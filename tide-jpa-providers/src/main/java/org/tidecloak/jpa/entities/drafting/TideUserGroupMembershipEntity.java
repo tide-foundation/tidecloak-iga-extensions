@@ -1,0 +1,132 @@
+package org.tidecloak.jpa.entities.drafting;
+
+
+import jakarta.persistence.*;
+import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.models.jpa.entities.UserGroupMembershipEntity;
+import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.interfaces.DraftStatus;
+
+import java.io.Serializable;
+
+@Table(name="USER_GROUP_MEMBERSHIP_DRAFT")
+@Entity
+@IdClass(TideUserGroupMembershipEntity.Key.class)
+public class TideUserGroupMembershipEntity {
+
+    @Id
+    @ManyToOne(fetch= FetchType.LAZY)
+    @JoinColumn(name="USER_ID")
+    protected UserEntity user;
+
+    @Id
+    @Column(name = "GROUP_ID")
+    protected String groupId;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "DRAFT_STATUS")
+    private DraftStatus draftStatus = DraftStatus.DRAFT; // Default to DRAFT
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "ACTION_TYPE")
+    private ActionType actionType = ActionType.CREATE; // Default to NONE
+
+    public UserEntity getUser() {
+        return user;
+    }
+
+    public void setUser(UserEntity user) {
+        this.user = user;
+    }
+
+    public String getGroupId() {
+        return groupId;
+    }
+
+    public void setGroupId(String groupId) {
+        this.groupId = groupId;
+    }
+
+    // Getters and setters for new fields
+    public DraftStatus getDraftStatus() {
+        return draftStatus;
+    }
+
+    public void setDraftStatus(DraftStatus draftStatus) {
+        this.draftStatus = draftStatus;
+    }
+
+    public ActionType getAction() {
+        return actionType;
+    }
+
+    public void setAction(ActionType actionType) {
+        this.actionType = actionType;
+    }
+
+
+
+    public static class Key implements Serializable {
+
+        protected UserEntity user;
+
+        protected String groupId;
+
+        public Key() {
+        }
+
+        public Key(UserEntity user, String groupId) {
+            this.user = user;
+            this.groupId = groupId;
+        }
+
+        public UserEntity getUser() {
+            return user;
+        }
+
+        public String getGroupId() {
+            return groupId;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+
+            TideUserGroupMembershipEntity.Key key = (TideUserGroupMembershipEntity.Key) o;
+
+            if (!groupId.equals(key.groupId)) return false;
+            if (!user.equals(key.user)) return false;
+
+            return true;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = user.hashCode();
+            result = 31 * result + groupId.hashCode();
+            return result;
+        }
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null) return false;
+        if (!(o instanceof TideUserGroupMembershipEntity)) return false;
+
+        TideUserGroupMembershipEntity key = (TideUserGroupMembershipEntity) o;
+
+        if (!groupId.equals(key.groupId)) return false;
+        if (!user.equals(key.user)) return false;
+
+        return true;
+    }
+
+    @Override
+    public int hashCode() {
+        int result = user.hashCode();
+        result = 31 * result + groupId.hashCode();
+        return result;
+    }
+}

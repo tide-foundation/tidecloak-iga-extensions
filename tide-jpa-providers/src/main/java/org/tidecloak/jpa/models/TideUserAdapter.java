@@ -1,0 +1,158 @@
+package org.tidecloak.jpa.models;
+
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.TypedQuery;
+import jakarta.persistence.criteria.CriteriaBuilder;
+import jakarta.persistence.criteria.CriteriaQuery;
+import jakarta.persistence.criteria.Predicate;
+import jakarta.persistence.criteria.Root;
+import org.keycloak.Config;
+import org.keycloak.admin.ui.rest.model.ClientRole;
+import org.keycloak.models.*;
+import org.keycloak.models.jpa.UserAdapter;
+import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.models.jpa.entities.UserGroupMembershipEntity;
+
+import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.jpa.entities.drafting.TideUserGroupMembershipEntity;
+import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
+import org.tidecloak.jpa.utils.ProofGeneration;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.stream.Stream;
+
+import static org.keycloak.utils.StreamsUtil.closing;
+
+public class TideUserAdapter extends UserAdapter {
+    private final KeycloakSession session;
+    private final RealmModel realm;
+
+    public TideUserAdapter(KeycloakSession session, RealmModel realm, EntityManager em, UserEntity user) {
+        super(session, realm, em, user);
+        this.session = session;
+        this.realm = realm;
+    }
+
+    @Override
+    public void joinGroup(GroupModel group) {
+        super.joinGroup(group);
+        TideUserGroupMembershipEntity entity = new TideUserGroupMembershipEntity();
+        entity.setUser(getEntity());
+        entity.setGroupId(group.getId());
+        entity.setDraftStatus(DraftStatus.DRAFT);
+        entity.setAction(ActionType.CREATE);
+        em.persist(entity);
+        em.flush();
+        em.detach(entity);
+
+//        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
+//        List<ClientRole> effectiveGroupClientRoles = proofGeneration.getEffectiveGroupClientRoles(group);
+//        UserModel user = session.users().getUserById(realm, getEntity().getId());
+//        proofGeneration.regenerateProofsForMembers(effectiveGroupClientRoles, List.of(user));
+    }
+
+    @Override
+    protected void joinGroupImpl(GroupModel group) {
+        UserGroupMembershipEntity entity = new UserGroupMembershipEntity();
+        entity.setUser(getEntity());
+        entity.setGroupId(group.getId());
+        em.persist(entity);
+        em.flush();
+        em.detach(entity);
+    }
+
+    @Override
+    public void leaveGroup(GroupModel group) {
+        super.leaveGroup(group);
+        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
+        List<ClientRole> effectiveGroupClientRoles = proofGeneration.getEffectiveGroupClientRoles(group);
+        UserModel user = session.users().getUserById(realm, getEntity().getId());
+        proofGeneration.regenerateProofsForMembers(effectiveGroupClientRoles, List.of(user));
+    }
+
+    @Override
+    public void grantRole(RoleModel role) {
+        super.grantRole(role);
+        // Check if initial user
+        RealmModel adminRealm = session.realms().getRealmByName(Config.getAdminRealm());
+        // Add roles as draft
+        TideUserRoleMappingDraftEntity draft = em.find(TideUserRoleMappingDraftEntity.class, new TideUserRoleMappingDraftEntity.Key(this.getEntity(), role.getId()));
+        // Check if role has been granted
+        if (draft == null) {
+            var draftUserRole = new TideUserRoleMappingDraftEntity();
+            draftUserRole.setRoleId(role.getId());
+            draftUserRole.setUser(this.getEntity());
+            draftUserRole.setAction(ActionType.CREATE);
+            draftUserRole.setDraftStatus(DraftStatus.DRAFT);
+
+            em.persist(draftUserRole);
+            em.flush();
+        }
+
+//        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
+//        if (role.getContainer() instanceof ClientModel clientModel){
+//            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+//            clientList.add(clientModel);
+//            UserEntity user = getEntity();
+//            clientList.forEach(client -> {
+//                proofGeneration.generateProofAndSaveToTable(user.getId(), client);
+//            });
+//        }
+    }
+
+    @Override
+    public void deleteRoleMapping(RoleModel role) {
+        Optional<ClientModel> clientModel = Optional.empty();
+        if (role.getContainer() instanceof ClientModel){
+            clientModel = Optional.of((ClientModel) role.getContainer());
+        }
+        super.deleteRoleMapping(role);
+
+        if(clientModel.isPresent()){
+            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+            clientList.add(clientModel.get());
+            ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
+            clientList.forEach(client -> {
+                proofGeneration.generateProofAndSaveToTable(user.getId(), client);
+            });
+        }
+    }
+
+    @Override
+    public Stream<RoleModel> getRoleMappingsStream() {
+        // we query ids only as the role might be cached and following the @ManyToOne will result in a load
+        // even if we're getting just the id.
+        TypedQuery<String> query = em.createNamedQuery("userRoleMappingIds", String.class);
+        query.setParameter("user", getEntity());
+        return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
+    }
+
+
+    public Stream<RoleModel> getRoleMappingsStreamByStatus(DraftStatus status) {
+        System.out.println("HELLO GETTING ROLE MAPPING STREAM!!");
+        TypedQuery<String> query = em.createNamedQuery("filterUserRoleMappings", String.class);
+        query.setParameter("user", this.getEntity());
+        query.setParameter("draftStatus", status);
+        return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
+    }
+
+    private TypedQuery<String> createGetGroupsQuery() {
+        // we query ids only as the group  might be cached and following the @ManyToOne will result in a load
+        // even if we're getting just the id.
+        CriteriaBuilder builder = em.getCriteriaBuilder();
+        CriteriaQuery<String> queryBuilder = builder.createQuery(String.class);
+        Root<UserGroupMembershipEntity> root = queryBuilder.from(UserGroupMembershipEntity.class);
+
+        List<Predicate> predicates = new ArrayList<>();
+        predicates.add(builder.equal(root.get("user"), getEntity()));
+
+        queryBuilder.select(root.get("groupId"));
+        queryBuilder.where(predicates.toArray(new Predicate[0]));
+
+        return em.createQuery(queryBuilder);
+    }
+}
