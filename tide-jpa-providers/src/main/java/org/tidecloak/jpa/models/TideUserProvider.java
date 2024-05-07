@@ -61,6 +61,7 @@ public class TideUserProvider extends JpaUserProvider {
         // Add draft record for user groups. DEFAULT ROLES ARE APPROVED BY DEFAULT FOR NOW
         RoleModel defaultRole =  realm.getDefaultRole();
         var draftDefaultRoleUserRole = new TideUserRoleMappingDraftEntity();
+        draftDefaultRoleUserRole.setId(KeycloakModelUtils.generateId());
         draftDefaultRoleUserRole.setRoleId(defaultRole.getId());
         draftDefaultRoleUserRole.setUser(userEntity);
         draftDefaultRoleUserRole.setAction(ActionType.CREATE);

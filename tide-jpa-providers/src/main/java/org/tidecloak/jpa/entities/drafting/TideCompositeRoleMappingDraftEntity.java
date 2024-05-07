@@ -6,13 +6,18 @@ import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
 
 @NamedQueries({
-        @NamedQuery(name="getCompositeRoleDraft", query="select r from TideCompositeRoleDraftEntity r where r.composite = :composite and r.draftStatus = :draftStatus"),
-        @NamedQuery(name="deleteCompositeRole", query="delete from TideCompositeRoleDraftEntity r where r.composite = :composite"),
+        @NamedQuery(name="filterChildRoleByStatusAndParent", query="select r.childRole from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.draftStatus = :draftStatus"),
+        @NamedQuery(name="getCompositeRoleMappingDraft", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole"),
+        @NamedQuery(name="getCompositeRoleMappingDraftByStatus", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole and r.draftStatus = :draftStatus"),
+        @NamedQuery(name="deleteCompositeRoleMapping", query="delete from TideCompositeRoleMappingDraftEntity r where r.composite = :composite"),
+
+
 })
 
 @Entity
-@Table(name="COMPOSITE_ROLE_DRAFT")
-public class TideCompositeRoleDraftEntity {
+@Table(name="COMPOSITE_ROLE_MAPPING_DRAFT")
+public class TideCompositeRoleMappingDraftEntity {
+
 
     @Id
     @Column(name="ID", length = 36)
@@ -22,6 +27,11 @@ public class TideCompositeRoleDraftEntity {
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "COMPOSITE", referencedColumnName = "ID")  // Ensure 'ID' is the correct primary key field name in RoleEntity
     private RoleEntity composite;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "CHILD_ROLE", referencedColumnName = "ID")
+    private RoleEntity childRole;
+
 
     @Enumerated(EnumType.STRING)
     @Column(name = "DRAFT_STATUS")
@@ -47,6 +57,13 @@ public class TideCompositeRoleDraftEntity {
         this.composite = composite;
     }
 
+    public RoleEntity getChildRole() {
+        return childRole;
+    }
+
+    public void setChildRole(RoleEntity childRole) {
+        this.childRole = childRole;
+    }
 
     // Getters and setters for new fields
     public DraftStatus getDraftStatus() {
@@ -69,10 +86,11 @@ public class TideCompositeRoleDraftEntity {
     public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null) return false;
-        if (!(o instanceof TideCompositeRoleDraftEntity)) return false;
+        if (!(o instanceof TideCompositeRoleMappingDraftEntity)) return false;
 
-        TideCompositeRoleDraftEntity key = (TideCompositeRoleDraftEntity) o;
+        TideCompositeRoleMappingDraftEntity key = (TideCompositeRoleMappingDraftEntity) o;
 
+        if (!childRole.equals(key.childRole)) return false;
         if (!composite.equals(key.composite)) return false;
 
         return true;
@@ -81,6 +99,7 @@ public class TideCompositeRoleDraftEntity {
     @Override
     public int hashCode() {
         int result = composite.hashCode();
+        result = 31 * result + childRole.hashCode();
         return result;
     }
 }

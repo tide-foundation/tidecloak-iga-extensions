@@ -9,6 +9,8 @@ import java.io.Serializable;
 
 @NamedQueries({
         @NamedQuery(name="getUserRoleAssignmentDraftEntity", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId"),
+        @NamedQuery(name="getUserRoleAssignmentDraftEntityByStatus", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId and draftStatus = :draftStatus"),
+        @NamedQuery(name="getUserRoleAssignmentDraftEntityByStatusAndAction", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId and draftStatus = :draftStatus and actionType = :actionType"),
         @NamedQuery(name="filterUserRoleMappings", query="select m.roleId from TideUserRoleMappingDraftEntity m where m.user = :user and m.draftStatus = :draftStatus"),
         @NamedQuery(name="deleteUserRoleMappingDraftsByRealm", query="delete from TideUserRoleMappingDraftEntity mapping where mapping.user IN (select u from UserEntity u where u.realmId=:realmId)"),
         @NamedQuery(name="deleteUserRoleMappingDraftsByRealmAndLink", query="delete from TideUserRoleMappingDraftEntity mapping where mapping.user IN (select u from UserEntity u where u.realmId=:realmId and u.federationLink=:link)"),
@@ -18,15 +20,17 @@ import java.io.Serializable;
 
 @Entity
 @Table(name = "USER_ROLE_MAPPING_DRAFT")
-@IdClass(TideUserRoleMappingDraftEntity.Key.class)
 public class TideUserRoleMappingDraftEntity {
 
     @Id
+    @Column(name="ID", length = 36)
+    @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
+    protected String id;
+
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="USER_ID")
     protected UserEntity user;
 
-    @Id
     @Column(name = "ROLE_ID")
     protected String roleId;
 
@@ -37,6 +41,14 @@ public class TideUserRoleMappingDraftEntity {
     @Enumerated(EnumType.STRING)
     @Column(name = "ACTION_TYPE")
     private ActionType actionType = ActionType.CREATE; // Default to NONE
+
+    public String getId() {
+        return id;
+    }
+
+    public void setId(String id) {
+        this.id = id;
+    }
 
     public UserEntity getUser() {
         return user;
@@ -71,48 +83,6 @@ public class TideUserRoleMappingDraftEntity {
         this.actionType = actionType;
     }
 
-    public static class Key implements Serializable {
-
-        protected UserEntity user;
-
-        protected String roleId;
-
-        public Key() {
-        }
-
-        public Key(UserEntity user, String roleId) {
-            this.user = user;
-            this.roleId = roleId;
-        }
-
-        public UserEntity getUser() {
-            return user;
-        }
-
-        public String getRoleId() {
-            return roleId;
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (this == o) return true;
-            if (o == null || getClass() != o.getClass()) return false;
-
-            TideUserRoleMappingDraftEntity.Key key = (TideUserRoleMappingDraftEntity.Key) o;
-
-            if (!roleId.equals(key.roleId)) return false;
-            if (!user.equals(key.user)) return false;
-
-            return true;
-        }
-
-        @Override
-        public int hashCode() {
-            int result = user.hashCode();
-            result = 31 * result + roleId.hashCode();
-            return result;
-        }
-    }
 
     @Override
     public boolean equals(Object o) {

@@ -12,7 +12,7 @@ public class TideEntityProvider implements JpaEntityProvider {
         return List.of(UserClientAccessProofEntity.class,
                 TideUserDraftEntity.class,
                 TideUserRoleMappingDraftEntity.class,
-                TideCompositeRoleDraftEntity.class,
+                TideCompositeRoleMappingDraftEntity.class,
                 TideGroupDraftEntity.class,
                 TideUserGroupMembershipEntity.class,
                 TideGroupRoleMappingEntity.class

@@ -7,6 +7,11 @@ import org.keycloak.models.jpa.entities.GroupEntity;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
 
+@NamedQueries({
+        @NamedQuery(name="getGroupByStatus", query="select m from TideGroupDraftEntity m where m.group = :group and m.draftStatus = :draftStatus"),
+        @NamedQuery(name="deleteGroupDraftByRole", query="delete from TideGroupDraftEntity m where m.id = :roleId"),
+})
+
 @Entity
 @Table(name="KEYCLOAK_GROUP_DRAFT",
         uniqueConstraints = { @UniqueConstraint(columnNames = {"REALM_ID", "PARENT_GROUP", "NAME"})}

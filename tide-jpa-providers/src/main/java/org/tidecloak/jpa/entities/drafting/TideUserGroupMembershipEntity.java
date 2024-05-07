@@ -11,15 +11,17 @@ import java.io.Serializable;
 
 @Table(name="USER_GROUP_MEMBERSHIP_DRAFT")
 @Entity
-@IdClass(TideUserGroupMembershipEntity.Key.class)
 public class TideUserGroupMembershipEntity {
 
     @Id
+    @Column(name="ID", length = 36)
+    @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
+    protected String id;
+
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="USER_ID")
     protected UserEntity user;
 
-    @Id
     @Column(name = "GROUP_ID")
     protected String groupId;
 
@@ -30,6 +32,14 @@ public class TideUserGroupMembershipEntity {
     @Enumerated(EnumType.STRING)
     @Column(name = "ACTION_TYPE")
     private ActionType actionType = ActionType.CREATE; // Default to NONE
+
+    public String getId() {
+        return id;
+    }
+
+    public void setId(String id) {
+        this.id = id;
+    }
 
     public UserEntity getUser() {
         return user;
@@ -62,51 +72,6 @@ public class TideUserGroupMembershipEntity {
 
     public void setAction(ActionType actionType) {
         this.actionType = actionType;
-    }
-
-
-
-    public static class Key implements Serializable {
-
-        protected UserEntity user;
-
-        protected String groupId;
-
-        public Key() {
-        }
-
-        public Key(UserEntity user, String groupId) {
-            this.user = user;
-            this.groupId = groupId;
-        }
-
-        public UserEntity getUser() {
-            return user;
-        }
-
-        public String getGroupId() {
-            return groupId;
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (this == o) return true;
-            if (o == null || getClass() != o.getClass()) return false;
-
-            TideUserGroupMembershipEntity.Key key = (TideUserGroupMembershipEntity.Key) o;
-
-            if (!groupId.equals(key.groupId)) return false;
-            if (!user.equals(key.user)) return false;
-
-            return true;
-        }
-
-        @Override
-        public int hashCode() {
-            int result = user.hashCode();
-            result = 31 * result + groupId.hashCode();
-            return result;
-        }
     }
 
     @Override

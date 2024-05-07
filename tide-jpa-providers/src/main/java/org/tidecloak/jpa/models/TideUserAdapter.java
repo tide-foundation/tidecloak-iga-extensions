@@ -13,6 +13,7 @@ import org.keycloak.models.jpa.UserAdapter;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.jpa.entities.UserGroupMembershipEntity;
 
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.entities.drafting.TideUserGroupMembershipEntity;
@@ -41,6 +42,9 @@ public class TideUserAdapter extends UserAdapter {
     public void joinGroup(GroupModel group) {
         super.joinGroup(group);
         TideUserGroupMembershipEntity entity = new TideUserGroupMembershipEntity();
+
+        //TODO: !!!! CHECK IF THIS EXISTS BEFORE ADDING
+        entity.setId(KeycloakModelUtils.generateId());
         entity.setUser(getEntity());
         entity.setGroupId(group.getId());
         entity.setDraftStatus(DraftStatus.DRAFT);
@@ -79,11 +83,18 @@ public class TideUserAdapter extends UserAdapter {
         super.grantRole(role);
         // Check if initial user
         RealmModel adminRealm = session.realms().getRealmByName(Config.getAdminRealm());
+
         // Add roles as draft
-        TideUserRoleMappingDraftEntity draft = em.find(TideUserRoleMappingDraftEntity.class, new TideUserRoleMappingDraftEntity.Key(this.getEntity(), role.getId()));
+        Stream<TideUserRoleMappingDraftEntity> entity =  em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatusAndAction", TideUserRoleMappingDraftEntity.class)
+                .setParameter("user", getEntity())
+                .setParameter("roleId", role.getId())
+                .setParameter("draftStatus", DraftStatus.DRAFT)
+                .setParameter("actionType", ActionType.CREATE)
+                .getResultStream();
         // Check if role has been granted
-        if (draft == null) {
+        if (entity.toList().isEmpty()) {
             var draftUserRole = new TideUserRoleMappingDraftEntity();
+            draftUserRole.setId(KeycloakModelUtils.generateId());
             draftUserRole.setRoleId(role.getId());
             draftUserRole.setUser(this.getEntity());
             draftUserRole.setAction(ActionType.CREATE);
@@ -106,19 +117,44 @@ public class TideUserAdapter extends UserAdapter {
 
     @Override
     public void deleteRoleMapping(RoleModel role) {
-        Optional<ClientModel> clientModel = Optional.empty();
-        if (role.getContainer() instanceof ClientModel){
-            clientModel = Optional.of((ClientModel) role.getContainer());
-        }
-        super.deleteRoleMapping(role);
+//        Optional<ClientModel> clientModel = Optional.empty();
+//        if (role.getContainer() instanceof ClientModel){
+//            clientModel = Optional.of((ClientModel) role.getContainer());
+//        }
+//        super.deleteRoleMapping(role);
+//
+//        if(clientModel.isPresent()){
+//            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+//            clientList.add(clientModel.get());
+//            ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
+//            clientList.forEach(client -> {
+//                proofGeneration.generateProofAndSaveToTable(user.getId(), client);
+//            });
+//        }
 
-        if(clientModel.isPresent()){
-            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
-            clientList.add(clientModel.get());
-            ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-            clientList.forEach(client -> {
-                proofGeneration.generateProofAndSaveToTable(user.getId(), client);
-            });
+        // Check if role mapping is a draft
+        Stream<TideUserRoleMappingDraftEntity> entity =  em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
+                .setParameter("user", getEntity())
+                .setParameter("roleId", role.getId())
+                .setParameter("draftStatus", DraftStatus.DRAFT)
+                .getResultStream();
+
+        if(!entity.toList().isEmpty()){
+            em.createNamedQuery("deleteUserRoleMappingDraftsByRole")
+                    .setParameter("roleId", role.getId())
+                    .executeUpdate();
+            super.deleteRoleMapping(role);
+        } else {
+            // GET APPROVAL FOR DELETION
+            TideUserRoleMappingDraftEntity newEntity = new TideUserRoleMappingDraftEntity();
+            newEntity.setId(KeycloakModelUtils.generateId());
+            newEntity.setUser(getEntity());
+            newEntity.setRoleId(role.getId());
+            newEntity.setDraftStatus(DraftStatus.DRAFT);
+            newEntity.setAction(ActionType.DELETE);
+            em.persist(newEntity);
+            em.flush();
+            em.detach(newEntity);
         }
     }
 
@@ -133,7 +169,6 @@ public class TideUserAdapter extends UserAdapter {
 
 
     public Stream<RoleModel> getRoleMappingsStreamByStatus(DraftStatus status) {
-        System.out.println("HELLO GETTING ROLE MAPPING STREAM!!");
         TypedQuery<String> query = em.createNamedQuery("filterUserRoleMappings", String.class);
         query.setParameter("user", this.getEntity());
         query.setParameter("draftStatus", status);

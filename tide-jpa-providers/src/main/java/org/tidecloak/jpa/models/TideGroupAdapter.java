@@ -1,14 +1,17 @@
 package org.tidecloak.jpa.models;
 
+import com.google.errorprone.annotations.Var;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.GroupAdapter;
 import org.keycloak.models.jpa.entities.GroupEntity;
 import org.keycloak.models.jpa.entities.GroupRoleMappingEntity;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.RoleUtils;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.jpa.entities.drafting.TideGroupDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideGroupRoleMappingEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
 
@@ -34,6 +37,10 @@ public class TideGroupAdapter extends GroupAdapter {
     public void grantRole(RoleModel role) {
         super.grantRole(role);
         TideGroupRoleMappingEntity entity = new TideGroupRoleMappingEntity();
+
+        // Probably check if it exists firsts then add
+        // TODO !!!
+        entity.setId(KeycloakModelUtils.generateId());
         entity.setGroup(getEntity());
         entity.setRoleId(role.getId());
         entity.setDraftStatus(DraftStatus.DRAFT);
@@ -62,37 +69,62 @@ public class TideGroupAdapter extends GroupAdapter {
 
     @Override
     public void deleteRoleMapping(RoleModel role) {
-        Optional<ClientModel> clientModel = Optional.empty();
-        List<UserModel> users = new ArrayList<>();
-        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
+        List<TideGroupRoleMappingEntity> groupEntity = em.createNamedQuery("groupRoleMappingDraftsByStatusAndGroupAndRole", TideGroupRoleMappingEntity.class)
+                .setParameter("group", getEntity())
+                .setParameter("roleId", role.getId())
+                .setParameter("draftStatus", DraftStatus.DRAFT)
+                .getResultList();
 
-        // First, gather all necessary details before deletion
-        if (role.getContainer() instanceof ClientModel) {
-            clientModel = Optional.of((ClientModel) role.getContainer());
-            GroupEntity groupEntity = getEntity();  // Retrieve only if needed
-            GroupModel group = session.groups().getGroupById(realm, groupEntity.getId());
-            users = proofGeneration.getAllGroupMembersIncludingSubgroups(realm, group);
+
+        if (!groupEntity.isEmpty()){
+            em.createNamedQuery("deleteGroupRoleMappingDraftsByRole").setParameter("roleId", role.getId())
+                    .executeUpdate();
+            super.deleteRoleMapping(role);
         }
-        // Perform the deletion
-        super.deleteRoleMapping(role);
-        // Regenerate tokens if necessary
-        List<UserModel> finalUsers = users;
+        else {
+            // GET APPROVAL FOR DELETION
+            TideGroupRoleMappingEntity entity = new TideGroupRoleMappingEntity();
+            entity.setId(KeycloakModelUtils.generateId());
+            entity.setGroup(getEntity());
+            entity.setRoleId(role.getId());
+            entity.setDraftStatus(DraftStatus.DRAFT);
+            entity.setAction(ActionType.DELETE);
 
-        clientModel.ifPresent(c -> {
-            // Regen for any clients with full scope enabled as well
-            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
-            clientList.add(c);
-            finalUsers.forEach(user -> {
-                clientList.forEach(client -> {
-                    try {
-                        proofGeneration.generateProofAndSaveToTable(user.getId(), client);
-                    } catch (Exception e) {
-                        System.err.println("Failed to regenerate token for user: " + user.getId());
-                    }
-                });
-
-            });
-        });
+            em.persist(entity);
+            em.flush();
+            em.detach(entity);
+        }
+//        Optional<ClientModel> clientModel = Optional.empty();
+//        List<UserModel> users = new ArrayList<>();
+//        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
+//
+//        // First, gather all necessary details before deletion
+//        if (role.getContainer() instanceof ClientModel) {
+//            clientModel = Optional.of((ClientModel) role.getContainer());
+//            GroupEntity groupEntity = getEntity();  // Retrieve only if needed
+//            GroupModel group = session.groups().getGroupById(realm, groupEntity.getId());
+//            users = proofGeneration.getAllGroupMembersIncludingSubgroups(realm, group);
+//        }
+//        // Perform the deletion
+//        super.deleteRoleMapping(role);
+//        // Regenerate tokens if necessary
+//        List<UserModel> finalUsers = users;
+//
+//        clientModel.ifPresent(c -> {
+//            // Regen for any clients with full scope enabled as well
+//            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+//            clientList.add(c);
+//            finalUsers.forEach(user -> {
+//                clientList.forEach(client -> {
+//                    try {
+//                        proofGeneration.generateProofAndSaveToTable(user.getId(), client);
+//                    } catch (Exception e) {
+//                        System.err.println("Failed to regenerate token for user: " + user.getId());
+//                    }
+//                });
+//
+//            });
+//        });
     }
 
     public Stream<RoleModel> getRealmRoleMappingsStreamByStatus(DraftStatus draftStatus) {

@@ -5,7 +5,6 @@ import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.GroupEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
-import org.keycloak.models.utils.RoleUtils;
 import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.models.TideGroupAdapter;
 import org.tidecloak.jpa.models.TideRoleAdapter;
@@ -92,7 +91,6 @@ public class TideRolesUtil {
      * @return all user role mappings including all groups of user. Composite roles will be expanded
      */
     public static Set<RoleModel> getDeepUserRoleMappings(UserModel user, KeycloakSession session, RealmModel realm, EntityManager manager) {
-        System.out.println("YOU ARE IN YOUR OWN DEEP USER ROLE MAPPINGS");
         Set<RoleModel> roleMappings;
         if (user instanceof TideUserAdapter){
             roleMappings = ((TideUserAdapter) user).getRoleMappingsStreamByStatus(DraftStatus.APPROVED).map(x-> wrapRoleModel(x, session, realm, manager)).collect(Collectors.toSet());
