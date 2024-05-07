@@ -174,6 +174,19 @@ public class TideUserAdapter extends UserAdapter {
         query.setParameter("draftStatus", status);
         return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
     }
+    public Stream<RoleModel> getRoleMappingsStreamByAction(ActionType actionType) {
+        TypedQuery<String> query = em.createNamedQuery("getUserRoleMappingDraftEntityByAction", String.class);
+        query.setParameter("user", this.getEntity());
+        query.setParameter("actionType", actionType);
+        return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
+    }
+    public Stream<RoleModel> getRoleMappingsStreamByStatusAndAction(DraftStatus status, ActionType actionType) {
+        TypedQuery<String> query = em.createNamedQuery("getUserRoleMappingDraftEntityIdsByStatusAndAction", String.class);
+        query.setParameter("user", this.getEntity());
+        query.setParameter("draftStatus", status);
+        query.setParameter("actionType", actionType);
+        return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
+    }
 
     private TypedQuery<String> createGetGroupsQuery() {
         // we query ids only as the group  might be cached and following the @ManyToOne will result in a load

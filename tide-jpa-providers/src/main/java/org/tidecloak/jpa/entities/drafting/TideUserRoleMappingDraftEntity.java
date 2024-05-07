@@ -9,8 +9,10 @@ import java.io.Serializable;
 
 @NamedQueries({
         @NamedQuery(name="getUserRoleAssignmentDraftEntity", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId"),
+        @NamedQuery(name="getUserRoleMappingDraftEntityByAction", query="SELECT m.roleId  FROM TideUserRoleMappingDraftEntity m WHERE m.user = :user and m.actionType = :actionType"),
         @NamedQuery(name="getUserRoleAssignmentDraftEntityByStatus", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId and draftStatus = :draftStatus"),
         @NamedQuery(name="getUserRoleAssignmentDraftEntityByStatusAndAction", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId and draftStatus = :draftStatus and actionType = :actionType"),
+        @NamedQuery(name="getUserRoleMappingDraftEntityIdsByStatusAndAction", query="SELECT t.roleId FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and draftStatus = :draftStatus and actionType = :actionType"),
         @NamedQuery(name="filterUserRoleMappings", query="select m.roleId from TideUserRoleMappingDraftEntity m where m.user = :user and m.draftStatus = :draftStatus"),
         @NamedQuery(name="deleteUserRoleMappingDraftsByRealm", query="delete from TideUserRoleMappingDraftEntity mapping where mapping.user IN (select u from UserEntity u where u.realmId=:realmId)"),
         @NamedQuery(name="deleteUserRoleMappingDraftsByRealmAndLink", query="delete from TideUserRoleMappingDraftEntity mapping where mapping.user IN (select u from UserEntity u where u.realmId=:realmId and u.federationLink=:link)"),

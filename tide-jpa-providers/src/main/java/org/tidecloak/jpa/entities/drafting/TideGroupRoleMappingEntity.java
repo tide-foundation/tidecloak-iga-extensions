@@ -12,6 +12,7 @@ import java.io.Serializable;
         @NamedQuery(name="groupRoleMappingDraftsByStatus", query="select m from TideGroupRoleMappingEntity m where m.group = :group and m.draftStatus = :draftStatus"),
         @NamedQuery(name="groupRoleMappingDraftsByStatusAndGroupAndRole", query="select m from TideGroupRoleMappingEntity m where m.group = :group and m.draftStatus = :draftStatus and m.roleId = :roleId"),
         @NamedQuery(name="groupRoleMappingDraftIdsByStatus", query="select m.roleId from TideGroupRoleMappingEntity m where m.group = :group and m.draftStatus = :draftStatus"),
+        @NamedQuery(name="groupRoleMappingDraftIdsByStatusAndAction", query="select m.roleId from TideGroupRoleMappingEntity m where m.group = :group and m.draftStatus = :draftStatus and m.actionType = :actionType"),
         @NamedQuery(name="deleteGroupRoleMappingDraftsByRealm", query="delete from  TideGroupRoleMappingEntity mapping where mapping.group IN (select u from GroupEntity u where u.realm=:realm)"),
         @NamedQuery(name="deleteGroupRoleMappingDraftsByRole", query="delete from TideGroupRoleMappingEntity m where m.roleId = :roleId"),
         @NamedQuery(name="deleteGroupRoleMappingDraftsByGroup", query="delete from TideGroupRoleMappingEntity m where m.group = :group")

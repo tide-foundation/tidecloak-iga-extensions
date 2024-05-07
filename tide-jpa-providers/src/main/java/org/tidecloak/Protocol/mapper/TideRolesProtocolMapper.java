@@ -8,6 +8,8 @@ import org.keycloak.protocol.oidc.mappers.OIDCAccessTokenMapper;
 import org.keycloak.protocol.oidc.mappers.OIDCAttributeMapperHelper;
 import org.keycloak.provider.ProviderConfigProperty;
 import org.keycloak.representations.AccessToken;
+import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.interfaces.DraftStatus;
 
 import java.util.*;
 
@@ -34,7 +36,7 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         RealmModel realm = session.getContext().getRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         UserModel tideUser = TideRolesUtil.wrapUserModel(userSession.getUser(), session, realm, em);
-        Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em);
+        Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE);
         setTokenClaims(token, activeRoles, session);
 
         return token;

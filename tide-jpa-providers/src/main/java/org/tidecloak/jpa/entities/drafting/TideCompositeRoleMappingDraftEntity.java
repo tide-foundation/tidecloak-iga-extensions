@@ -6,6 +6,7 @@ import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
 
 @NamedQueries({
+        @NamedQuery(name="filterChildRoleByStatusAndParentAndAction", query="select r.childRole from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.draftStatus = :draftStatus and r.actionType = :actionType"),
         @NamedQuery(name="filterChildRoleByStatusAndParent", query="select r.childRole from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.draftStatus = :draftStatus"),
         @NamedQuery(name="getCompositeRoleMappingDraft", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole"),
         @NamedQuery(name="getCompositeRoleMappingDraftByStatus", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole and r.draftStatus = :draftStatus"),

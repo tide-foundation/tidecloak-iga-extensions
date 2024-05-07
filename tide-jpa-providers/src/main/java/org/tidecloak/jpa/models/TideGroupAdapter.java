@@ -140,5 +140,13 @@ public class TideGroupAdapter extends GroupAdapter {
         query.setParameter("draftStatus", draftStatus);
         return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
     }
+    public Stream<RoleModel> getRoleMappingsStreamByStatusAndAction(DraftStatus draftStatus, ActionType actionType) {
+        // we query ids only as the role might be cached and following the @ManyToOne will result in a load
+        // even if we're getting just the id.
+        TypedQuery<String> query = em.createNamedQuery("groupRoleMappingDraftIdsByStatus", String.class);
+        query.setParameter("group", getEntity());
+        query.setParameter("draftStatus", draftStatus);
+        return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
+    }
 
 }
