@@ -108,7 +108,7 @@ public class TideUserAdapter extends UserAdapter {
             draftUserRole.setAction(ActionType.CREATE);
             draftUserRole.setDraftStatus(DraftStatus.DRAFT);
 
-            //TODO: CLEAN THIS UP IN PROOFGENERATION UTIL!!!
+            //TODO: CLEAN THIS UP, PUT IN PROOFGENERATION UTIL!!!
             ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
             if (role.getContainer() instanceof ClientModel) {
                 List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
@@ -142,18 +142,8 @@ public class TideUserAdapter extends UserAdapter {
                         String proofDraft = proofGeneration.cleanProofDraft(proof);
                         System.out.println(draftRecord); // <-- this is the draft record
                         System.out.println(proofDraft.concat(draftRecord)); // <-- this is the draft record
-//                        String change = proofDraft.concat(draftRecord);
 
-//                        // Hash the proofDetails and draftRecord
-//                        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-//                        byte[] changeBytes = digest.digest(
-//                                change.getBytes(StandardCharsets.UTF_8));
-//                        String changeChecksum = Base64.getEncoder().encodeToString(changeBytes);
-
-//                        // Add checksum to draft record
-//                        draftUserRole.setChecksum(changeChecksum);
-
-                        // store proof detail into detail
+                        // store proof detail into db
 
                         AccessProofDetailEntity accessProofEntity = new AccessProofDetailEntity();
                         accessProofEntity.setId(KeycloakModelUtils.generateId());
@@ -164,7 +154,6 @@ public class TideUserAdapter extends UserAdapter {
                         accessProofEntity.setChangesetType(ChangeSetType.USER_ROLE);
 
                         em.persist(accessProofEntity);
-
 
                     } catch (JsonProcessingException e) {
                         throw new RuntimeException("Failed to process token", e);
