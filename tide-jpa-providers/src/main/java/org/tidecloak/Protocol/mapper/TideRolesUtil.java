@@ -114,21 +114,21 @@ public class TideRolesUtil {
         addGroupRoles(group.getParent(), roleMappings, draftStatus, actionType);
     }
 
-    static GroupModel wrapGroupModel(GroupModel groupModel, KeycloakSession session, RealmModel realm, EntityManager em) {
+    public static GroupModel wrapGroupModel(GroupModel groupModel, KeycloakSession session, RealmModel realm, EntityManager em) {
         if (groupModel instanceof TideGroupAdapter) {
             return groupModel;
         }
         GroupEntity groupEntity = toGroupEntity(groupModel, em);
         return new TideGroupAdapter(realm, em, groupEntity, session);
     }
-    static RoleModel wrapRoleModel(RoleModel role, KeycloakSession session, RealmModel realm, EntityManager em) {
+    public static RoleModel wrapRoleModel(RoleModel role, KeycloakSession session, RealmModel realm, EntityManager em) {
         if (role instanceof TideRoleAdapter) {
             return role;
         }
         RoleEntity roleEntity = toRoleEntity(role, em);
         return new TideRoleAdapter(session, realm, em, roleEntity);
     }
-    static UserModel wrapUserModel(UserModel userModel, KeycloakSession session, RealmModel realm, EntityManager em) {
+    public static UserModel wrapUserModel(UserModel userModel, KeycloakSession session, RealmModel realm, EntityManager em) {
         if (userModel instanceof TideUserAdapter) {
             return userModel;
         }
@@ -136,19 +136,19 @@ public class TideRolesUtil {
         return new TideUserAdapter(session, realm, em, userEntity);
     }
 
-    private static GroupEntity toGroupEntity(GroupModel model, EntityManager em) {
+    public static GroupEntity toGroupEntity(GroupModel model, EntityManager em) {
         if (model instanceof TideGroupAdapter) {
             return ((TideGroupAdapter) model).getEntity();
         }
         return em.getReference(GroupEntity.class, model.getId());
     }
-    private static RoleEntity toRoleEntity(RoleModel model, EntityManager em) {
+    public static RoleEntity toRoleEntity(RoleModel model, EntityManager em) {
         if (model instanceof TideRoleAdapter) {
             return ((TideRoleAdapter) model).getEntity();
         }
         return em.getReference(RoleEntity.class, model.getId());
     }
-    private static UserEntity toUserEntity(UserModel model, EntityManager em) {
+    public static UserEntity toUserEntity(UserModel model, EntityManager em) {
         if (model instanceof TideUserAdapter) {
             return ((TideUserAdapter) model).getEntity();
         }

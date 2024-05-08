@@ -1,5 +1,9 @@
 package org.tidecloak.jpa.models;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
 import jakarta.persistence.criteria.CriteriaBuilder;
@@ -14,19 +18,24 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.jpa.entities.UserGroupMembershipEntity;
 
 import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.representations.AccessToken;
+import org.tidecloak.Protocol.mapper.TideRolesUtil;
 import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserGroupMembershipEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.*;
 import java.util.stream.Stream;
 
 import static org.keycloak.utils.StreamsUtil.closing;
+import static org.tidecloak.AdminRealmResource.TideAdminRealmResource.*;
 
 public class TideUserAdapter extends UserAdapter {
     private final KeycloakSession session;
@@ -80,18 +89,18 @@ public class TideUserAdapter extends UserAdapter {
 
     @Override
     public void grantRole(RoleModel role) {
+        System.out.println("HELLO IT ME " + getEntity().getId());
         super.grantRole(role);
-        // Check if initial user
-        RealmModel adminRealm = session.realms().getRealmByName(Config.getAdminRealm());
 
-        // Add roles as draft
+        // Check if this has already been action before
         Stream<TideUserRoleMappingDraftEntity> entity =  em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatusAndAction", TideUserRoleMappingDraftEntity.class)
                 .setParameter("user", getEntity())
                 .setParameter("roleId", role.getId())
                 .setParameter("draftStatus", DraftStatus.DRAFT)
                 .setParameter("actionType", ActionType.CREATE)
                 .getResultStream();
-        // Check if role has been granted
+
+        // Add draft request
         if (entity.toList().isEmpty()) {
             var draftUserRole = new TideUserRoleMappingDraftEntity();
             draftUserRole.setId(KeycloakModelUtils.generateId());
@@ -100,8 +109,76 @@ public class TideUserAdapter extends UserAdapter {
             draftUserRole.setAction(ActionType.CREATE);
             draftUserRole.setDraftStatus(DraftStatus.DRAFT);
 
-            em.persist(draftUserRole);
-            em.flush();
+
+            ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
+            if (role.getContainer() instanceof ClientModel) {
+                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+                UserModel user = session.users().getUserById(realm, getEntity().getId());
+                UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm, em);
+                clientList.forEach(client -> {
+                    session.getContext().setClient(client);
+                    // generate proof, this should have all current access
+                    AccessToken proof = proofGeneration.generateAccessToken(client, wrappedUser, "openid");
+                    // Get request changes
+                    Set<RoleModel> rolemappings = new HashSet<>();
+                    rolemappings.add(role);
+                    Set<RoleModel> activeRoles = getDeepUserRoleMappings(rolemappings, wrappedUser, session, realm, em);
+                    Set<RoleModel> requestedAccess = getAccess(activeRoles, client, client.getClientScopes(false).values().stream());
+                    setTokenClaims(proof, requestedAccess);
+
+                    try {
+                        ObjectMapper objectMapper = new ObjectMapper();
+                        objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+
+                        TideUserRoleMappingDraftEntity temp = new TideUserRoleMappingDraftEntity();
+                        temp.setId(draftUserRole.getId());
+                        temp.setUser(draftUserRole.getUser());
+                        temp.setRoleId(draftUserRole.getRoleId());
+                        temp.setAction(draftUserRole.getAction());
+                        temp.setDraftStatus(draftUserRole.getDraftStatus());
+
+                        JsonNode tempNode = objectMapper.valueToTree(temp);
+                        var sortedTemp = ProofGeneration.sortJsonNode(tempNode);
+                        String draftRecord = objectMapper.writeValueAsString(sortedTemp);
+                        String proofDraft = proofGeneration.cleanProofDraft(proof);
+                        System.out.println(draftRecord); // <-- this is the draft record
+                        System.out.println(proofDraft.concat(draftRecord)); // <-- this is the draft record
+                        String change = proofDraft.concat(draftRecord);
+
+                        // Hash the proofDetails and draftRecord
+                        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                        byte[] changeBytes = digest.digest(
+                                change.getBytes(StandardCharsets.UTF_8));
+                        String changeChecksum = Base64.getEncoder().encodeToString(changeBytes);
+
+                        // Add checksum to draft record
+                        draftUserRole.setChecksum(changeChecksum);
+
+                        // store proof detail into detail
+
+                        AccessProofDetailEntity accessProofEntity = new AccessProofDetailEntity();
+                        accessProofEntity.setId(KeycloakModelUtils.generateId());
+                        accessProofEntity.setClientId(client.getId());
+                        accessProofEntity.setUser(draftUserRole.getUser());
+                        accessProofEntity.setRecordId(draftUserRole.getId());
+                        accessProofEntity.setProofDraft(proofDraft);
+                        accessProofEntity.setChangesetType(ChangeSetType.USER_ROLE);
+
+                        em.persist(accessProofEntity);
+
+
+                    } catch (JsonProcessingException e) {
+
+                        throw new RuntimeException("Failed to process token", e);
+                    } catch (NoSuchAlgorithmException e) {
+                        throw new RuntimeException(e);
+                    }
+
+                    em.persist(draftUserRole);
+                    em.flush();
+
+                });
+            }
         }
 
 //        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);

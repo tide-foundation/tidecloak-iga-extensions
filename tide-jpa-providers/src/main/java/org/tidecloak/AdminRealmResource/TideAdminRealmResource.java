@@ -1,20 +1,48 @@
 package org.tidecloak.AdminRealmResource;
 
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.PropertyAccessor;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.NoResultException;
-import jakarta.ws.rs.GET;
-import jakarta.ws.rs.Path;
-import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.*;
+import jakarta.ws.rs.core.MediaType;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
-import org.keycloak.models.KeycloakSession;
-import org.keycloak.models.RealmModel;
+import org.keycloak.exportimport.ExportOptions;
+import org.keycloak.exportimport.util.ExportUtils;
+import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.models.utils.RoleUtils;
+import org.keycloak.protocol.oidc.TokenManager;
+import org.keycloak.representations.AccessToken;
+import org.keycloak.representations.idm.UserRepresentation;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.keycloak.services.resources.admin.permissions.UserPermissionEvaluator;
 
+import org.tidecloak.Protocol.mapper.TideRolesUtil;
+import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.interfaces.DraftChangeSet;
 import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
+import org.tidecloak.jpa.models.ProofData;
+import org.tidecloak.jpa.models.TideUserAdapter;
+import org.tidecloak.jpa.utils.ProofGeneration;
+import twitter4j.v1.User;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class TideAdminRealmResource {
 
@@ -27,6 +55,8 @@ public class TideAdminRealmResource {
         this.realm = realm;
         this.auth = auth;
     }
+
+    // UI STUFF!
 
     @GET
     @Path("users/{user-id}/roles/{role-id}/draft/status")
@@ -90,4 +120,229 @@ public class TideAdminRealmResource {
 //
 //
 //    }
+
+// UI STUFF END!
+
+    // APPROVAL MECHANISM STARTS HERE
+    // NEED DIFFERENT ENDPOINTS FOR EACH TYPE?
+
+    @POST
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Path("change-set/sign")
+    public void signChangeset(DraftChangeSet changeSet){
+
+        System.out.println(realm.getName());
+        if (ChangeSetType.valueOf(changeSet.getType()) == ChangeSetType.USER_ROLE){
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            TideUserRoleMappingDraftEntity entity = em.find(TideUserRoleMappingDraftEntity.class, changeSet.getChangeSetId());
+
+            RoleModel roleModel =  realm.getRoleById(entity.getRoleId());
+
+            if ( roleModel.isClientRole()){
+                session.getContext().setClient((ClientModel) roleModel.getContainer());
+                UserModel user =  session.users().getUserById(realm, entity.getUser().getId());
+                UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session,realm, em);
+
+                ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
+                ClientModel clientModel = (ClientModel) roleModel.getContainer();
+
+                // generate proof, this should have all current access
+                AccessToken proof = proofGeneration.generateAccessToken(clientModel, user, "openid");
+
+                // Get request changes
+                Set<RoleModel> rolemappings = new HashSet<>();
+                rolemappings.add(realm.getRoleById(entity.getRoleId()));
+                Set<RoleModel> activeRoles = getDeepUserRoleMappings(rolemappings, wrappedUser, session, realm, em);
+                Set<RoleModel> requestedAccess = getAccess(activeRoles, clientModel, clientModel.getClientScopes(false).values().stream());
+                setTokenClaims(proof, requestedAccess);
+
+                try{
+                    ObjectMapper objectMapper = new ObjectMapper();
+                    objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+
+                    TideUserRoleMappingDraftEntity temp = new TideUserRoleMappingDraftEntity();
+                    temp.setId(entity.getId());
+                    temp.setUser(entity.getUser());
+                    temp.setRoleId(entity.getRoleId());
+                    temp.setAction(entity.getAction());
+                    temp.setDraftStatus(entity.getDraftStatus());
+
+                    JsonNode tempNode = objectMapper.valueToTree(temp);
+                    var sortedTemp = ProofGeneration.sortJsonNode(tempNode);
+                    String draftRecord = objectMapper.writeValueAsString(sortedTemp);
+                    String proofDraft = proofGeneration.cleanProofDraft(proof);
+                    System.out.println(draftRecord); // <-- this is the draft record
+                    System.out.println(proofDraft.concat(draftRecord)); // <-- this is the draft record
+                    String change = proofDraft.concat(draftRecord);
+
+                    // Hash the proofDetails and draftRecord
+                    MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                    byte[] changeBytes = digest.digest(
+                            change.getBytes(StandardCharsets.UTF_8));
+                    String changeChecksum = Base64.getEncoder().encodeToString(changeBytes);
+
+                    // Add checksum to draft record
+                    entity.setChecksum(changeChecksum);
+
+                    // store proof detail into detail
+
+                    AccessProofDetailEntity accessProofEntity = new AccessProofDetailEntity();
+                    accessProofEntity.setId(KeycloakModelUtils.generateId());
+                    accessProofEntity.setClientId(clientModel.getId());
+                    accessProofEntity.setUser(entity.getUser());
+                    accessProofEntity.setRecordId(entity.getId());
+                    accessProofEntity.setProofDraft(proofDraft);
+                    accessProofEntity.setChangesetType(ChangeSetType.USER_ROLE);
+
+                    em.persist(accessProofEntity);
+                    em.flush();
+                    em.detach(accessProofEntity);
+
+                }
+                catch (JsonProcessingException e) {
+
+                    throw new RuntimeException("Failed to process token", e);
+                } catch (NoSuchAlgorithmException e) {
+                    throw new RuntimeException(e);
+                }
+
+
+                // need to get the draft changes
+
+
+
+                //String draftRecord = userRepJson(userRep);
+                // TODO: update timestamp to show creation of the changeset, for this example it should be when the new role was assigned to this user
+                // GET THE CHANGESET and add to THE USER REP, in this case its one role from a client
+                // NEED THIS MECHANISIM FOR PROOF DRAFT
+                // atm shows the timestamp of user creation
+                // {"id":"92a99e11-8915-4c65-b2ad-79f40661e0f5","username":"sasha1","firstName":"sasha1","lastName":"sasha1","email":"sasha1@tide.org","emailVerified":false,"createdTimestamp":1715062299309,"enabled":true,"totp":false,"disableableCredentialTypes":[],"requiredActions":[],"clientRoles":{"client 1":["client 1 role 1"]},"notBefore":0,"groups":["/group 1"]}
+
+                //System.out.println(draftRecord);
+
+                // generate the proof
+                // somehow turn changeset into json format?????~??!?!?!?!?!?
+                // just get a list of users and inform admin
+                // e.g. list of users who will gain access
+
+                // expand the roles to show the admin what this role gives the users
+
+            }
+
+        }
+        // PARSE JSON, look for type e.g. USER, GROUP, COMPOSITE ROLE, ROLE
+        // use the correct method based on type to generate proof for user.
+        // can we use the changeset-id for this ? how to construct the token exactly ?
+        // query both approved and draft and construct token like that.
+
+
+    }
+
+
+    private String userRepJson(UserRepresentation userRep) {
+        try{
+            ObjectMapper objMapper = new ObjectMapper();
+            objMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+            objMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY);
+
+            return objMapper.writeValueAsString(userRep);
+        }
+        catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to process change set", e);
+        }
+    }
+
+    //TODO: move into a more generic util file
+    public static Set<RoleModel> getDeepUserRoleMappings(Set<RoleModel> roleModels, UserModel user, KeycloakSession session, RealmModel realm, EntityManager manager) {
+        user.getGroupsStream().forEach(group -> TideRolesUtil.addGroupRoles(TideRolesUtil.wrapGroupModel(group, session, realm, manager), roleModels, DraftStatus.APPROVED, ActionType.CREATE));
+        return TideRolesUtil.expandCompositeRoles(roleModels, DraftStatus.APPROVED, ActionType.CREATE);
+    }
+    public static Set<RoleModel> getAccess(Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes) {
+
+        if (client.isFullScopeAllowed()) {
+            return roleModels;
+        } else {
+
+            // 1 - Client roles of this client itself
+            Stream<RoleModel> scopeMappings = client.getRolesStream();
+
+            // 2 - Role mappings of client itself + default client scopes + optional client scopes requested by scope parameter (if applyScopeParam is true)
+            Stream<RoleModel> clientScopesMappings;
+            clientScopesMappings = clientScopes.flatMap(ScopeContainerModel::getScopeMappingsStream);
+
+            scopeMappings = Stream.concat(scopeMappings, clientScopesMappings);
+
+            // 3 - Expand scope mappings
+            scopeMappings = RoleUtils.expandCompositeRolesStream(scopeMappings);
+
+            // Intersection of expanded user roles and expanded scopeMappings
+            roleModels.retainAll(scopeMappings.collect(Collectors.toSet()));
+
+            return roleModels;
+        }
+    }
+
+    //TODO: CLEAN THIS MONSTROSITY!!!!
+    public static void setTokenClaims(AccessToken token, Set<RoleModel> roles) {
+        System.out.println("SEETING CLAIMS");
+        roles.forEach(x -> System.out.println(x.getName()));
+        System.out.println("TOKEN ACCESS");
+        System.out.println(token.getRealmAccess());
+        System.out.println(token.getResourceAccess());
+        AccessToken.Access realmAccess = new AccessToken.Access();
+        Map<String, AccessToken.Access> clientAccesses = new HashMap<>();
+        for (RoleModel role : roles) {
+            if (role.getContainer() instanceof RealmModel) {
+                realmAccess.addRole(role.getName());
+            } else if (role.getContainer() instanceof ClientModel client) {
+                clientAccesses.computeIfAbsent(client.getClientId(), k -> new AccessToken.Access())
+                        .addRole(role.getName());
+            }
+        }
+        // Add our roles to what is existing
+        // If original token does not include any roles we dont add.
+        if (token.getRealmAccess() != null) {
+            if(token.getRealmAccess().getRoles() != null && realmAccess.getRoles() != null){
+                realmAccess.getRoles().forEach(role -> {
+                    if (!token.getRealmAccess().getRoles().contains(role)){
+                        token.getRealmAccess().addRole(role);
+                    }
+                });
+            }
+        }
+        if (!token.getResourceAccess().isEmpty()) {
+            clientAccesses.forEach((clientKey, clientAccess) -> {
+                AccessToken.Access tokenClientRoles = token.getResourceAccess().get(clientKey);
+                if (tokenClientRoles != null) {
+                    Set<String> newRoles = clientAccess.getRoles();
+                    if (!tokenClientRoles.getRoles().containsAll(newRoles)) {
+                        newRoles.stream()
+                                .filter(role -> !tokenClientRoles.getRoles().contains(role))
+                                .forEach(tokenClientRoles::addRole);
+                    }
+                }else {
+                    if (clientAccess.getRoles() != null){
+                        token.getResourceAccess().put(clientKey, clientAccess);
+                    }
+                }
+            });
+        }
+        if ( token.getRealmAccess() == null) {
+            System.out.println(" token realm is NULL");
+            if (realmAccess.getRoles() != null ){
+                System.out.println("ALL NULL");
+                token.setRealmAccess(realmAccess);
+            }
+
+        }
+        if (token.getResourceAccess().isEmpty() ){
+            System.out.println("token resource is null");
+            if(!clientAccesses.isEmpty()){
+                System.out.println("ALL NULL");
+                token.setResourceAccess(clientAccesses);
+            }
+        }
+    }
+
+
 }

@@ -14,6 +14,7 @@ import org.tidecloak.interfaces.DraftStatus;
 import java.util.*;
 
 import static org.keycloak.protocol.ProtocolMapperUtils.PRIORITY_SCRIPT_MAPPER;
+import static org.tidecloak.AdminRealmResource.TideAdminRealmResource.getAccess;
 
 public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implements OIDCAccessTokenMapper {
 
@@ -37,7 +38,9 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         UserModel tideUser = TideRolesUtil.wrapUserModel(userSession.getUser(), session, realm, em);
         Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE);
-        setTokenClaims(token, activeRoles, session);
+        ClientModel clientModel = session.getContext().getClient();
+        Set<RoleModel> roles = getAccess(activeRoles, clientModel, clientModel.getClientScopes(true).values().stream());
+        setTokenClaims(token, roles, session);
 
         return token;
     }
@@ -45,9 +48,7 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
     private void setTokenClaims(AccessToken token, Set<RoleModel> roles, KeycloakSession session) {
         AccessToken.Access realmAccess = new AccessToken.Access();
         Map<String, AccessToken.Access> clientAccesses = new HashMap<>();
-        System.out.println(token);
         for (RoleModel role : roles) {
-            System.out.println(role.getContainer() instanceof RealmModel);
             if (role.getContainer() instanceof RealmModel) {
                 realmAccess.addRole(role.getName());
             } else if (role.getContainer() instanceof ClientModel client) {
@@ -59,7 +60,8 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         if (token.getRealmAccess() != null) {
             token.setRealmAccess(realmAccess);
         }
-        if (!token.getResourceAccess().values().isEmpty()) {
+        if (!token.getResourceAccess().entrySet().isEmpty()) {
+            System.out.println(clientAccesses.keySet());
             token.setResourceAccess(clientAccesses);
         }
     }

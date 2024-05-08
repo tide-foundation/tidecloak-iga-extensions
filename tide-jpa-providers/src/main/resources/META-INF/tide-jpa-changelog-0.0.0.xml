@@ -17,6 +17,26 @@
                 <constraints nullable="false"/>
             </column>
         </createTable>
+        <createTable tableName="ACCESS_PROOF_DETAIL">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="RECORD_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CHANGE_SET_TYPE" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="USER_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CLIENT_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="PROOF_DRAFT" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
 
         <!-- TABLES FOR DRAFTING PURPOSES -->
         <!-- For new users added to realm-->
@@ -50,6 +70,9 @@
             </column>
             <column name="ACTION_TYPE" type="VARCHAR(36)">
                 <constraints nullable="false"/>
+            </column>
+            <column name="CHECKSUM" type="TEXT">
+                <constraints nullable="true"/>
             </column>
         </createTable>
         <!-- For roles assigned to a composite role -->
