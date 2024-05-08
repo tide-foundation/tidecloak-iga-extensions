@@ -30,6 +30,7 @@ import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftChangeSet;
 import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.jpa.models.ProofData;
@@ -130,47 +131,44 @@ public class TideAdminRealmResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign")
     public void signChangeset(DraftChangeSet changeSet){
-
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<String> proofDetails;
         System.out.println(realm.getName());
-        if (ChangeSetType.valueOf(changeSet.getType()) == ChangeSetType.USER_ROLE){
-            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        Object draftRecordEntity = new Object();
 
-            TideUserRoleMappingDraftEntity draftRecord = em.find(TideUserRoleMappingDraftEntity.class, changeSet.getChangeSetId());
+        if (ChangeSetType.valueOf(changeSet.getType()) == ChangeSetType.USER_ROLE) {
+
+
+            draftRecordEntity = em.find(TideUserRoleMappingDraftEntity.class, changeSet.getChangeSetId());
             Stream<AccessProofDetailEntity> accessProofDetailEntity = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                    .setParameter("recordId", draftRecord.getId())
+                    .setParameter("recordId", ((TideUserRoleMappingDraftEntity) draftRecordEntity).getId())
                     .getResultStream();
 
-            List<String> proofDetails = accessProofDetailEntity.map(AccessProofDetailEntity::getProofDraft).toList();
+            proofDetails = accessProofDetailEntity.map(AccessProofDetailEntity::getProofDraft).toList();
 
-            // We have the proofDetails
+        }
+        if(ChangeSetType.valueOf(changeSet.getType()) == ChangeSetType.COMPOSITE_ROLE){
+            draftRecordEntity = em.find(TideCompositeRoleMappingDraftEntity.class, changeSet.getChangeSetId());
+            Stream<AccessProofDetailEntity> accessProofDetailEntity = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).getId())
+                    .getResultStream();
+
+            proofDetails = accessProofDetailEntity.map(AccessProofDetailEntity::getProofDraft).toList();
+        }
+        try {
+            ObjectMapper objectMapper = new ObjectMapper();
+            objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+
+            JsonNode tempNode = objectMapper.valueToTree(draftRecordEntity);
+            var sortedTemp = ProofGeneration.sortJsonNode(tempNode);
+
+            // send proofDetails and draftRecord to enclave to be signed with sessKey
+            String draftRecord = objectMapper.writeValueAsString(sortedTemp);
 
 
-                // need to get the draft changes
-
-
-
-                //String draftRecord = userRepJson(userRep);
-                // TODO: update timestamp to show creation of the changeset, for this example it should be when the new role was assigned to this user
-                // GET THE CHANGESET and add to THE USER REP, in this case its one role from a client
-                // NEED THIS MECHANISIM FOR PROOF DRAFT
-                // atm shows the timestamp of user creation
-                // {"id":"92a99e11-8915-4c65-b2ad-79f40661e0f5","username":"sasha1","firstName":"sasha1","lastName":"sasha1","email":"sasha1@tide.org","emailVerified":false,"createdTimestamp":1715062299309,"enabled":true,"totp":false,"disableableCredentialTypes":[],"requiredActions":[],"clientRoles":{"client 1":["client 1 role 1"]},"notBefore":0,"groups":["/group 1"]}
-
-                //System.out.println(draftRecord);
-
-                // generate the proof
-                // somehow turn changeset into json format?????~??!?!?!?!?!?
-                // just get a list of users and inform admin
-                // e.g. list of users who will gain access
-
-                // expand the roles to show the admin what this role gives the users
-
-            }
-
-        // PARSE JSON, look for type e.g. USER, GROUP, COMPOSITE ROLE, ROLE
-        // use the correct method based on type to generate proof for user.
-        // can we use the changeset-id for this ? how to construct the token exactly ?
-        // query both approved and draft and construct token like that.
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
 
 
     }
