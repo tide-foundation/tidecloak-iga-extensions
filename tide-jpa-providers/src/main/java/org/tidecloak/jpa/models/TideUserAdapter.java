@@ -89,7 +89,6 @@ public class TideUserAdapter extends UserAdapter {
 
     @Override
     public void grantRole(RoleModel role) {
-        System.out.println("HELLO IT ME " + getEntity().getId());
         super.grantRole(role);
 
         // Check if this has already been action before
@@ -109,7 +108,7 @@ public class TideUserAdapter extends UserAdapter {
             draftUserRole.setAction(ActionType.CREATE);
             draftUserRole.setDraftStatus(DraftStatus.DRAFT);
 
-
+            //TODO: CLEAN THIS UP IN PROOFGENERATION UTIL!!!
             ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
             if (role.getContainer() instanceof ClientModel) {
                 List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
@@ -143,16 +142,16 @@ public class TideUserAdapter extends UserAdapter {
                         String proofDraft = proofGeneration.cleanProofDraft(proof);
                         System.out.println(draftRecord); // <-- this is the draft record
                         System.out.println(proofDraft.concat(draftRecord)); // <-- this is the draft record
-                        String change = proofDraft.concat(draftRecord);
+//                        String change = proofDraft.concat(draftRecord);
 
-                        // Hash the proofDetails and draftRecord
-                        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-                        byte[] changeBytes = digest.digest(
-                                change.getBytes(StandardCharsets.UTF_8));
-                        String changeChecksum = Base64.getEncoder().encodeToString(changeBytes);
+//                        // Hash the proofDetails and draftRecord
+//                        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+//                        byte[] changeBytes = digest.digest(
+//                                change.getBytes(StandardCharsets.UTF_8));
+//                        String changeChecksum = Base64.getEncoder().encodeToString(changeBytes);
 
-                        // Add checksum to draft record
-                        draftUserRole.setChecksum(changeChecksum);
+//                        // Add checksum to draft record
+//                        draftUserRole.setChecksum(changeChecksum);
 
                         // store proof detail into detail
 
@@ -168,10 +167,7 @@ public class TideUserAdapter extends UserAdapter {
 
 
                     } catch (JsonProcessingException e) {
-
                         throw new RuntimeException("Failed to process token", e);
-                    } catch (NoSuchAlgorithmException e) {
-                        throw new RuntimeException(e);
                     }
 
                     em.persist(draftUserRole);
@@ -181,15 +177,6 @@ public class TideUserAdapter extends UserAdapter {
             }
         }
 
-//        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-//        if (role.getContainer() instanceof ClientModel clientModel){
-//            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
-//            clientList.add(clientModel);
-//            UserEntity user = getEntity();
-//            clientList.forEach(client -> {
-//                proofGeneration.generateProofAndSaveToTable(user.getId(), client);
-//            });
-//        }
     }
 
     @Override

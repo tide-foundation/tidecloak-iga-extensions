@@ -71,9 +71,9 @@
             <column name="ACTION_TYPE" type="VARCHAR(36)">
                 <constraints nullable="false"/>
             </column>
-            <column name="CHECKSUM" type="TEXT">
-                <constraints nullable="true"/>
-            </column>
+<!--            <column name="CHECKSUM" type="TEXT">-->
+<!--                <constraints nullable="true"/>-->
+<!--            </column>-->
         </createTable>
         <!-- For roles assigned to a composite role -->
         <createTable tableName="COMPOSITE_ROLE_MAPPING_DRAFT">

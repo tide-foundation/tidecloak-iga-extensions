@@ -44,8 +44,8 @@ public class TideUserRoleMappingDraftEntity {
     @Column(name = "ACTION_TYPE")
     private ActionType actionType = ActionType.CREATE; // Default to NONE
 
-    @Column(name = "CHECKSUM")
-    protected String checksum;
+//    @Column(name = "CHECKSUM")
+//    protected String checksum;
 
     public String getId() {
         return id;
@@ -88,13 +88,13 @@ public class TideUserRoleMappingDraftEntity {
         this.actionType = actionType;
     }
 
-    public String getChecksum() {
-        return checksum;
-    }
-
-    public void setChecksum(String checksum) {
-        this.checksum = checksum;
-    }
+//    public String getChecksum() {
+//        return checksum;
+//    }
+//
+//    public void setChecksum(String checksum) {
+//        this.checksum = checksum;
+//    }
 
 
 

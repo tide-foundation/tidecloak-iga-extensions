@@ -134,77 +134,15 @@ public class TideAdminRealmResource {
         System.out.println(realm.getName());
         if (ChangeSetType.valueOf(changeSet.getType()) == ChangeSetType.USER_ROLE){
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-            TideUserRoleMappingDraftEntity entity = em.find(TideUserRoleMappingDraftEntity.class, changeSet.getChangeSetId());
 
-            RoleModel roleModel =  realm.getRoleById(entity.getRoleId());
+            TideUserRoleMappingDraftEntity draftRecord = em.find(TideUserRoleMappingDraftEntity.class, changeSet.getChangeSetId());
+            Stream<AccessProofDetailEntity> accessProofDetailEntity = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", draftRecord.getId())
+                    .getResultStream();
 
-            if ( roleModel.isClientRole()){
-                session.getContext().setClient((ClientModel) roleModel.getContainer());
-                UserModel user =  session.users().getUserById(realm, entity.getUser().getId());
-                UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session,realm, em);
+            List<String> proofDetails = accessProofDetailEntity.map(AccessProofDetailEntity::getProofDraft).toList();
 
-                ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-                ClientModel clientModel = (ClientModel) roleModel.getContainer();
-
-                // generate proof, this should have all current access
-                AccessToken proof = proofGeneration.generateAccessToken(clientModel, user, "openid");
-
-                // Get request changes
-                Set<RoleModel> rolemappings = new HashSet<>();
-                rolemappings.add(realm.getRoleById(entity.getRoleId()));
-                Set<RoleModel> activeRoles = getDeepUserRoleMappings(rolemappings, wrappedUser, session, realm, em);
-                Set<RoleModel> requestedAccess = getAccess(activeRoles, clientModel, clientModel.getClientScopes(false).values().stream());
-                setTokenClaims(proof, requestedAccess);
-
-                try{
-                    ObjectMapper objectMapper = new ObjectMapper();
-                    objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
-
-                    TideUserRoleMappingDraftEntity temp = new TideUserRoleMappingDraftEntity();
-                    temp.setId(entity.getId());
-                    temp.setUser(entity.getUser());
-                    temp.setRoleId(entity.getRoleId());
-                    temp.setAction(entity.getAction());
-                    temp.setDraftStatus(entity.getDraftStatus());
-
-                    JsonNode tempNode = objectMapper.valueToTree(temp);
-                    var sortedTemp = ProofGeneration.sortJsonNode(tempNode);
-                    String draftRecord = objectMapper.writeValueAsString(sortedTemp);
-                    String proofDraft = proofGeneration.cleanProofDraft(proof);
-                    System.out.println(draftRecord); // <-- this is the draft record
-                    System.out.println(proofDraft.concat(draftRecord)); // <-- this is the draft record
-                    String change = proofDraft.concat(draftRecord);
-
-                    // Hash the proofDetails and draftRecord
-                    MessageDigest digest = MessageDigest.getInstance("SHA-256");
-                    byte[] changeBytes = digest.digest(
-                            change.getBytes(StandardCharsets.UTF_8));
-                    String changeChecksum = Base64.getEncoder().encodeToString(changeBytes);
-
-                    // Add checksum to draft record
-                    entity.setChecksum(changeChecksum);
-
-                    // store proof detail into detail
-
-                    AccessProofDetailEntity accessProofEntity = new AccessProofDetailEntity();
-                    accessProofEntity.setId(KeycloakModelUtils.generateId());
-                    accessProofEntity.setClientId(clientModel.getId());
-                    accessProofEntity.setUser(entity.getUser());
-                    accessProofEntity.setRecordId(entity.getId());
-                    accessProofEntity.setProofDraft(proofDraft);
-                    accessProofEntity.setChangesetType(ChangeSetType.USER_ROLE);
-
-                    em.persist(accessProofEntity);
-                    em.flush();
-                    em.detach(accessProofEntity);
-
-                }
-                catch (JsonProcessingException e) {
-
-                    throw new RuntimeException("Failed to process token", e);
-                } catch (NoSuchAlgorithmException e) {
-                    throw new RuntimeException(e);
-                }
+            // We have the proofDetails
 
 
                 // need to get the draft changes
@@ -229,7 +167,6 @@ public class TideAdminRealmResource {
 
             }
 
-        }
         // PARSE JSON, look for type e.g. USER, GROUP, COMPOSITE ROLE, ROLE
         // use the correct method based on type to generate proof for user.
         // can we use the changeset-id for this ? how to construct the token exactly ?

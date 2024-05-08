@@ -4,6 +4,10 @@ import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.interfaces.ChangeSetType;
 
+@NamedQueries({
+        @NamedQuery(name="getProofDetailsForDraft", query="SELECT a FROM AccessProofDetailEntity a WHERE a.recordId = :recordId"),
+})
+
 @Entity
 @Table(name = "ACCESS_PROOF_DETAIL")
 public class AccessProofDetailEntity {
