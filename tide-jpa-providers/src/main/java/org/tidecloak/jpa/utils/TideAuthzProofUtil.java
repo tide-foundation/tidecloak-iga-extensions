@@ -145,12 +145,15 @@ public final class TideAuthzProofUtil {
                 System.out.println("HELLO TRYING TO ADD !!!");
                 var parentAccess = em.find(AccessProofDetailDependencyEntity.class, new AccessProofDetailDependencyEntity.Key(latestProof.getRecordId(), latestProof.getChangesetType()));
 
+                System.out.println(parentAccess.getRecordId());
+                System.out.println(parentAccess.getForkedChangeSetType());
+
                 AccessProofDetailDependencyEntity newRecord = new AccessProofDetailDependencyEntity();
                 newRecord.setRecordId(recordId);
                 newRecord.setChangesetType(type);
                 newRecord.setForkedRecordId(parentAccess.getRecordId());
-                newRecord.setForkedChangeSetType(parentAccess.getForkedChangeSetType());
-
+                newRecord.setForkedChangeSetType(parentAccess.getChangeSetType());
+                System.out.println(objectMapper.writeValueAsString(newRecord));
                 em.persist(newRecord);
             }
         }

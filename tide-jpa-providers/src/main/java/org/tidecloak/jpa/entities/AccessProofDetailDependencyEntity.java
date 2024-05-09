@@ -43,11 +43,11 @@ public class AccessProofDetailDependencyEntity {
         this.changeSetType = changeSetType;
     }
 
-    public String getForkedRecordIdRecordId() {
+    public String getForkedRecordId() {
         return forkedRecordId;
     }
 
-    public void setForkedRecordId(String recordId) {
+    public void setForkedRecordId(String forkedRecordId) {
         this.forkedRecordId = forkedRecordId;
     }
 
