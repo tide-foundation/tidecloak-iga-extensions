@@ -6,25 +6,20 @@ import com.fasterxml.jackson.annotation.PropertyAccessor;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.NoResultException;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
-import org.keycloak.exportimport.ExportOptions;
-import org.keycloak.exportimport.util.ExportUtils;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
-import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.RoleUtils;
-import org.keycloak.protocol.oidc.TokenManager;
 import org.keycloak.representations.AccessToken;
 import org.keycloak.representations.idm.UserRepresentation;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.keycloak.services.resources.admin.permissions.UserPermissionEvaluator;
 
-import org.tidecloak.Protocol.mapper.TideRolesUtil;
+import org.tidecloak.jpa.utils.TideRolesUtil;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftChangeSet;
@@ -33,14 +28,8 @@ import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
-import org.tidecloak.jpa.models.ProofData;
-import org.tidecloak.jpa.models.TideUserAdapter;
 import org.tidecloak.jpa.utils.ProofGeneration;
-import twitter4j.v1.User;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -125,8 +114,8 @@ public class TideAdminRealmResource {
 // UI STUFF END!
 
     // APPROVAL MECHANISM STARTS HERE
-    // NEED DIFFERENT ENDPOINTS FOR EACH TYPE?
 
+    // add a button on ui that posts to this endpoint
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign")
@@ -219,11 +208,6 @@ public class TideAdminRealmResource {
 
     //TODO: CLEAN THIS MONSTROSITY!!!!
     public static void setTokenClaims(AccessToken token, Set<RoleModel> roles) {
-        System.out.println("SEETING CLAIMS");
-        roles.forEach(x -> System.out.println(x.getName()));
-        System.out.println("TOKEN ACCESS");
-        System.out.println(token.getRealmAccess());
-        System.out.println(token.getResourceAccess());
         AccessToken.Access realmAccess = new AccessToken.Access();
         Map<String, AccessToken.Access> clientAccesses = new HashMap<>();
         for (RoleModel role : roles) {
@@ -239,7 +223,7 @@ public class TideAdminRealmResource {
         if (token.getRealmAccess() != null) {
             if(token.getRealmAccess().getRoles() != null && realmAccess.getRoles() != null){
                 realmAccess.getRoles().forEach(role -> {
-                    if (!token.getRealmAccess().getRoles().contains(role)){
+                    if (!token.getRealmAccess().getRoles().contains(role)) {
                         token.getRealmAccess().addRole(role);
                     }
                 });
@@ -263,17 +247,13 @@ public class TideAdminRealmResource {
             });
         }
         if ( token.getRealmAccess() == null) {
-            System.out.println(" token realm is NULL");
             if (realmAccess.getRoles() != null ){
-                System.out.println("ALL NULL");
                 token.setRealmAccess(realmAccess);
             }
 
         }
         if (token.getResourceAccess().isEmpty() ){
-            System.out.println("token resource is null");
             if(!clientAccesses.isEmpty()){
-                System.out.println("ALL NULL");
                 token.setResourceAccess(clientAccesses);
             }
         }

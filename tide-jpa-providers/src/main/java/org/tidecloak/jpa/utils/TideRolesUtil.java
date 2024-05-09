@@ -1,4 +1,4 @@
-package org.tidecloak.Protocol.mapper;
+package org.tidecloak.jpa.utils;
 
 import jakarta.persistence.EntityManager;
 import org.keycloak.models.*;
@@ -103,6 +103,7 @@ public class TideRolesUtil {
         user.getGroupsStream().forEach(group -> addGroupRoles(wrapGroupModel(group, session, realm, manager), roleMappings, draftStatus, actionType));
         return expandCompositeRoles(roleMappings, draftStatus, actionType);
     }
+
 
     public static void addGroupRoles(GroupModel group, Set<RoleModel> roleMappings, DraftStatus draftStatus, ActionType actionType) {
         if(group instanceof TideGroupAdapter){

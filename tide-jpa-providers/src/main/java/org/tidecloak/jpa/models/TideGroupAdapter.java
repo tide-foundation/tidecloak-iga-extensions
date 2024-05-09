@@ -50,6 +50,7 @@ public class TideGroupAdapter extends GroupAdapter {
         em.detach(entity);
 
 
+
 //        if (role.getContainer() instanceof ClientModel clientModel) {
 //            GroupEntity groupEntity = getEntity();
 //            GroupModel group = session.groups().getGroupById(realm, groupEntity.getId());

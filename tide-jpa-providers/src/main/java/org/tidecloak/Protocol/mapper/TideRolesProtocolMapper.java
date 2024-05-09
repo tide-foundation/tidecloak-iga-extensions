@@ -10,6 +10,7 @@ import org.keycloak.provider.ProviderConfigProperty;
 import org.keycloak.representations.AccessToken;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.jpa.utils.TideRolesUtil;
 
 import java.util.*;
 

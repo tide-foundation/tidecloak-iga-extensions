@@ -6,6 +6,7 @@ import org.tidecloak.interfaces.ChangeSetType;
 
 @NamedQueries({
         @NamedQuery(name="getProofDetailsForDraft", query="SELECT a FROM AccessProofDetailEntity a WHERE a.recordId = :recordId"),
+        @NamedQuery(name="getProofDetailsForUserByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user and a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),
 })
 
 @Entity
@@ -33,6 +34,9 @@ public class AccessProofDetailEntity {
 
     @Column(name = "PROOF_DRAFT")
     protected String proofDraft;
+
+    @Column(name = "CREATED_TIMESTAMP")
+    protected Long createdTimestamp;
 
     public String getId() {
         return id;
@@ -66,7 +70,7 @@ public class AccessProofDetailEntity {
         this.recordId = recordId;
     }
 
-    public ChangeSetType changeSetType() {
+    public ChangeSetType getChangesetType() {
         return changesetType;
     }
 
@@ -80,6 +84,14 @@ public class AccessProofDetailEntity {
 
     public void setProofDraft(String proofDraft) {
         this.proofDraft = proofDraft;
+    }
+
+    public Long getCreatedTimestamp() {
+        return createdTimestamp;
+    }
+
+    public void setCreatedTimestamp(Long timestamp) {
+        createdTimestamp = timestamp;
     }
 
 

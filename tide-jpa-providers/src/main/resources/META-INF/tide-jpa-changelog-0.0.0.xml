@@ -36,8 +36,22 @@
             <column name="PROOF_DRAFT" type="TEXT">
                 <constraints nullable="false"/>
             </column>
+            <column name="CREATED_TIMESTAMP" type="BIGINT"/>
         </createTable>
-
+        <createTable tableName="ACCESS_PROOF_DETAIL_DEPENDENCY">
+            <column name="RECORD_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CHANGE_SET_TYPE" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="FORKED_RECORD_ID" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="FORKED_CHANGE_SET_TYPE" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+        </createTable>
         <!-- TABLES FOR DRAFTING PURPOSES -->
         <!-- For new users added to realm-->
         <createTable tableName="USER_ENTITY_DRAFT">
@@ -146,6 +160,7 @@
         </createTable>
         <addPrimaryKey columnNames="ROLE_ID, USER_ID, DRAFT_STATUS" constraintName="CONSTRAINT_USER_ROLE_MAPPING_DRAFT" tableName="USER_ROLE_MAPPING_DRAFT"/>
         <addUniqueConstraint columnNames="USER_ID,CLIENT_ID" constraintName="client_access_proof_16042024" tableName="USER_CLIENT_ACCESS_PROOF"/>
+        <addUniqueConstraint columnNames="RECORD_ID,CHANGE_SET_TYPE" constraintName="FORKED_TABLE" tableName="ACCESS_PROOF_DETAIL_DEPENDENCY"/>
         <addForeignKeyConstraint constraintName="FK_USER_CLIENT_ACCESS_PROOF_1" baseTableName="USER_CLIENT_ACCESS_PROOF" baseColumnNames="USER_ID" referencedTableName="USER_ENTITY" referencedColumnNames="ID"/>
         <addForeignKeyConstraint constraintName="DRAFTING" baseTableName="USER_ENTITY_DRAFT" baseColumnNames="USER_ID" referencedTableName="USER_ENTITY" referencedColumnNames="ID"/>
         <addForeignKeyConstraint baseColumnNames="USER_ID" baseTableName="USER_ROLE_MAPPING_DRAFT" constraintName="DRAFTING_USER_ROLE_MAPPING" referencedColumnNames="ID" referencedTableName="USER_ENTITY"/>

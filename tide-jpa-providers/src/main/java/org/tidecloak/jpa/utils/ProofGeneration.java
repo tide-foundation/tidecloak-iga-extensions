@@ -140,7 +140,6 @@ public class ProofGeneration {
                     .generateAccessToken().getAccessToken();
         });
 
-
     }
 
     private void updateOrAddEntity(UserModel user, ClientModel client){
