@@ -37,7 +37,10 @@ public class TideRolesUtil {
         }
 
         Deque<RoleModel> stack = new ArrayDeque<>();
+        //TODO: if initial role is pending a delete, we do not bother expanding it.
+
         stack.push(role);
+
 
         while (!stack.isEmpty()) {
             RoleModel current = stack.pop();

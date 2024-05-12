@@ -119,7 +119,7 @@ public class TideUserAdapter extends UserAdapter {
                     Set<RoleModel> roleMappings = new HashSet<>();
                     roleMappings.add(role);
                     try {
-                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUserRole.getRoleId(), draftUserRole.getUser(), ChangeSetType.USER_ROLE);
+                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUserRole.getId(), ChangeSetType.USER_ROLE, ActionType.CREATE);
                     } catch (JsonProcessingException e) {
                         throw new RuntimeException(e);
                     }
@@ -131,21 +131,6 @@ public class TideUserAdapter extends UserAdapter {
 
     @Override
     public void deleteRoleMapping(RoleModel role) {
-//        Optional<ClientModel> clientModel = Optional.empty();
-//        if (role.getContainer() instanceof ClientModel){
-//            clientModel = Optional.of((ClientModel) role.getContainer());
-//        }
-//        super.deleteRoleMapping(role);
-//
-//        if(clientModel.isPresent()){
-//            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
-//            clientList.add(clientModel.get());
-//            ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-//            clientList.forEach(client -> {
-//                proofGeneration.generateProofAndSaveToTable(user.getId(), client);
-//            });
-//        }
-
         // Check if role mapping is a draft
         Stream<TideUserRoleMappingDraftEntity> entity =  em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
                 .setParameter("user", getEntity())
@@ -167,9 +152,27 @@ public class TideUserAdapter extends UserAdapter {
             newEntity.setDraftStatus(DraftStatus.DRAFT);
             newEntity.setAction(ActionType.DELETE);
             em.persist(newEntity);
-            em.flush();
-            em.detach(newEntity);
+
+            // Generate a proof draft for this changeset and any affected clients with full-scope enabled. These need to be signed.
+            if (role.getContainer() instanceof ClientModel) {
+                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+                UserModel user = session.users().getUserById(realm, getEntity().getId());
+                UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm, em);
+                TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
+                clientList.forEach(client -> {
+                    session.getContext().setClient(client);
+                    Set<RoleModel> roleMappings = new HashSet<>();
+                    roleMappings.add(role);
+                    try {
+                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, newEntity.getId(), ChangeSetType.USER_ROLE, ActionType.DELETE);
+                    } catch (JsonProcessingException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+            }
+
         }
+        em.flush();
     }
 
     @Override

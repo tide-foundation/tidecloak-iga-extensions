@@ -89,7 +89,7 @@ public class TideRoleAdapter extends RoleAdapter {
                 roleMappings.add(role); // this is the new role we are adding to the parent role.
 
                 try {
-                    util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draft.getId(), TideRolesUtil.toUserEntity(user, em), ChangeSetType.COMPOSITE_ROLE);
+                    util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draft.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE);
                 } catch (JsonProcessingException e) {
                     throw new RuntimeException(e);
                 }
@@ -97,22 +97,6 @@ public class TideRoleAdapter extends RoleAdapter {
         });
         em.flush();
     }
-
-
-    public boolean isApprovedForComposite(String parentRoleId) {
-        RoleModel parentRole = realm.getRoleById(parentRoleId);
-
-        TypedQuery<TideCompositeRoleMappingDraftEntity> query = em.createNamedQuery("getCompositeRoleMappingDraftByStatus", TideCompositeRoleMappingDraftEntity.class);
-        query.setParameter("composite", toRoleEntity(parentRole));
-        query.setParameter("childRole", getEntity());
-        query.setParameter("draftStatus", DraftStatus.APPROVED);
-        var result = query.getResultList();
-
-        return result.isEmpty();
-
-    }
-
-
 
     /**
      *
