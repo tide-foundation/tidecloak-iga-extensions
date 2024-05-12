@@ -33,8 +33,6 @@ public class TideRoleAdapter extends RoleAdapter {
 
     @Override
     public void removeCompositeRole(RoleModel role) {
-        //RoleEntity entity = toRoleEntity(role);
-        //getEntity().getCompositeRoles().remove(entity);
 
         // Check if role mapping is a draft
         Stream<TideCompositeRoleDraftEntity> entity =  em.createNamedQuery("getCompositeRoleDraft", TideCompositeRoleDraftEntity.class)
@@ -55,8 +53,29 @@ public class TideRoleAdapter extends RoleAdapter {
             newEntity.setDraftStatus(DraftStatus.DRAFT);
             newEntity.setAction(ActionType.DELETE);
             em.persist(newEntity);
+
+            if (role.getContainer() instanceof ClientModel) {
+                RoleModel compositeRole = realm.getRoleById(getEntity().getId());
+                List<UserModel> users =  session.users().getRoleMembersStream(realm, compositeRole).toList();
+                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+                TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
+                clientList.forEach(client -> {
+                    session.getContext().setClient(client);
+                    users.forEach(user -> {
+                        UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm, em);
+                        Set<RoleModel> roleMappings = new HashSet<>();
+                        roleMappings.add(role); // this is the new role we are adding to the parent role.
+
+                        try {
+                            util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, newEntity.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.DELETE);
+                        } catch (JsonProcessingException e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
+                });
+            }
+
             em.flush();
-            em.detach(newEntity);
         }
     }
     @Override
@@ -77,24 +96,27 @@ public class TideRoleAdapter extends RoleAdapter {
         em.persist(draft);
 
 
-        RoleModel compositeRole = realm.getRoleById(getEntity().getId());
-        List<UserModel> users =  session.users().getRoleMembersStream(realm, compositeRole).toList();
-        List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
-        TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-        clientList.forEach(client -> {
-            session.getContext().setClient(client);
-            users.forEach(user -> {
-                UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm, em);
-                Set<RoleModel> roleMappings = new HashSet<>();
-                roleMappings.add(role); // this is the new role we are adding to the parent role.
+        if (role.getContainer() instanceof ClientModel) {
+            RoleModel compositeRole = realm.getRoleById(getEntity().getId());
+            List<UserModel> users =  session.users().getRoleMembersStream(realm, compositeRole).toList();
+            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+            TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
+            clientList.forEach(client -> {
+                session.getContext().setClient(client);
+                users.forEach(user -> {
+                    UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm, em);
+                    Set<RoleModel> roleMappings = new HashSet<>();
+                    roleMappings.add(role); // this is the new role we are adding to the parent role.
 
-                try {
-                    util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draft.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE);
-                } catch (JsonProcessingException e) {
-                    throw new RuntimeException(e);
-                }
+                    try {
+                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draft.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE);
+                    } catch (JsonProcessingException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
             });
-        });
+        }
+
         em.flush();
     }
 

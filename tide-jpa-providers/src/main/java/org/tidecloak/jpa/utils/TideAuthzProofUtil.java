@@ -149,7 +149,6 @@ public final class TideAuthzProofUtil {
 
             JsonNode draft;
             if (actionType == ActionType.DELETE){
-                System.out.println("HELLO WE ARE TRYING TO DELETE");
                 draft = removeAccessFromJsonNode(latestProofNode, accessDetails);
             }
             else{
