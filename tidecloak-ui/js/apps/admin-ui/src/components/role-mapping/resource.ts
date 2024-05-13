@@ -19,6 +19,12 @@ type Query = Partial<Omit<PaginatingQuery, "adminClient">> & {
   endpoint: string;
 };
 
+
+type ClientRoleExt = {
+  clientRole: ClientRole;
+  draftStatus: string;
+};
+
 type ClientRole = {
   id: string;
   role: string;
@@ -41,6 +47,21 @@ const fetchEndpoint = async ({
     search: search || "",
   });
 
+  
+const fetchTideEndpoint = async ({
+  id,
+  type,
+  first,
+  max,
+  search,
+  endpoint,
+}: Query): Promise<any> =>
+  fetchAdminUI(`/tide-admin/${endpoint}/${type}/${id}`, {
+    first: (first || 0).toString(),
+    max: (max || 10).toString(),
+    search: search || "",
+  });
+
 export const getAvailableClientRoles = (
   query: PaginatingQuery,
 ): Promise<ClientRole[]> =>
@@ -50,6 +71,12 @@ export const getEffectiveClientRoles = (
   query: EffectiveClientRolesQuery,
 ): Promise<ClientRole[]> =>
   fetchEndpoint({ ...query, endpoint: "effective-roles" });
+
+  export const getEffectiveClientRolesTideImpl = (
+    query: EffectiveClientRolesQuery,
+  ): Promise<ClientRoleExt[]> =>
+    fetchTideEndpoint({ ...query, endpoint: "effective-roles" });
+  
 
 type UserQuery = {
   lastName?: string;

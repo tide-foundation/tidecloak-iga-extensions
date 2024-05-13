@@ -62,7 +62,7 @@ public class TideRoleAdapter extends RoleAdapter {
                 clientList.forEach(client -> {
                     session.getContext().setClient(client);
                     users.forEach(user -> {
-                        UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm, em);
+                        UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                         Set<RoleModel> roleMappings = new HashSet<>();
                         roleMappings.add(role); // this is the new role we are adding to the parent role.
 
@@ -104,7 +104,7 @@ public class TideRoleAdapter extends RoleAdapter {
             clientList.forEach(client -> {
                 session.getContext().setClient(client);
                 users.forEach(user -> {
-                    UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm, em);
+                    UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                     Set<RoleModel> roleMappings = new HashSet<>();
                     roleMappings.add(role); // this is the new role we are adding to the parent role.
 

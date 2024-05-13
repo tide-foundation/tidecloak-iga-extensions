@@ -10,6 +10,12 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.NoResultException;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
+import org.eclipse.microprofile.openapi.annotations.Operation;
+import org.eclipse.microprofile.openapi.annotations.enums.SchemaType;
+import org.eclipse.microprofile.openapi.annotations.media.Content;
+import org.eclipse.microprofile.openapi.annotations.media.Schema;
+import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
+import org.keycloak.admin.ui.rest.model.ClientRole;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
@@ -19,20 +25,22 @@ import org.keycloak.representations.idm.UserRepresentation;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.keycloak.services.resources.admin.permissions.UserPermissionEvaluator;
 
+import org.tidecloak.jpa.entities.drafting.*;
+import org.tidecloak.jpa.models.TideRoleAdapter;
+import org.tidecloak.jpa.models.TideUserAdapter;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftChangeSet;
 import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
-import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideUserDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
 
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
+import static org.keycloak.admin.ui.rest.model.RoleMapper.convertToModel;
 
 public class TideAdminRealmResource {
 
@@ -92,23 +100,123 @@ public class TideAdminRealmResource {
     }
 
 //    @GET
-//    @Path("composite/{parent-id}/child/{child-id}/draft/status")
-//    public DraftStatus getRoleDraftStatus(@PathParam("parent-id") String parentId, @PathParam("child-id") String childId) {
+//    @Path("composite/{user-id}/draft/status")
+//    public DraftStatus getUserDraftStatus(@PathParam("user-id") String id) {
 //        // do the authorization with the existing admin permissions (e.g. realm management roles)
 //        final UserPermissionEvaluator userPermissionEvaluator = auth.users();
 //        userPermissionEvaluator.requireQuery();
 //
 //        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+//        UserEntity userEntity = em.find(UserEntity.class, id);
 //
-//        TideCompositeRoleDraftEntity entity = em.find(TideCompositeRoleDraftEntity.class, new TideCompositeRoleDraftEntity.Key(parentId, childId));
-//
-//        if (entity == null){
+//        try {
+//            return em.createNamedQuery("getTideUserDraftEntity", TideUserDraftEntity.class)
+//                    .setParameter("user", userEntity)
+//                    .getSingleResult().getDraftStatus();
+//        } catch (NoResultException e) {
+//            // Handle case where no draft status is found
+//            System.out.println("I AM NULL");
 //            return null;
 //        }
 //
-//        return entity.getDraftStatus();
+//    }
+
+    @GET
+    @Path("composite/{parent-id}/child/{child-id}/draft/status")
+    public DraftStatus getRoleDraftStatus(@PathParam("parent-id") String parentId, @PathParam("child-id") String childId) {
+        // do the authorization with the existing admin permissions (e.g. realm management roles)
+        final UserPermissionEvaluator userPermissionEvaluator = auth.users();
+        userPermissionEvaluator.requireQuery();
+
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        var parentRole = realm.getRoleById(parentId);
+        var childRole = realm.getRoleById(childId);
+
+        List<TideCompositeRoleMappingDraftEntity> entity = em.createNamedQuery("getCompositeRoleMappingDraft", TideCompositeRoleMappingDraftEntity.class)
+                .setParameter("composite", TideRolesUtil.toRoleEntity(parentRole, em))
+                .setParameter("childRole", TideRolesUtil.toRoleEntity(childRole, em))
+                .getResultList();
+
+        if (entity.isEmpty()){
+            return null;
+        }
+
+        return entity.get(0).getDraftStatus();
+
+
+    }
+
+//    // EFFECTIVE ROLES FOR USER
+//    @GET
+//    @Path("/effective-roles/users/{id}")
+//    @Consumes({"application/json"})
+//    @Produces({"application/json"})
+//    @Operation(
+//            summary = "List all effective roles for this users",
+//            description = "This endpoint returns all the client role mapping for a specific users"
+//    )
+//    @APIResponse(
+//            responseCode = "200",
+//            description = "",
+//            content = {@Content(
+//                    schema = @Schema(
+//                            implementation = ClientRole.class,
+//                            type = SchemaType.ARRAY
+//                    )
+//            )}
+//    )
 //
 //
+//    public final List<ClientRoleExt> listCompositeUsersRoleMappings(@PathParam("id") String id) {
+//        System.out.println("HELLO YOUR IN HWEWEW");
+//
+//        UserModel user = session.users().getUserById(this.realm, id);
+//        UserModel wrappedUser =  TideRolesUtil.wrapUserModel(user, session, realm);
+//        if (user == null) {
+//            if (auth.users().canQuery()) throw new NotFoundException("User not found");
+//            else throw new ForbiddenException();
+//        }
+//        auth.users().requireView(wrappedUser);
+//        var roles = toSortedClientRoles(
+//                addSubClientRoles(Stream.concat(
+//                        wrappedUser.getRoleMappingsStream(),
+//                        wrappedUser.getGroupsStream()
+//                                .flatMap(g -> addParents(g))
+//                                .flatMap(GroupModel::getRoleMappingsStream)))
+//                        .filter(auth.roles()::canMapRole));
+//
+//        return roles.stream().map(role -> {
+//            DraftStatus draftStatus = ((TideUserAdapter) wrappedUser).getUserRoleDraftStatus(role.getId());
+//            System.out.println("HERE tryomg");
+//            return new ClientRoleExt(role, draftStatus);
+//        }).toList();
+//    }
+//
+//
+//    private Stream<RoleModel> addSubClientRoles(Stream<RoleModel> roles) {
+//        return addSubRoles(roles).filter(RoleModel::isClientRole);
+//    }
+//
+//    private List<ClientRole> toSortedClientRoles(Stream<RoleModel> roles) {
+//        return roles.map(roleModel -> convertToModel(roleModel, realm))
+//                .sorted(Comparator.comparing(ClientRole::getClient).thenComparing(ClientRole::getRole))
+//                .collect(Collectors.toList());
+//    }
+//
+//    private Stream<RoleModel> addSubRoles(Stream<RoleModel> roles) {
+//        return addSubRoles(roles, new HashSet<>());
+//    }
+//    private Stream<RoleModel> addSubRoles(Stream<RoleModel> roles, HashSet<RoleModel> visited) {
+//        List<RoleModel> roleList = roles.collect(Collectors.toList());
+//        visited.addAll(roleList);
+//        return Stream.concat(roleList.stream(), roleList.stream().flatMap(r -> addSubRoles(r.getCompositesStream().filter(s -> !visited.contains(s)), visited)));
+//    }
+//    private Stream<GroupModel> addParents(GroupModel group) {
+//        //no cycle check here, I hope that's fine
+//        if (group.getParent() == null) {
+//            return Stream.of(group);
+//        }
+//        return Stream.concat(Stream.of(group), addParents(group.getParent()));
 //    }
 
 // UI STUFF END!
@@ -178,7 +286,7 @@ public class TideAdminRealmResource {
 
     //TODO: move into a more generic util file
     public static Set<RoleModel> getDeepUserRoleMappings(Set<RoleModel> roleModels, UserModel user, KeycloakSession session, RealmModel realm, EntityManager manager) {
-        user.getGroupsStream().forEach(group -> TideRolesUtil.addGroupRoles(TideRolesUtil.wrapGroupModel(group, session, realm, manager), roleModels, DraftStatus.APPROVED, ActionType.CREATE));
+        user.getGroupsStream().forEach(group -> TideRolesUtil.addGroupRoles(TideRolesUtil.wrapGroupModel(group, session, realm), roleModels, DraftStatus.APPROVED, ActionType.CREATE));
         return TideRolesUtil.expandCompositeRoles(roleModels, DraftStatus.APPROVED, ActionType.CREATE);
     }
     public static Set<RoleModel> getAccess(Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes) {

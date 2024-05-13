@@ -112,7 +112,7 @@ public class TideUserAdapter extends UserAdapter {
             if (role.getContainer() instanceof ClientModel) {
                 List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
                 UserModel user = session.users().getUserById(realm, getEntity().getId());
-                UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm, em);
+                UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
                 clientList.forEach(client -> {
                     session.getContext().setClient(client);
@@ -157,7 +157,7 @@ public class TideUserAdapter extends UserAdapter {
             if (role.getContainer() instanceof ClientModel) {
                 List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
                 UserModel user = session.users().getUserById(realm, getEntity().getId());
-                UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm, em);
+                UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
                 clientList.forEach(client -> {
                     session.getContext().setClient(client);
@@ -203,6 +203,13 @@ public class TideUserAdapter extends UserAdapter {
         query.setParameter("draftStatus", status);
         query.setParameter("actionType", actionType);
         return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
+    }
+
+    public DraftStatus getUserRoleDraftStatus(String roleId) {
+        TypedQuery<TideUserRoleMappingDraftEntity> query = em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class);
+        query.setParameter("user", this.getEntity());
+        query.setParameter("roleId", roleId);
+        return query.getSingleResult().getDraftStatus();
     }
 
     private TypedQuery<String> createGetGroupsQuery() {

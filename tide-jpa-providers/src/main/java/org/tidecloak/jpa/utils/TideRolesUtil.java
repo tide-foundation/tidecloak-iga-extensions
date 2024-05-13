@@ -1,6 +1,7 @@
 package org.tidecloak.jpa.utils;
 
 import jakarta.persistence.EntityManager;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.GroupEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
@@ -97,13 +98,13 @@ public class TideRolesUtil {
     public static Set<RoleModel> getDeepUserRoleMappings(UserModel user, KeycloakSession session, RealmModel realm, EntityManager manager, DraftStatus draftStatus, ActionType actionType) {
         Set<RoleModel> roleMappings;
         if (user instanceof TideUserAdapter){
-            roleMappings = ((TideUserAdapter) user).getRoleMappingsStreamByStatusAndAction(draftStatus, actionType).map(x-> wrapRoleModel(x, session, realm, manager)).collect(Collectors.toSet());
+            roleMappings = ((TideUserAdapter) user).getRoleMappingsStreamByStatusAndAction(draftStatus, actionType).map(x-> wrapRoleModel(x, session, realm)).collect(Collectors.toSet());
         }
         else{
             roleMappings = new HashSet<>();
             user.getRoleMappingsStream().collect(Collectors.toSet());
         }
-        user.getGroupsStream().forEach(group -> addGroupRoles(wrapGroupModel(group, session, realm, manager), roleMappings, draftStatus, actionType));
+        user.getGroupsStream().forEach(group -> addGroupRoles(wrapGroupModel(group, session, realm), roleMappings, draftStatus, actionType));
         return expandCompositeRoles(roleMappings, draftStatus, actionType);
     }
 
@@ -118,21 +119,24 @@ public class TideRolesUtil {
         addGroupRoles(group.getParent(), roleMappings, draftStatus, actionType);
     }
 
-    public static GroupModel wrapGroupModel(GroupModel groupModel, KeycloakSession session, RealmModel realm, EntityManager em) {
+    public static GroupModel wrapGroupModel(GroupModel groupModel, KeycloakSession session, RealmModel realm) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         if (groupModel instanceof TideGroupAdapter) {
             return groupModel;
         }
         GroupEntity groupEntity = toGroupEntity(groupModel, em);
         return new TideGroupAdapter(realm, em, groupEntity, session);
     }
-    public static RoleModel wrapRoleModel(RoleModel role, KeycloakSession session, RealmModel realm, EntityManager em) {
+    public static RoleModel wrapRoleModel(RoleModel role, KeycloakSession session, RealmModel realm) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         if (role instanceof TideRoleAdapter) {
             return role;
         }
         RoleEntity roleEntity = toRoleEntity(role, em);
         return new TideRoleAdapter(session, realm, em, roleEntity);
     }
-    public static UserModel wrapUserModel(UserModel userModel, KeycloakSession session, RealmModel realm, EntityManager em) {
+    public static UserModel wrapUserModel(UserModel userModel, KeycloakSession session, RealmModel realm) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         if (userModel instanceof TideUserAdapter) {
             return userModel;
         }

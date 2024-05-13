@@ -66,7 +66,7 @@ export const ServiceRole = ({ role, client, id, type }: Row) => {
 
   useEffect(() => {
       const fetchUserStatus = async () => {
-        const test = ((role as CompositeRole) || null)
+        const test = ((role as CompositeRole).parent || null)
         console.log(test)
         console.log(role)
 
@@ -77,16 +77,18 @@ export const ServiceRole = ({ role, client, id, type }: Row) => {
 
           setRoleStatus(status);
         }
-        // else if (type === "roles" ){
-        //   const roleIsInherited = (role as CompositeRole).isInherited || false
-        //   console.log("I AM ROLES CHECKING STATUS AND IM INHERITED " + roleIsInherited)
-        //   if (roleIsInherited){
-        //     const status = await adminClient.tideUsersExt.getRoleDraftStatus({ parentId: role.id!, childId: (role as CompositeRole).parent.id!}); // TIDE IMPLEMENTATION
-        //     console.log("I AM COMPOSITE ROLE CHECKING STATUS " + status)
-        //     setRoleStatus(status);
-        //   }
+        else if (type === "roles" ){
+            const status = await adminClient.tideUsersExt.getRoleDraftStatus({ parentId: id!, childId: role.id!}); // TIDE IMPLEMENTATION
+            console.log("I AM COMPOSITE ROLE CHECKING STATUS " + status)
+            setRoleStatus(status);
+            // sort this out another time
+//           const roleIsInherited = (role as CompositeRole).isInherited || false
+//           console.log("I AM ROLES CHECKING STATUS AND IM INHERITED " + roleIsInherited)
+//           if (roleIsInherited){
+//
+//           }
 
-        // }
+        }
     }
     fetchUserStatus();
   }, [id, role.id, adminClient]);

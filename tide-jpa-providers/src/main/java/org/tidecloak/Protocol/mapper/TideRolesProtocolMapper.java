@@ -37,7 +37,7 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
     public AccessToken transformAccessToken(AccessToken token, ProtocolMapperModel mappingModel, KeycloakSession session, UserSessionModel userSession, ClientSessionContext clientSessionCtx) {
         RealmModel realm = session.getContext().getRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        UserModel tideUser = TideRolesUtil.wrapUserModel(userSession.getUser(), session, realm, em);
+        UserModel tideUser = TideRolesUtil.wrapUserModel(userSession.getUser(), session, realm);
         Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE);
         ClientModel clientModel = session.getContext().getClient();
         Set<RoleModel> roles = getAccess(activeRoles, clientModel, clientModel.getClientScopes(true).values().stream());
