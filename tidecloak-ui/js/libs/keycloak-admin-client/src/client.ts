@@ -11,12 +11,12 @@ import { IdentityProviders } from "./resources/identityProviders.js";
 import { Realms } from "./resources/realms.js";
 import { Roles } from "./resources/roles.js";
 import { ServerInfo } from "./resources/serverInfo.js";
-import { TideUsersExt } from "./resources/TideUserExt.js";
 import { Users } from "./resources/users.js";
 import { UserStorageProvider } from "./resources/userStorageProvider.js";
 import { WhoAmI } from "./resources/whoAmI.js";
 import { Credentials, getToken } from "./utils/auth.js";
 import { defaultBaseUrl, defaultRealm } from "./utils/constants.js";
+import { TideUsersExt } from "./resources/TideUserExt.js";
 
 export interface TokenProvider {
   getAccessToken: () => Promise<string | undefined>;

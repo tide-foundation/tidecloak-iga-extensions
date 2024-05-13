@@ -11,7 +11,7 @@ import {
   Label
 } from "@patternfly/react-core";
 import { cellWidth } from "@patternfly/react-table";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 
 import { emptyFormatter, upperCaseFormatter } from "../../util";
@@ -35,7 +35,7 @@ export type Row = {
   client?: ClientRepresentation;
   role: RoleRepresentation | CompositeRole;
   id?: string; // KeycloakDataTable expects an id for the row
-  type?: ResourcesKey
+  type?: ResourcesKey;
 };
 
 export const mapRoles = (
@@ -43,15 +43,15 @@ export const mapRoles = (
   effectiveRoles: Row[],
   hide: boolean,
 ) => [
-    ...(hide
-      ? assignedRoles.map((row) => ({
+  ...(hide
+    ? assignedRoles.map((row) => ({
         ...row,
         role: {
           ...row.role,
           isInherited: false,
         },
       }))
-      : effectiveRoles.map((row) => ({
+    : effectiveRoles.map((row) => ({
         ...row,
         role: {
           ...row.role,
@@ -59,34 +59,34 @@ export const mapRoles = (
             assignedRoles.find((r) => r.role.id === row.role.id) === undefined,
         },
       }))),
-  ];
+];
 
 export const ServiceRole = ({ role, client, id, type }: Row) => {
   const [roleStatus, setRoleStatus] = useState("");
 
   useEffect(() => {
-    const fetchUserStatus = async () => {
-      const test = ((role as CompositeRole) || null)
-      console.log(test)
-      console.log(role)
+      const fetchUserStatus = async () => {
+        const test = ((role as CompositeRole) || null)
+        console.log(test)
+        console.log(role)
 
 
-      if (type === "users") {
-        const status = await adminClient.tideUsersExt.getUserRoleDraftStatus({ userId: id!, roleId: role.id! }); // TIDE IMPLEMENTATION
-        console.log("I AM USER CHECKING STATUS " + status)
+        if (type === "users" ) {
+          const status = await adminClient.tideUsersExt.getUserRoleDraftStatus({ userId: id!, roleId: role.id!}); // TIDE IMPLEMENTATION
+          console.log("I AM USER CHECKING STATUS " + status)
 
-        setRoleStatus(status);
-      }
-      // else if (type === "roles" ){
-      //   const roleIsInherited = (role as CompositeRole).isInherited || false
-      //   console.log("I AM ROLES CHECKING STATUS AND IM INHERITED " + roleIsInherited)
-      //   if (roleIsInherited){
-      //     const status = await adminClient.tideUsersExt.getRoleDraftStatus({ parentId: role.id!, childId: (role as CompositeRole).parent.id!}); // TIDE IMPLEMENTATION
-      //     console.log("I AM COMPOSITE ROLE CHECKING STATUS " + status)
-      //     setRoleStatus(status);
-      //   }
+          setRoleStatus(status);
+        }
+        // else if (type === "roles" ){
+        //   const roleIsInherited = (role as CompositeRole).isInherited || false
+        //   console.log("I AM ROLES CHECKING STATUS AND IM INHERITED " + roleIsInherited)
+        //   if (roleIsInherited){
+        //     const status = await adminClient.tideUsersExt.getRoleDraftStatus({ parentId: role.id!, childId: (role as CompositeRole).parent.id!}); // TIDE IMPLEMENTATION
+        //     console.log("I AM COMPOSITE ROLE CHECKING STATUS " + status)
+        //     setRoleStatus(status);
+        //   }
 
-      // }
+        // }
     }
     fetchUserStatus();
   }, [id, role.id, adminClient]);
@@ -272,15 +272,15 @@ export const RoleMapping = ({
         actions={
           isManager
             ? [
-              {
-                title: t("unAssignRole"),
-                onRowClick: async (role) => {
-                  setSelected([role]);
-                  toggleDeleteDialog();
-                  return false;
-                },
-              } as Action<Awaited<ReturnType<typeof loader>>[0]>,
-            ]
+                {
+                  title: t("unAssignRole"),
+                  onRowClick: async (role) => {
+                    setSelected([role]);
+                    toggleDeleteDialog();
+                    return false;
+                  },
+                } as Action<Awaited<ReturnType<typeof loader>>[0]>,
+              ]
             : []
         }
         columns={[
@@ -288,7 +288,7 @@ export const RoleMapping = ({
             name: "role.name",
             displayKey: t("name"),
             transforms: [cellWidth(30)],
-            cellRenderer: (row => <ServiceRole id={id} client={row.client} role={row.role} type={type} />),
+            cellRenderer: (row => <ServiceRole id={id} client={row.client} role={row.role} type={type}/>),
           },
           {
             name: "role.isInherited",
@@ -313,7 +313,3 @@ export const RoleMapping = ({
     </>
   );
 };
-function useEffect(arg0: () => void, arg1: any[]) {
-  throw new Error("Function not implemented.");
-}
-
