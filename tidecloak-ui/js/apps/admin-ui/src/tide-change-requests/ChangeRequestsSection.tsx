@@ -13,7 +13,7 @@ import {
 import useIsFeatureEnabled, { Feature } from "../utils/useIsFeatureEnabled";
 import "./user-section.css";
 import { useAccess } from "../context/access/Access";
-import { ChangeRequestDataTable } from "../components/tide-change-requests/ChangeRequestsDataTable";
+import { ChangeRequestsDataTable } from "../components/tide-change-requests/ChangeRequestsDataTable";
 
 export default function UsersSection() {
   const { t } = useTranslation();
@@ -49,7 +49,7 @@ export default function UsersSection() {
         variant="light"
         className="pf-v5-u-p-0"
       >
-      <ChangeRequestDataTable />
+      <ChangeRequestsDataTable />
       </PageSection>
     </>
   );

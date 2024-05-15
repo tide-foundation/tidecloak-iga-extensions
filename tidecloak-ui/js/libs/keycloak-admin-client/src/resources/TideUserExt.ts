@@ -1,19 +1,7 @@
 import type { KeycloakAdminClient } from "../client.js";
-import type CredentialRepresentation from "../defs/credentialRepresentation.js";
-import type FederatedIdentityRepresentation from "../defs/federatedIdentityRepresentation.js";
-import type GroupRepresentation from "../defs/groupRepresentation.js";
-import type MappingsRepresentation from "../defs/mappingsRepresentation.js";
-import type { RequiredActionAlias } from "../defs/requiredActionProviderRepresentation.js";
-import type RoleRepresentation from "../defs/roleRepresentation.js";
-import type { RoleMappingPayload } from "../defs/roleRepresentation.js";
-import type UserConsentRepresentation from "../defs/userConsentRepresentation.js";
-import type {
-  UserProfileConfig,
-  UserProfileMetadata,
-} from "../defs/userProfileMetadata.js";
-import type UserRepresentation from "../defs/userRepresentation.js";
-import type UserSessionRepresentation from "../defs/userSessionRepresentation.js";
 import Resource from "./resource.js";
+import type RequestedChanges from "../defs/RequestedChanges.js";
+
 
 interface SearchQuery {
   search?: string;
@@ -64,6 +52,11 @@ public getRoleDraftStatus = this.makeRequest<
   method: "GET",
   path: "/composite/{parentId}/child/{childId}/draft/status",
   urlParamKeys: ["parentId", "childId"],
+});
+
+public getRequestedChanges = this.makeRequest<void, RequestedChanges[]>({
+  method: "GET",
+  path: "/change-set/requests",
 });
 
   constructor(client: KeycloakAdminClient) {

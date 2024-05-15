@@ -192,6 +192,9 @@ public class TideAdminRealmResource {
         }
     }
 
+
+    @GET
+    @Path("change-set/requests")
     public List<RequestedChanges> getRequestedChanges() {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> requestedChangesList = new ArrayList<>();
