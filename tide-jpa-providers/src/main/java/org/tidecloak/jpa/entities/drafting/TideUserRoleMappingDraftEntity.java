@@ -8,6 +8,7 @@ import org.tidecloak.interfaces.DraftStatus;
 import java.io.Serializable;
 
 @NamedQueries({
+        @NamedQuery(name="getAllUserRoleMappingsByStatusAndRealm", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
         @NamedQuery(name="getAllUserRoleMappingsByStatus", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus"),
         @NamedQuery(name="getUserRoleMappingStatus", query="select m from TideUserRoleMappingDraftEntity m where m.user = :user"),
         @NamedQuery(name="getUserRoleAssignmentDraftEntity", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId"),
@@ -21,7 +22,7 @@ import java.io.Serializable;
         @NamedQuery(name="deleteUserRoleMappingDraftsByRole", query="delete from TideUserRoleMappingDraftEntity m where m.roleId = :roleId"),
         @NamedQuery(name="deleteUserRoleMappingDraftsByUser", query="delete from TideUserRoleMappingDraftEntity m where m.user = :user"),
 })
-
+//where mapping.user IN (select u from UserEntity u where u.realmId=:realmId)")
 @Entity
 @Table(name = "USER_ROLE_MAPPING_DRAFT")
 public class TideUserRoleMappingDraftEntity {

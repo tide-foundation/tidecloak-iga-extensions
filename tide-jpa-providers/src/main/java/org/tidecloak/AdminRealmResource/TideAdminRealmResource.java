@@ -208,11 +208,21 @@ public class TideAdminRealmResource {
 
     private List<RequestedChanges> processUserRoleMappings(EntityManager em) {
         List<RequestedChanges> changes = new ArrayList<>();
-        List<TideUserRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllUserRoleMappingsByStatus", TideUserRoleMappingDraftEntity.class)
+        List<TideUserRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllUserRoleMappingsByStatusAndRealm", TideUserRoleMappingDraftEntity.class)
                 .setParameter("draftStatus", DraftStatus.DRAFT)
+                .setParameter("realmId",realm.getId())
                 .getResultList();
 
         for (TideUserRoleMappingDraftEntity m : mappings) {
+
+            RoleModel role = realm.getRoleById(m.getRoleId());
+            System.out.println(m.getId());
+            if(role == null ||!role.isClientRole()){
+                continue;
+            }
+            System.out.println(role.isClientRole());
+            ClientModel clientModel = realm.getClientById(role.getContainerId());
+
             List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                     .setParameter("recordId", m.getId())
                     .getResultList();
@@ -222,8 +232,8 @@ public class TideAdminRealmResource {
                 requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getFirstName(), p.getId()));
             });
 
-            RoleModel role = realm.getRoleById(m.getRoleId());
-            requestChange.setDescription(String.format("Granting %s access in %s to user\\s: ", role.getName(), ((ClientModel)role.getContainer()).getClientId()));
+
+            requestChange.setDescription(String.format("Granting %s access in %s to user\\s: ", role.getName(), clientModel.getClientId()));
 
             changes.add(requestChange);
         }
@@ -234,11 +244,15 @@ public class TideAdminRealmResource {
     // Example placeholder methods for other data types
     private List<RequestedChanges> processCompositeRoleMappings(EntityManager em) {
         List<RequestedChanges> changes = new ArrayList<>();
-        List<TideCompositeRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllCompositeRoleMappingsByStatus", TideCompositeRoleMappingDraftEntity.class)
+        List<TideCompositeRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllCompositeRoleMappingsByStatusAndRealm", TideCompositeRoleMappingDraftEntity.class)
                 .setParameter("draftStatus", DraftStatus.DRAFT)
+                .setParameter("realmId", realm.getId())
                 .getResultList();
 
         for (TideCompositeRoleMappingDraftEntity m : mappings) {
+            if (m.getComposite() == null || !m.getComposite().isClientRole()){
+                continue;
+            }
             List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                     .setParameter("recordId", m.getId())
                     .getResultList();
@@ -247,9 +261,8 @@ public class TideAdminRealmResource {
             proofs.forEach(p -> {
                 requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getFirstName(), p.getId()));
             });
-
-            ClientModel client = realm.getClientById(m.getComposite().getClientId());
-            requestChange.setDescription(String.format("Adding %s access to %s in %s", m.getChildRole().getName(), m.getComposite().getName(), client.getClientId()));
+            ClientModel clientModel = realm.getClientById(m.getComposite().getClientId());
+            requestChange.setDescription(String.format("Adding %s access to %s in %s", m.getChildRole().getName(), m.getComposite().getName(), clientModel.getClientId()));
 
             changes.add(requestChange);
         }
