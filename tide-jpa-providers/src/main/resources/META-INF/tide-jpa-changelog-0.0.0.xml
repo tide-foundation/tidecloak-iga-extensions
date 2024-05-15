@@ -106,6 +106,7 @@
             <column name="ACTION_TYPE" type="VARCHAR(36)">
                 <constraints nullable="false"/>
             </column>
+            <column name="CREATED_TIMESTAMP" type="BIGINT"/>
         </createTable>
         <!-- For roles tracking composite role updates, mainly deletion -->
         <createTable tableName="COMPOSITE_ROLE_DRAFT">

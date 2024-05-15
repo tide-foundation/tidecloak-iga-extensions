@@ -1,27 +1,29 @@
 package org.tidecloak.interfaces;
-
-//// Enum for Change-set type
-//public enum ChangeSetType {
-//    USER, USER_ROLE, ROLE, GROUP, COMPOSITE_ROLE, GROUP_ROLE
-//}
+import org.tidecloak.jpa.entities.drafting.*;
 
 public enum ChangeSetType {
-    USER("USER_ENTITY_DRAFT"),
-    USER_ROLE("USER_ROLE_MAPPING_DRAFT"),
-    GROUP("KEYCLOAK_GROUP_DRAFT"),
-    USER_GROUP_MEMBERSHIP("USER_GROUP_MEMBERSHIP_DRAFT"),
-    COMPOSITE_ROLE("COMPOSITE_ROLE_MAPPING_DRAFT"),
-    GROUP_ROLE("GROUP_ROLE_MAPPING_DRAFT");
+    USER("USER_ENTITY_DRAFT", TideUserDraftEntity.class),
+    USER_ROLE("USER_ROLE_MAPPING_DRAFT", TideUserRoleMappingDraftEntity.class),
+    GROUP("KEYCLOAK_GROUP_DRAFT", TideGroupDraftEntity.class),
+    USER_GROUP_MEMBERSHIP("USER_GROUP_MEMBERSHIP_DRAFT", TideUserGroupMembershipEntity.class),
+    COMPOSITE_ROLE("COMPOSITE_ROLE_MAPPING_DRAFT", TideCompositeRoleMappingDraftEntity.class),
+    GROUP_ROLE("GROUP_ROLE_MAPPING_DRAFT", TideGroupDraftEntity.class);
 
     private final String tableName;
+    private final Class<?> entityClass;
 
     // Constructor that sets the table name for each enum instance
-    ChangeSetType(String tableName) {
-        this.tableName = tableName;
+    ChangeSetType(String tableName, Class<?> entityClass) {
+        this.tableName = tableName; this.entityClass = entityClass;
     }
 
     // Getter method to retrieve the table name
     public String getTableName() {
         return tableName;
     }
+    public Class<?> getEntityClass() {
+        return entityClass;
+    }
+
+
 }

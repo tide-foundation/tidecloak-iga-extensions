@@ -6,6 +6,15 @@ import org.tidecloak.interfaces.ChangeSetType;
 
 import java.io.Serializable;
 
+@NamedQueries({
+        @NamedQuery(
+                name = "AccessProofDetailDependencyEntity.findTideCompositeMappingByForkedDetails",
+                query = "SELECT t FROM TideCompositeRoleMappingDraftEntity t WHERE t.composite.id IN " +
+                        "(SELECT a.forkedRecordId FROM AccessProofDetailDependencyEntity a WHERE a.forkedChangeSetType = :changeSetType AND a.recordId = :recordId)" +
+                        "ORDER BY t.createdTimestamp DESC"
+        ),
+})
+
 @Entity
 @Table(name = "ACCESS_PROOF_DETAIL_DEPENDENCY")
 @IdClass(AccessProofDetailDependencyEntity.Key.class)
@@ -26,6 +35,9 @@ public class AccessProofDetailDependencyEntity {
     @Enumerated(EnumType.STRING)
     @Column(name = "FORKED_CHANGE_SET_TYPE")
     protected ChangeSetType forkedChangeSetType;
+
+//    @Column(name = "ROOT_NODE")
+//    protected boolean root;
 
     public String getRecordId() {
         return recordId;
@@ -58,6 +70,14 @@ public class AccessProofDetailDependencyEntity {
     public void setForkedChangeSetType(ChangeSetType forkedChangeSetType) {
         this.forkedChangeSetType = forkedChangeSetType;
     }
+
+//    public boolean isRoot() {
+//        return root;
+//    }
+//
+//    public void set(boolean isRoot) {
+//        this.root = isRoot;
+//    }
 
     public static class Key implements Serializable {
 

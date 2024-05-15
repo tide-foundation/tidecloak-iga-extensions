@@ -11,6 +11,7 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.jpa.entities.AccessProofDetailDependencyEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
@@ -32,8 +33,9 @@ public class TideRoleAdapter extends RoleAdapter {
     }
 
     @Override
-    public void removeCompositeRole(RoleModel role) {
+    public void removeCompositeRole(RoleModel roleModel) {
 
+        RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
         // Check if role mapping is a draft
         Stream<TideCompositeRoleDraftEntity> entity =  em.createNamedQuery("getCompositeRoleDraft", TideCompositeRoleDraftEntity.class)
                 .setParameter("composite", toRoleEntity(role))
@@ -78,8 +80,10 @@ public class TideRoleAdapter extends RoleAdapter {
             em.flush();
         }
     }
+
     @Override
-    public void addCompositeRole(RoleModel role) {
+    public void addCompositeRole(RoleModel roleModel) {
+        RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
         RoleEntity entity = toRoleEntity(role);
         for (RoleEntity composite : getEntity().getCompositeRoles()) {
             if (composite.equals(entity)) return;
@@ -92,9 +96,9 @@ public class TideRoleAdapter extends RoleAdapter {
         draft.setChildRole(entity);
         draft.setDraftStatus(DraftStatus.DRAFT);
         draft.setAction(ActionType.CREATE);
+        draft.setCreatedTimestamp(System.currentTimeMillis());
 
         em.persist(draft);
-
 
         if (role.getContainer() instanceof ClientModel) {
             RoleModel compositeRole = realm.getRoleById(getEntity().getId());
@@ -106,8 +110,8 @@ public class TideRoleAdapter extends RoleAdapter {
                 users.forEach(user -> {
                     UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                     Set<RoleModel> roleMappings = new HashSet<>();
-                    roleMappings.add(role); // this is the new role we are adding to the parent role.
-
+                    roleMappings.add(role);// this is the new role we are adding to the parent role.
+                    roleMappings.add(realm.getRoleById(getEntity().getId()));// ensure the parent role is in there too
                     try {
                         util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draft.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE);
                     } catch (JsonProcessingException e) {
@@ -119,6 +123,7 @@ public class TideRoleAdapter extends RoleAdapter {
 
         em.flush();
     }
+
 
     /**
      *

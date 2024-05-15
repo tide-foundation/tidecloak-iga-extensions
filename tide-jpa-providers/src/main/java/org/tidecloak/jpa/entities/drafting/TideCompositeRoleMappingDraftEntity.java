@@ -6,11 +6,16 @@ import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
 
 @NamedQueries({
+        @NamedQuery(name="getCompositeEntityByParent", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite ORDER BY r.createdTimestamp DESC"),
         @NamedQuery(name="filterChildRoleByStatusAndParentAndAction", query="select r.childRole from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.draftStatus = :draftStatus and r.actionType = :actionType"),
         @NamedQuery(name="filterChildRoleByStatusAndParent", query="select r.childRole from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.draftStatus = :draftStatus"),
         @NamedQuery(name="getCompositeRoleMappingDraft", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole"),
         @NamedQuery(name="getCompositeRoleMappingDraftByStatus", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole and r.draftStatus = :draftStatus"),
         @NamedQuery(name="deleteCompositeRoleMapping", query="delete from TideCompositeRoleMappingDraftEntity r where r.composite = :composite"),
+        @NamedQuery(
+                name = "getRecordIdByChildAndComposite",
+                query = "SELECT t FROM TideCompositeRoleMappingDraftEntity t WHERE t.composite = :composite and t.childRole = :childRole "
+        )
 
 
 })
@@ -41,6 +46,9 @@ public class TideCompositeRoleMappingDraftEntity {
     @Enumerated(EnumType.STRING)
     @Column(name = "ACTION_TYPE")
     private ActionType actionType;
+
+    @Column(name = "CREATED_TIMESTAMP")
+    protected Long createdTimestamp;
 
     public String getId() {
         return id;
@@ -81,6 +89,14 @@ public class TideCompositeRoleMappingDraftEntity {
 
     public void setAction(ActionType actionType) {
         this.actionType = actionType;
+    }
+
+    public Long getCreatedTimestamp() {
+        return createdTimestamp;
+    }
+
+    public void setCreatedTimestamp(Long timestamp) {
+        createdTimestamp = timestamp;
     }
 
     @Override

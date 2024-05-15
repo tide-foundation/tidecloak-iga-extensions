@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.RoleUtils;
@@ -28,6 +29,7 @@ import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailDependencyEntity;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 
 import java.net.URI;
@@ -110,8 +112,6 @@ public final class TideAuthzProofUtil {
             // Add or update client accesses in the token
             mergeClientAccesses(token, accessRoles.getClientAccesses());
         }
-
-
     }
 
     public void generateAndSaveProofDraft(ClientModel clientModel, UserModel userModel, Set<RoleModel> newRoleMappings, String recordId, ChangeSetType type, ActionType actionType) throws JsonProcessingException {
@@ -119,10 +119,12 @@ public final class TideAuthzProofUtil {
         AccessToken proof = generateAccessToken(clientModel, userModel, "openid");
 
         // Filter and expand roles based on the provided mappings; only approved roles are considered
+
         Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
+        System.out.println("INSIDE GENERATION");
         Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, clientModel, clientModel.getClientScopes(false).values().stream());
         UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
-        List<AccessProofDetailEntity> proofDetails = fetchProofDetails(clientModel.getId(), user);
+
         AccessDetails accessDetails = sortAccessRoles(requestedAccess);
 
         // Apply the filtered roles to the AccessToken
@@ -130,55 +132,31 @@ public final class TideAuthzProofUtil {
 
         JsonNode proofDraftNode = objectMapper.valueToTree(proof);
 
+        if ( actionType == ActionType.DELETE){
+            proofDraftNode = removeAccessFromJsonNode(proofDraftNode, accessDetails);
+        }
 
+        var proofDraft = cleanProofDraft(proofDraftNode);
 
-        String proofDraft = processProofDetails(proofDetails, proofDraftNode, recordId, type, em, actionType, accessDetails);
 
         // Always save the access proof detail
         saveAccessProofDetail(clientModel, user, recordId, type, proofDraft, System.currentTimeMillis());
     }
 
-    private String processProofDetails(List<AccessProofDetailEntity> proofDetails, JsonNode proofDraftNode, String recordId, ChangeSetType type, EntityManager em, ActionType actionType, AccessDetails accessDetails) throws JsonProcessingException {
-        if (proofDetails.isEmpty()) {
-            handleNewProofDependencies(recordId, type, em);
-            return cleanProofDraft(proofDraftNode); // Return clean proof draft without merging
-        }
-        else {
-            AccessProofDetailEntity latestProof = proofDetails.get(0);
-            JsonNode latestProofNode = objectMapper.readTree(latestProof.getProofDraft());
-
-            JsonNode draft;
-            if (actionType == ActionType.DELETE){
-                draft = removeAccessFromJsonNode(latestProofNode, accessDetails);
-            }
-            else{
-                draft = mergeJsonNodes(latestProofNode, proofDraftNode);
-            }
-
-
-            updateDependencyIfNeeded(latestProof, recordId, type, em);
-            return cleanProofDraft(draft); // Return cleaned proof draft
-        }
-    }
-
-    private void handleNewProofDependencies(String recordId, ChangeSetType type, EntityManager em) {
-        AccessProofDetailDependencyEntity dependency = em.find(AccessProofDetailDependencyEntity.class, new AccessProofDetailDependencyEntity.Key(recordId, type));
-        if (dependency == null) {
-            AccessProofDetailDependencyEntity newDependency = new AccessProofDetailDependencyEntity();
-            newDependency.setRecordId(recordId);
-            newDependency.setChangesetType(type);
-            em.persist(newDependency);
-        }
+    public List<TideCompositeRoleMappingDraftEntity> findCompositeMappingsByChildRole(RoleEntity composite) {
+        return em.createNamedQuery("TideCompositeRoleMappingDraftEntity.findByChildRoleWithDependency", TideCompositeRoleMappingDraftEntity.class)
+                .setParameter("composite", composite)
+                .getResultList();
     }
 
     private void updateDependencyIfNeeded(AccessProofDetailEntity latestProof, String recordId, ChangeSetType type, EntityManager em) {
         AccessProofDetailDependencyEntity dependency = em.find(AccessProofDetailDependencyEntity.class, new AccessProofDetailDependencyEntity.Key(recordId, type));
-        if (dependency == null) {
+        if (dependency == null && type == latestProof.getChangesetType()) {
             AccessProofDetailDependencyEntity newDependency = new AccessProofDetailDependencyEntity();
             newDependency.setRecordId(recordId);
             newDependency.setChangesetType(type);
             newDependency.setForkedRecordId(latestProof.getRecordId());
-            newDependency.setForkedChangeSetType(latestProof.getChangesetType());
+            newDependency.setForkedChangeSetType(latestProof.getChangesetType()); // made redundant
             em.persist(newDependency);
         }
     }
@@ -193,13 +171,6 @@ public final class TideAuthzProofUtil {
         newDetail.setChangesetType(type);
         newDetail.setCreatedTimestamp(timestamp);
         em.persist(newDetail);
-    }
-
-    private List<AccessProofDetailEntity> fetchProofDetails(String clientId, UserEntity user) {
-        return em.createNamedQuery("getProofDetailsForUserByClient", AccessProofDetailEntity.class)
-                .setParameter("user", user)
-                .setParameter("clientId", clientId)
-                .getResultList();
     }
 
     public String generateChangeChecksum(String proofDraft, TideUserRoleMappingDraftEntity draftUserRole) throws JsonProcessingException, NoSuchAlgorithmException {
@@ -421,7 +392,9 @@ public final class TideAuthzProofUtil {
             if (token.getRealmAccess() == null) {
                 token.setRealmAccess(realmAccess);
             } else {
-                token.getRealmAccess().getRoles().addAll(realmAccess.getRoles());
+                realmAccess.getRoles().forEach(role -> {
+                    token.getRealmAccess().addRole(role);
+                });
             }
         }
     }
@@ -430,7 +403,7 @@ public final class TideAuthzProofUtil {
         clientAccesses.forEach((clientKey, access) -> {
             AccessToken.Access tokenClientAccess = token.getResourceAccess().computeIfAbsent(clientKey, k -> new AccessToken.Access());
             if (access.getRoles() != null) {
-                tokenClientAccess.getRoles().addAll(access.getRoles());
+                access.getRoles().forEach(tokenClientAccess::addRole);
             }
         });
     }

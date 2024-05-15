@@ -7,9 +7,9 @@ public class DraftChangeSet {
     @JsonProperty("changeSetId")
     protected String changeSetId;
     @JsonProperty("changeSetType")
-    protected String changeSetType;
+    protected ChangeSetType changeSetType;
 
-    public String getType() {
+    public ChangeSetType getType() {
         return changeSetType;
     }
     public String getChangeSetId() {

@@ -13,11 +13,13 @@ import jakarta.persistence.criteria.Root;
 import org.keycloak.admin.ui.rest.model.ClientRole;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.UserAdapter;
+import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.jpa.entities.UserGroupMembershipEntity;
 
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.representations.AccessToken;
+import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 import org.tidecloak.interfaces.ActionType;
@@ -28,6 +30,7 @@ import org.tidecloak.jpa.entities.drafting.TideUserGroupMembershipEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
 
+import javax.management.relation.Role;
 import java.util.*;
 import java.util.stream.Stream;
 
@@ -85,9 +88,9 @@ public class TideUserAdapter extends UserAdapter {
     }
 
     @Override
-    public void grantRole(RoleModel role) {
+    public void grantRole(RoleModel roleModel) {
+        RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
         super.grantRole(role);
-
         // Check if this has already been action before
         Stream<TideUserRoleMappingDraftEntity> entity =  em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatusAndAction", TideUserRoleMappingDraftEntity.class)
                 .setParameter("user", getEntity())
@@ -110,16 +113,47 @@ public class TideUserAdapter extends UserAdapter {
 
             // Generate a proof draft for this changeset and any affected clients with full-scope enabled. These need to be signed.
             if (role.getContainer() instanceof ClientModel) {
+                Set<RoleModel> roleMappings = new HashSet<>();
+                roleMappings.add(role);
+                // save the record for the user role grant
                 List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
                 UserModel user = session.users().getUserById(realm, getEntity().getId());
                 UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
                 clientList.forEach(client -> {
                     session.getContext().setClient(client);
-                    Set<RoleModel> roleMappings = new HashSet<>();
-                    roleMappings.add(role);
+
                     try {
                         util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUserRole.getId(), ChangeSetType.USER_ROLE, ActionType.CREATE);
+                        if(role.isComposite()){
+                            // we expand it and create a new record
+                            Set<RoleModel> compositeRoles = TideRolesUtil.expandCompositeRoles(roleMappings,DraftStatus.DRAFT, ActionType.CREATE);
+
+                            for(RoleModel r : compositeRoles)
+                            {
+                                Set<RoleModel> roleSet = new HashSet<>();
+                                roleSet.add(r);
+                                roleSet.add(role);
+                                if(Objects.equals(r.getId(), role.getId())){
+                                    continue;
+                                }
+
+
+                                RoleEntity compositeEntity = TideRolesUtil.toRoleEntity(realm.getRoleById(role.getId()), em);
+                                RoleEntity childEntity = TideRolesUtil.toRoleEntity(r, em);
+                                // find child id here
+                                TideCompositeRoleMappingDraftEntity compositeRecord = em.createNamedQuery("getRecordIdByChildAndComposite", TideCompositeRoleMappingDraftEntity.class)
+                                        .setParameter("composite", compositeEntity)
+                                        .setParameter("childRole", childEntity)
+                                        .getSingleResult();
+
+                                try {
+                                    util.generateAndSaveProofDraft(client, wrappedUser, roleSet, compositeRecord.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE);
+                                } catch (JsonProcessingException e) {
+                                    throw new RuntimeException(e);
+                                }
+                            }
+                        }
                     } catch (JsonProcessingException e) {
                         throw new RuntimeException(e);
                     }
@@ -130,7 +164,8 @@ public class TideUserAdapter extends UserAdapter {
     }
 
     @Override
-    public void deleteRoleMapping(RoleModel role) {
+    public void deleteRoleMapping(RoleModel roleModel) {
+        RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
         // Check if role mapping is a draft
         Stream<TideUserRoleMappingDraftEntity> entity =  em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
                 .setParameter("user", getEntity())

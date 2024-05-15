@@ -7,6 +7,13 @@ import org.tidecloak.interfaces.ChangeSetType;
 @NamedQueries({
         @NamedQuery(name="getProofDetailsForDraft", query="SELECT a FROM AccessProofDetailEntity a WHERE a.recordId = :recordId"),
         @NamedQuery(name="getProofDetailsForUserByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user and a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),
+        @NamedQuery(name="getProofDetailsForCompositeByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),
+        @NamedQuery(
+                name = "AccessProofDetailEntity.findLatestValidByUserAndClientAndType",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user AND a.clientId = :clientId AND a.id NOT IN " +
+                        "(SELECT d.recordId FROM AccessProofDetailDependencyEntity d WHERE d.forkedChangeSetType = :changesetType) " +
+                        "ORDER BY a.createdTimestamp DESC"
+        )
 })
 
 @Entity

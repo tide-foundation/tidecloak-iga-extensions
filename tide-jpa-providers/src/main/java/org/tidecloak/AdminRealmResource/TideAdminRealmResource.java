@@ -145,80 +145,6 @@ public class TideAdminRealmResource {
 
 
     }
-
-//    // EFFECTIVE ROLES FOR USER
-//    @GET
-//    @Path("/effective-roles/users/{id}")
-//    @Consumes({"application/json"})
-//    @Produces({"application/json"})
-//    @Operation(
-//            summary = "List all effective roles for this users",
-//            description = "This endpoint returns all the client role mapping for a specific users"
-//    )
-//    @APIResponse(
-//            responseCode = "200",
-//            description = "",
-//            content = {@Content(
-//                    schema = @Schema(
-//                            implementation = ClientRole.class,
-//                            type = SchemaType.ARRAY
-//                    )
-//            )}
-//    )
-//
-//
-//    public final List<ClientRoleExt> listCompositeUsersRoleMappings(@PathParam("id") String id) {
-//        System.out.println("HELLO YOUR IN HWEWEW");
-//
-//        UserModel user = session.users().getUserById(this.realm, id);
-//        UserModel wrappedUser =  TideRolesUtil.wrapUserModel(user, session, realm);
-//        if (user == null) {
-//            if (auth.users().canQuery()) throw new NotFoundException("User not found");
-//            else throw new ForbiddenException();
-//        }
-//        auth.users().requireView(wrappedUser);
-//        var roles = toSortedClientRoles(
-//                addSubClientRoles(Stream.concat(
-//                        wrappedUser.getRoleMappingsStream(),
-//                        wrappedUser.getGroupsStream()
-//                                .flatMap(g -> addParents(g))
-//                                .flatMap(GroupModel::getRoleMappingsStream)))
-//                        .filter(auth.roles()::canMapRole));
-//
-//        return roles.stream().map(role -> {
-//            DraftStatus draftStatus = ((TideUserAdapter) wrappedUser).getUserRoleDraftStatus(role.getId());
-//            System.out.println("HERE tryomg");
-//            return new ClientRoleExt(role, draftStatus);
-//        }).toList();
-//    }
-//
-//
-//    private Stream<RoleModel> addSubClientRoles(Stream<RoleModel> roles) {
-//        return addSubRoles(roles).filter(RoleModel::isClientRole);
-//    }
-//
-//    private List<ClientRole> toSortedClientRoles(Stream<RoleModel> roles) {
-//        return roles.map(roleModel -> convertToModel(roleModel, realm))
-//                .sorted(Comparator.comparing(ClientRole::getClient).thenComparing(ClientRole::getRole))
-//                .collect(Collectors.toList());
-//    }
-//
-//    private Stream<RoleModel> addSubRoles(Stream<RoleModel> roles) {
-//        return addSubRoles(roles, new HashSet<>());
-//    }
-//    private Stream<RoleModel> addSubRoles(Stream<RoleModel> roles, HashSet<RoleModel> visited) {
-//        List<RoleModel> roleList = roles.collect(Collectors.toList());
-//        visited.addAll(roleList);
-//        return Stream.concat(roleList.stream(), roleList.stream().flatMap(r -> addSubRoles(r.getCompositesStream().filter(s -> !visited.contains(s)), visited)));
-//    }
-//    private Stream<GroupModel> addParents(GroupModel group) {
-//        //no cycle check here, I hope that's fine
-//        if (group.getParent() == null) {
-//            return Stream.of(group);
-//        }
-//        return Stream.concat(Stream.of(group), addParents(group.getParent()));
-//    }
-
 // UI STUFF END!
 
     // APPROVAL MECHANISM STARTS HERE
@@ -233,7 +159,7 @@ public class TideAdminRealmResource {
         System.out.println(realm.getName());
         Object draftRecordEntity = new Object();
 
-        if (ChangeSetType.valueOf(changeSet.getType()) == ChangeSetType.USER_ROLE) {
+        if (changeSet.getType() == ChangeSetType.USER_ROLE) {
 
 
             draftRecordEntity = em.find(TideUserRoleMappingDraftEntity.class, changeSet.getChangeSetId());
@@ -244,7 +170,7 @@ public class TideAdminRealmResource {
             proofDetails = accessProofDetailEntity.map(AccessProofDetailEntity::getProofDraft).toList();
 
         }
-        if(ChangeSetType.valueOf(changeSet.getType()) == ChangeSetType.COMPOSITE_ROLE){
+        if(changeSet.getType() == ChangeSetType.COMPOSITE_ROLE){
             draftRecordEntity = em.find(TideCompositeRoleMappingDraftEntity.class, changeSet.getChangeSetId());
             Stream<AccessProofDetailEntity> accessProofDetailEntity = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                     .setParameter("recordId", ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).getId())
@@ -266,9 +192,59 @@ public class TideAdminRealmResource {
         } catch (JsonProcessingException e) {
             throw new RuntimeException(e);
         }
-
-
     }
+
+    private void getchangeSetDependencies(DraftChangeSet changeSet){
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        Object draftRecordEntity = new Object();
+
+        if (changeSet.getType() == ChangeSetType.USER_ROLE) {
+            draftRecordEntity = em.find(TideUserRoleMappingDraftEntity.class, changeSet.getChangeSetId());
+            List<AccessProofDetailEntity> accessProofDetailEntity = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", ((TideUserRoleMappingDraftEntity) draftRecordEntity).getId())
+                    .getResultList();
+            if(!accessProofDetailEntity.isEmpty()){
+                // just get the latest one
+                AccessProofDetailEntity entity = accessProofDetailEntity.get(0);
+
+                entity.getRecordId();
+                entity.getChangesetType();
+            }
+
+
+
+        }
+        if(changeSet.getType() == ChangeSetType.COMPOSITE_ROLE){
+            draftRecordEntity = em.find(TideCompositeRoleMappingDraftEntity.class, changeSet.getChangeSetId());
+            Stream<AccessProofDetailEntity> accessProofDetailEntity = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).getId())
+                    .getResultStream();
+
+        }
+    }
+
+    @POST
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Path("change-set/approve")
+    public void approveChangeSet(List<DraftChangeSet> changeSets){
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        System.out.println(realm.getName());
+
+
+        changeSets.forEach(change -> {
+            if (change.getType() == ChangeSetType.USER_ROLE) {
+
+                TideUserRoleMappingDraftEntity draftRecordEntity = em.find(TideUserRoleMappingDraftEntity.class, change.getChangeSetId());
+                draftRecordEntity.setDraftStatus(DraftStatus.APPROVED);
+
+            }
+            if(change.getType() == ChangeSetType.COMPOSITE_ROLE){
+                TideCompositeRoleMappingDraftEntity draftRecordEntity = em.find(TideCompositeRoleMappingDraftEntity.class, change.getChangeSetId());
+                draftRecordEntity.setDraftStatus(DraftStatus.APPROVED);
+            }
+        });
+    }
+
 
 
     private String userRepJson(UserRepresentation userRep) {

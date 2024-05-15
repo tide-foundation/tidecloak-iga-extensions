@@ -3,6 +3,7 @@ package org.tidecloak.Protocol.mapper;
 import jakarta.persistence.EntityManager;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.protocol.ProtocolMapperUtils;
 import org.keycloak.protocol.oidc.mappers.AbstractOIDCProtocolMapper;
 import org.keycloak.protocol.oidc.mappers.OIDCAccessTokenMapper;
 import org.keycloak.protocol.oidc.mappers.OIDCAttributeMapperHelper;
@@ -65,6 +66,28 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
             System.out.println(clientAccesses.keySet());
             token.setResourceAccess(clientAccesses);
         }
+    }
+    public static ProtocolMapperModel create(String clientId, String clientRolePrefix,
+                                             String name,
+                                             String tokenClaimName,
+                                             boolean accessToken, boolean idToken, boolean introspectionEndpoint) {
+        return create(clientId, clientRolePrefix, name, tokenClaimName, accessToken, idToken, introspectionEndpoint, false);
+
+    }
+
+    public static ProtocolMapperModel create(String clientId, String clientRolePrefix,
+                                             String name,
+                                             String tokenClaimName,
+                                             boolean accessToken, boolean idToken, boolean introspectionEndpoint, boolean multiValued) {
+        ProtocolMapperModel mapper = OIDCAttributeMapperHelper.createClaimMapper(name, "foo",
+                tokenClaimName, "String",
+                accessToken, idToken, false, introspectionEndpoint,
+                PROVIDER_ID);
+
+        mapper.getConfig().put(ProtocolMapperUtils.MULTIVALUED, String.valueOf(multiValued));
+        mapper.getConfig().put(ProtocolMapperUtils.USER_MODEL_CLIENT_ROLE_MAPPING_CLIENT_ID, clientId);
+        mapper.getConfig().put(ProtocolMapperUtils.USER_MODEL_CLIENT_ROLE_MAPPING_ROLE_PREFIX, clientRolePrefix);
+        return mapper;
     }
 
 
