@@ -18,6 +18,7 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.keycloak.admin.ui.rest.model.ClientRole;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.RoleUtils;
 import org.keycloak.representations.AccessToken;
@@ -26,14 +27,18 @@ import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluato
 import org.keycloak.services.resources.admin.permissions.UserPermissionEvaluator;
 
 import org.tidecloak.interfaces.*;
+import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.jpa.models.TideRoleAdapter;
 import org.tidecloak.jpa.models.TideUserAdapter;
+import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
 import ua_parser.Client;
 
+import javax.management.relation.Role;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -229,7 +234,7 @@ public class TideAdminRealmResource {
 
             RequestedChanges requestChange = new RequestedChanges(RequestType.USER, m.getId(), new ArrayList<>(), "");
             proofs.forEach(p -> {
-                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getFirstName(), p.getId()));
+                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getName()));
             });
 
 
@@ -259,7 +264,7 @@ public class TideAdminRealmResource {
 
             RequestedChanges requestChange = new RequestedChanges(RequestType.USER, m.getId(), new ArrayList<>(), "");
             proofs.forEach(p -> {
-                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getFirstName(), p.getId()));
+                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getName()));
             });
             ClientModel clientModel = realm.getClientById(m.getComposite().getClientId());
             requestChange.setDescription(String.format("Adding %s access to %s in %s", m.getChildRole().getName(), m.getComposite().getName(), clientModel.getClientId()));
@@ -270,48 +275,190 @@ public class TideAdminRealmResource {
         return changes;
     }
 
+    // This should be called after the drafts have been checked by the orks and the proof has been signed by the vvk.
+    // Calling this method after getting the approval from the orks will update keycloak database for these records to active.
+    // Need to give this endpoint the newly signed proof (signed by vvk) so it can be stored and used in the authz\authn flow
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/approve")
-    public void approveChangeSet(List<DraftChangeSet> changeSets){
+    public void approveChangeSet(List<DraftChangeSet> changeSets) throws NoSuchAlgorithmException, JsonProcessingException {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         System.out.println(realm.getName());
 
-
-        changeSets.forEach(change -> {
+        for ( DraftChangeSet change : changeSets) {
             if (change.getType() == ChangeSetType.USER_ROLE) {
+                System.out.println("I AM HERE IN USER ROLE");
+                List<TideUserRoleMappingDraftEntity> mappings = em.createNamedQuery("getUserRoleMappingsByStatusAndRealmAndRecordId", TideUserRoleMappingDraftEntity.class)
+                        .setParameter("draftStatus", DraftStatus.DRAFT)
+                        .setParameter("changesetId", change.getChangeSetId())
+                        .setParameter("realmId",realm.getId())
+                        .getResultList();
 
-                TideUserRoleMappingDraftEntity draftRecordEntity = em.find(TideUserRoleMappingDraftEntity.class, change.getChangeSetId());
-                draftRecordEntity.setDraftStatus(DraftStatus.APPROVED);
+                if ( mappings.isEmpty()){
+                    continue;
+                }
+                // Should only be one so we grab the first one
+                TideUserRoleMappingDraftEntity mapping = mappings.get(0);
+                // WE APPROVE THE DRAFT RECORD AND CONTINUE WITH THE OTHER CHECKS
+                // Can probably move this further down
+                mapping.setDraftStatus(DraftStatus.APPROVED);
+                RoleModel role = realm.getRoleById(mapping.getRoleId());
+                if ( role == null || !role.isClientRole()) {
+                    System.out.println("I not client role");
+                    continue;
+                }
+                ClientModel clientModel = realm.getClientById(role.getContainerId());
 
+                /*
+                *
+                * somewhere here we:
+                * generate the meta for the vvk signed proof
+                * store both meta and proof into db
+                * then continue with checking the other records
+                * hash it then store the proof
+                * */
+                // Get the user
+                UserEntity user = mapping.getUser();
+                UserModel userModel = session.users().getUserById(realm, user.getId());
+                UserModel wrappedUser = TideRolesUtil.wrapUserModel(userModel, session, realm);
+                TideAuthzProofUtil tideAuthzProofUtil = new TideAuthzProofUtil(session, realm, em);
+
+                String draftProof = em.createNamedQuery("getProofDetailsForUserByClientAndRecordId", AccessProofDetailEntity.class)
+                        .setParameter("user", user)
+                        .setParameter("clientId", clientModel.getId())
+                        .setParameter("recordId", change.getChangeSetId())
+                        .getSingleResult().getProofDraft();
+
+                tideAuthzProofUtil.saveProofToDatabase(draftProof, clientModel.getId(), user);
+
+
+                // query the proof database, we need to update and draft or pending records with the new proof ( proof will be merged )
+                List<ClientModel> affectedClients = new ArrayList<>(realm.getClientsStream().filter(ClientModel::isFullScopeAllowed).toList());
+                affectedClients.add(clientModel);
+                List<ClientModel> uniqueAffectedClients = affectedClients.stream().distinct().toList();
+
+
+                // Query affected records to update the proof details
+                for (ClientModel client: uniqueAffectedClients) {
+                    List<AccessProofDetailEntity> pendingProofDetails = em.createNamedQuery("getProofDetailsForUserByClient", AccessProofDetailEntity.class)
+                            .setParameter("user", user)
+                            .setParameter("clientId", client.getId())
+                            .getResultList();
+
+                    for (AccessProofDetailEntity p : pendingProofDetails) {
+                        // Find the draft record and update back to draft status to be re approved and signed as the access has now changed
+                        TideUserRoleMappingDraftEntity draftEntity = em.find(TideUserRoleMappingDraftEntity.class, p.getRecordId() );
+                        if(draftEntity == null || draftEntity.getDraftStatus() == DraftStatus.APPROVED) {
+                            continue;
+                        }
+                        draftEntity.setDraftStatus(DraftStatus.DRAFT);
+                        String proof = p.getProofDraft();
+                        String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof);
+                        p.setProofDraft(updatedProof);
+
+                    };
+                }
             }
             if(change.getType() == ChangeSetType.COMPOSITE_ROLE){
-                TideCompositeRoleMappingDraftEntity draftRecordEntity = em.find(TideCompositeRoleMappingDraftEntity.class, change.getChangeSetId());
-                draftRecordEntity.setDraftStatus(DraftStatus.APPROVED);
+                List<TideCompositeRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllCompositeRoleMappingsByStatusAndRealmAndRecordId", TideCompositeRoleMappingDraftEntity.class)
+                        .setParameter("draftStatus", DraftStatus.DRAFT)
+                        .setParameter("changesetId", change.getChangeSetId())
+                        .setParameter("realmId",realm.getId())
+                        .getResultList();
+
+                if ( mappings.isEmpty()){
+                    continue;
+                }
+                // ID's are unique for each record so we check if the query finds anything then just get the only record
+                TideCompositeRoleMappingDraftEntity mapping = mappings.get(0);
+                RoleEntity roleEntity = mapping.getComposite();
+                RoleModel role = realm.getRoleById(roleEntity.getId());
+                //Only this one record got approved, now we need to check who was affected
+                mapping.setDraftStatus(DraftStatus.APPROVED);
+                // query proof details for all records with this recordID
+                ClientModel clientModel = realm.getClientById(role.getContainerId());
+                List<ClientModel> affectedClients = new ArrayList<>(realm.getClientsStream().filter(ClientModel::isFullScopeAllowed).toList());
+                affectedClients.add(clientModel);
+                List<ClientModel> uniqueAffectedClients = affectedClients.stream().distinct().toList();
+                TideAuthzProofUtil tideAuthzProofUtil = new TideAuthzProofUtil(session, realm, em);
+
+                for (ClientModel client : uniqueAffectedClients){
+                    List<AccessProofDetailEntity> allProofDetailsAffected = em.createNamedQuery("getProofDetailsByClient", AccessProofDetailEntity.class)
+                            .setParameter("clientId", client.getId())
+                            .getResultList();
+
+                    // Need to do this for all fullscoped enabled clients and this specifc client
+                    // Need to loop through and update all draft records that belong to an affected user and check if there are any pending requests for this user for the same record and update the status back to draft
+                    for ( AccessProofDetailEntity proofDetail : allProofDetailsAffected){
+                        // Get the user
+                        UserEntity user = proofDetail.getUser();
+                        UserModel userModel = session.users().getUserById(realm, user.getId());
+                        UserModel wrappedUser = TideRolesUtil.wrapUserModel(userModel, session, realm);
+
+
+                        // If its for the record that was just approved, we save the final proof in a different table
+                        if (Objects.equals(proofDetail.getRecordId(), change.getChangeSetId())){
+                            /*
+                             *
+                             * somewhere here we:
+                             * generate the meta for the vvk signed proof
+                             * store both meta and proof into db
+                             * then continue with checking the other records
+                             * hash it then store the proof
+                             * */
+
+                            // Get the user
+                            System.out.println("SETTING FINAL PROOF FOR " + user.getFirstName());
+                            // if record is the same we need to remove the proof draft entity and store the final one in the user clientaccess entity
+                            String draftProof = em.createNamedQuery("getProofDetailsForUserByClientAndRecordId", AccessProofDetailEntity.class)
+                                    .setParameter("user", user)
+                                    .setParameter("clientId", client.getId())
+                                    .setParameter("recordId", change.getChangeSetId())
+                                    .getSingleResult().getProofDraft();
+
+                            tideAuthzProofUtil.saveProofToDatabase(draftProof, client.getId(), user);
+                        }
+
+                        TideCompositeRoleMappingDraftEntity draftEntity = em.find(TideCompositeRoleMappingDraftEntity.class, proofDetail.getRecordId());
+                        if(draftEntity == null || draftEntity.getDraftStatus() == DraftStatus.APPROVED) {
+                            System.out.println("nothing here in composite role");
+                            continue;
+                        }
+                        System.out.println("setting this back to draft " + draftEntity.getId());
+                        draftEntity.setDraftStatus(DraftStatus.DRAFT);
+                        String proof = proofDetail.getProofDraft();
+                        String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof);
+                        proofDetail.setProofDraft(updatedProof);
+
+                        System.out.println(proof);
+                        System.out.println(updatedProof);
+
+                    }
+                }
             }
-        });
-    }
-
-
-
-    private String userRepJson(UserRepresentation userRep) {
-        try{
-            ObjectMapper objMapper = new ObjectMapper();
-            objMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
-            objMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY);
-
-            return objMapper.writeValueAsString(userRep);
         }
-        catch (JsonProcessingException e) {
-            throw new RuntimeException("Failed to process change set", e);
-        }
+        em.flush();
     }
 
-    //TODO: move into a more generic util file
-    public static Set<RoleModel> getDeepUserRoleMappings(Set<RoleModel> roleModels, UserModel user, KeycloakSession session, RealmModel realm, EntityManager manager) {
-        user.getGroupsStream().forEach(group -> TideRolesUtil.addGroupRoles(TideRolesUtil.wrapGroupModel(group, session, realm), roleModels, DraftStatus.APPROVED, ActionType.CREATE));
-        return TideRolesUtil.expandCompositeRoles(roleModels, DraftStatus.APPROVED, ActionType.CREATE);
+    private void resetUserPendingChanges(){
+
+        // Need to get all proof records for this user.
+        // Update has been approved so now we need to update all pending\draft proofs for this user to reflect actually access in jwt
+
+        // We update for all full scoped enable clients and check if there are pending changes for the same client
+        // if the record id exists in the changeset list we ignore this reset and continue.
+
     }
+    private void resetCompositeRolePendingChanges(){
+
+        // Need to get all proof records for this user.
+        // Update has been approved so now we need to update all pending\draft proofs for this user to reflect actually access in jwt
+
+        // We update for all full scoped enable clients and check if there are pending changes for the same client
+        // if the record id exists in the changeset list we ignore this reset and continue.
+
+    }
+
     public static Set<RoleModel> getAccess(Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes) {
 
         if (client.isFullScopeAllowed()) {
@@ -336,59 +483,5 @@ public class TideAdminRealmResource {
             return roleModels;
         }
     }
-
-    //TODO: CLEAN THIS MONSTROSITY!!!!
-    public static void setTokenClaims(AccessToken token, Set<RoleModel> roles) {
-        AccessToken.Access realmAccess = new AccessToken.Access();
-        Map<String, AccessToken.Access> clientAccesses = new HashMap<>();
-        for (RoleModel role : roles) {
-            if (role.getContainer() instanceof RealmModel) {
-                realmAccess.addRole(role.getName());
-            } else if (role.getContainer() instanceof ClientModel client) {
-                clientAccesses.computeIfAbsent(client.getClientId(), k -> new AccessToken.Access())
-                        .addRole(role.getName());
-            }
-        }
-        // Add our roles to what is existing
-        // If original token does not include any roles we dont add.
-        if (token.getRealmAccess() != null) {
-            if(token.getRealmAccess().getRoles() != null && realmAccess.getRoles() != null){
-                realmAccess.getRoles().forEach(role -> {
-                    if (!token.getRealmAccess().getRoles().contains(role)) {
-                        token.getRealmAccess().addRole(role);
-                    }
-                });
-            }
-        }
-        if (!token.getResourceAccess().isEmpty()) {
-            clientAccesses.forEach((clientKey, clientAccess) -> {
-                AccessToken.Access tokenClientRoles = token.getResourceAccess().get(clientKey);
-                if (tokenClientRoles != null) {
-                    Set<String> newRoles = clientAccess.getRoles();
-                    if (!tokenClientRoles.getRoles().containsAll(newRoles)) {
-                        newRoles.stream()
-                                .filter(role -> !tokenClientRoles.getRoles().contains(role))
-                                .forEach(tokenClientRoles::addRole);
-                    }
-                }else {
-                    if (clientAccess.getRoles() != null){
-                        token.getResourceAccess().put(clientKey, clientAccess);
-                    }
-                }
-            });
-        }
-        if ( token.getRealmAccess() == null) {
-            if (realmAccess.getRoles() != null ){
-                token.setRealmAccess(realmAccess);
-            }
-
-        }
-        if (token.getResourceAccess().isEmpty() ){
-            if(!clientAccesses.isEmpty()){
-                token.setResourceAccess(clientAccesses);
-            }
-        }
-    }
-
 
 }

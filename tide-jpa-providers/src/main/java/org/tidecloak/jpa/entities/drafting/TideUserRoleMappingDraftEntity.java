@@ -8,6 +8,7 @@ import org.tidecloak.interfaces.DraftStatus;
 import java.io.Serializable;
 
 @NamedQueries({
+        @NamedQuery(name="getUserRoleMappingsByStatusAndRealmAndRecordId", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.id = :changesetId AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
         @NamedQuery(name="getAllUserRoleMappingsByStatusAndRealm", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
         @NamedQuery(name="getAllUserRoleMappingsByStatus", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus"),
         @NamedQuery(name="getUserRoleMappingStatus", query="select m from TideUserRoleMappingDraftEntity m where m.user = :user"),

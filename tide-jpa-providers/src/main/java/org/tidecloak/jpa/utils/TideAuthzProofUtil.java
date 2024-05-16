@@ -7,6 +7,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeType;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import org.keycloak.common.ClientConnection;
@@ -29,8 +30,10 @@ import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailDependencyEntity;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
+import twitter4j.v1.User;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -41,9 +44,6 @@ import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
-
-import static org.tidecloak.AdminRealmResource.TideAdminRealmResource.getAccess;
-import static org.tidecloak.AdminRealmResource.TideAdminRealmResource.setTokenClaims;
 
 public final class TideAuthzProofUtil {
 
@@ -191,10 +191,56 @@ public final class TideAuthzProofUtil {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         byte[] changeBytes = digest.digest(
                 change.getBytes(StandardCharsets.UTF_8));
+
         return Base64.getEncoder().encodeToString(changeBytes);
     }
 
+    public void saveProofToDatabase(String proof, String clientId, UserEntity user) throws NoSuchAlgorithmException, JsonProcessingException {
+
+        System.out.println("ADDING THIS PRROF " + proof);
+        // find if proof exists, update if it does else we create a new one for the user
+        UserClientAccessProofEntity userClientAccess = em.find(UserClientAccessProofEntity.class, new UserClientAccessProofEntity.Key(user, clientId ));
+        String proofChecksum = generateProofChecksum(proof);
+        String proofMeta = getProofMeta(proof);
+
+        if (userClientAccess == null){
+            System.out.println("NO ACCESS FOUND, ADDING NEW");
+            UserClientAccessProofEntity newAccess = new UserClientAccessProofEntity();
+            newAccess.setUser(user);
+            newAccess.setClientId(clientId);
+            newAccess.setAccessProof(proofChecksum);
+            newAccess.setAccessProofMeta(proofMeta);
+            em.persist(newAccess);
+        } else{
+            userClientAccess.setAccessProof(proofChecksum);
+            userClientAccess.setAccessProofMeta(proofMeta);
+        }
+    }
+
+    public String generateProofChecksum(String proof) throws NoSuchAlgorithmException {
+
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        byte[] changeBytes = digest.digest(
+                proof.getBytes(StandardCharsets.UTF_8));
+
+        return Base64.getEncoder().encodeToString(changeBytes);
+    }
+
+    public String getProofMeta(String proofDraft) throws JsonProcessingException, NoSuchAlgorithmException {
+
+        // Generate the meta here
+        // Create a root node
+        JsonNode jsonNode = objectMapper.readTree(proofDraft);
+        ObjectNode object = (ObjectNode) jsonNode;
+        ObjectNode rootNode = objectMapper.createObjectNode();
+        var jsonProperties = object.properties();
+        generateMeta(rootNode, jsonProperties);
+        return objectMapper.writeValueAsString(rootNode);
+    }
+
+
     public AccessToken generateAccessToken(ClientModel client, UserModel user, String scopeParam){
+        session.getContext().setClient(client);
         return sessionAware(client, user, scopeParam, (userSession, clientSessionCtx) -> {
             TokenManager tokenManager = new TokenManager();
             return tokenManager.responseBuilder(realm, client, null, session, userSession, clientSessionCtx)
@@ -232,6 +278,18 @@ public final class TideAuthzProofUtil {
         }
     }
 
+    public String updateDraftProofDetails(ClientModel clientModel, UserModel userModel, String oldProofDetails) throws JsonProcessingException {
+        // Generate the current token
+        AccessToken currentProof = generateAccessToken(clientModel, userModel, "openid");
+
+        JsonNode currentProofNode = objectMapper.valueToTree(currentProof);
+        JsonNode oldProofNode = objectMapper.readTree(oldProofDetails);
+
+        return cleanProofDraft(mergeJsonNodes(currentProofNode, oldProofNode));
+
+
+    }
+
     // This is used to merged previous generate draft tokens with the newly created one.
     public static JsonNode mergeJsonNodes(JsonNode node1, JsonNode node2) {
         if (node1.isObject() && node2.isObject()) {
@@ -266,6 +324,18 @@ public final class TideAuthzProofUtil {
     }
 
 
+    private void generateMeta(ObjectNode rootNode, Set<Map.Entry<String, JsonNode>> json){
+        json.forEach(x -> {
+            if ( x.getValue().getNodeType() == JsonNodeType.OBJECT ){
+                ObjectNode node = rootNode.putObject(x.getKey());
+                generateMeta(node, x.getValue().properties());
+            }else {
+                ObjectNode node = objectMapper.createObjectNode();
+                node.put("type", x.getValue().getNodeType().toString());
+                rootNode.set(x.getKey(), node);
+            }
+        });
+    }
 
     private static boolean containsNode(ArrayNode array, JsonNode item) {
         for (JsonNode node : array) {

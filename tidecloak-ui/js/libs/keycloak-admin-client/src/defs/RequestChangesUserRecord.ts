@@ -1,4 +1,6 @@
 export default interface RequestChangesUserRecord {
-    user: string;
+    username: string;
     proofDetailId: string;
+    clientName: string;
+
 }

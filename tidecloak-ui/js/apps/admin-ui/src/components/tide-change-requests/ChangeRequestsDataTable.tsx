@@ -9,12 +9,17 @@ import {
   ToolbarContent,
   ToolbarItem,
   EmptyState,
-  AlertVariant
+  AlertVariant,
+  DescriptionList,
+  DescriptionListDescription,
+  DescriptionListGroup,
+  DescriptionListTerm,
 } from "@patternfly/react-core";
 import { KeycloakDataTable } from "../table-toolbar/KeycloakDataTable";
 import { useAlerts } from '../alert/Alerts';
-import type { IRowData } from '@patternfly/react-table';
 import RequestedChanges from "@keycloak/keycloak-admin-client/lib/defs/RequestedChanges"
+import RequestChangesUserRecord from "@keycloak/keycloak-admin-client/lib/defs/RequestChangesUserRecord"
+
 import { adminClient } from '../../admin-client';
 import { KeycloakSpinner } from "../keycloak-spinner/KeycloakSpinner";
 
@@ -46,30 +51,35 @@ export const ChangeRequestsDataTable = () => {
   const columns = [
     {
       name: t('Description'),
-      displayKey: 'Description', // Assuming there's a display key concept, similar to Keycloak's pattern
-      cellRenderer: (row: { data: { description: any; }; }) => row.data.description
+      displayKey: 'Description',
+      cellRenderer: (row: RequestedChanges ) => row.description
     },
     {
       name: t('Type'),
       displayKey: 'Type',
-      cellRenderer: (row: { data: { type: any; }; }) => row.data.type
+      cellRenderer: (row: RequestedChanges) => row.type
     },
     {
       name: t('Parent Record ID'),
       displayKey: 'Parent Record ID',
-      cellRenderer: (row: { data: { parentRecordId: any; }; }) => row.data.parentRecordId
+      cellRenderer: (row: RequestedChanges) => row.parentRecordId
     },
   ];
 
+  const DetailCell = (row: RequestedChanges) => (
+    <DescriptionList isHorizontal className="keycloak_eventsection_details">
+      <DescriptionListTerm>Affected Users:</DescriptionListTerm>
+        {row.userRecord &&
+          row.userRecord.map((value: RequestChangesUserRecord) => (
+            <DescriptionListGroup key={value.username}>
+              <DescriptionListDescription>{value.username} {value.clientName}</DescriptionListDescription>
+            </DescriptionListGroup>
+          ))}
+    </DescriptionList>
+  );
+
   const loader = async () => {
-    return data.map((item) => ({
-      cells: [
-        item.description,
-        item.type,
-        item.parentRecordId
-      ],
-      data: item
-    }));
+    return data;
   };
 
   const goToCreateChangeRequest = () => {
@@ -96,6 +106,13 @@ export const ChangeRequestsDataTable = () => {
         key={key}
         loader={loader}
         ariaLabelKey="Requested Changes"
+        detailColumns={[
+          {
+            name: "details",
+            enabled: (row) => row.userRecord.length > 0,
+            cellRenderer: DetailCell,
+          },
+        ]}
         columns={columns}
         isPaginated={true}
         emptyState={

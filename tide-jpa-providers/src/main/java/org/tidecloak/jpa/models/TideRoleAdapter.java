@@ -62,7 +62,6 @@ public class TideRoleAdapter extends RoleAdapter {
                 List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
                 clientList.forEach(client -> {
-                    session.getContext().setClient(client);
                     users.forEach(user -> {
                         UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                         Set<RoleModel> roleMappings = new HashSet<>();
@@ -106,7 +105,6 @@ public class TideRoleAdapter extends RoleAdapter {
             List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
             TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
             clientList.forEach(client -> {
-                session.getContext().setClient(client);
                 users.forEach(user -> {
                     UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                     Set<RoleModel> roleMappings = new HashSet<>();

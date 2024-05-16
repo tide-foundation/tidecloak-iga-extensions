@@ -121,8 +121,6 @@ public class TideUserAdapter extends UserAdapter {
                 UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
                 clientList.forEach(client -> {
-                    session.getContext().setClient(client);
-
                     try {
                         util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUserRole.getId(), ChangeSetType.USER_ROLE, ActionType.CREATE);
                         if(role.isComposite()){
@@ -195,7 +193,6 @@ public class TideUserAdapter extends UserAdapter {
                 UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
                 clientList.forEach(client -> {
-                    session.getContext().setClient(client);
                     Set<RoleModel> roleMappings = new HashSet<>();
                     roleMappings.add(role);
                     try {

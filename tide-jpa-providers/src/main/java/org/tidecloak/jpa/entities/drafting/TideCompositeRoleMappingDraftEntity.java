@@ -6,6 +6,7 @@ import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
 
 @NamedQueries({
+        @NamedQuery(name="getAllCompositeRoleMappingsByStatusAndRealmAndRecordId", query="select r from TideCompositeRoleMappingDraftEntity r where r.draftStatus = :draftStatus AND r.id = :changesetId AND r.composite IN ( SELECT u from RoleEntity u where u.realmId =:realmId ) "),
         @NamedQuery(name="getAllCompositeRoleMappingsByStatusAndRealm", query="select r from TideCompositeRoleMappingDraftEntity r where r.draftStatus = :draftStatus and r.composite IN ( SELECT u from RoleEntity u where u.realmId =:realmId ) "),
         @NamedQuery(name="getAllCompositeRoleMappingsByStatus", query="select r from TideCompositeRoleMappingDraftEntity r where r.draftStatus = :draftStatus"),
         @NamedQuery(name="getCompositeEntityByParent", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite ORDER BY r.createdTimestamp DESC"),
