@@ -31,6 +31,9 @@ public class TideCompositeRoleDraftEntity {
     @Column(name = "ACTION_TYPE")
     private ActionType actionType;
 
+    @Column(name = "CREATED_TIMESTAMP")
+    protected Long createdTimestamp = System.currentTimeMillis();
+
     public String getId() {
         return id;
     }
@@ -63,6 +66,14 @@ public class TideCompositeRoleDraftEntity {
 
     public void setAction(ActionType actionType) {
         this.actionType = actionType;
+    }
+
+    public Long getCreatedTimestamp() {
+        return createdTimestamp;
+    }
+
+    public void setCreatedTimestamp(Long timestamp) {
+        createdTimestamp = timestamp;
     }
 
     @Override

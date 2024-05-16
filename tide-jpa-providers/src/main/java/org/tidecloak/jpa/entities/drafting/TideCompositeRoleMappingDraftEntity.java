@@ -51,7 +51,7 @@ public class TideCompositeRoleMappingDraftEntity {
     private ActionType actionType;
 
     @Column(name = "CREATED_TIMESTAMP")
-    protected Long createdTimestamp;
+    protected Long createdTimestamp = System.currentTimeMillis(); // sets the current time by default
 
     public String getId() {
         return id;

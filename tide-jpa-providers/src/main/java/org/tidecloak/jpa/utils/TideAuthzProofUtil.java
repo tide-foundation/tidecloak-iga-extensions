@@ -140,7 +140,7 @@ public final class TideAuthzProofUtil {
 
 
         // Always save the access proof detail
-        saveAccessProofDetail(clientModel, user, recordId, type, proofDraft, System.currentTimeMillis());
+        saveAccessProofDetail(clientModel, user, recordId, type, proofDraft);
     }
 
     public List<TideCompositeRoleMappingDraftEntity> findCompositeMappingsByChildRole(RoleEntity composite) {
@@ -161,7 +161,7 @@ public final class TideAuthzProofUtil {
         }
     }
 
-    private void saveAccessProofDetail(ClientModel clientModel, UserEntity user, String recordId, ChangeSetType type, String proofDraft, long timestamp) {
+    private void saveAccessProofDetail(ClientModel clientModel, UserEntity user, String recordId, ChangeSetType type, String proofDraft) {
         AccessProofDetailEntity newDetail = new AccessProofDetailEntity();
         newDetail.setId(KeycloakModelUtils.generateId());
         newDetail.setClientId(clientModel.getId());
@@ -169,7 +169,6 @@ public final class TideAuthzProofUtil {
         newDetail.setRecordId(recordId);
         newDetail.setProofDraft(proofDraft);
         newDetail.setChangesetType(type);
-        newDetail.setCreatedTimestamp(timestamp);
         em.persist(newDetail);
     }
 

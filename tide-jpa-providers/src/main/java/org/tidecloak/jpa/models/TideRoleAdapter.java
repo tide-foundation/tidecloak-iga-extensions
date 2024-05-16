@@ -95,7 +95,6 @@ public class TideRoleAdapter extends RoleAdapter {
         draft.setChildRole(entity);
         draft.setDraftStatus(DraftStatus.DRAFT);
         draft.setAction(ActionType.CREATE);
-        draft.setCreatedTimestamp(System.currentTimeMillis());
 
         em.persist(draft);
 

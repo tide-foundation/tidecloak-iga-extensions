@@ -48,6 +48,9 @@ public class TideUserRoleMappingDraftEntity {
     @Column(name = "ACTION_TYPE")
     private ActionType actionType = ActionType.CREATE; // Default to NONE
 
+    @Column(name = "CREATED_TIMESTAMP")
+    protected Long createdTimestamp = System.currentTimeMillis();
+
 //    @Column(name = "CHECKSUM")
 //    protected String checksum;
 
@@ -90,6 +93,14 @@ public class TideUserRoleMappingDraftEntity {
 
     public void setAction(ActionType actionType) {
         this.actionType = actionType;
+    }
+
+    public Long getCreatedTimestamp() {
+        return createdTimestamp;
+    }
+
+    public void setCreatedTimestamp(Long timestamp) {
+        createdTimestamp = timestamp;
     }
 
 //    public String getChecksum() {
