@@ -389,18 +389,15 @@ public class TideAdminRealmResource {
                 RoleModel role = null;
                 ActionType actionType = null;
                 if (entity instanceof  TideUserRoleMappingDraftEntity) {
-                     role = realm.getRoleById(((TideUserRoleMappingDraftEntity) entity).getRoleId());
+                     role = TideRolesUtil.wrapRoleModel(realm.getRoleById(((TideUserRoleMappingDraftEntity) entity).getRoleId()), session, realm);
                      actionType = ((TideUserRoleMappingDraftEntity) entity).getAction();
                 }
                 if ( entity instanceof  TideCompositeRoleMappingDraftEntity) {
-                    role = realm.getRoleById(((TideCompositeRoleMappingDraftEntity) entity).getChildRole().getId());
+                    role = TideRolesUtil.wrapRoleModel(realm.getRoleById(((TideCompositeRoleMappingDraftEntity) entity).getChildRole().getId()), session, realm);
                     actionType = ((TideCompositeRoleMappingDraftEntity) entity).getAction();
                 }
-
                 if (proofDetail.getChangesetType() == ChangeSetType.USER_ROLE) {
                     TideUserRoleMappingDraftEntity draftEntity = em.find(TideUserRoleMappingDraftEntity.class, proofDetail.getRecordId());
-                    Object temp;
-
                     handleUserRoleMappingDraft(draftEntity, proofDetail, change, role, actionType, client, tideAuthzProofUtil, wrappedUser);
                 } else if (proofDetail.getChangesetType() == ChangeSetType.COMPOSITE_ROLE) {
                     TideCompositeRoleMappingDraftEntity draftEntity = em.find(TideCompositeRoleMappingDraftEntity.class, proofDetail.getRecordId());
@@ -464,6 +461,8 @@ public class TideAdminRealmResource {
         Set<RoleModel> roleSet = new HashSet<>();
         roleSet.add(role);
         String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof, roleSet, actionType);
+        System.out.println("UPDATED PROOF " + updatedProof);
+
         proofDetail.setProofDraft(updatedProof);
     }
 
@@ -496,6 +495,23 @@ public class TideAdminRealmResource {
     private void saveFinalProofDetailsOnApproval(AccessProofDetailEntity proofDetail, DraftChangeSet change, EntityManager em, UserEntity user, ClientModel client) throws NoSuchAlgorithmException, JsonProcessingException {
         TideAuthzProofUtil tideAuthzProofUtil = new TideAuthzProofUtil(session, realm, em);
         if (Objects.equals(proofDetail.getRecordId(), change.getChangeSetId())) {
+            // have a check here for composite role actions, ensure the composite role is granted to user. If no we dont bother saving a final proof.
+            if ( change.getType() == ChangeSetType.COMPOSITE_ROLE) {
+                TideCompositeRoleMappingDraftEntity record = em.find(TideCompositeRoleMappingDraftEntity.class, proofDetail.getRecordId());
+                if ( record == null ) {
+                    return;
+                }
+
+                List<TideUserRoleMappingDraftEntity> userRoleRecord = em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class)
+                        .setParameter("user", user)
+                        .setParameter("roleId", record.getComposite().getId())
+                        .getResultList();
+                // If composite role is not yet granted to user, then we dont bother with final proof
+                // TODO: check if status is ACTIVE (all admin signed, and was finalised by getting vvk to sign)
+                if( userRoleRecord.isEmpty() || userRoleRecord.get(0).getDraftStatus() != DraftStatus.APPROVED){
+                    return;
+                }
+            }
             String draftProof = em.createNamedQuery("getProofDetailsForUserByClientAndRecordId", AccessProofDetailEntity.class)
                     .setParameter("user", user)
                     .setParameter("clientId", client.getId())

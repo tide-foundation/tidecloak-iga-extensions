@@ -203,6 +203,7 @@ public final class TideAuthzProofUtil {
 
         // find if proof exists, update if it does else we create a new one for the user
         UserClientAccessProofEntity userClientAccess = em.find(UserClientAccessProofEntity.class, new UserClientAccessProofEntity.Key(user, clientId ));
+        System.out.println("THE FINAL PROOF IS :" + proof);
         String proofChecksum = generateProofChecksum(proof);
         String proofMeta = getProofMeta(proof);
 
@@ -285,7 +286,8 @@ public final class TideAuthzProofUtil {
         AccessToken currentProof = generateAccessToken(clientModel, userModel, "openid");
         Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
         Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, clientModel, clientModel.getClientScopes(false).values().stream());
-        UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
+        activeRoles.forEach(x -> System.out.println(" this is the active role mappings " + x.getName()));
+        newRoleMappings.forEach(x -> System.out.println(" this is the new role mappings " + x.getName()));
 
         AccessDetails accessDetails = sortAccessRoles(requestedAccess);
 
@@ -294,6 +296,9 @@ public final class TideAuthzProofUtil {
 
         JsonNode currentProofNode = objectMapper.valueToTree(currentProof);
         JsonNode oldProofNode = objectMapper.readTree(oldProofDetails);
+
+        System.out.println("CURRENT PROOF + ROLE " + objectMapper.writeValueAsString(currentProofNode));
+        System.out.println("OLD PROOF " + oldProofDetails);
 
         return cleanProofDraft(mergeJsonNodes(currentProofNode, oldProofNode));
 
