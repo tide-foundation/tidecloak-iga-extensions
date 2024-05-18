@@ -37,16 +37,20 @@ public class TideRoleAdapter extends RoleAdapter {
 
         RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
         // Check if role mapping is a draft
-        Stream<TideCompositeRoleMappingDraftEntity> entity =  em.createNamedQuery("getCompositeRoleMappingDraftByStatus", TideCompositeRoleMappingDraftEntity.class)
+        List<TideCompositeRoleMappingDraftEntity> entity =  em.createNamedQuery("getCompositeRoleMappingDraftByStatus", TideCompositeRoleMappingDraftEntity.class)
                 .setParameter("composite", getEntity())
                 .setParameter("childRole", toRoleEntity(role))
                 .setParameter("draftStatus", DraftStatus.DRAFT)
-                .getResultStream();
+                .getResultList();
 
-        if(!entity.toList().isEmpty()){
+        if(!entity.isEmpty()){
             em.createNamedQuery("deleteCompositeRoleMapping")
                     .setParameter("composite", getEntity())
                     .setParameter("childRole", toRoleEntity(role))
+                    .executeUpdate();
+            // Remove all draft access proofs affected by this draft record change
+            em.createNamedQuery("deleteProofRecords")
+                    .setParameter("recordId", entity.get(0).getId())
                     .executeUpdate();
             super.removeCompositeRole(role);
         } else {

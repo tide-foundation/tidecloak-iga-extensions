@@ -175,6 +175,10 @@ public class TideUserAdapter extends UserAdapter {
             em.createNamedQuery("deleteUserRoleMappingDraftsByRole")
                     .setParameter("roleId", role.getId())
                     .executeUpdate();
+            em.createNamedQuery("deleteProofRecordForUser")
+                    .setParameter("recordId", entity.get(0).getId())
+                    .setParameter("user", getEntity())
+                    .executeUpdate();
             super.deleteRoleMapping(role);
         } else {
 
