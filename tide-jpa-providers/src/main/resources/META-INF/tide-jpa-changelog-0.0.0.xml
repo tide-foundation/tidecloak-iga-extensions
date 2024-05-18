@@ -86,7 +86,10 @@
             <column name="ACTION_TYPE" type="VARCHAR(36)">
                 <constraints nullable="false"/>
             </column>
-            <column name="CREATED_TIMESTAMP" type="BIGINT"/>
+            <column name="DELETE_STATUS" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="TIMESTAMP" type="BIGINT"/>
             <!--            <column name="CHECKSUM" type="TEXT">-->
 <!--                <constraints nullable="true"/>-->
 <!--            </column>-->
@@ -108,7 +111,10 @@
             <column name="ACTION_TYPE" type="VARCHAR(36)">
                 <constraints nullable="false"/>
             </column>
-            <column name="CREATED_TIMESTAMP" type="BIGINT"/>
+            <column name="DELETE_STATUS" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="TIMESTAMP" type="BIGINT"/>
         </createTable>
         <!-- For roles tracking composite role updates, mainly deletion -->
         <createTable tableName="COMPOSITE_ROLE_DRAFT">
@@ -118,13 +124,10 @@
             <column name="COMPOSITE" type="VARCHAR(36)">
                 <constraints nullable="false"/>
             </column>
-            <column name="DRAFT_STATUS" type="VARCHAR(36)">
-                <constraints nullable="false"/>
+            <column name="DELETE_STATUS" type="VARCHAR(36)">
+                <constraints nullable="true"/>
             </column>
-            <column name="ACTION_TYPE" type="VARCHAR(36)">
-                <constraints nullable="false"/>
-            </column>
-            <column name="CREATED_TIMESTAMP" type="BIGINT"/>
+            <column name="TIMESTAMP" type="BIGINT"/>
         </createTable>
         <!-- For users assigned to a group -->
         <createTable tableName="USER_GROUP_MEMBERSHIP_DRAFT">
@@ -171,7 +174,6 @@
         <addForeignKeyConstraint constraintName="DRAFTING" baseTableName="USER_ENTITY_DRAFT" baseColumnNames="USER_ID" referencedTableName="USER_ENTITY" referencedColumnNames="ID"/>
         <addForeignKeyConstraint baseColumnNames="USER_ID" baseTableName="USER_ROLE_MAPPING_DRAFT" constraintName="DRAFTING_USER_ROLE_MAPPING" referencedColumnNames="ID" referencedTableName="USER_ENTITY"/>
         <!-- COMPOSITE ROLE DRAFT -->
-        <addPrimaryKey columnNames="COMPOSITE, DRAFT_STATUS, ACTION_TYPE" constraintName="CONSTRAINT_COMPOSITE_ROLE_DRAFT" tableName="COMPOSITE_ROLE_DRAFT"/>
         <addForeignKeyConstraint baseColumnNames="COMPOSITE" baseTableName="COMPOSITE_ROLE_MAPPING_DRAFT" constraintName="DRAFTING_COMPOSITE_ROLE_01"  referencedColumnNames="ID" referencedTableName="KEYCLOAK_ROLE"/>
         <addForeignKeyConstraint baseColumnNames="CHILD_ROLE" baseTableName="COMPOSITE_ROLE_MAPPING_DRAFT" constraintName="DRAFTING_COMPOSITE_ROLE_02" referencedColumnNames="ID" referencedTableName="KEYCLOAK_ROLE"/>
         <!-- USER GROUP MEMBERSHIP DRAFT -->

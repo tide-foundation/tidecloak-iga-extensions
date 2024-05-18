@@ -8,6 +8,8 @@ public class DraftChangeSet {
     protected String changeSetId;
     @JsonProperty("changeSetType")
     protected ChangeSetType changeSetType;
+    @JsonProperty("actionType")
+    protected ActionType actionType;
 
     public ChangeSetType getType() {
         return changeSetType;
@@ -15,6 +17,10 @@ public class DraftChangeSet {
     public String getChangeSetId() {
         return changeSetId;
     }
+    public ActionType getActionType() {
+        return actionType;
+    }
+
 
 
 

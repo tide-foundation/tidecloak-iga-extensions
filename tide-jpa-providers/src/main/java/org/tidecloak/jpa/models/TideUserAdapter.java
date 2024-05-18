@@ -165,26 +165,28 @@ public class TideUserAdapter extends UserAdapter {
     public void deleteRoleMapping(RoleModel roleModel) {
         RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
         // Check if role mapping is a draft
-        Stream<TideUserRoleMappingDraftEntity> entity =  em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
+        List<TideUserRoleMappingDraftEntity> entity =  em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
                 .setParameter("user", getEntity())
                 .setParameter("roleId", role.getId())
                 .setParameter("draftStatus", DraftStatus.DRAFT)
-                .getResultStream();
+                .getResultList();
 
-        if(!entity.toList().isEmpty()){
+        if(!entity.isEmpty()){
             em.createNamedQuery("deleteUserRoleMappingDraftsByRole")
                     .setParameter("roleId", role.getId())
                     .executeUpdate();
             super.deleteRoleMapping(role);
         } else {
+
+            TideUserRoleMappingDraftEntity userRoleMapping =  em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
+                    .setParameter("user", getEntity())
+                    .setParameter("roleId", role.getId())
+                    .setParameter("draftStatus", DraftStatus.APPROVED)
+                    .getSingleResult();
+
             // GET APPROVAL FOR DELETION
-            TideUserRoleMappingDraftEntity newEntity = new TideUserRoleMappingDraftEntity();
-            newEntity.setId(KeycloakModelUtils.generateId());
-            newEntity.setUser(getEntity());
-            newEntity.setRoleId(role.getId());
-            newEntity.setDraftStatus(DraftStatus.DRAFT);
-            newEntity.setAction(ActionType.DELETE);
-            em.persist(newEntity);
+            userRoleMapping.setDeleteStatus(DraftStatus.DRAFT);
+            userRoleMapping.setTimestamp(System.currentTimeMillis());
 
             // Generate a proof draft for this changeset and any affected clients with full-scope enabled. These need to be signed.
             if (role.getContainer() instanceof ClientModel) {
@@ -196,7 +198,7 @@ public class TideUserAdapter extends UserAdapter {
                     Set<RoleModel> roleMappings = new HashSet<>();
                     roleMappings.add(role);
                     try {
-                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, newEntity.getId(), ChangeSetType.USER_ROLE, ActionType.DELETE);
+                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, userRoleMapping.getId(), ChangeSetType.USER_ROLE, ActionType.DELETE);
                     } catch (JsonProcessingException e) {
                         throw new RuntimeException(e);
                     }

@@ -9,6 +9,7 @@ import java.io.Serializable;
 
 @NamedQueries({
         @NamedQuery(name="getUserRoleMappingsByStatusAndRealmAndRecordId", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.id = :changesetId AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
+        @NamedQuery(name="getUserRoleMappingsByDeleteStatusAndRealmAndRecordId", query="select m from TideUserRoleMappingDraftEntity m where m.deleteStatus = :deleteStatus AND m.id = :changesetId AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
         @NamedQuery(name="getAllUserRoleMappingsByStatusAndRealm", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
         @NamedQuery(name="getAllUserRoleMappingsByStatus", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus"),
         @NamedQuery(name="getUserRoleMappingStatus", query="select m from TideUserRoleMappingDraftEntity m where m.user = :user"),
@@ -48,8 +49,12 @@ public class TideUserRoleMappingDraftEntity {
     @Column(name = "ACTION_TYPE")
     private ActionType actionType = ActionType.CREATE; // Default to NONE
 
-    @Column(name = "CREATED_TIMESTAMP")
-    protected Long createdTimestamp = System.currentTimeMillis();
+    @Enumerated(EnumType.STRING)
+    @Column(name = "DELETE_STATUS")
+    private DraftStatus deleteStatus;
+    @Column(name = "TIMESTAMP")
+    protected Long timestamp = System.currentTimeMillis();
+
 
 //    @Column(name = "CHECKSUM")
 //    protected String checksum;
@@ -95,12 +100,20 @@ public class TideUserRoleMappingDraftEntity {
         this.actionType = actionType;
     }
 
-    public Long getCreatedTimestamp() {
-        return createdTimestamp;
+    public DraftStatus getDeleteStatus() {
+        return deleteStatus;
     }
 
-    public void setCreatedTimestamp(Long timestamp) {
-        createdTimestamp = timestamp;
+    public void setDeleteStatus(DraftStatus deleteStatus) {
+        this.deleteStatus = deleteStatus;
+    }
+
+    public Long getTimestamp() {
+        return timestamp;
+    }
+
+    public void setTimestamp(Long timestamp) {
+        this.timestamp = timestamp;
     }
 
 //    public String getChecksum() {

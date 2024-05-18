@@ -63,7 +63,6 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
             token.setRealmAccess(realmAccess);
         }
         if (!token.getResourceAccess().entrySet().isEmpty()) {
-            System.out.println(clientAccesses.keySet());
             token.setResourceAccess(clientAccesses);
         }
     }

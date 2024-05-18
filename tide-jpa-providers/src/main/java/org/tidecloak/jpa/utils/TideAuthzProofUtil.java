@@ -114,6 +114,12 @@ public final class TideAuthzProofUtil {
         }
     }
 
+    public AccessDetails getAccessToRemove (ClientModel clientModel, Set<RoleModel> newRoleMappings) {
+        Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
+        Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, clientModel, clientModel.getClientScopes(false).values().stream());
+        return sortAccessRoles(requestedAccess);
+    }
+
     public void generateAndSaveProofDraft(ClientModel clientModel, UserModel userModel, Set<RoleModel> newRoleMappings, String recordId, ChangeSetType type, ActionType actionType) throws JsonProcessingException {
         // Generate AccessToken based on the client and user information with openid scope
         AccessToken proof = generateAccessToken(clientModel, userModel, "openid");
@@ -121,7 +127,6 @@ public final class TideAuthzProofUtil {
         // Filter and expand roles based on the provided mappings; only approved roles are considered
 
         Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
-        System.out.println("INSIDE GENERATION");
         Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, clientModel, clientModel.getClientScopes(false).values().stream());
         UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
 
@@ -196,14 +201,12 @@ public final class TideAuthzProofUtil {
 
     public void saveProofToDatabase(String proof, String clientId, UserEntity user) throws NoSuchAlgorithmException, JsonProcessingException {
 
-        System.out.println("ADDING THIS PRROF " + proof);
         // find if proof exists, update if it does else we create a new one for the user
         UserClientAccessProofEntity userClientAccess = em.find(UserClientAccessProofEntity.class, new UserClientAccessProofEntity.Key(user, clientId ));
         String proofChecksum = generateProofChecksum(proof);
         String proofMeta = getProofMeta(proof);
 
         if (userClientAccess == null){
-            System.out.println("NO ACCESS FOUND, ADDING NEW");
             UserClientAccessProofEntity newAccess = new UserClientAccessProofEntity();
             newAccess.setUser(user);
             newAccess.setClientId(clientId);
@@ -277,9 +280,17 @@ public final class TideAuthzProofUtil {
         }
     }
 
-    public String updateDraftProofDetails(ClientModel clientModel, UserModel userModel, String oldProofDetails) throws JsonProcessingException {
+    public String updateDraftProofDetails(ClientModel clientModel, UserModel userModel, String oldProofDetails, Set<RoleModel> newRoleMappings, ActionType actionType) throws JsonProcessingException {
         // Generate the current token
         AccessToken currentProof = generateAccessToken(clientModel, userModel, "openid");
+        Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
+        Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, clientModel, clientModel.getClientScopes(false).values().stream());
+        UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
+
+        AccessDetails accessDetails = sortAccessRoles(requestedAccess);
+
+        // Apply the filtered roles to the AccessToken
+        setTokenClaims(currentProof, accessDetails, actionType);
 
         JsonNode currentProofNode = objectMapper.valueToTree(currentProof);
         JsonNode oldProofNode = objectMapper.readTree(oldProofDetails);
@@ -343,6 +354,12 @@ public final class TideAuthzProofUtil {
             }
         }
         return false;
+    }
+
+    public String removeAccesFromToken(String proof, AccessDetails accessDetails) throws JsonProcessingException {
+        JsonNode currentProof = objectMapper.readTree(proof);
+        JsonNode removedAccess = removeAccessFromJsonNode(currentProof, accessDetails);
+        return cleanProofDraft(removedAccess);
     }
 
     public static JsonNode removeAccessFromJsonNode(JsonNode originalNode, AccessDetails accessDetails) {

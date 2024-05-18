@@ -37,24 +37,27 @@ public class TideRoleAdapter extends RoleAdapter {
 
         RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
         // Check if role mapping is a draft
-        Stream<TideCompositeRoleDraftEntity> entity =  em.createNamedQuery("getCompositeRoleDraft", TideCompositeRoleDraftEntity.class)
-                .setParameter("composite", toRoleEntity(role))
+        Stream<TideCompositeRoleMappingDraftEntity> entity =  em.createNamedQuery("getCompositeRoleMappingDraftByStatus", TideCompositeRoleMappingDraftEntity.class)
+                .setParameter("composite", getEntity())
+                .setParameter("childRole", toRoleEntity(role))
                 .setParameter("draftStatus", DraftStatus.DRAFT)
                 .getResultStream();
 
         if(!entity.toList().isEmpty()){
-            em.createNamedQuery("deleteCompositeRole")
-                    .setParameter("composite", toRoleEntity(role))
+            em.createNamedQuery("deleteCompositeRoleMapping")
+                    .setParameter("composite", getEntity())
+                    .setParameter("childRole", toRoleEntity(role))
                     .executeUpdate();
             super.removeCompositeRole(role);
         } else {
+            TideCompositeRoleMappingDraftEntity compositeRoleEntity =  em.createNamedQuery("getCompositeRoleMappingDraftByStatus", TideCompositeRoleMappingDraftEntity.class)
+                    .setParameter("composite", getEntity())
+                    .setParameter("childRole", toRoleEntity(role))
+                    .setParameter("draftStatus", DraftStatus.APPROVED)
+                    .getSingleResult();
             // GET APPROVAL FOR DELETION
-            TideCompositeRoleDraftEntity newEntity = new TideCompositeRoleDraftEntity();
-            newEntity.setId(KeycloakModelUtils.generateId());
-            newEntity.setComposite(toRoleEntity(role));
-            newEntity.setDraftStatus(DraftStatus.DRAFT);
-            newEntity.setAction(ActionType.DELETE);
-            em.persist(newEntity);
+            compositeRoleEntity.setDeleteStatus(DraftStatus.DRAFT);
+            compositeRoleEntity.setTimestamp(System.currentTimeMillis());
 
             if (role.getContainer() instanceof ClientModel) {
                 RoleModel compositeRole = realm.getRoleById(getEntity().getId());
@@ -65,10 +68,10 @@ public class TideRoleAdapter extends RoleAdapter {
                     users.forEach(user -> {
                         UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                         Set<RoleModel> roleMappings = new HashSet<>();
-                        roleMappings.add(role); // this is the new role we are adding to the parent role.
+                        roleMappings.add(role); // this is the new role we are removing from the parent role.
 
                         try {
-                            util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, newEntity.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.DELETE);
+                            util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, compositeRoleEntity.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.DELETE);
                         } catch (JsonProcessingException e) {
                             throw new RuntimeException(e);
                         }
@@ -163,10 +166,6 @@ public class TideRoleAdapter extends RoleAdapter {
         query.setParameter("draftStatus", draftStatus);
 
         Stream<String> composites = query.getResultStream().map(RoleEntity::getId);
-
-        System.out.println(session.roles().getRolesStream(realm,
-                composites,
-                search, first, max));
 
         return session.roles().getRolesStream(realm,
                 composites,

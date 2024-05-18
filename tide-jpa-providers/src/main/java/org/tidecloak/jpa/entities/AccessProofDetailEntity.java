@@ -15,7 +15,10 @@ import org.tidecloak.interfaces.ChangeSetType;
                 query = "SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user AND a.clientId = :clientId AND a.id NOT IN " +
                         "(SELECT d.recordId FROM AccessProofDetailDependencyEntity d WHERE d.forkedChangeSetType = :changesetType) " +
                         "ORDER BY a.createdTimestamp DESC"
-        )
+        ),
+        @NamedQuery(name="deleteProofRecordForUserAndClient", query="DELETE FROM AccessProofDetailEntity a WHERE a.recordId = :recordId and a.user  = :user AND a.clientId = :clientId"),
+
+
 })
 
 @Entity
@@ -45,7 +48,7 @@ public class AccessProofDetailEntity {
     protected String proofDraft;
 
     @Column(name = "CREATED_TIMESTAMP")
-    protected Long createdTimestamp;
+    protected Long createdTimestamp = System.currentTimeMillis();;
 
     public String getId() {
         return id;
