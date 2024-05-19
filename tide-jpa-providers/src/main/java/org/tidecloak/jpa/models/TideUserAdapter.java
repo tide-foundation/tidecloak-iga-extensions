@@ -172,6 +172,7 @@ public class TideUserAdapter extends UserAdapter {
                 .getResultList();
 
         if(!entity.isEmpty()){
+            TideUserRoleMappingDraftEntity userRoleMapping = entity.get(0);
             em.createNamedQuery("deleteUserRoleMappingDraftsByRole")
                     .setParameter("roleId", role.getId())
                     .executeUpdate();
@@ -179,6 +180,20 @@ public class TideUserAdapter extends UserAdapter {
                     .setParameter("recordId", entity.get(0).getId())
                     .setParameter("user", getEntity())
                     .executeUpdate();
+
+            RoleModel userRole = realm.getRoleById( userRoleMapping.getRoleId());
+
+            // Remove any composite role proof records, no longer need to keep track of these for this user.
+            if ( userRole.isComposite()){
+                List<AccessProofDetailEntity> proofRecordsToRemove = em.createNamedQuery("FindUserWithCompositeRoleRecord", AccessProofDetailEntity.class)
+                        .setParameter("composite", TideRolesUtil.toRoleEntity(userRole, em))
+                        .setParameter("user", getEntity())
+                        .getResultList();
+
+                proofRecordsToRemove.forEach(record -> em.remove(record));
+
+            }
+
             super.deleteRoleMapping(role);
         } else {
 

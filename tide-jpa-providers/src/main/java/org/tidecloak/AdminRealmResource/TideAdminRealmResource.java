@@ -292,21 +292,22 @@ public class TideAdminRealmResource {
             ActionType action = change.getActionType();
             ChangeSetType type = change.getType();
 
-            if (type == ChangeSetType.USER_ROLE || type == ChangeSetType.COMPOSITE_ROLE) {
-                List<?> mappings = getMappings(em, change, type, action);
-                if (mappings.isEmpty()) continue;
+            List<?> mappings = getMappings(em, change, type, action);
+            if (mappings.isEmpty()) continue;
 
-                Object mapping = mappings.get(0);
-                em.lock(mapping, LockModeType.PESSIMISTIC_WRITE);
+            Object mapping = mappings.get(0);
+            em.lock(mapping, LockModeType.PESSIMISTIC_WRITE);
 
-                if (type == ChangeSetType.USER_ROLE) {
-                    processUserRoleMapping(change, (TideUserRoleMappingDraftEntity) mapping, em, action);
-                } else if (type == ChangeSetType.COMPOSITE_ROLE) {
-                    processCompositeRoleMapping(change, (TideCompositeRoleMappingDraftEntity) mapping, em, action);
-                }
-
-                em.flush();
+            if (type == ChangeSetType.USER_ROLE) {
+                processUserRoleMapping(change, (TideUserRoleMappingDraftEntity) mapping, em, action);
+            } else if (type == ChangeSetType.COMPOSITE_ROLE) {
+                processCompositeRoleMapping(change, (TideCompositeRoleMappingDraftEntity) mapping, em, action);
+            } else if ( type == ChangeSetType.ROLE) {
+                processRole(change, (TideRoleDraftEntity) mapping, em, action);
             }
+
+            em.flush();
+
         }
     }
 
@@ -337,6 +338,13 @@ public class TideAdminRealmResource {
                         .setParameter("deleteStatus", DraftStatus.DRAFT)
                         .setParameter("changesetId", change.getChangeSetId())
                         .setParameter("realmId", realm.getId())
+                        .getResultList();
+            }
+        } else if ( type == ChangeSetType.ROLE){
+            if (action == ActionType.DELETE) {
+                return em.createNamedQuery("getRoleDraftByRoleAndDeleteStatus", TideRoleDraftEntity.class)
+                        .setParameter("deleteStatus", DraftStatus.DRAFT)
+                        .setParameter("changesetId", change.getChangeSetId())
                         .getResultList();
             }
         }
@@ -372,6 +380,23 @@ public class TideAdminRealmResource {
         }
     }
 
+    private void processRole(DraftChangeSet change, TideRoleDraftEntity mapping, EntityManager em, ActionType action) throws NoSuchAlgorithmException, JsonProcessingException {
+        // ROLE types only handle deletes for now
+        if (action == ActionType.DELETE) {
+            mapping.setDeleteStatus(DraftStatus.APPROVED);
+            checkAndUpdateProofRecords(change, mapping, ChangeSetType.ROLE, em);
+
+            // do the removal
+            em.createNamedQuery("deleteProofRecords")
+                            .setParameter("recordId", mapping.getId());
+            em.remove(mapping);
+            RoleModel role = realm.getRoleById(mapping.getRole().getId());
+            realm.removeRole(role);
+
+            // TODO: Check any draft or pending records that is trying to add this now deleted row and also remove
+        }
+    }
+
     private void checkAndUpdateProofRecords(DraftChangeSet change, Object entity, ChangeSetType changeSetType, EntityManager em) throws NoSuchAlgorithmException, JsonProcessingException {
         List<ClientModel> affectedClients = getAffectedClients(entity, changeSetType);
         TideAuthzProofUtil tideAuthzProofUtil = new TideAuthzProofUtil(session, realm, em);
@@ -392,9 +417,13 @@ public class TideAdminRealmResource {
                      role = TideRolesUtil.wrapRoleModel(realm.getRoleById(((TideUserRoleMappingDraftEntity) entity).getRoleId()), session, realm);
                      actionType = ((TideUserRoleMappingDraftEntity) entity).getAction();
                 }
-                if ( entity instanceof  TideCompositeRoleMappingDraftEntity) {
+                else if ( entity instanceof  TideCompositeRoleMappingDraftEntity) {
                     role = TideRolesUtil.wrapRoleModel(realm.getRoleById(((TideCompositeRoleMappingDraftEntity) entity).getChildRole().getId()), session, realm);
                     actionType = ((TideCompositeRoleMappingDraftEntity) entity).getAction();
+                }
+                else if ( entity instanceof  TideRoleDraftEntity ){
+                    role = TideRolesUtil.wrapRoleModel(realm.getRoleById(((TideRoleDraftEntity) entity).getRole().getId()), session, realm);
+                    actionType = ((TideRoleDraftEntity) entity).getAction();
                 }
                 if (proofDetail.getChangesetType() == ChangeSetType.USER_ROLE) {
                     TideUserRoleMappingDraftEntity draftEntity = em.find(TideUserRoleMappingDraftEntity.class, proofDetail.getRecordId());
@@ -402,6 +431,10 @@ public class TideAdminRealmResource {
                 } else if (proofDetail.getChangesetType() == ChangeSetType.COMPOSITE_ROLE) {
                     TideCompositeRoleMappingDraftEntity draftEntity = em.find(TideCompositeRoleMappingDraftEntity.class, proofDetail.getRecordId());
                     handleCompositeRoleMappingDraft(draftEntity, proofDetail, change, role, client, tideAuthzProofUtil, wrappedUser);
+                }
+                else if ( proofDetail.getChangesetType() == ChangeSetType.ROLE) {
+                    TideRoleDraftEntity draftEntity = em.find(TideRoleDraftEntity.class, proofDetail.getRecordId());
+                    handRoleDraft(draftEntity, proofDetail, change, role, client, tideAuthzProofUtil, wrappedUser);
                 }
             }
         }
@@ -416,6 +449,9 @@ public class TideAdminRealmResource {
         } else if (changeSetType == ChangeSetType.COMPOSITE_ROLE) {
             RoleModel role = realm.getRoleById(((TideCompositeRoleMappingDraftEntity) entity).getChildRole().getId());
             clientModel = realm.getClientById(role.getContainerId());
+        } else if (changeSetType == ChangeSetType.ROLE) {
+            RoleModel role = realm.getRoleById(((TideRoleDraftEntity) entity).getRole().getId());
+            clientModel = realm.getClientById(role.getContainerId());
         }
         affectedClients.add(clientModel);
         return affectedClients.stream().distinct().toList();
@@ -429,7 +465,7 @@ public class TideAdminRealmResource {
                     .setParameter("clientId", client.getId())
                     .setLockMode(LockModeType.PESSIMISTIC_WRITE)
                     .getResultList();
-        } else if (changeSetType == ChangeSetType.COMPOSITE_ROLE) {
+        } else if (changeSetType == ChangeSetType.COMPOSITE_ROLE || changeSetType == ChangeSetType.ROLE) {
             return em.createNamedQuery("getProofDetailsByClient", AccessProofDetailEntity.class)
                     .setParameter("clientId", client.getId())
                     .getResultList();
@@ -467,6 +503,32 @@ public class TideAdminRealmResource {
     }
 
     private void handleCompositeRoleMappingDraft(TideCompositeRoleMappingDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSet change, RoleModel roleModel, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser) throws JsonProcessingException, NoSuchAlgorithmException {
+        if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == null)) {
+            return;
+        }
+        if (change.getActionType() == ActionType.DELETE) {
+            if (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == DraftStatus.PENDING) {
+                draftEntity.setDeleteStatus(DraftStatus.DRAFT);
+            } else {
+                draftEntity.setDraftStatus(DraftStatus.DRAFT);
+            }
+            String proof = proofDetail.getProofDraft();
+            Set<RoleModel> rolesToRemove = new HashSet<>();
+            rolesToRemove.add(roleModel);
+            AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, rolesToRemove);
+            String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
+            proofDetail.setProofDraft(updatedProof);
+            return;
+        }
+        draftEntity.setDraftStatus(DraftStatus.DRAFT);
+        String proof = proofDetail.getProofDraft();
+        Set<RoleModel> roleSet = new HashSet<>();
+        roleSet.add(roleModel);
+        String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof, roleSet, draftEntity.getAction());
+        proofDetail.setProofDraft(updatedProof);
+    }
+
+    private void handRoleDraft(TideRoleDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSet change, RoleModel roleModel, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser) throws JsonProcessingException, NoSuchAlgorithmException {
         if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == null)) {
             return;
         }

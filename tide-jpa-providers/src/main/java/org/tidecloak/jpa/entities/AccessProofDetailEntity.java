@@ -11,9 +11,9 @@ import org.tidecloak.interfaces.ChangeSetType;
         @NamedQuery(name="getProofDetailsByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForCompositeByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(
-                name = "AccessProofDetailEntity.findLatestValidByUserAndClientAndType",
-                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user AND a.clientId = :clientId AND a.id NOT IN " +
-                        "(SELECT d.recordId FROM AccessProofDetailDependencyEntity d WHERE d.forkedChangeSetType = :changesetType) " +
+                name = "FindUserWithCompositeRoleRecord",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user AND a.recordId IN " +
+                        "(SELECT d.id FROM TideCompositeRoleMappingDraftEntity d WHERE d.composite = :composite) " +
                         "ORDER BY a.createdTimestamp DESC"
         ),
         @NamedQuery(name="deleteProofRecordForUserAndClient", query="DELETE FROM AccessProofDetailEntity a WHERE a.recordId = :recordId and a.user  = :user AND a.clientId = :clientId"),

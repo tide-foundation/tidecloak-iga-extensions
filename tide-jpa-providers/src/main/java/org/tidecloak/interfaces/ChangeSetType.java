@@ -2,6 +2,7 @@ package org.tidecloak.interfaces;
 import org.tidecloak.jpa.entities.drafting.*;
 
 public enum ChangeSetType {
+    ROLE("GROUP_ROLE_MAPPING_DRAFT", TideRoleDraftEntity.class),
     USER("USER_ENTITY_DRAFT", TideUserDraftEntity.class),
     USER_ROLE("USER_ROLE_MAPPING_DRAFT", TideUserRoleMappingDraftEntity.class),
     GROUP("KEYCLOAK_GROUP_DRAFT", TideGroupDraftEntity.class),

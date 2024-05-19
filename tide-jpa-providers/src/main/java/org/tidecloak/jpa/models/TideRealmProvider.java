@@ -1,5 +1,6 @@
 package org.tidecloak.jpa.models;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
 import jakarta.persistence.criteria.*;
@@ -13,7 +14,13 @@ import org.keycloak.models.jpa.RealmAdapter;
 import org.keycloak.models.jpa.RoleAdapter;
 import org.keycloak.models.jpa.entities.*;
 import org.keycloak.models.utils.KeycloakModelUtils;
+import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
+import org.tidecloak.jpa.utils.TideAuthzProofUtil;
+import org.tidecloak.jpa.utils.TideRolesUtil;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -101,38 +108,61 @@ public class TideRealmProvider extends JpaRealmProvider {
 
     @Override
     public boolean removeRole(RoleModel role) {
-        Optional<ClientModel> optionalClient = Optional.empty();
-        List<UserModel> users = new ArrayList<>();
+        // Deletion of roles need to be first approved
+        // Check if draft record already exists
+        RoleEntity roleEntity = TideRolesUtil.toRoleEntity(role, em);
+        List<TideRoleDraftEntity> drafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                .setParameter("role", roleEntity)
+                .getResultList();
 
-        // Check if role is associated with a ClientModel and collect relevant users
-        if (role.getContainer() instanceof ClientModel client) {
-            optionalClient = Optional.of(client);
-            // Fetching users with a specific role in a given realm.
-            RealmModel realm = client.getRealm();
-            users = session.users().searchForUserStream(realm, new HashMap<>())
-                    .filter(user -> user.hasRole(role))
-                    .collect(Collectors.toList());
-        }
+        if (drafts.isEmpty()){
+            // generate proof drafts for affected users for this change request
+            if (role.getContainer() instanceof  ClientModel) {
+                RealmModel realm = ((ClientModel)role.getContainer()).getRealm();
+                List<UserModel> users =  session.users().getRoleMembersStream(realm, role).toList();
 
-        // Attempt to remove the role
-        boolean isRoleDeleted = super.removeRole(role);
+                // If no users has this role granted, allow for removal of role.
+                if (users.isEmpty()) {
+                    return super.removeRole(role);
 
-        // Regenerate tokens if the role was successfully removed
-        if (isRoleDeleted) {
-            List<UserModel> finalUsers = users;
-            optionalClient.ifPresent(client -> {
-                ProofGeneration proofGeneration = new ProofGeneration(session, client.getRealm(), em);
-                for (UserModel user : finalUsers) {
-                    try {
-                        proofGeneration.generateProofAndSaveToTable(user.getId(), client);
-
-                    } catch (Exception e) {
-                        System.err.println("Failed to regenerate token for user: " + user.getId() + e);
-                    }
                 }
-            });
+                TideRoleDraftEntity newDeletionRequest = new TideRoleDraftEntity();
+                newDeletionRequest.setId(KeycloakModelUtils.generateId());
+                newDeletionRequest.setRole(roleEntity);
+                newDeletionRequest.setDeleteStatus(DraftStatus.DRAFT);
+                em.persist(newDeletionRequest);
+
+                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+                TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
+                clientList.forEach(client -> {
+                    users.forEach(user -> {
+                        UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
+                        Set<RoleModel> roleMappings = new HashSet<>();
+                        roleMappings.add(role); // this is the new role we are removing
+
+                        try {
+                            util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, role.getId(), ChangeSetType.ROLE, ActionType.DELETE);
+                        } catch (JsonProcessingException e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
+                });
+
+            }
+            em.flush();
+            // Can we return a better message here ?
+            // e.g. change request created
+            return true;
         }
-        return isRoleDeleted;
+
+        // Only one record
+        TideRoleDraftEntity draftRecord = drafts.get(0);
+        if ( draftRecord.getDeleteStatus() == DraftStatus.APPROVED) {
+            return super.removeRole(role);
+        }
+
+        // Can we return a better message here ?
+        return true;
     }
 
     @Override

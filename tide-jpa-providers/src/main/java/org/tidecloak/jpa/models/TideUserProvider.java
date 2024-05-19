@@ -70,15 +70,6 @@ public class TideUserProvider extends JpaUserProvider {
 
         em.flush();
 
-//        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-//        Stream<ClientModel> clientModelStream = realm.getClientsStream();
-//
-//        // Create initial proof for default clients
-//        clientModelStream.forEach(client -> {
-//            proofGeneration.generateProofAndSaveToTable(user.getId(), client);
-//        });
-
-        // Return our TideUserAdapter here. This ensures any further calls uses our extensions.
         return new TideUserAdapter(session, realm, em, userEntity);
     }
 
@@ -104,20 +95,20 @@ public class TideUserProvider extends JpaUserProvider {
         em.flush();
     }
 
-    @Override
-    public void preRemove(RealmModel realm, GroupModel group){
-
-        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-
-        // get effective roles
-        List<ClientRole> effectiveGroupClientRoles = proofGeneration.getEffectiveGroupClientRoles(group);
-        List<UserModel> affectedUsers = proofGeneration.getAllGroupMembersIncludingSubgroups(realm, group);
-
-        super.preRemove(realm, group);
-
-        proofGeneration.regenerateProofsForMembers(effectiveGroupClientRoles, affectedUsers);
-
-    }
+//    @Override
+//    public void preRemove(RealmModel realm, GroupModel group){
+//
+//        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
+//
+//        // get effective roles
+//        //List<ClientRole> effectiveGroupClientRoles = proofGeneration.getEffectiveGroupClientRoles(group);
+//        //List<UserModel> affectedUsers = proofGeneration.getAllGroupMembersIncludingSubgroups(realm, group);
+//
+//        super.preRemove(realm, group);
+//
+//        //proofGeneration.regenerateProofsForMembers(effectiveGroupClientRoles, affectedUsers);
+//
+//    }
 
     /**
      *

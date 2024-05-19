@@ -52,7 +52,9 @@
                 <constraints nullable="true"/>
             </column>
         </createTable>
+
         <!-- TABLES FOR DRAFTING PURPOSES -->
+
         <!-- For new users added to realm-->
         <createTable tableName="USER_ENTITY_DRAFT">
             <column name="ID" type="VARCHAR(36)">
@@ -167,6 +169,28 @@
             </column>
             <column name="CREATED_TIMESTAMP" type="BIGINT"/>
         </createTable>
+        <!-- For tracking role deletion from client\realm -->
+        <createTable tableName="ROLE_DRAFT">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ROLE" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="DRAFT_STATUS" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ACTION_TYPE" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="DELETE_STATUS" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="TIMESTAMP" type="BIGINT"/>
+        </createTable>
+
+
+
         <addPrimaryKey columnNames="ROLE_ID, USER_ID, DRAFT_STATUS" constraintName="CONSTRAINT_USER_ROLE_MAPPING_DRAFT" tableName="USER_ROLE_MAPPING_DRAFT"/>
         <addUniqueConstraint columnNames="USER_ID,CLIENT_ID" constraintName="client_access_proof_16042024" tableName="USER_CLIENT_ACCESS_PROOF"/>
         <addUniqueConstraint columnNames="RECORD_ID,CHANGE_SET_TYPE" constraintName="FORKED_TABLE" tableName="ACCESS_PROOF_DETAIL_DEPENDENCY"/>
