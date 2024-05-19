@@ -287,7 +287,6 @@ public final class TideAuthzProofUtil {
         Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
         Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, clientModel, clientModel.getClientScopes(false).values().stream());
         activeRoles.forEach(x -> System.out.println(" this is the active role mappings " + x.getName()));
-        newRoleMappings.forEach(x -> System.out.println(" this is the new role mappings " + x.getName()));
 
         AccessDetails accessDetails = sortAccessRoles(requestedAccess);
 
@@ -296,9 +295,6 @@ public final class TideAuthzProofUtil {
 
         JsonNode currentProofNode = objectMapper.valueToTree(currentProof);
         JsonNode oldProofNode = objectMapper.readTree(oldProofDetails);
-
-        System.out.println("CURRENT PROOF + ROLE " + objectMapper.writeValueAsString(currentProofNode));
-        System.out.println("OLD PROOF " + oldProofDetails);
 
         return cleanProofDraft(mergeJsonNodes(currentProofNode, oldProofNode));
 

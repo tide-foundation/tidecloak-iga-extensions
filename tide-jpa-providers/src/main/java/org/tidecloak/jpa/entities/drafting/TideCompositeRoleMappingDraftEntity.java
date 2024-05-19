@@ -15,11 +15,23 @@ import org.tidecloak.interfaces.DraftStatus;
         @NamedQuery(name="filterChildRoleByStatusAndParent", query="select r.childRole from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.draftStatus = :draftStatus"),
         @NamedQuery(name="getCompositeRoleMappingDraft", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole"),
         @NamedQuery(name="getCompositeRoleMappingDraftByStatus", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole and r.draftStatus = :draftStatus"),
+        @NamedQuery(name="getCompositeRoleMappingDraftByStatusAndDeleteStatus", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole and r.draftStatus = :draftStatus AND r.deleteStatus = :deleteStatus"),
+
         @NamedQuery(name="deleteCompositeRoleMapping", query="delete from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole"),
         @NamedQuery(
                 name = "getRecordIdByChildAndComposite",
                 query = "SELECT t FROM TideCompositeRoleMappingDraftEntity t WHERE t.composite = :composite and t.childRole = :childRole "
+        ),
+        @NamedQuery(
+                name="removeDraftRequestsOnRemovalOfRole",
+                query="delete from TideCompositeRoleMappingDraftEntity r where r.composite = :role or r.childRole = :role"
+        ),
+        @NamedQuery(
+                name="selectIdsForRemoval",
+                query="select r.id from TideCompositeRoleMappingDraftEntity r where r.composite = :role or r.childRole = :role"
         )
+
+
 })
 
 @Entity

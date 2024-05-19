@@ -7,6 +7,7 @@ import jakarta.persistence.criteria.*;
 import org.keycloak.admin.ui.rest.model.ClientRole;
 import org.keycloak.client.clienttype.ClientTypeManager;
 import org.keycloak.common.Profile;
+import org.keycloak.connections.jpa.util.JpaUtils;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.JpaRealmProvider;
 
@@ -106,16 +107,29 @@ public class TideRealmProvider extends JpaRealmProvider {
         return resource;
     }
 
+
     @Override
     public boolean removeRole(RoleModel role) {
         // Deletion of roles need to be first approved
         // Check if draft record already exists
         RoleEntity roleEntity = TideRolesUtil.toRoleEntity(role, em);
-        List<TideRoleDraftEntity> drafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+
+        List<TideRoleDraftEntity> drafts = em.createNamedQuery("getRoleDraftByRoleEntityAndDeleteStatus", TideRoleDraftEntity.class)
                 .setParameter("role", roleEntity)
+                .setParameter("deleteStatus", DraftStatus.APPROVED)
                 .getResultList();
 
-        if (drafts.isEmpty()){
+        if (!drafts.isEmpty()){
+            TideRoleDraftEntity draft = drafts.get(0);
+            em.remove(draft);
+            em.flush();
+
+
+            return super.removeRole(role);
+        }
+
+        else {
+            System.out.println("EMPTY ROLE DELETE DRAFT");
             // generate proof drafts for affected users for this change request
             if (role.getContainer() instanceof  ClientModel) {
                 RealmModel realm = ((ClientModel)role.getContainer()).getRealm();
@@ -149,20 +163,13 @@ public class TideRealmProvider extends JpaRealmProvider {
                 });
 
             }
+
             em.flush();
             // Can we return a better message here ?
             // e.g. change request created
             return true;
         }
 
-        // Only one record
-        TideRoleDraftEntity draftRecord = drafts.get(0);
-        if ( draftRecord.getDeleteStatus() == DraftStatus.APPROVED) {
-            return super.removeRole(role);
-        }
-
-        // Can we return a better message here ?
-        return true;
     }
 
     @Override

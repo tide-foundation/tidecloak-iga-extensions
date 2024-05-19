@@ -386,14 +386,41 @@ public class TideAdminRealmResource {
             mapping.setDeleteStatus(DraftStatus.APPROVED);
             checkAndUpdateProofRecords(change, mapping, ChangeSetType.ROLE, em);
 
-            // do the removal
-            em.createNamedQuery("deleteProofRecords")
-                            .setParameter("recordId", mapping.getId());
-            em.remove(mapping);
             RoleModel role = realm.getRoleById(mapping.getRole().getId());
-            realm.removeRole(role);
 
-            // TODO: Check any draft or pending records that is trying to add this now deleted row and also remove
+            realm.removeRole(role);
+            // After this role record has been removed, we go through and check the other change requests
+            // check user role table for any pending/draft requests for this role
+            // check the access proof records for this record id
+
+            System.out.println("REMOVING THIS REST");
+            List<String> userRoleMappingIds = em.createNamedQuery("getUserRoleMappingDraftsByRole", String.class)
+                    .setParameter("roleId", mapping.getRole().getId())
+                    .getResultList();
+
+            List<String> recordsToRemove = new ArrayList<>(userRoleMappingIds);
+
+            em.createNamedQuery("deleteUserRoleMappingDraftsByRole")
+                    .setParameter("roleId", mapping.getRole().getId())
+                    .executeUpdate();
+
+            // check composite role table for any pending/draft requests for role
+            // check the access proof records for this record id
+            List<String> compositeRoleIds = em.createNamedQuery("selectIdsForRemoval", String.class)
+                    .setParameter("role", mapping.getRole())
+                    .getResultList();
+            recordsToRemove.addAll(compositeRoleIds);
+            recordsToRemove.add(mapping.getId());
+
+            em.createNamedQuery("removeDraftRequestsOnRemovalOfRole")
+                    .setParameter("role", mapping.getRole())
+                    .executeUpdate();
+
+            recordsToRemove.forEach(id -> {
+                em.createNamedQuery("deleteProofRecords")
+                        .setParameter("recordId", id)
+                        .executeUpdate();
+            });
         }
     }
 

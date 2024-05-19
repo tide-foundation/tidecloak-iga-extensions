@@ -36,14 +36,19 @@ public class TideRoleAdapter extends RoleAdapter {
     public void removeCompositeRole(RoleModel roleModel) {
 
         RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
-        // Check if role mapping is a draft
+        // Check if composite role is approved already
         List<TideCompositeRoleMappingDraftEntity> entity =  em.createNamedQuery("getCompositeRoleMappingDraftByStatus", TideCompositeRoleMappingDraftEntity.class)
                 .setParameter("composite", getEntity())
                 .setParameter("childRole", toRoleEntity(role))
-                .setParameter("draftStatus", DraftStatus.DRAFT)
+                .setParameter("draftStatus", DraftStatus.APPROVED)
                 .getResultList();
 
-        if(!entity.isEmpty()){
+        if (entity.isEmpty()) {
+            throw new IllegalStateException("No approved draft found for the specified composite and child role.");
+        }
+        TideCompositeRoleMappingDraftEntity approvedEntity = entity.get(0);
+
+        if(approvedEntity.getDeleteStatus() == DraftStatus.APPROVED) {
             em.createNamedQuery("deleteCompositeRoleMapping")
                     .setParameter("composite", getEntity())
                     .setParameter("childRole", toRoleEntity(role))

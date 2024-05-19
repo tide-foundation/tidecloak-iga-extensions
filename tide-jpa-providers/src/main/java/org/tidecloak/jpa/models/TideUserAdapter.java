@@ -168,11 +168,15 @@ public class TideUserAdapter extends UserAdapter {
         List<TideUserRoleMappingDraftEntity> entity =  em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
                 .setParameter("user", getEntity())
                 .setParameter("roleId", role.getId())
-                .setParameter("draftStatus", DraftStatus.DRAFT)
+                .setParameter("draftStatus", DraftStatus.APPROVED)
                 .getResultList();
 
-        if(!entity.isEmpty()){
-            TideUserRoleMappingDraftEntity userRoleMapping = entity.get(0);
+        if ( entity.isEmpty()){
+            throw new IllegalStateException("No approved draft found for this role.");
+        }
+
+        TideUserRoleMappingDraftEntity approvedEntity = entity.get(0);
+        if(approvedEntity.getDeleteStatus() == DraftStatus.APPROVED){
             em.createNamedQuery("deleteUserRoleMappingDraftsByRole")
                     .setParameter("roleId", role.getId())
                     .executeUpdate();
@@ -181,7 +185,7 @@ public class TideUserAdapter extends UserAdapter {
                     .setParameter("user", getEntity())
                     .executeUpdate();
 
-            RoleModel userRole = realm.getRoleById( userRoleMapping.getRoleId());
+            RoleModel userRole = realm.getRoleById( approvedEntity.getRoleId());
 
             // Remove any composite role proof records, no longer need to keep track of these for this user.
             if ( userRole.isComposite()){
