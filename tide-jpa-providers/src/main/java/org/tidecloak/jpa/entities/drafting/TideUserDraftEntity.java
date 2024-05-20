@@ -8,6 +8,7 @@ import org.tidecloak.interfaces.DraftStatus;
 
 
 @NamedQueries({
+        @NamedQuery(name="getTideUserDraftEntityByDraftStatusAndId", query="SELECT t FROM TideUserDraftEntity t WHERE t.id = :changesetId AND t.draftStatus = :draftStatus"),
         @NamedQuery(name="getTideUserDraftEntity", query="SELECT t FROM TideUserDraftEntity t WHERE t.user = :user"),
         @NamedQuery(name="deleteUserDrafts", query="delete from TideUserDraftEntity m where m.user = :user"),
 })
@@ -33,8 +34,12 @@ public class TideUserDraftEntity {
     @Column(name = "ACTION_TYPE")
     private ActionType actionType = ActionType.CREATE; // Default to NONE
 
-    @Column(name = "CREATED_TIMESTAMP")
-    protected Long createdTimestamp = System.currentTimeMillis();
+    @Enumerated(EnumType.STRING)
+    @Column(name = "DELETE_STATUS")
+    private DraftStatus deleteStatus;
+
+    @Column(name = "TIMESTAMP")
+    protected Long timestamp = System.currentTimeMillis();
 
     public String getId() {
         return id;
@@ -69,12 +74,20 @@ public class TideUserDraftEntity {
         this.actionType = actionType;
     }
 
-    public Long getCreatedTimestamp() {
-        return createdTimestamp;
+    public DraftStatus getDeleteStatus() {
+        return deleteStatus;
     }
 
-    public void setCreatedTimestamp(Long timestamp) {
-        createdTimestamp = timestamp;
+    public void setDeleteStatus(DraftStatus deleteStatus) {
+        this.deleteStatus = deleteStatus;
+    }
+
+    public Long getTimestamp() {
+        return timestamp;
+    }
+
+    public void setTimestamp(Long timestamp) {
+        this.timestamp = timestamp;
     }
 
 }

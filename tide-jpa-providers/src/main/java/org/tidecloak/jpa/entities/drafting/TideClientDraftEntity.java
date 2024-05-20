@@ -6,6 +6,12 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
 
+
+@NamedQueries({
+        @NamedQuery(name="getClientDraftByIdAndDraftStatus", query="SELECT t FROM TideClientDraftEntity t WHERE t.id = :changesetId AND t.draftStatus = :draftStatus"),
+})
+
+
 @Entity
 @Table(name="CLIENT_DRAFT")
 public class TideClientDraftEntity {
