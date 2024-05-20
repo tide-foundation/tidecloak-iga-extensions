@@ -1,15 +1,21 @@
 package org.tidecloak.jpa.models;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.persistence.EntityManager;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.ClientAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
+import org.keycloak.models.utils.KeycloakModelUtils;
+import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
+import org.tidecloak.jpa.utils.TideAuthzProofUtil;
+import org.tidecloak.jpa.utils.TideRolesUtil;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Stream;
 
 public class TideClientAdapter extends ClientAdapter {
@@ -20,23 +26,52 @@ public class TideClientAdapter extends ClientAdapter {
 
     @Override
     public void setFullScopeAllowed(boolean value) {
+        System.out.println("HELLO I AM HERE IN SETTING FULLSCOPE");
         super.setFullScopeAllowed(value);
-        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-        ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
-        Stream<RoleModel> rolesStream = client.getRolesStream();
+        TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
+        Set<RoleModel> roleMappings = new HashSet<>();
 
-        // get all users who have roles for this client.
-        List<UserModel> usersInClient = new ArrayList<>();
-        rolesStream.forEach(role -> {
-            session.users().getRoleMembersStream(realm, role).forEach(user -> {
-                if (!usersInClient.contains(user)) {
-                    usersInClient.add(user);
+        TideClientDraftEntity clientDraftEntity = new TideClientDraftEntity();
+        clientDraftEntity.setId(KeycloakModelUtils.generateId());
+        clientDraftEntity.setClient(entity);
+        clientDraftEntity.setDraftStatus(DraftStatus.DRAFT);
+        clientDraftEntity.setAction(ActionType.CREATE);
+        em.persist(clientDraftEntity);
+        em.flush();
+
+        if(value){
+            Stream<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>());
+
+            usersInRealm.forEach(user -> {
+                UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
+
+                try {
+                    util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), wrappedUser, roleMappings, clientDraftEntity.getId(), ChangeSetType.CLIENT, ActionType.CREATE);
+                } catch (JsonProcessingException e) {
+                    throw new RuntimeException(e);
                 }
             });
-        });
+        } else {
+            ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
+            Stream<RoleModel> rolesStream = client.getRolesStream();
+            List<UserModel> usersInClient = new ArrayList<>();
+            rolesStream.forEach(role -> {
+                session.users().getRoleMembersStream(realm, role).forEach(user -> {
+                    if (!usersInClient.contains(user)) {
+                        usersInClient.add(user);
+                    }
+                });
+            });
 
-        // Regenerate the proof for this client when scope is updated true or false.
-        proofGeneration.regenerateProofForClient(client, usersInClient);
+            usersInClient.forEach(user -> {
+                try {
+                    UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
+                    util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), wrappedUser, roleMappings, clientDraftEntity.getId(), ChangeSetType.CLIENT, ActionType.CREATE);
+                } catch (JsonProcessingException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        }
     }
 
     @Override

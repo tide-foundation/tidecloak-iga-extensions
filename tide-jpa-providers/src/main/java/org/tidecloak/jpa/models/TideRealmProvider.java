@@ -7,6 +7,7 @@ import jakarta.persistence.criteria.*;
 import org.keycloak.admin.ui.rest.model.ClientRole;
 import org.keycloak.client.clienttype.ClientTypeManager;
 import org.keycloak.common.Profile;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.connections.jpa.util.JpaUtils;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.JpaRealmProvider;
@@ -18,6 +19,7 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
@@ -75,38 +77,10 @@ public class TideRealmProvider extends JpaRealmProvider {
 
     @Override
     public ClientModel addClient(RealmModel realm, String id, String clientId) {
-        ClientModel resource;
-
-        if (id == null) {
-            id = KeycloakModelUtils.generateId();
-        }
-
-        if (clientId == null) {
-            clientId = id;
-        }
-
-        logger.tracef("addClient(%s, %s, %s)%s", realm, id, clientId, getShortStackTrace());
-
-        ClientEntity entity = new ClientEntity();
-        entity.setId(id);
-        entity.setClientId(clientId);
-        entity.setEnabled(true);
-        entity.setStandardFlowEnabled(true);
-        entity.setRealmId(realm.getId());
-        em.persist(entity);
-
-        resource = toClientModel(realm, entity);
-
-//        Stream<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>());
-//        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-//        usersInRealm.forEach(user -> {
-//            proofGeneration.generateProofAndSaveToTable(user.getId(), resource);
-//        });
-
-        session.getKeycloakSessionFactory().publish((ClientModel.ClientCreationEvent) () -> resource);
-        return resource;
+        ClientModel clientModel = super.addClient(realm, id, clientId);
+        ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
+        return new TideClientAdapter(realm, em, session, clientEntity);
     }
-
 
     @Override
     public boolean removeRole(RoleModel role) {

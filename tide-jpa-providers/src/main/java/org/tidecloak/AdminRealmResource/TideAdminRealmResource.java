@@ -19,8 +19,10 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.keycloak.admin.ui.rest.model.ClientRole;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.RoleUtils;
 import org.keycloak.representations.AccessToken;
 import org.keycloak.representations.idm.UserRepresentation;
@@ -310,6 +312,39 @@ public class TideAdminRealmResource {
         }
 
         return changes;
+    }
+
+    @GET
+    @Path("/clients/{client-id}/generate-proofs")
+    public void generateProofsAfterClientCreation(@PathParam("client-id") String clientId) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        ClientEntity client = em.createNamedQuery("getClientById", ClientEntity.class)
+                .setParameter("id", clientId)
+                .setParameter("realm", realm.getId())
+                .getSingleResult();
+
+        if(client.isFullScopeAllowed()) {
+            TideClientDraftEntity clientDraftEntity = new TideClientDraftEntity();
+            clientDraftEntity.setId(KeycloakModelUtils.generateId());
+            clientDraftEntity.setClient(client);
+            clientDraftEntity.setDraftStatus(DraftStatus.DRAFT);
+            clientDraftEntity.setAction(ActionType.CREATE);
+            em.persist(clientDraftEntity);
+            em.flush();
+
+            Stream<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>());
+            TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
+
+            usersInRealm.forEach(user -> {
+                UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
+                Set<RoleModel> roleMappings = new HashSet<>();
+                try {
+                    util.generateAndSaveProofDraft(realm.getClientById(clientId), wrappedUser, roleMappings, clientDraftEntity.getId(), ChangeSetType.CLIENT, ActionType.CREATE);
+                } catch (JsonProcessingException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        }
     }
 
 

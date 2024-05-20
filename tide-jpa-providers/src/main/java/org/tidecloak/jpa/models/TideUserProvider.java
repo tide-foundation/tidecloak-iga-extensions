@@ -1,5 +1,6 @@
 package org.tidecloak.jpa.models;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.TypedQuery;
@@ -12,13 +13,18 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.storage.jpa.JpaHashUtils;
 
 import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.entities.drafting.TideUserDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
+import org.tidecloak.jpa.utils.TideAuthzProofUtil;
+import org.tidecloak.jpa.utils.TideRolesUtil;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 import static org.keycloak.models.jpa.PaginationUtils.paginateQuery;
@@ -35,30 +41,20 @@ public class TideUserProvider extends JpaUserProvider {
 
     @Override
     public UserModel addUser(RealmModel realm, String username) {
-        boolean isInitialUser = false;
-
-        // Check if initial user
-        RealmModel adminRealm = session.realms().getRealmByName(Config.getAdminRealm());
-        if (realm == adminRealm){
-            if (session.users().getUsersCount(realm) == 0 ){
-                isInitialUser = true;
-            }
-        }
-
         // Call the existing functionality from the superclass
         UserModel user = super.addUser(realm, username);
+        UserEntity userEntity = em.getReference(UserEntity.class, user.getId());
 
         // Add draft record for user
-        DraftStatus draftStatus = isInitialUser ? DraftStatus.APPROVED : DraftStatus.DRAFT;
-        UserEntity userEntity = em.getReference(UserEntity.class, user.getId());
-        var draftUser = new TideUserDraftEntity();
+        TideUserDraftEntity draftUser = new TideUserDraftEntity();
         draftUser.setId(KeycloakModelUtils.generateId());
         draftUser.setUser(userEntity);
-        draftUser.setDraftStatus(draftStatus);
+        draftUser.setDraftStatus(DraftStatus.DRAFT);
         draftUser.setAction(ActionType.CREATE);
         em.persist(draftUser);
 
         // Add draft record for user groups. DEFAULT ROLES ARE APPROVED BY DEFAULT FOR NOW
+        // TODO: have a step here that goes and gets it signed by VVK automatically and save final proof to DB
         RoleModel defaultRole =  realm.getDefaultRole();
         var draftDefaultRoleUserRole = new TideUserRoleMappingDraftEntity();
         draftDefaultRoleUserRole.setId(KeycloakModelUtils.generateId());
@@ -67,6 +63,19 @@ public class TideUserProvider extends JpaUserProvider {
         draftDefaultRoleUserRole.setAction(ActionType.CREATE);
         draftDefaultRoleUserRole.setDraftStatus(DraftStatus.APPROVED);
         em.persist(draftDefaultRoleUserRole);
+
+        // do we care about previously approved client full scopes ?
+        // We generate proof requests for all full-scoped enabled clients for this client
+        TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
+        UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
+        Set<RoleModel> roleMappings = new HashSet<>();
+        realm.getClientsStream().forEach(client -> {
+            try {
+                util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUser.getId(), ChangeSetType.USER, ActionType.CREATE);
+            } catch (JsonProcessingException e) {
+                throw new RuntimeException(e);
+            }
+        });
 
         em.flush();
 

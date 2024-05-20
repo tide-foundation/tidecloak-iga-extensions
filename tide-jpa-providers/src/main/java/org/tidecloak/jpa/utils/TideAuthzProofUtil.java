@@ -123,17 +123,18 @@ public final class TideAuthzProofUtil {
     public void generateAndSaveProofDraft(ClientModel clientModel, UserModel userModel, Set<RoleModel> newRoleMappings, String recordId, ChangeSetType type, ActionType actionType) throws JsonProcessingException {
         // Generate AccessToken based on the client and user information with openid scope
         AccessToken proof = generateAccessToken(clientModel, userModel, "openid");
-
+        AccessDetails accessDetails = null;
+        UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
         // Filter and expand roles based on the provided mappings; only approved roles are considered
 
-        Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
-        Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, clientModel, clientModel.getClientScopes(false).values().stream());
-        UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
+        if (!newRoleMappings.isEmpty()){
+            Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
+            Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, clientModel, clientModel.getClientScopes(false).values().stream());
+            accessDetails = sortAccessRoles(requestedAccess);
 
-        AccessDetails accessDetails = sortAccessRoles(requestedAccess);
-
-        // Apply the filtered roles to the AccessToken
-        setTokenClaims(proof, accessDetails, actionType);
+            // Apply the filtered roles to the AccessToken
+            setTokenClaims(proof, accessDetails, actionType);
+        }
 
         JsonNode proofDraftNode = objectMapper.valueToTree(proof);
 

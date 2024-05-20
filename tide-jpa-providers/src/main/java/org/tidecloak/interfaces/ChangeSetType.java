@@ -8,7 +8,8 @@ public enum ChangeSetType {
     GROUP("KEYCLOAK_GROUP_DRAFT", TideGroupDraftEntity.class),
     USER_GROUP_MEMBERSHIP("USER_GROUP_MEMBERSHIP_DRAFT", TideUserGroupMembershipEntity.class),
     COMPOSITE_ROLE("COMPOSITE_ROLE_MAPPING_DRAFT", TideCompositeRoleMappingDraftEntity.class),
-    GROUP_ROLE("GROUP_ROLE_MAPPING_DRAFT", TideGroupDraftEntity.class);
+    GROUP_ROLE("GROUP_ROLE_MAPPING_DRAFT", TideGroupDraftEntity.class),
+    CLIENT("CLIENT_DRAFT", TideClientDraftEntity.class);
 
     private final String tableName;
     private final Class<?> entityClass;
