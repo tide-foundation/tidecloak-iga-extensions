@@ -23,7 +23,8 @@ export type AccessType =
   | "manage-clients"
   | "query-groups"
   | "anyone"
-  | AccessTypeFunc;
+  | AccessTypeFunc
+  | "query-change-requests";
 
 export default interface WhoAmIRepresentation {
   userId: string;

@@ -197,15 +197,23 @@ public class TideAdminRealmResource {
         }
     }
 
-
     @GET
-    @Path("change-set/requests")
-    public List<RequestedChanges> getRequestedChanges() {
+    @Path("change-set/users/requests")
+    public List<RequestedChanges> getRequestedChangesForUsers() {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        List<RequestedChanges> requestedChangesList = new ArrayList<>();
 
         // Handling different types of data fetches
-        requestedChangesList.addAll(processUserRoleMappings(em));
+        return new ArrayList<>(processUserRoleMappings(em));
+    }
+
+
+
+    @GET
+    @Path("change-set/roles/requests")
+    public List<RequestedChanges> getRequestedChanges() {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<RequestedChanges> requestedChangesList = new ArrayList<>(processRoleMappings(em));
+        // Handling different types of data fetches
         requestedChangesList.addAll(processCompositeRoleMappings(em));
 
         return requestedChangesList;
@@ -237,7 +245,7 @@ public class TideAdminRealmResource {
             });
 
 
-            requestChange.setDescription(String.format("Granting %s access in %s to user\\s: ", role.getName(), clientModel.getClientId()));
+            requestChange.setDescription(String.format("Granting \"%s\" access in \"%s\" to user\\s: ", role.getName(), clientModel.getClientId()));
 
             changes.add(requestChange);
         }
@@ -267,13 +275,43 @@ public class TideAdminRealmResource {
                 requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getName()));
             });
             ClientModel clientModel = realm.getClientById(m.getComposite().getClientId());
-            requestChange.setDescription(String.format("Adding %s access to %s in %s", m.getChildRole().getName(), m.getComposite().getName(), clientModel.getClientId()));
+            requestChange.setDescription(String.format("Adding \"%s\" access to \"%s\" in \"%s\"", m.getChildRole().getName(), m.getComposite().getName(), clientModel.getClientId()));
 
             changes.add(requestChange);
         }
 
         return changes;
     }
+
+    private List<RequestedChanges> processRoleMappings(EntityManager em) {
+        List<RequestedChanges> changes = new ArrayList<>();
+        List<TideRoleDraftEntity> mappings = em.createNamedQuery("getAllRolesByStatusAndRealm", TideRoleDraftEntity.class)
+                .setParameter("deleteStatus", DraftStatus.DRAFT)
+                .setParameter("realmId", realm.getId())
+                .getResultList();
+
+        for (TideRoleDraftEntity m : mappings) {
+            if (!m.getRole().isClientRole()){
+                continue;
+            }
+            List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", m.getId())
+                    .setLockMode(LockModeType.PESSIMISTIC_WRITE)
+                    .getResultList();
+
+            RequestedChanges requestChange = new RequestedChanges( ChangeSetType.COMPOSITE_ROLE, RequestType.USER, m.getAction(), m.getId(), new ArrayList<>(), "");
+            proofs.forEach(p -> {
+                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getName()));
+            });
+            ClientModel clientModel = realm.getClientById(m.getRole().getClientId());
+            requestChange.setDescription(String.format("Deleting  \"%s\" access in \"%s\"", m.getRole().getName(), clientModel.getClientId()));
+
+            changes.add(requestChange);
+        }
+
+        return changes;
+    }
+
 
     // This should be called after the drafts have been checked by the orks and the proof has been signed by the vvk.
     // Calling this method after getting the approval from the orks will update keycloak database for these records to active.
@@ -384,6 +422,8 @@ public class TideAdminRealmResource {
         // ROLE types only handle deletes for now
         if (action == ActionType.DELETE) {
             mapping.setDeleteStatus(DraftStatus.APPROVED);
+            em.persist(mapping);
+            em.flush();
             checkAndUpdateProofRecords(change, mapping, ChangeSetType.ROLE, em);
 
             RoleModel role = realm.getRoleById(mapping.getRole().getId());
@@ -394,6 +434,10 @@ public class TideAdminRealmResource {
             // check the access proof records for this record id
 
             System.out.println("REMOVING THIS REST");
+            System.out.println(mapping.getId());
+            System.out.println(mapping.getRole().getId());
+            System.out.println(mapping.getRole().getName());
+
             List<String> userRoleMappingIds = em.createNamedQuery("getUserRoleMappingDraftsByRole", String.class)
                     .setParameter("roleId", mapping.getRole().getId())
                     .getResultList();
@@ -421,6 +465,8 @@ public class TideAdminRealmResource {
                         .setParameter("recordId", id)
                         .executeUpdate();
             });
+
+            System.out.println(mapping.getId());
         }
     }
 

@@ -54,9 +54,13 @@ public getRoleDraftStatus = this.makeRequest<
   urlParamKeys: ["parentId", "childId"],
 });
 
-public getRequestedChanges = this.makeRequest<void, RequestedChanges[]>({
+public getRequestedChangesForUsers = this.makeRequest<void, RequestedChanges[]>({
   method: "GET",
-  path: "/change-set/requests",
+  path: "/change-set/users/requests",
+});
+public getRequestedChangesForRoles = this.makeRequest<void, RequestedChanges[]>({
+  method: "GET",
+  path: "/change-set/roles/requests",
 });
 
   constructor(client: KeycloakAdminClient) {

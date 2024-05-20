@@ -9,7 +9,9 @@ import org.tidecloak.interfaces.DraftStatus;
         @NamedQuery(name="getRoleDraftByRole", query="SELECT r FROM TideRoleDraftEntity r WHERE r.role = :role"),
         @NamedQuery(name="getRoleDraftByRoleEntityAndDeleteStatus", query="SELECT r FROM TideRoleDraftEntity r WHERE r.role = :role And r.deleteStatus = :deleteStatus"),
         @NamedQuery(name="getRoleDraftByRoleAndDeleteStatus", query="SELECT r FROM TideRoleDraftEntity r WHERE r.id = :changesetId AND r.deleteStatus = :deleteStatus"),
-        @NamedQuery(name="DeleteRoleDraftByRole", query="DELETE from TideRoleDraftEntity r WHERE r.id = :id")
+        @NamedQuery(name="DeleteRoleDraftByRole", query="DELETE from TideRoleDraftEntity r WHERE r.id = :id"),
+        @NamedQuery(name="getAllRolesByStatusAndRealm", query="select r from TideRoleDraftEntity r where r.deleteStatus = :deleteStatus and r.role IN ( SELECT u from RoleEntity u where u.realmId =:realmId ) "),
+
 
 })
 

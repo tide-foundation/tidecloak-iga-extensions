@@ -1,9 +1,10 @@
 import type { AppRouteObject } from "../routes";
-import { ChangeRequestsRoute } from "./routes/ChangeRequests";
+import { ChangeRequestsRoute, ChangeRequestsRouteWithTab } from "./routes/ChangeRequests";
 
 
 const routes: AppRouteObject[] = [
-  ChangeRequestsRoute
+  ChangeRequestsRoute,
+  ChangeRequestsRouteWithTab
 ];
 
 export default routes;
