@@ -13,6 +13,7 @@ import jakarta.persistence.criteria.Root;
 import org.keycloak.admin.ui.rest.model.ClientRole;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.UserAdapter;
+import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.jpa.entities.UserGroupMembershipEntity;
@@ -116,7 +117,11 @@ public class TideUserAdapter extends UserAdapter {
                 Set<RoleModel> roleMappings = new HashSet<>();
                 roleMappings.add(role);
                 // save the record for the user role grant
-                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).map(client -> {
+                            ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
+                            return new TideClientAdapter(realm, em, session, clientEntity);
+                        })
+                        .filter(ClientModel::isFullScopeAllowed).toList());
                 UserModel user = session.users().getUserById(realm, getEntity().getId());
                 UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
@@ -213,7 +218,11 @@ public class TideUserAdapter extends UserAdapter {
 
             // Generate a proof draft for this changeset and any affected clients with full-scope enabled. These need to be signed.
             if (role.getContainer() instanceof ClientModel) {
-                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).map(client -> {
+                            ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
+                            return new TideClientAdapter(realm, em, session, clientEntity);
+                        })
+                        .filter(ClientModel::isFullScopeAllowed).toList());
                 UserModel user = session.users().getUserById(realm, getEntity().getId());
                 UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);

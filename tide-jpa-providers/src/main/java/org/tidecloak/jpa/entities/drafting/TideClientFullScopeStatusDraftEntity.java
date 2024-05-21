@@ -2,19 +2,20 @@ package org.tidecloak.jpa.entities.drafting;
 
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
-import org.keycloak.models.jpa.entities.RoleEntity;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
 
 
 @NamedQueries({
-        @NamedQuery(name="getClientDraftByIdAndDraftStatus", query="SELECT t FROM TideClientDraftEntity t WHERE t.id = :changesetId AND t.draftStatus = :draftStatus"),
+        @NamedQuery(name="getClientFullScopeStatusDraftByIdAndDraftStatus", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.id = :changesetId AND t.draftStatus = :draftStatus"),
+        @NamedQuery(name="getClientFullScopeStatus", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.client = :client"),
+
 })
 
 
 @Entity
-@Table(name="CLIENT_DRAFT")
-public class TideClientDraftEntity {
+@Table(name="CLIENT_FULL_SCOPE_STATUS_DRAFT")
+public class TideClientFullScopeStatusDraftEntity {
 
     @Id
     @Column(name="ID", length = 36)

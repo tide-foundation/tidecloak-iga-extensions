@@ -3,6 +3,8 @@ package org.tidecloak.Protocol.mapper;
 import jakarta.persistence.EntityManager;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.ClientEntity;
+import org.keycloak.models.utils.RoleUtils;
 import org.keycloak.protocol.ProtocolMapperUtils;
 import org.keycloak.protocol.oidc.mappers.AbstractOIDCProtocolMapper;
 import org.keycloak.protocol.oidc.mappers.OIDCAccessTokenMapper;
@@ -11,12 +13,14 @@ import org.keycloak.provider.ProviderConfigProperty;
 import org.keycloak.representations.AccessToken;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.jpa.models.TideClientAdapter;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
 import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.keycloak.protocol.ProtocolMapperUtils.PRIORITY_SCRIPT_MAPPER;
-import static org.tidecloak.AdminRealmResource.TideAdminRealmResource.getAccess;
 
 public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implements OIDCAccessTokenMapper {
 
@@ -41,7 +45,9 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         UserModel tideUser = TideRolesUtil.wrapUserModel(userSession.getUser(), session, realm);
         Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE);
         ClientModel clientModel = session.getContext().getClient();
-        Set<RoleModel> roles = getAccess(activeRoles, clientModel, clientModel.getClientScopes(true).values().stream());
+        ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
+        ClientModel wrapClientModel = new TideClientAdapter(realm, em, session, clientEntity);
+        Set<RoleModel> roles = getAccess(activeRoles, wrapClientModel, clientModel.getClientScopes(true).values().stream());
         setTokenClaims(token, roles, session);
 
         return token;
@@ -87,6 +93,30 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         mapper.getConfig().put(ProtocolMapperUtils.USER_MODEL_CLIENT_ROLE_MAPPING_CLIENT_ID, clientId);
         mapper.getConfig().put(ProtocolMapperUtils.USER_MODEL_CLIENT_ROLE_MAPPING_ROLE_PREFIX, clientRolePrefix);
         return mapper;
+    }
+
+    public static Set<RoleModel> getAccess(Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes) {
+        if (client.isFullScopeAllowed()) {
+            return roleModels;
+        } else {
+
+            // 1 - Client roles of this client itself
+            Stream<RoleModel> scopeMappings = client.getRolesStream();
+
+            // 2 - Role mappings of client itself + default client scopes + optional client scopes requested by scope parameter (if applyScopeParam is true)
+            Stream<RoleModel> clientScopesMappings;
+            clientScopesMappings = clientScopes.flatMap(ScopeContainerModel::getScopeMappingsStream);
+
+            scopeMappings = Stream.concat(scopeMappings, clientScopesMappings);
+
+            // 3 - Expand scope mappings
+            scopeMappings = RoleUtils.expandCompositeRolesStream(scopeMappings);
+
+            // Intersection of expanded user roles and expanded scopeMappings
+            roleModels.retainAll(scopeMappings.collect(Collectors.toSet()));
+
+            return roleModels;
+        }
     }
 
 

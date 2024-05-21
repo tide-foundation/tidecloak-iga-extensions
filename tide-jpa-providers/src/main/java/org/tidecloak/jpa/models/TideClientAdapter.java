@@ -9,7 +9,8 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
-import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
@@ -25,22 +26,38 @@ public class TideClientAdapter extends ClientAdapter {
     }
 
     @Override
+    public boolean isFullScopeAllowed() {
+        List<TideClientFullScopeStatusDraftEntity> draft = em.createNamedQuery("getClientFullScopeStatus", TideClientFullScopeStatusDraftEntity.class)
+                .setParameter("client", entity)
+                .getResultList();
+
+        if (entity.isFullScopeAllowed()){
+            // check if there are any pending requests for fullscope changes
+            return draft.isEmpty() || draft.get(0).getDraftStatus() == DraftStatus.APPROVED;
+        }else{
+            return false;
+        }
+    }
+
+    @Override
     public void setFullScopeAllowed(boolean value) {
         System.out.println("HELLO I AM HERE IN SETTING FULLSCOPE");
         super.setFullScopeAllowed(value);
         TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
         Set<RoleModel> roleMappings = new HashSet<>();
 
-        TideClientDraftEntity clientDraftEntity = new TideClientDraftEntity();
-        clientDraftEntity.setId(KeycloakModelUtils.generateId());
-        clientDraftEntity.setClient(entity);
-        clientDraftEntity.setDraftStatus(DraftStatus.DRAFT);
-        clientDraftEntity.setAction(ActionType.CREATE);
-        em.persist(clientDraftEntity);
-        em.flush();
-
         if(value){
-            Stream<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>());
+            List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
+            if(usersInRealm.isEmpty()){
+                return;
+            }
+            TideClientFullScopeStatusDraftEntity clientDraftEntity = new TideClientFullScopeStatusDraftEntity();
+            clientDraftEntity.setId(KeycloakModelUtils.generateId());
+            clientDraftEntity.setClient(entity);
+            clientDraftEntity.setDraftStatus(DraftStatus.DRAFT);
+            clientDraftEntity.setAction(ActionType.CREATE);
+            em.persist(clientDraftEntity);
+            em.flush();
 
             usersInRealm.forEach(user -> {
                 UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
@@ -62,6 +79,16 @@ public class TideClientAdapter extends ClientAdapter {
                     }
                 });
             });
+            if (usersInClient.isEmpty()){
+                return;
+            }
+            TideClientFullScopeStatusDraftEntity clientDraftEntity = new TideClientFullScopeStatusDraftEntity();
+            clientDraftEntity.setId(KeycloakModelUtils.generateId());
+            clientDraftEntity.setClient(entity);
+            clientDraftEntity.setDraftStatus(DraftStatus.DRAFT);
+            clientDraftEntity.setAction(ActionType.CREATE);
+            em.persist(clientDraftEntity);
+            em.flush();
 
             usersInClient.forEach(user -> {
                 try {

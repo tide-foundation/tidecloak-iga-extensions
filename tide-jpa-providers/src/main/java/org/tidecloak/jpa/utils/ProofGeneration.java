@@ -23,6 +23,7 @@ import jakarta.persistence.*;
 import org.keycloak.admin.ui.rest.model.ClientRole;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.protocol.oidc.TokenManager;
@@ -35,6 +36,7 @@ import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.sessions.RootAuthenticationSessionModel;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.models.ProofData;
+import org.tidecloak.jpa.models.TideClientAdapter;
 
 import static org.keycloak.admin.ui.rest.model.RoleMapper.convertToModel;
 
@@ -71,7 +73,11 @@ public class ProofGeneration {
     }
 
     public void regenerateProofsForMembers(List<ClientRole> clientRoles, List<UserModel> members) {
-        List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+        List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).map(client -> {
+                    ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
+                    return new TideClientAdapter(realm, em, session, clientEntity);
+                })
+                .filter(ClientModel::isFullScopeAllowed).toList());
         List<ClientModel> effectiveList = clientRoles.stream().map(role -> realm.getClientById(role.getClientId())).toList();
         clientList.addAll(effectiveList);
 

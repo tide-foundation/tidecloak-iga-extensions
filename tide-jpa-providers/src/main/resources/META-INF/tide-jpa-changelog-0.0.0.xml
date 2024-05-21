@@ -69,7 +69,10 @@
             <column name="ACTION_TYPE" type="VARCHAR(36)">
                 <constraints nullable="false"/>
             </column>
-            <column name="CREATED_TIMESTAMP" type="BIGINT"/>
+            <column name="DELETE_STATUS" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="TIMESTAMP" type="BIGINT"/>
         </createTable>
         <!-- For users role assignments -->
         <createTable tableName="USER_ROLE_MAPPING_DRAFT">
@@ -189,7 +192,7 @@
             <column name="TIMESTAMP" type="BIGINT"/>
         </createTable>
         <!-- For tracking client full scope updates -->
-        <createTable tableName="CLIENT_DRAFT">
+        <createTable tableName="CLIENT_FULL_SCOPE_STATUS_DRAFT">
             <column name="ID" type="VARCHAR(36)">
                 <constraints nullable="false"/>
             </column>

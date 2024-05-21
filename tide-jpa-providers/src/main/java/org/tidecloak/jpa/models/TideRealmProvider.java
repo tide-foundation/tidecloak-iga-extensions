@@ -19,7 +19,7 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
-import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
@@ -120,7 +120,11 @@ public class TideRealmProvider extends JpaRealmProvider {
                 newDeletionRequest.setDeleteStatus(DraftStatus.DRAFT);
                 em.persist(newDeletionRequest);
 
-                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).map(client -> {
+                            ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
+                            return new TideClientAdapter(realm, em, session, clientEntity);
+                        })
+                        .filter(ClientModel::isFullScopeAllowed).toList());
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
                 clientList.forEach(client -> {
                     users.forEach(user -> {
@@ -311,7 +315,7 @@ public class TideRealmProvider extends JpaRealmProvider {
         List<String> results = query.getResultList();
         if (results.isEmpty()) return null;
         String id = results.get(0);
-        return session.clients().getClientById(realm, id);
+        return getClientById(realm, id);
     }
     @Override
     public ClientModel getClientById(RealmModel realm, String id) {

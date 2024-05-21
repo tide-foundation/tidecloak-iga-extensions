@@ -5,6 +5,7 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.RoleAdapter;
+import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 
 import org.keycloak.models.utils.KeycloakModelUtils;
@@ -71,7 +72,11 @@ public class TideRoleAdapter extends RoleAdapter {
             if (role.getContainer() instanceof ClientModel) {
                 RoleModel compositeRole = realm.getRoleById(getEntity().getId());
                 List<UserModel> users =  session.users().getRoleMembersStream(realm, compositeRole).toList();
-                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).map(client -> {
+                            ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
+                            return new TideClientAdapter(realm, em, session, clientEntity);
+                        })
+                        .filter(ClientModel::isFullScopeAllowed).toList());
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
                 clientList.forEach(client -> {
                     users.forEach(user -> {
@@ -113,7 +118,11 @@ public class TideRoleAdapter extends RoleAdapter {
         if (role.getContainer() instanceof ClientModel) {
             RoleModel compositeRole = realm.getRoleById(getEntity().getId());
             List<UserModel> users =  session.users().getRoleMembersStream(realm, compositeRole).toList();
-            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).map(client -> {
+                        ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
+                        return new TideClientAdapter(realm, em, session, clientEntity);
+                    })
+                    .filter(ClientModel::isFullScopeAllowed).toList());
             TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
             clientList.forEach(client -> {
                 users.forEach(user -> {
