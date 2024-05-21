@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
@@ -33,6 +34,7 @@ import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
+import org.tidecloak.jpa.models.TideClientAdapter;
 import twitter4j.v1.User;
 
 import java.net.URI;
@@ -116,7 +118,9 @@ public final class TideAuthzProofUtil {
 
     public AccessDetails getAccessToRemove (ClientModel clientModel, Set<RoleModel> newRoleMappings) {
         Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
-        Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, clientModel, clientModel.getClientScopes(false).values().stream());
+        ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
+        ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
+        Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream());
         return sortAccessRoles(requestedAccess);
     }
 
@@ -129,7 +133,9 @@ public final class TideAuthzProofUtil {
 
         if (!newRoleMappings.isEmpty()){
             Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
-            Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, clientModel, clientModel.getClientScopes(false).values().stream());
+            ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
+            ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
+            Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream());
             accessDetails = sortAccessRoles(requestedAccess);
 
             // Apply the filtered roles to the AccessToken
@@ -286,7 +292,9 @@ public final class TideAuthzProofUtil {
         // Generate the current token
         AccessToken currentProof = generateAccessToken(clientModel, userModel, "openid");
         Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
-        Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, clientModel, clientModel.getClientScopes(false).values().stream());
+        ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
+        ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
+        Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream());
         activeRoles.forEach(x -> System.out.println(" this is the active role mappings " + x.getName()));
 
         AccessDetails accessDetails = sortAccessRoles(requestedAccess);

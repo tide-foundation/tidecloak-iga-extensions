@@ -77,7 +77,7 @@ public class ProofGeneration {
                     ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
                     return new TideClientAdapter(realm, em, session, clientEntity);
                 })
-                .filter(ClientModel::isFullScopeAllowed).toList());
+                .filter(TideClientAdapter::isFullScopeAllowed).toList());
         List<ClientModel> effectiveList = clientRoles.stream().map(role -> realm.getClientById(role.getClientId())).toList();
         clientList.addAll(effectiveList);
 

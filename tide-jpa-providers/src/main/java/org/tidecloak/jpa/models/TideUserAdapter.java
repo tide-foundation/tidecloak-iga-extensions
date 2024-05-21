@@ -121,7 +121,7 @@ public class TideUserAdapter extends UserAdapter {
                             ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
                             return new TideClientAdapter(realm, em, session, clientEntity);
                         })
-                        .filter(ClientModel::isFullScopeAllowed).toList());
+                        .filter(TideClientAdapter::isFullScopeAllowed).toList());
                 UserModel user = session.users().getUserById(realm, getEntity().getId());
                 UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
@@ -222,7 +222,7 @@ public class TideUserAdapter extends UserAdapter {
                             ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
                             return new TideClientAdapter(realm, em, session, clientEntity);
                         })
-                        .filter(ClientModel::isFullScopeAllowed).toList());
+                        .filter(TideClientAdapter::isFullScopeAllowed).toList());
                 UserModel user = session.users().getUserById(realm, getEntity().getId());
                 UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);

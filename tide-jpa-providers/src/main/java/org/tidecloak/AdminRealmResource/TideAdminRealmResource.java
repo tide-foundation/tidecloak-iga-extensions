@@ -49,6 +49,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.keycloak.admin.ui.rest.model.RoleMapper.convertToModel;
+import static org.tidecloak.Protocol.mapper.TideRolesProtocolMapper.getAccess;
 
 public class TideAdminRealmResource {
 
@@ -315,40 +316,6 @@ public class TideAdminRealmResource {
         return changes;
     }
 
-    @GET
-    @Path("/clients/{client-id}/generate-proofs")
-    public void generateProofsAfterClientCreation(@PathParam("client-id") String clientId) {
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        ClientEntity client = em.createNamedQuery("getClientById", ClientEntity.class)
-                .setParameter("id", clientId)
-                .setParameter("realm", realm.getId())
-                .getSingleResult();
-
-        if(client.isFullScopeAllowed()) {
-            TideClientFullScopeStatusDraftEntity clientDraftEntity = new TideClientFullScopeStatusDraftEntity();
-            clientDraftEntity.setId(KeycloakModelUtils.generateId());
-            clientDraftEntity.setClient(client);
-            clientDraftEntity.setDraftStatus(DraftStatus.DRAFT);
-            clientDraftEntity.setAction(ActionType.CREATE);
-            em.persist(clientDraftEntity);
-            em.flush();
-
-            Stream<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>());
-            TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-
-            usersInRealm.forEach(user -> {
-                UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
-                Set<RoleModel> roleMappings = new HashSet<>();
-                try {
-                    util.generateAndSaveProofDraft(realm.getClientById(clientId), wrappedUser, roleMappings, clientDraftEntity.getId(), ChangeSetType.CLIENT, ActionType.CREATE);
-                } catch (JsonProcessingException e) {
-                    throw new RuntimeException(e);
-                }
-            });
-        }
-    }
-
-
     // This should be called after the drafts have been checked by the orks and the proof has been signed by the vvk.
     // Calling this method after getting the approval from the orks will update keycloak database for these records to active.
     // Need to give this endpoint the newly signed proof (signed by vvk) so it can be stored and used in the authz\authn flow
@@ -379,7 +346,6 @@ public class TideAdminRealmResource {
             } else if ( type == ChangeSetType.ROLE) {
                 processRole(change, (TideRoleDraftEntity) mapping, em, action);
             } else if ( type == ChangeSetType.USER) {
-                System.out.println("Processing user");
                 processUser(change, (TideUserDraftEntity) mapping, em, action);
             } else if ( type == ChangeSetType.CLIENT) {
                 processClient(change, (TideClientFullScopeStatusDraftEntity) mapping, em, action);
@@ -439,6 +405,12 @@ public class TideAdminRealmResource {
             if (action == ActionType.CREATE) {
                 return em.createNamedQuery("getClientFullScopeStatusDraftByIdAndDraftStatus", TideClientFullScopeStatusDraftEntity.class)
                         .setParameter("draftStatus", DraftStatus.DRAFT)
+                        .setParameter("changesetId", change.getChangeSetId())
+                        .getResultList();
+            }
+            if (action == ActionType.DELETE) {
+                return em.createNamedQuery("getClientFullScopeStatusDraftByIdAndDeleteStatus", TideClientFullScopeStatusDraftEntity.class)
+                        .setParameter("deleteStatus", DraftStatus.DRAFT)
                         .setParameter("changesetId", change.getChangeSetId())
                         .getResultList();
             }
@@ -545,14 +517,19 @@ public class TideAdminRealmResource {
     }
     private void processClient(DraftChangeSet change, TideClientFullScopeStatusDraftEntity mapping, EntityManager em, ActionType action) throws NoSuchAlgorithmException, JsonProcessingException {
         if (action == ActionType.CREATE) {
-            mapping.setDraftStatus(DraftStatus.APPROVED);
+            mapping.setFullScopeEnabled(DraftStatus.APPROVED);
             em.persist(mapping);
             em.flush();
             checkAndUpdateProofRecords(change, mapping, ChangeSetType.CLIENT, em);
+        }
+        else if (action == ActionType.DELETE){
 
-            // no longer need to track, proofs are now saved
-            em.remove(mapping);
+            mapping.setFullScopeDisabled(DraftStatus.APPROVED);
+            em.persist(mapping);
             em.flush();
+            checkAndUpdateProofRecords(change, mapping, ChangeSetType.CLIENT, em);
+            ClientModel client = new TideClientAdapter(realm, em, session, mapping.getClient());
+            client.setFullScopeAllowed(false);
         }
     }
 
@@ -603,13 +580,20 @@ public class TideAdminRealmResource {
                 }
                 else if ( proofDetail.getChangesetType() == ChangeSetType.CLIENT) {
                     TideClientFullScopeStatusDraftEntity draftEntity = em.find(TideClientFullScopeStatusDraftEntity.class, proofDetail.getRecordId());
-                    handClientDraft(draftEntity, proofDetail, client, tideAuthzProofUtil, wrappedUser);
+                    handClientDraft(draftEntity, proofDetail, change, client, tideAuthzProofUtil, wrappedUser, em);
                 }
             }
         }
     }
 
     private List<ClientModel> getAffectedClients(Object entity, ChangeSetType changeSetType, EntityManager em) {
+        if (changeSetType == ChangeSetType.CLIENT) {
+            List<ClientModel> client = new ArrayList<>();
+            ClientEntity clientEntity = ((TideClientFullScopeStatusDraftEntity) entity).getClient();
+            client.add(realm.getClientById(clientEntity.getId()));
+            return client;
+        }
+
         List<ClientModel> affectedClients = new ArrayList<>(realm.getClientsStream().map(client -> {
             ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
             return new TideClientAdapter(realm, em, session, clientEntity);
@@ -625,9 +609,6 @@ public class TideAdminRealmResource {
         } else if (changeSetType == ChangeSetType.ROLE) {
             RoleModel role = realm.getRoleById(((TideRoleDraftEntity) entity).getRole().getId());
             clientModel = realm.getClientById(role.getContainerId());
-        } else if (changeSetType == ChangeSetType.CLIENT) {
-            ClientEntity clientEntity = ((TideClientFullScopeStatusDraftEntity) entity).getClient();
-            clientModel = realm.getClientById(clientEntity.getId());
         }
         affectedClients.add(clientModel);
         return affectedClients.stream().distinct().toList();
@@ -760,25 +741,31 @@ public class TideAdminRealmResource {
         proofDetail.setProofDraft(updatedProof);
     }
 
-    private void handClientDraft(TideClientFullScopeStatusDraftEntity draftEntity, AccessProofDetailEntity proofDetail, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser) throws JsonProcessingException, NoSuchAlgorithmException {
-        if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == null)) {
+    private void handClientDraft(TideClientFullScopeStatusDraftEntity draftEntity, AccessProofDetailEntity proofDetail,DraftChangeSet change, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws JsonProcessingException, NoSuchAlgorithmException {
+        if (draftEntity == null || (draftEntity.getFullScopeEnabled() == DraftStatus.ACTIVE && draftEntity.getFullScopeDisabled() == null) || (draftEntity.getFullScopeDisabled() == DraftStatus.ACTIVE && draftEntity.getFullScopeEnabled() == null) ) {
             return;
         }
-//        if (change.getActionType() == ActionType.DELETE) {
-//            if (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == DraftStatus.PENDING) {
-//                draftEntity.setDeleteStatus(DraftStatus.DRAFT);
-//            } else {
-//                draftEntity.setDraftStatus(DraftStatus.DRAFT);
-//            }
-//            String proof = proofDetail.getProofDraft();
-//            Set<RoleModel> rolesToRemove = new HashSet<>();
-//            rolesToRemove.add(roleModel);
-//            AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, rolesToRemove);
-//            String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
-//            proofDetail.setProofDraft(updatedProof);
-//            return;
-//        }
-        draftEntity.setDraftStatus(DraftStatus.DRAFT);
+        if (change.getActionType() == ActionType.DELETE) {
+            if (draftEntity.getFullScopeDisabled() == DraftStatus.ACTIVE && draftEntity.getFullScopeEnabled() == DraftStatus.PENDING) {
+                draftEntity.setFullScopeEnabled(DraftStatus.DRAFT);
+            }
+
+            String proof = proofDetail.getProofDraft();
+            // We only want to remove the roles that are not this clients role.
+            Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(wrappedUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE).stream().filter(x -> {
+                if (x.isClientRole()){
+                    return !Objects.equals(((ClientModel) x.getContainer()).getClientId(), client.getClientId());
+                }
+                return true;
+            }).collect(Collectors.toSet());
+
+            Set<RoleModel> roles = getAccess(activeRoles, client, client.getClientScopes(true).values().stream(), true);
+            AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, roles);
+            String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
+            proofDetail.setProofDraft(updatedProof);
+            return;
+        }
+        draftEntity.setFullScopeEnabled(DraftStatus.DRAFT);
         String proof = proofDetail.getProofDraft();
         Set<RoleModel> roleSet = new HashSet<>();
         String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof, roleSet, draftEntity.getAction());

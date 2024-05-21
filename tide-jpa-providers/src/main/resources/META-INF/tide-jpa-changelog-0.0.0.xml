@@ -199,14 +199,14 @@
             <column name="CLIENT" type="VARCHAR(36)">
                 <constraints nullable="false"/>
             </column>
-            <column name="DRAFT_STATUS" type="VARCHAR(36)">
-                <constraints nullable="false"/>
+            <column name="FULL_SCOPE_ENABLED" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="FULL_SCOPE_DISABLED" type="VARCHAR(36)">
+                <constraints nullable="true"/>
             </column>
             <column name="ACTION_TYPE" type="VARCHAR(36)">
                 <constraints nullable="false"/>
-            </column>
-            <column name="DELETE_STATUS" type="VARCHAR(36)">
-                <constraints nullable="true"/>
             </column>
             <column name="TIMESTAMP" type="BIGINT"/>
         </createTable>

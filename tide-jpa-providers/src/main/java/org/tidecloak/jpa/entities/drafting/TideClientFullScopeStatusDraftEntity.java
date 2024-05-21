@@ -8,7 +8,10 @@ import org.tidecloak.interfaces.DraftStatus;
 
 @NamedQueries({
         @NamedQuery(name="getClientFullScopeStatusDraftByIdAndDraftStatus", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.id = :changesetId AND t.draftStatus = :draftStatus"),
+        @NamedQuery(name="getClientFullScopeStatusDraftByIdAndDeleteStatus", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.id = :changesetId AND t.deleteStatus = :deleteStatus"),
         @NamedQuery(name="getClientFullScopeStatus", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.client = :client"),
+        @NamedQuery(name="getClientFullScopeStatusByDraftStatus", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.client = :client AND t.draftStatus = :draftStatus"),
+
 
 })
 
@@ -27,16 +30,16 @@ public class TideClientFullScopeStatusDraftEntity {
     private ClientEntity client;
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "DRAFT_STATUS")
-    private DraftStatus draftStatus = DraftStatus.APPROVED;
+    @Column(name = "FULL_SCOPE_ENABLED")
+    private DraftStatus fullScopeEnabled; // by default, clients are full-scoped
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "FULL_SCOPE_DISABLED")
+    private DraftStatus fullScopeDisabled;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "ACTION_TYPE")
     private ActionType actionType;
-
-    @Enumerated(EnumType.STRING)
-    @Column(name = "DELETE_STATUS")
-    private DraftStatus deleteStatus;
 
     @Column(name = "TIMESTAMP")
     protected Long timestamp = System.currentTimeMillis();
@@ -58,12 +61,21 @@ public class TideClientFullScopeStatusDraftEntity {
     }
 
     // Getters and setters for new fields
-    public DraftStatus getDraftStatus() {
-        return draftStatus;
+
+    public DraftStatus getFullScopeEnabled() {
+        return fullScopeEnabled;
     }
 
-    public void setDraftStatus(DraftStatus draftStatus) {
-        this.draftStatus = draftStatus;
+    public void setFullScopeEnabled(DraftStatus fullScopeEnabled) {
+        this.fullScopeEnabled = fullScopeEnabled;
+    }
+
+    public DraftStatus getFullScopeDisabled() {
+        return fullScopeDisabled;
+    }
+
+    public void setFullScopeDisabled(DraftStatus fullScopeDisabled) {
+        this.fullScopeDisabled = fullScopeDisabled;
     }
 
     public ActionType getAction() {
@@ -72,14 +84,6 @@ public class TideClientFullScopeStatusDraftEntity {
 
     public void setAction(ActionType actionType) {
         this.actionType = actionType;
-    }
-
-    public DraftStatus getDeleteStatus() {
-        return deleteStatus;
-    }
-
-    public void setDeleteStatus(DraftStatus deleteStatus) {
-        this.deleteStatus = deleteStatus;
     }
 
     public Long getTimestamp() {

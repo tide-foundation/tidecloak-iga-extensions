@@ -124,7 +124,7 @@ public class TideRealmProvider extends JpaRealmProvider {
                             ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
                             return new TideClientAdapter(realm, em, session, clientEntity);
                         })
-                        .filter(ClientModel::isFullScopeAllowed).toList());
+                        .filter(TideClientAdapter::isFullScopeAllowed).toList());
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
                 clientList.forEach(client -> {
                     users.forEach(user -> {

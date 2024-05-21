@@ -47,7 +47,7 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         ClientModel clientModel = session.getContext().getClient();
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
         ClientModel wrapClientModel = new TideClientAdapter(realm, em, session, clientEntity);
-        Set<RoleModel> roles = getAccess(activeRoles, wrapClientModel, clientModel.getClientScopes(true).values().stream());
+        Set<RoleModel> roles = getAccess(activeRoles, wrapClientModel, clientModel.getClientScopes(true).values().stream(), wrapClientModel.isFullScopeAllowed());
         setTokenClaims(token, roles, session);
 
         return token;
@@ -95,8 +95,8 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         return mapper;
     }
 
-    public static Set<RoleModel> getAccess(Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes) {
-        if (client.isFullScopeAllowed()) {
+    public static Set<RoleModel> getAccess(Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes, boolean isFullScopeAllowed) {
+        if (isFullScopeAllowed) {
             return roleModels;
         } else {
 
