@@ -578,7 +578,7 @@ public class TideAdminRealmResource {
 
                 if (proofDetail.getChangesetType() == ChangeSetType.USER_ROLE) {
                     TideUserRoleMappingDraftEntity draftEntity = em.find(TideUserRoleMappingDraftEntity.class, proofDetail.getRecordId());
-                    handleUserRoleMappingDraft(draftEntity, proofDetail, change, roleSet, actionType, client, tideAuthzProofUtil, wrappedUser);
+                    handleUserRoleMappingDraft(draftEntity, proofDetail, change, roleSet, actionType, client, tideAuthzProofUtil, wrappedUser, em);
                 } else if (proofDetail.getChangesetType() == ChangeSetType.COMPOSITE_ROLE) {
                     TideCompositeRoleMappingDraftEntity draftEntity = em.find(TideCompositeRoleMappingDraftEntity.class, proofDetail.getRecordId());
                     handleCompositeRoleMappingDraft(draftEntity, proofDetail, change, roleSet, client, tideAuthzProofUtil, wrappedUser);
@@ -657,20 +657,20 @@ public class TideAdminRealmResource {
         return Collections.emptyList();
     }
 
-    private void handleUserRoleMappingDraft(TideUserRoleMappingDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSet change, Set<RoleModel>  roles, ActionType actionType, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser) throws JsonProcessingException, NoSuchAlgorithmException {
+    private void handleUserRoleMappingDraft(TideUserRoleMappingDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSet change, Set<RoleModel>  roles, ActionType actionType, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws JsonProcessingException, NoSuchAlgorithmException {
         if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == null)) {
             return;
         }
         if (change.getActionType() == ActionType.DELETE) {
             if (change.getType() == ChangeSetType.CLIENT){
-                System.out.println("TRYING TO CLEAN PREEXISTING PROOF");
                 String proof = proofDetail.getProofDraft();
+                // get the role this record was trying to add
+                TideUserRoleMappingDraftEntity userRoleDraft = em.find(TideUserRoleMappingDraftEntity.class, proofDetail.getRecordId());
+                if ( userRoleDraft != null){
+                    roles.add(realm.getRoleById(userRoleDraft.getRoleId()));
+                }
                 AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, roles, true);
-                System.out.println("ROLES IM REMOVING");
-                roles.forEach(x -> System.out.println(x.getName()));
                 String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
-                System.out.println("THIS IS MY NEW PROOF");
-                System.out.println(updatedProof);
                 proofDetail.setProofDraft(updatedProof);
                 return;
             }
