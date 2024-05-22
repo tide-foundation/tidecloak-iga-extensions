@@ -498,8 +498,6 @@ public class TideAdminRealmResource {
                         .setParameter("recordId", id)
                         .executeUpdate();
             });
-
-            System.out.println(mapping.getId());
         }
     }
 
@@ -539,10 +537,10 @@ public class TideAdminRealmResource {
 
         for (ClientModel client : affectedClients) {
             List<AccessProofDetailEntity> proofDetails = getProofDetailsByChangeSetType(em, client, entity, changeSetType);
+            System.out.println("PROOF DETAILS HERE");
+            proofDetails.forEach(x -> System.out.println(x.getId()));
             for (AccessProofDetailEntity proofDetail : proofDetails) {
                 em.lock(proofDetail, LockModeType.PESSIMISTIC_WRITE);
-                System.out.println("PROOF DETAILS HERE");
-                System.out.println(proofDetail.getId());
                 UserEntity user = proofDetail.getUser();
                 UserModel userModel = session.users().getUserById(realm, user.getId());
                 UserModel wrappedUser = TideRolesUtil.wrapUserModel(userModel, session, realm);
@@ -568,13 +566,14 @@ public class TideAdminRealmResource {
                     ClientModel clientModel = realm.getClientById(clientEntity.getId());
                     roleSet.addAll(clientModel.getRolesStream().collect(Collectors.toSet()));
 
-                    Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(wrappedUser, session, realm, em, DraftStatus.APPROVED, actionType).stream().filter(role -> {
+                    Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(wrappedUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE).stream().filter(role -> {
                         if (role.isClientRole()) {
                             return !Objects.equals(((ClientModel) role.getContainer()).getClientId(), client.getClientId());
                         }
-                        return false;
+                        return true;
                     }).collect(Collectors.toSet());
 
+                    roleSet.addAll(activeRoles);
                 }
 
                 if (proofDetail.getChangesetType() == ChangeSetType.USER_ROLE) {
@@ -663,6 +662,19 @@ public class TideAdminRealmResource {
             return;
         }
         if (change.getActionType() == ActionType.DELETE) {
+            if (change.getType() == ChangeSetType.CLIENT){
+                System.out.println("TRYING TO CLEAN PREEXISTING PROOF");
+                String proof = proofDetail.getProofDraft();
+                AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, roles, true);
+                System.out.println("ROLES IM REMOVING");
+                roles.forEach(x -> System.out.println(x.getName()));
+                String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
+                System.out.println("THIS IS MY NEW PROOF");
+                System.out.println(updatedProof);
+                proofDetail.setProofDraft(updatedProof);
+                return;
+            }
+            // For deletion roles
             if (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == DraftStatus.PENDING) {
                 draftEntity.setDeleteStatus(DraftStatus.DRAFT);
             } else {
@@ -678,8 +690,6 @@ public class TideAdminRealmResource {
         draftEntity.setDraftStatus(DraftStatus.DRAFT);
         String proof = proofDetail.getProofDraft();
         String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof, roles, actionType, client.isFullScopeAllowed());
-        System.out.println("UPDATED PROOF " + updatedProof);
-
         proofDetail.setProofDraft(updatedProof);
     }
 
