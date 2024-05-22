@@ -97,7 +97,7 @@ public class TideRolesUtil {
      */
     public static Set<RoleModel> getDeepUserRoleMappings(UserModel user, KeycloakSession session, RealmModel realm, EntityManager manager, DraftStatus draftStatus, ActionType actionType) {
         Set<RoleModel> roleMappings;
-        if (user instanceof TideUserAdapter){
+        if (user instanceof TideUserAdapter) {
             roleMappings = ((TideUserAdapter) user).getRoleMappingsStreamByStatusAndAction(draftStatus, actionType).map(x-> wrapRoleModel(x, session, realm)).collect(Collectors.toSet());
         }
         else{

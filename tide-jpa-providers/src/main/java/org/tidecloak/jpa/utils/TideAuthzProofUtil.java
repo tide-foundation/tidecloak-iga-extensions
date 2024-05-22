@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeType;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.EntityTransaction;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
@@ -47,6 +48,8 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
+import static org.tidecloak.Protocol.mapper.TideRolesProtocolMapper.getAccess;
+
 public final class TideAuthzProofUtil {
 
     private final KeycloakSession session;
@@ -64,8 +67,8 @@ public final class TideAuthzProofUtil {
     /**
      * @return filtered set of roles based on Client settings. If client is full scoped returns back everything else remove out of scope roles.
      */
-    public static Set<RoleModel> filterClientRoles(Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes) {
-        if (!client.isFullScopeAllowed()) {
+    public static Set<RoleModel> filterClientRoles(Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes, Boolean isFullScopeAllowed) {
+        if (!isFullScopeAllowed) {
 
             // 1 - Client roles of this client itself
             Stream<RoleModel> scopeMappings = client.getRolesStream();
@@ -116,17 +119,19 @@ public final class TideAuthzProofUtil {
         }
     }
 
-    public AccessDetails getAccessToRemove (ClientModel clientModel, Set<RoleModel> newRoleMappings) {
+    public AccessDetails getAccessToRemove (ClientModel clientModel, Set<RoleModel> newRoleMappings, Boolean isFullScopeAllowed) {
         Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
         ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
-        Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream());
+        Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream(), isFullScopeAllowed);
         return sortAccessRoles(requestedAccess);
     }
 
-    public void generateAndSaveProofDraft(ClientModel clientModel, UserModel userModel, Set<RoleModel> newRoleMappings, String recordId, ChangeSetType type, ActionType actionType) throws JsonProcessingException {
+    public void generateAndSaveProofDraft(ClientModel clientModel, UserModel userModel, Set<RoleModel> newRoleMappings, String recordId, ChangeSetType type, ActionType actionType, Boolean isFullScopeAllowed) throws JsonProcessingException {
         // Generate AccessToken based on the client and user information with openid scope
         AccessToken proof = generateAccessToken(clientModel, userModel, "openid");
+        System.out.println("THIS IS THE PROOF IM TRYING TO CLEAN");
+        System.out.println(objectMapper.writeValueAsString(proof));
         AccessDetails accessDetails = null;
         UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
         // Filter and expand roles based on the provided mappings; only approved roles are considered
@@ -135,7 +140,7 @@ public final class TideAuthzProofUtil {
             Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
             ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
             ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
-            Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream());
+            Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream(), isFullScopeAllowed);
             accessDetails = sortAccessRoles(requestedAccess);
 
             // Apply the filtered roles to the AccessToken
@@ -144,7 +149,7 @@ public final class TideAuthzProofUtil {
 
         JsonNode proofDraftNode = objectMapper.valueToTree(proof);
 
-        if ( actionType == ActionType.DELETE){
+        if ( actionType == ActionType.DELETE && accessDetails != null){
             proofDraftNode = removeAccessFromJsonNode(proofDraftNode, accessDetails);
         }
 
@@ -153,6 +158,7 @@ public final class TideAuthzProofUtil {
 
         // Always save the access proof detail
         saveAccessProofDetail(clientModel, user, recordId, type, proofDraft);
+
     }
 
     public List<TideCompositeRoleMappingDraftEntity> findCompositeMappingsByChildRole(RoleEntity composite) {
@@ -288,13 +294,13 @@ public final class TideAuthzProofUtil {
         }
     }
 
-    public String updateDraftProofDetails(ClientModel clientModel, UserModel userModel, String oldProofDetails, Set<RoleModel> newRoleMappings, ActionType actionType) throws JsonProcessingException {
+    public String updateDraftProofDetails(ClientModel clientModel, UserModel userModel, String oldProofDetails, Set<RoleModel> newRoleMappings, ActionType actionType, Boolean isFullScopeAllowed) throws JsonProcessingException {
         // Generate the current token
         AccessToken currentProof = generateAccessToken(clientModel, userModel, "openid");
         Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
         ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
-        Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream());
+        Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream(), isFullScopeAllowed);
         activeRoles.forEach(x -> System.out.println(" this is the active role mappings " + x.getName()));
 
         AccessDetails accessDetails = sortAccessRoles(requestedAccess);

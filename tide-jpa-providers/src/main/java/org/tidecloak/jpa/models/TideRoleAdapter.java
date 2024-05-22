@@ -85,7 +85,7 @@ public class TideRoleAdapter extends RoleAdapter {
                         roleMappings.add(role); // this is the new role we are removing from the parent role.
 
                         try {
-                            util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, compositeRoleEntity.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.DELETE);
+                            util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, compositeRoleEntity.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.DELETE, client.isFullScopeAllowed());
                         } catch (JsonProcessingException e) {
                             throw new RuntimeException(e);
                         }
@@ -131,7 +131,7 @@ public class TideRoleAdapter extends RoleAdapter {
                     roleMappings.add(role);// this is the new role we are adding to the parent role.
                     roleMappings.add(realm.getRoleById(getEntity().getId()));// ensure the parent role is in there too
                     try {
-                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draft.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE);
+                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draft.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE, client.isFullScopeAllowed());
                     } catch (JsonProcessingException e) {
                         throw new RuntimeException(e);
                     }

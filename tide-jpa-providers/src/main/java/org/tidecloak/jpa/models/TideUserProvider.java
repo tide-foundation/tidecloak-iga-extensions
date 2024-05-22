@@ -63,21 +63,23 @@ public class TideUserProvider extends JpaUserProvider {
         draftDefaultRoleUserRole.setAction(ActionType.CREATE);
         draftDefaultRoleUserRole.setDraftStatus(DraftStatus.APPROVED);
         em.persist(draftDefaultRoleUserRole);
-
-        // do we care about previously approved client full scopes ?
-        // We generate proof requests for all full-scoped enabled clients for this client
-        TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-        UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
-        Set<RoleModel> roleMappings = new HashSet<>();
-        realm.getClientsStream().forEach(client -> {
-            try {
-                util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUser.getId(), ChangeSetType.USER, ActionType.CREATE);
-            } catch (JsonProcessingException e) {
-                throw new RuntimeException(e);
-            }
-        });
-
         em.flush();
+
+
+//        // do we care about previously approved client full scopes ?
+//        // We generate proof requests for all full-scoped enabled clients for this client
+//        TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
+//        UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
+//        Set<RoleModel> roleMappings = new HashSet<>();
+//        realm.getClientsStream().forEach(client -> {
+//            try {
+//                util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUser.getId(), ChangeSetType.USER, ActionType.CREATE);
+//            } catch (JsonProcessingException e) {
+//                throw new RuntimeException(e);
+//            }
+//        });
+//
+//        em.flush();
 
         return new TideUserAdapter(session, realm, em, userEntity);
     }

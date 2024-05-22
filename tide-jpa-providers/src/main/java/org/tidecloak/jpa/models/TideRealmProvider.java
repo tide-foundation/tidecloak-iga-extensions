@@ -133,7 +133,7 @@ public class TideRealmProvider extends JpaRealmProvider {
                         roleMappings.add(role); // this is the new role we are removing
 
                         try {
-                            util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, newDeletionRequest.getId(), ChangeSetType.ROLE, ActionType.DELETE);
+                            util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, newDeletionRequest.getId(), ChangeSetType.ROLE, ActionType.DELETE, client.isFullScopeAllowed());
                         } catch (JsonProcessingException e) {
                             throw new RuntimeException(e);
                         }

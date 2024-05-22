@@ -40,6 +40,7 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
 
     @Override
     public AccessToken transformAccessToken(AccessToken token, ProtocolMapperModel mappingModel, KeycloakSession session, UserSessionModel userSession, ClientSessionContext clientSessionCtx) {
+        System.out.println("TRANSFORMING ACCESS TOKEN");
         RealmModel realm = session.getContext().getRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         UserModel tideUser = TideRolesUtil.wrapUserModel(userSession.getUser(), session, realm);
@@ -47,13 +48,14 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         ClientModel clientModel = session.getContext().getClient();
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
         ClientModel wrapClientModel = new TideClientAdapter(realm, em, session, clientEntity);
+        System.out.println(wrapClientModel.isFullScopeAllowed());
         Set<RoleModel> roles = getAccess(activeRoles, wrapClientModel, clientModel.getClientScopes(true).values().stream(), wrapClientModel.isFullScopeAllowed());
-        setTokenClaims(token, roles, session);
+        setTokenClaims(token, roles);
 
         return token;
     }
 
-    private void setTokenClaims(AccessToken token, Set<RoleModel> roles, KeycloakSession session) {
+    private void setTokenClaims(AccessToken token, Set<RoleModel> roles) {
         AccessToken.Access realmAccess = new AccessToken.Access();
         Map<String, AccessToken.Access> clientAccesses = new HashMap<>();
         for (RoleModel role : roles) {

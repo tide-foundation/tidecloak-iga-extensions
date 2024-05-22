@@ -127,7 +127,7 @@ public class TideUserAdapter extends UserAdapter {
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
                 clientList.forEach(client -> {
                     try {
-                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUserRole.getId(), ChangeSetType.USER_ROLE, ActionType.CREATE);
+                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUserRole.getId(), ChangeSetType.USER_ROLE, ActionType.CREATE, client.isFullScopeAllowed());
                         if(role.isComposite()){
                             // we expand it and create a new record
                             Set<RoleModel> compositeRoles = TideRolesUtil.expandCompositeRoles(roleMappings,DraftStatus.DRAFT, ActionType.CREATE);
@@ -151,7 +151,7 @@ public class TideUserAdapter extends UserAdapter {
                                         .getSingleResult();
 
                                 try {
-                                    util.generateAndSaveProofDraft(client, wrappedUser, roleSet, compositeRecord.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE);
+                                    util.generateAndSaveProofDraft(client, wrappedUser, roleSet, compositeRecord.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE, client.isFullScopeAllowed());
                                 } catch (JsonProcessingException e) {
                                     throw new RuntimeException(e);
                                 }
@@ -230,7 +230,7 @@ public class TideUserAdapter extends UserAdapter {
                     Set<RoleModel> roleMappings = new HashSet<>();
                     roleMappings.add(role);
                     try {
-                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, userRoleMapping.getId(), ChangeSetType.USER_ROLE, ActionType.DELETE);
+                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, userRoleMapping.getId(), ChangeSetType.USER_ROLE, ActionType.DELETE, client.isFullScopeAllowed());
                     } catch (JsonProcessingException e) {
                         throw new RuntimeException(e);
                     }
