@@ -66,12 +66,23 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
                         .addRole(role.getName());
             }
         }
-        // If original token does not include any roles we dont add.
+
+        // Conditionally set realmAccess if the original token had it and it's not empty
         if (token.getRealmAccess() != null) {
-            token.setRealmAccess(realmAccess);
+            if (!realmAccess.getRoles().isEmpty()) {
+                token.setRealmAccess(realmAccess);
+            } else {
+                token.setRealmAccess(null); // Remove realmAccess if empty
+            }
         }
-        if (!token.getResourceAccess().entrySet().isEmpty()) {
-            token.setResourceAccess(clientAccesses);
+
+        // Conditionally set resourceAccess if the original token had it and it's not empty
+        if (token.getResourceAccess() != null && !token.getResourceAccess().isEmpty()) {
+            if (!clientAccesses.isEmpty()) {
+                token.setResourceAccess(clientAccesses);
+            } else {
+                token.getResourceAccess().clear(); // Remove resourceAccess if empty
+            }
         }
     }
     public static ProtocolMapperModel create(String clientId, String clientRolePrefix,

@@ -153,7 +153,7 @@ public final class TideAuthzProofUtil {
             proofDraftNode = removeAccessFromJsonNode(proofDraftNode, accessDetails);
         }
 
-        var proofDraft = cleanProofDraft(proofDraftNode);
+        String proofDraft = cleanProofDraft(proofDraftNode);
 
 
         // Always save the access proof detail
@@ -390,6 +390,11 @@ public final class TideAuthzProofUtil {
         ObjectNode realmAccessNode = (ObjectNode) modifiedNode.get("realm_access");
         if (realmAccessNode != null && realmAccessNode.has("roles")) {
             removeRolesFromArrayNode(realmAccessNode, "roles", realmAccess.getRoles());
+
+            // Check if realm_access node is now empty and remove it
+            if (!realmAccessNode.has("roles") || !realmAccessNode.get("roles").elements().hasNext()) {
+                modifiedNode.remove("realm_access");
+            }
         }
 
         // Handle client accesses removal
@@ -402,16 +407,20 @@ public final class TideAuthzProofUtil {
                     removeRolesFromArrayNode(clientNode, "roles", access.getRoles());
 
                     // Check if the client node is now empty and remove it from the resource access
-                    if (!clientNode.fieldNames().hasNext()) {
+                    if (!clientNode.has("roles") || !clientNode.get("roles").elements().hasNext()) {
                         resourceAccessNode.remove(clientId); // Remove the client node if it's empty
                     }
                 }
             });
+
+            // Check if resource_access node is now empty and remove it
+            if (!resourceAccessNode.fieldNames().hasNext()) {
+                modifiedNode.remove("resource_access");
+            }
         }
 
         return modifiedNode;
     }
-
 
     private static void removeRolesFromArrayNode(ObjectNode parentNode, String key, Set<String> rolesToRemove) {
         if (parentNode == null || !parentNode.has(key) || rolesToRemove == null || rolesToRemove.isEmpty()) {

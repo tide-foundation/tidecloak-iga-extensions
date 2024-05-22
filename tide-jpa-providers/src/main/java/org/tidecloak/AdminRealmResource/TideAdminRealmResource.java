@@ -545,9 +545,14 @@ public class TideAdminRealmResource {
                 UserModel userModel = session.users().getUserById(realm, user.getId());
                 UserModel wrappedUser = TideRolesUtil.wrapUserModel(userModel, session, realm);
 
+                // When a record is approved and gets submitted, we save the final proof to the db
                 saveFinalProofDetailsOnApproval(proofDetail, change, em, user, client);
+
+                // We then check any pending or draft records that were affected and update.
                 Set<RoleModel> roleSet = new HashSet<>();
                 ActionType actionType = null;
+
+                // In this section we set up what is needed depending on the record that was APPROVED
                 if (entity instanceof  TideUserRoleMappingDraftEntity) {
                     // Check if role belongs to a client
                     roleSet.add(TideRolesUtil.wrapRoleModel(realm.getRoleById(((TideUserRoleMappingDraftEntity) entity).getRoleId()), session, realm));
@@ -576,6 +581,8 @@ public class TideAdminRealmResource {
                     roleSet.addAll(activeRoles);
                 }
 
+                // Here, we go through each proof and update according to the type of change it was. These are the draft records that were still waiting for approval.
+                // They are now invalidated and needs to be updated
                 if (proofDetail.getChangesetType() == ChangeSetType.USER_ROLE) {
                     TideUserRoleMappingDraftEntity draftEntity = em.find(TideUserRoleMappingDraftEntity.class, proofDetail.getRecordId());
                     handleUserRoleMappingDraft(draftEntity, proofDetail, change, roleSet, actionType, client, tideAuthzProofUtil, wrappedUser, em);
@@ -764,9 +771,18 @@ public class TideAdminRealmResource {
     }
 
     private void handClientDraft(TideClientFullScopeStatusDraftEntity draftEntity, AccessProofDetailEntity proofDetail,DraftChangeSet change, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws JsonProcessingException, NoSuchAlgorithmException {
-        if (draftEntity == null || (draftEntity.getFullScopeEnabled() == DraftStatus.APPROVED && draftEntity.getFullScopeDisabled() == null) || (draftEntity.getFullScopeDisabled() == DraftStatus.APPROVED && draftEntity.getFullScopeEnabled() == null) ) {
+        boolean isDraftEntityNull = draftEntity == null;
+        boolean isFullScopeEnabledApprovedAndDisabledNull = draftEntity != null &&
+                draftEntity.getFullScopeEnabled() == DraftStatus.APPROVED &&
+                draftEntity.getFullScopeDisabled() == null;
+        boolean isFullScopeDisabledApprovedAndEnabledNull = draftEntity != null &&
+                draftEntity.getFullScopeDisabled() == DraftStatus.APPROVED &&
+                draftEntity.getFullScopeEnabled() == null;
+
+        if (isDraftEntityNull || isFullScopeEnabledApprovedAndDisabledNull || isFullScopeDisabledApprovedAndEnabledNull) {
             return;
         }
+
         if (change.getActionType() == ActionType.DELETE) {
             if (draftEntity.getFullScopeDisabled() == DraftStatus.APPROVED && draftEntity.getFullScopeEnabled() == DraftStatus.PENDING) {
                 draftEntity.setFullScopeEnabled(DraftStatus.DRAFT);
@@ -787,6 +803,13 @@ public class TideAdminRealmResource {
             proofDetail.setProofDraft(updatedProof);
             return;
         }
+        // this section here for any client changes. We need to check if there are any pending drafts and create any new records.
+        // The client fullscope was enabled and approved. So now any pending\draft changes for this client needs to also appear.
+        // per user , per client
+        // user-role mappings - need extra record for this client with this new user role
+        // composite role mappings - if a user is affected, need to show this in this client proof
+        // deletions - need extra record to show a role no longer existing in this clients proof per user affected
+
         draftEntity.setFullScopeEnabled(DraftStatus.DRAFT);
         String proof = proofDetail.getProofDraft();
         Set<RoleModel> roleSet = new HashSet<>();
