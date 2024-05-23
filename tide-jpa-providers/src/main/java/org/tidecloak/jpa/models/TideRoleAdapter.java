@@ -97,14 +97,91 @@ public class TideRoleAdapter extends RoleAdapter {
         }
     }
 
+    private Boolean approveDefaultRolesOnInitiation(RoleModel child){
+        RoleModel role = TideRolesUtil.wrapRoleModel(child, session, realm);
+        RoleEntity entity = toRoleEntity(role);
+
+        System.out.println(" PARENT " + getEntity().getName());
+        System.out.println(" CHILD " + child.getName());
+        if (Objects.equals(getEntity().getName(), AdminRoles.REALM_ADMIN)) {
+            if (Arrays.stream(AdminRoles.ALL_REALM_ROLES).toList().contains(child.getName()) || Objects.equals(child.getName(), AdminRoles.CREATE_REALM)) {
+                TideCompositeRoleMappingDraftEntity draft = new TideCompositeRoleMappingDraftEntity();
+                draft.setId(KeycloakModelUtils.generateId());
+                draft.setComposite(getEntity());
+                draft.setChildRole(entity);
+                draft.setAction(ActionType.CREATE);
+                draft.setDraftStatus(DraftStatus.APPROVED);
+                em.persist(draft);
+                em.flush();
+                return true;
+            }
+        }
+        else if (Objects.equals(getEntity().getName(), AccountRoles.MANAGE_ACCOUNT)){
+            if (Objects.equals(child.getName(), AccountRoles.MANAGE_ACCOUNT_LINKS)){
+                TideCompositeRoleMappingDraftEntity draft = new TideCompositeRoleMappingDraftEntity();
+                draft.setId(KeycloakModelUtils.generateId());
+                draft.setComposite(getEntity());
+                draft.setChildRole(entity);
+                draft.setAction(ActionType.CREATE);
+                draft.setDraftStatus(DraftStatus.APPROVED);
+                em.persist(draft);
+                em.flush();
+                return true;
+            }
+        }
+        else if (Objects.equals(getEntity().getName(), AccountRoles.MANAGE_CONSENT)){
+            if (Objects.equals(child.getName(), AccountRoles.VIEW_CONSENT)){
+                TideCompositeRoleMappingDraftEntity draft = new TideCompositeRoleMappingDraftEntity();
+                draft.setId(KeycloakModelUtils.generateId());
+                draft.setComposite(getEntity());
+                draft.setChildRole(entity);
+                draft.setAction(ActionType.CREATE);
+                draft.setDraftStatus(DraftStatus.APPROVED);
+                em.persist(draft);
+                em.flush();
+                return true;
+            }
+        }
+        else if (Objects.equals(getEntity().getName(), AdminRoles.VIEW_CLIENTS)){
+            if (Objects.equals(child.getName(), AdminRoles.QUERY_CLIENTS) || child.getName() == AdminRoles.QUERY_GROUPS){
+                TideCompositeRoleMappingDraftEntity draft = new TideCompositeRoleMappingDraftEntity();
+                draft.setId(KeycloakModelUtils.generateId());
+                draft.setComposite(getEntity());
+                draft.setChildRole(entity);
+                draft.setAction(ActionType.CREATE);
+                draft.setDraftStatus(DraftStatus.APPROVED);
+                em.persist(draft);
+                em.flush();
+                return true;
+            }
+        }
+        else if (Objects.equals(getEntity().getName(), realm.getDefaultRole().getName())){
+            if (Arrays.stream(AccountRoles.DEFAULT).toList().contains(child.getName())){
+                TideCompositeRoleMappingDraftEntity draft = new TideCompositeRoleMappingDraftEntity();
+                draft.setId(KeycloakModelUtils.generateId());
+                draft.setComposite(getEntity());
+                draft.setChildRole(entity);
+                draft.setAction(ActionType.CREATE);
+                draft.setDraftStatus(DraftStatus.APPROVED);
+                em.persist(draft);
+                em.flush();
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     @Override
     public void addCompositeRole(RoleModel roleModel) {
+        if(approveDefaultRolesOnInitiation(roleModel)){
+            super.addCompositeRole(roleModel);
+            return;
+        }
         RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
         RoleEntity entity = toRoleEntity(role);
-        for (RoleEntity composite : getEntity().getCompositeRoles()) {
-            if (composite.equals(entity)) return;
-        }
-        getEntity().getCompositeRoles().add(entity);
+
+        super.addCompositeRole(roleModel);
 
         TideCompositeRoleMappingDraftEntity draft = new TideCompositeRoleMappingDraftEntity();
         draft.setId(KeycloakModelUtils.generateId());

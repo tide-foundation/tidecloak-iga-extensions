@@ -521,13 +521,17 @@ public final class TideAuthzProofUtil {
     }
 
     private static void mergeClientAccesses(AccessToken token, Map<String, AccessToken.Access> clientAccesses) {
+        // Ensure token.getResourceAccess() returns a modifiable map
+        Map<String, AccessToken.Access> resourceAccess = new HashMap<>(token.getResourceAccess());
         clientAccesses.forEach((clientKey, access) -> {
-            AccessToken.Access tokenClientAccess = token.getResourceAccess().computeIfAbsent(clientKey, k -> new AccessToken.Access());
+            AccessToken.Access tokenClientAccess = resourceAccess.computeIfAbsent(clientKey, k -> new AccessToken.Access());
             if (access.getRoles() != null) {
                 access.getRoles().forEach(tokenClientAccess::addRole);
             }
         });
+        token.setResourceAccess(resourceAccess);
     }
+
     private static void removeRealmAccess(AccessToken token, AccessToken.Access realmAccess) {
         if (token.getRealmAccess() != null && realmAccess.getRoles() != null) {
             token.getRealmAccess().getRoles().removeAll(realmAccess.getRoles());
