@@ -29,6 +29,7 @@ import org.keycloak.representations.idm.UserRepresentation;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.keycloak.services.resources.admin.permissions.UserPermissionEvaluator;
 
+import org.keycloak.utils.RoleResolveUtil;
 import org.tidecloak.interfaces.*;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.*;
@@ -40,6 +41,7 @@ import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
+import twitter4j.v1.User;
 import ua_parser.Client;
 
 import javax.management.relation.Role;
@@ -571,14 +573,21 @@ public class TideAdminRealmResource {
                     ClientModel clientModel = realm.getClientById(clientEntity.getId());
                     roleSet.addAll(clientModel.getRolesStream().collect(Collectors.toSet()));
 
-                    Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(wrappedUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE).stream().filter(role -> {
-                        if (role.isClientRole()) {
-                            return !Objects.equals(((ClientModel) role.getContainer()).getClientId(), client.getClientId());
-                        }
-                        return true;
-                    }).collect(Collectors.toSet());
+                    // If we are disabling full-scope, we want to remove all roles except the roles belonging to the client
+                    if (((TideClientFullScopeStatusDraftEntity) entity).getAction() == ActionType.DELETE){
+                        Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(wrappedUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE).stream().filter(role -> {
+                            if (role.isClientRole()) {
+                                return !Objects.equals(((ClientModel) role.getContainer()).getClientId(), client.getClientId());
+                            }
+                            return true;
+                        }).collect(Collectors.toSet());
 
-                    roleSet.addAll(activeRoles);
+                        roleSet.addAll(activeRoles);
+                    }else{
+                        // We want all roles thats the user has for full-scope enabled clients
+                        Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(wrappedUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE).stream().collect(Collectors.toSet());
+                        roleSet.addAll(activeRoles);
+                    }
                 }
 
                 // Here, we go through each proof and update according to the type of change it was. These are the draft records that were still waiting for approval.
@@ -678,7 +687,8 @@ public class TideAdminRealmResource {
                 }
                 AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, roles, true);
                 String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
-                proofDetail.setProofDraft(updatedProof);
+                String newProof = tideAuthzProofUtil.removeAudienceFromToken(updatedProof);
+                proofDetail.setProofDraft(newProof);
                 return;
             }
             // For deletion roles
@@ -693,7 +703,22 @@ public class TideAdminRealmResource {
             proofDetail.setProofDraft(updatedProof);
             return;
         }
+        if ( change.getType() == ChangeSetType.CLIENT){
+            UserEntity userEntity = em.find(UserEntity.class, wrappedUser.getId());
+            //check if the user has a record for this client
+            List<AccessProofDetailEntity> userRoleMappings = em.createNamedQuery("getProofDetailsForUserByClient", AccessProofDetailEntity.class)
+                    .setParameter("user", userEntity)
+                    .setParameter("clientId", client.getId())
+                    .getResultList();
+            if(userRoleMappings.isEmpty()){
+                TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
+                util.generateAndSaveProofDraft(client, wrappedUser, roles, draftEntity.getId(), ChangeSetType.USER_ROLE, ActionType.CREATE, true);
 
+            }
+        }
+        // the issue here is, the roles are what the user has approved, we want to also add what this change is adding.
+        roles.add(realm.getRoleById(draftEntity.getRoleId()));
+        roles.forEach(x -> System.out.println("CHECKING ROLES " + x.getName()));
         draftEntity.setDraftStatus(DraftStatus.DRAFT);
         String proof = proofDetail.getProofDraft();
         String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof, roles, actionType, client.isFullScopeAllowed());
@@ -800,16 +825,10 @@ public class TideAdminRealmResource {
             Set<RoleModel> roles = getAccess(activeRoles, client, client.getClientScopes(true).values().stream(), true);
             AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, roles, false);
             String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
-            proofDetail.setProofDraft(updatedProof);
+            String newProof = tideAuthzProofUtil.removeAudienceFromToken(updatedProof);
+            proofDetail.setProofDraft(newProof);
             return;
         }
-        // this section here for any client changes. We need to check if there are any pending drafts and create any new records.
-        // The client fullscope was enabled and approved. So now any pending\draft changes for this client needs to also appear.
-        // per user , per client
-        // user-role mappings - need extra record for this client with this new user role
-        // composite role mappings - if a user is affected, need to show this in this client proof
-        // deletions - need extra record to show a role no longer existing in this clients proof per user affected
-
         draftEntity.setFullScopeEnabled(DraftStatus.DRAFT);
         String proof = proofDetail.getProofDraft();
         Set<RoleModel> roleSet = new HashSet<>();
@@ -852,4 +871,46 @@ public class TideAdminRealmResource {
                     .executeUpdate();
         }
     }
+
+//    private void setAudience(AccessToken token, ClientModel clientModel, UserModel user, EntityManager em, Set<RoleModel> roleModelSet, ActionType actionType ) {
+//        AccessToken temp = new AccessToken();
+//        UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
+//        Set<RoleModel> allUserRoles = TideRolesUtil.getDeepUserRoleMappings(wrappedUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE);
+//        if (!roleModelSet.isEmpty()){
+//            allUserRoles.addAll(roleModelSet);
+//        }
+//
+//        for (Map.Entry<String, AccessToken.Access> entry : temp.getResourceAccess().entrySet()) {
+//            // Don't add client itself to the audience
+//            if (entry.getKey().equals(clientModel.getId())) {
+//                continue;
+//            }
+//
+//            AccessToken.Access access = entry.getValue();
+//            if (access != null && access.getRoles() != null && !access.getRoles().isEmpty()) {
+//                token.addAudience(entry.getKey());
+//            }
+//        }
+//    }
+//    private static void addToToken(AccessToken token, RoleModel role) {
+//        AccessToken.Access access = null;
+//        if (role.getContainer() instanceof RealmModel) {
+//            access = token.getRealmAccess();
+//            if (token.getRealmAccess() == null) {
+//                access = new AccessToken.Access();
+//                token.setRealmAccess(access);
+//            } else if (token.getRealmAccess().getRoles() != null && token.getRealmAccess().isUserInRole(role.getName()))
+//                return;
+//
+//        } else {
+//            ClientModel app = (ClientModel) role.getContainer();
+//            access = token.getResourceAccess(app.getClientId());
+//            if (access == null) {
+//                access = token.addAccess(app.getClientId());
+//                if (app.isSurrogateAuthRequired()) access.verifyCaller(true);
+//            } else if (access.isUserInRole(role.getName())) return;
+//
+//        }
+//        access.addRole(role.getName());
+//    }
 }

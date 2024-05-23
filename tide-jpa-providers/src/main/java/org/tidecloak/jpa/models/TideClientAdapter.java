@@ -10,7 +10,6 @@ import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
-import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
@@ -118,12 +117,12 @@ public class TideClientAdapter extends ClientAdapter {
         em.persist(clientFullScopeStatuses);
         em.flush();
         if (enable) {
-            createProofDraftsForUsers(util, usersInRealm, client, clientFullScopeStatuses.getId(), ActionType.CREATE, clientFullScopeStatuses);
+            createProofDraftsForUsers(util, usersInRealm, client, clientFullScopeStatuses.getId(), clientFullScopeStatuses);
         } else {
-            regenerateAccessProofForUsers(util, usersInRealm, client, clientFullScopeStatuses.getId(), ActionType.DELETE, clientFullScopeStatuses);
+            regenerateAccessProofForUsers(util, usersInRealm, client, clientFullScopeStatuses.getId(), clientFullScopeStatuses);
         }
     }
-    private void createProofDraftsForUsers(TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, String statusId, ActionType actionType, TideClientFullScopeStatusDraftEntity draft) {
+    private void createProofDraftsForUsers(TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, String statusId, TideClientFullScopeStatusDraftEntity draft) {
         ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
 
         usersInRealm.forEach(user -> {
@@ -137,15 +136,17 @@ public class TideClientAdapter extends ClientAdapter {
                     return;
                 }
                 UserModel tideUser = TideRolesUtil.wrapUserModel(user, session, realm);
-                Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.APPROVED, actionType);
+                Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE);
                 Set<RoleModel> roles = getAccess(activeRoles, client, client.getClientScopes(true).values().stream(), true);
-                util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, roles, statusId, ChangeSetType.CLIENT, actionType, true);
+                System.out.println("CHECKING THE ACCESS HERE IN CREATING DRAFT!!! testing enabling");
+                roles.forEach(x -> System.out.println(x.getName()));
+                util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, roles, statusId, ChangeSetType.CLIENT, ActionType.CREATE, true);
             } catch (JsonProcessingException e) {
                 throw new RuntimeException(e);
             }
         });
     }
-    private void regenerateAccessProofForUsers(TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, String statusId, ActionType actionType, TideClientFullScopeStatusDraftEntity draft) {
+    private void regenerateAccessProofForUsers(TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, String statusId, TideClientFullScopeStatusDraftEntity draft) {
         List<UserModel> usersInClient = new ArrayList<>();
         client.getRolesStream().forEach(role -> session.users().getRoleMembersStream(realm, role).forEach(user -> {
             if (!usersInClient.contains(user)) {
@@ -173,7 +174,7 @@ public class TideClientAdapter extends ClientAdapter {
                     return true;
                 }).collect(Collectors.toSet());
                 activeRoles.forEach(x -> System.out.println(x.getName()));
-                util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, activeRoles, statusId, ChangeSetType.CLIENT, actionType, true);
+                util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, activeRoles, statusId, ChangeSetType.CLIENT, ActionType.DELETE, true);
             } catch (JsonProcessingException e) {
                 throw new RuntimeException(e);
             }

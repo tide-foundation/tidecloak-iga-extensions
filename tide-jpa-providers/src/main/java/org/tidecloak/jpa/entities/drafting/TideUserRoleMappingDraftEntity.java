@@ -24,6 +24,15 @@ import java.io.Serializable;
         @NamedQuery(name="deleteUserRoleMappingDraftsByRole", query="delete from TideUserRoleMappingDraftEntity m where m.roleId = :roleId"),
         @NamedQuery(name="deleteUserRoleMappingDraftsByUser", query="delete from TideUserRoleMappingDraftEntity m where m.user = :user"),
         @NamedQuery(name="getUserRoleMappingDraftsByRole", query="SELECT t.id FROM TideUserRoleMappingDraftEntity t WHERE t.roleId = :roleId"),
+        @NamedQuery(
+                name = "getUserRoleMappingsByUserAndClientId",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.user =:user AND m.roleId IN (" +
+                        "   SELECT r.id FROM RoleEntity r " +
+                        "   WHERE r.clientRole = true AND r.clientId = :clientId" +
+                        ")"
+        ),
+
 })
 //where mapping.user IN (select u from UserEntity u where u.realmId=:realmId)")
 @Entity

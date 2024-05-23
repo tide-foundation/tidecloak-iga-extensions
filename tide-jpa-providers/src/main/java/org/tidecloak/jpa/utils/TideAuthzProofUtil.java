@@ -10,7 +10,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeType;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
-import jakarta.persistence.EntityTransaction;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
@@ -36,7 +35,6 @@ import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.jpa.models.TideClientAdapter;
-import twitter4j.v1.User;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -47,8 +45,6 @@ import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
-
-import static org.tidecloak.Protocol.mapper.TideRolesProtocolMapper.getAccess;
 
 public final class TideAuthzProofUtil {
 
@@ -62,7 +58,7 @@ public final class TideAuthzProofUtil {
         this.realm = realm;
         this.em = em;
         objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
-        objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY);
+        objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
     }
     /**
      * @return filtered set of roles based on Client settings. If client is full scoped returns back everything else remove out of scope roles.
@@ -130,7 +126,7 @@ public final class TideAuthzProofUtil {
     public void generateAndSaveProofDraft(ClientModel clientModel, UserModel userModel, Set<RoleModel> newRoleMappings, String recordId, ChangeSetType type, ActionType actionType, Boolean isFullScopeAllowed) throws JsonProcessingException {
         // Generate AccessToken based on the client and user information with openid scope
         AccessToken proof = generateAccessToken(clientModel, userModel, "openid");
-        System.out.println("THIS IS THE PROOF IM TRYING TO CLEAN");
+        System.out.println("CHECK ME OUT");
         System.out.println(objectMapper.writeValueAsString(proof));
         AccessDetails accessDetails = null;
         UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
@@ -145,11 +141,17 @@ public final class TideAuthzProofUtil {
 
             // Apply the filtered roles to the AccessToken
             setTokenClaims(proof, accessDetails, actionType);
+            // need to clean the audience somewhere here.
+            setAudience(proof, clientModel, activeRoles);
         }
-
+        if (type == ChangeSetType.CLIENT && actionType == ActionType.DELETE){
+            System.out.println(" TRYING TO REMOVE AUDIENCE!!");
+            proof.audience(null);
+        }
         JsonNode proofDraftNode = objectMapper.valueToTree(proof);
 
         if ( actionType == ActionType.DELETE && accessDetails != null){
+
             proofDraftNode = removeAccessFromJsonNode(proofDraftNode, accessDetails);
         }
 
@@ -307,6 +309,7 @@ public final class TideAuthzProofUtil {
 
         // Apply the filtered roles to the AccessToken
         setTokenClaims(currentProof, accessDetails, actionType);
+        setAudience(currentProof, clientModel, activeRoles );
 
         JsonNode currentProofNode = objectMapper.valueToTree(currentProof);
         JsonNode oldProofNode = objectMapper.readTree(oldProofDetails);
@@ -370,6 +373,13 @@ public final class TideAuthzProofUtil {
             }
         }
         return false;
+    }
+
+    public String removeAudienceFromToken(String proof) throws JsonProcessingException {
+        JsonNode currentProof = objectMapper.readTree(proof);
+        AccessToken token = objectMapper.convertValue(currentProof, AccessToken.class);
+        token.audience(null);
+         return objectMapper.writeValueAsString(sortJsonNode(objectMapper.valueToTree(token)));
     }
 
     public String removeAccesFromToken(String proof, AccessDetails accessDetails) throws JsonProcessingException {
@@ -530,6 +540,48 @@ public final class TideAuthzProofUtil {
                 token.getResourceAccess().get(clientKey).getRoles().removeAll(access.getRoles());
             }
         });
+    }
+
+    private void setAudience(AccessToken token, ClientModel clientModel, Set<RoleModel> roleModelSet ) {
+        System.out.println("SETTING AUDIENCE HERE!!");
+        roleModelSet.forEach(x -> System.out.println(x.getName()));
+        AccessToken temp = new AccessToken();
+        roleModelSet.forEach(role -> { if(role.isClientRole()){addToToken(temp, role);}});
+
+        for (Map.Entry<String, AccessToken.Access> entry : temp.getResourceAccess().entrySet()) {
+            // Don't add client itself to the audience
+            if (entry.getKey().equals(clientModel.getId())) {
+                continue;
+            }
+
+            AccessToken.Access access = entry.getValue();
+            if (access != null && access.getRoles() != null && !access.getRoles().isEmpty()) {
+                token.addAudience(entry.getKey());
+            }
+        }
+    }
+
+    private static void addToToken(AccessToken token, RoleModel role) {
+
+        AccessToken.Access access = null;
+        if (role.getContainer() instanceof RealmModel) {
+            access = token.getRealmAccess();
+            if (token.getRealmAccess() == null) {
+                access = new AccessToken.Access();
+                token.setRealmAccess(access);
+            } else if (token.getRealmAccess().getRoles() != null && token.getRealmAccess().isUserInRole(role.getName()))
+                return;
+
+        } else {
+            ClientModel app = (ClientModel) role.getContainer();
+            access = token.getResourceAccess(app.getClientId());
+            if (access == null) {
+                access = token.addAccess(app.getClientId());
+                if (app.isSurrogateAuthRequired()) access.verifyCaller(true);
+            } else if (access.isUserInRole(role.getName())) return;
+
+        }
+        access.addRole(role.getName());
     }
 
 
