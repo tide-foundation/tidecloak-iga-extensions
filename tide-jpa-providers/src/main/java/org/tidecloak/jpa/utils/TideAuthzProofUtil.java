@@ -126,8 +126,6 @@ public final class TideAuthzProofUtil {
     public void generateAndSaveProofDraft(ClientModel clientModel, UserModel userModel, Set<RoleModel> newRoleMappings, String recordId, ChangeSetType type, ActionType actionType, Boolean isFullScopeAllowed) throws JsonProcessingException {
         // Generate AccessToken based on the client and user information with openid scope
         AccessToken proof = generateAccessToken(clientModel, userModel, "openid");
-        System.out.println("CHECK ME OUT");
-        System.out.println(objectMapper.writeValueAsString(proof));
         AccessDetails accessDetails = null;
         UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
         // Filter and expand roles based on the provided mappings; only approved roles are considered
@@ -145,7 +143,6 @@ public final class TideAuthzProofUtil {
             setAudience(proof, clientModel, activeRoles);
         }
         if (type == ChangeSetType.CLIENT && actionType == ActionType.DELETE){
-            System.out.println(" TRYING TO REMOVE AUDIENCE!!");
             proof.audience(null);
         }
         JsonNode proofDraftNode = objectMapper.valueToTree(proof);
@@ -298,6 +295,7 @@ public final class TideAuthzProofUtil {
 
     public String updateDraftProofDetails(ClientModel clientModel, UserModel userModel, String oldProofDetails, Set<RoleModel> newRoleMappings, ActionType actionType, Boolean isFullScopeAllowed) throws JsonProcessingException {
         // Generate the current token
+        System.out.println("HELLO YOU ARE UPDATING THE PROOF!!!");
         AccessToken currentProof = generateAccessToken(clientModel, userModel, "openid");
         Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
@@ -547,8 +545,6 @@ public final class TideAuthzProofUtil {
     }
 
     private void setAudience(AccessToken token, ClientModel clientModel, Set<RoleModel> roleModelSet ) {
-        System.out.println("SETTING AUDIENCE HERE!!");
-        roleModelSet.forEach(x -> System.out.println(x.getName()));
         AccessToken temp = new AccessToken();
         roleModelSet.forEach(role -> { if(role.isClientRole()){addToToken(temp, role);}});
 
