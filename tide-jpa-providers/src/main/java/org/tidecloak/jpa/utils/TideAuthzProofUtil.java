@@ -140,20 +140,23 @@ public final class TideAuthzProofUtil {
             // Apply the filtered roles to the AccessToken
             setTokenClaims(proof, accessDetails, actionType);
             // need to clean the audience somewhere here.
-            setAudience(proof, clientModel, activeRoles);
-        }
-        if (type == ChangeSetType.CLIENT && actionType == ActionType.DELETE){
-            proof.audience(null);
+            Set<String> clientKeys = accessDetails.getClientAccesses().keySet();
+            if (proof.audience() != null) {
+                String[] cleanAudience = Arrays.stream(proof.getAudience())
+                        .filter(clientKeys::contains)
+                        .toArray(String[]::new);
+                proof.audience(cleanAudience);
+            }else {
+                String[] aud = clientKeys.toArray(String[]::new);
+                proof.audience(aud);
+            }
         }
         JsonNode proofDraftNode = objectMapper.valueToTree(proof);
 
         if ( actionType == ActionType.DELETE && accessDetails != null){
-
             proofDraftNode = removeAccessFromJsonNode(proofDraftNode, accessDetails);
         }
-
         String proofDraft = cleanProofDraft(proofDraftNode);
-
 
         // Always save the access proof detail
         saveAccessProofDetail(clientModel, user, recordId, type, proofDraft);
@@ -295,24 +298,36 @@ public final class TideAuthzProofUtil {
 
     public String updateDraftProofDetails(ClientModel clientModel, UserModel userModel, String oldProofDetails, Set<RoleModel> newRoleMappings, ActionType actionType, Boolean isFullScopeAllowed) throws JsonProcessingException {
         // Generate the current token
-        System.out.println("HELLO YOU ARE UPDATING THE PROOF!!!");
         AccessToken currentProof = generateAccessToken(clientModel, userModel, "openid");
         Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(newRoleMappings, DraftStatus.APPROVED, ActionType.CREATE);
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
         ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
         Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream(), isFullScopeAllowed);
-        activeRoles.forEach(x -> System.out.println(" this is the active role mappings " + x.getName()));
 
         AccessDetails accessDetails = sortAccessRoles(requestedAccess);
 
         // Apply the filtered roles to the AccessToken
         setTokenClaims(currentProof, accessDetails, actionType);
-        setAudience(currentProof, clientModel, activeRoles );
+
 
         JsonNode currentProofNode = objectMapper.valueToTree(currentProof);
         JsonNode oldProofNode = objectMapper.readTree(oldProofDetails);
+        JsonNode merged = mergeJsonNodes(currentProofNode, oldProofNode);
 
-        return cleanProofDraft(mergeJsonNodes(currentProofNode, oldProofNode));
+        AccessToken accessToken = objectMapper.convertValue(merged, AccessToken.class);
+        Set<String> clientKeys = accessToken.getResourceAccess().keySet();
+        if (accessToken.getAudience() != null) {
+            String[] cleanAudience = Arrays.stream(accessToken.getAudience())
+                    .filter(clientKeys::contains)
+                    .toArray(String[]::new);
+
+            accessToken.audience(cleanAudience);
+        } else {
+            String[] aud = clientKeys.toArray(String[]::new);
+            accessToken.audience(aud);
+        }
+        JsonNode finalToken = objectMapper.valueToTree(accessToken);
+        return cleanProofDraft(finalToken);
 
 
     }

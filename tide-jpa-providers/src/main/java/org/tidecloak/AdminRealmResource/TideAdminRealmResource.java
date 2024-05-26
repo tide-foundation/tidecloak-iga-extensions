@@ -9,9 +9,11 @@ import jakarta.persistence.LockModeType;
 import jakarta.persistence.NoResultException;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
+import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.tidecloak.Protocol.mapper.TideRolesProtocolMapper;
@@ -19,6 +21,7 @@ import org.tidecloak.interfaces.*;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.jpa.models.TideClientAdapter;
+import org.tidecloak.jpa.models.TideUserAdapter;
 import org.tidecloak.jpa.utils.AccessDetails;
 import org.tidecloak.jpa.utils.ProofGeneration;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
@@ -42,43 +45,50 @@ public class TideAdminRealmResource {
 
     @GET
     @Path("users/{user-id}/roles/{role-id}/draft/status")
-    public DraftStatus getUserRoleAssignmentDraftStatus(@PathParam("user-id") String userId, @PathParam("role-id") String roleId) {
-        auth.users().requireQuery();
+    public Response getUserRoleAssignmentDraftStatus(@PathParam("user-id") String userId, @PathParam("role-id") String roleId) {
+        auth.users().requireQuery(); // Ensure the user has the necessary permissions
+
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         UserEntity userEntity = em.find(UserEntity.class, userId);
 
         try {
-            return em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class)
+            DraftStatus draftStatus = em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class)
                     .setParameter("user", userEntity)
                     .setParameter("roleId", roleId)
                     .getSingleResult()
                     .getDraftStatus();
+            return Response.ok(draftStatus).build();
         } catch (NoResultException e) {
-            return null;
+            // Return 404 if no draft status is found
+            return Response.status(Response.Status.NOT_FOUND).entity("Draft status not found").build();
         }
     }
 
     @GET
     @Path("users/{user-id}/draft/status")
-    public DraftStatus getUserDraftStatus(@PathParam("user-id") String id) {
-        auth.users().requireQuery();
+    public Response getUserDraftStatus(@PathParam("user-id") String id) {
+        auth.users().requireQuery(); // Ensure the user has the necessary permissions
+
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         UserEntity userEntity = em.find(UserEntity.class, id);
 
         try {
-            return em.createNamedQuery("getTideUserDraftEntity", TideUserDraftEntity.class)
+            DraftStatus draftStatus = em.createNamedQuery("getTideUserDraftEntity", TideUserDraftEntity.class)
                     .setParameter("user", userEntity)
                     .getSingleResult()
                     .getDraftStatus();
+            return Response.ok(draftStatus).build();
         } catch (NoResultException e) {
-            return null;
+            // Return 404 if no draft status is found
+            return Response.status(Response.Status.NOT_FOUND).entity("Draft status not found").build();
         }
     }
 
     @GET
     @Path("composite/{parent-id}/child/{child-id}/draft/status")
-    public DraftStatus getRoleDraftStatus(@PathParam("parent-id") String parentId, @PathParam("child-id") String childId) {
-        auth.users().requireQuery();
+    public Response getRoleDraftStatus(@PathParam("parent-id") String parentId, @PathParam("child-id") String childId) {
+        auth.users().requireQuery(); // Ensure the user has the necessary permissions
+
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RoleModel parentRole = realm.getRoleById(parentId);
         RoleModel childRole = realm.getRoleById(childId);
@@ -88,16 +98,16 @@ public class TideAdminRealmResource {
                 .setParameter("childRole", TideRolesUtil.toRoleEntity(childRole, em))
                 .getResultList();
 
-        return entity.isEmpty() ? null : entity.get(0).getDraftStatus();
+        return entity.isEmpty() ? Response.status(Response.Status.NOT_FOUND).entity("Draft status not found").build() : Response.ok(entity.get(0).getDraftStatus()).build();
     }
 
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign")
-    public void signChangeset(DraftChangeSet changeSet) {
+    public Response signChangeset(DraftChangeSet changeSet) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<String> proofDetails;
-        Object draftRecordEntity = new Object();
+        Object draftRecordEntity;
 
         if (changeSet.getType() == ChangeSetType.USER_ROLE) {
             draftRecordEntity = em.find(TideUserRoleMappingDraftEntity.class, changeSet.getChangeSetId());
@@ -106,34 +116,39 @@ public class TideAdminRealmResource {
             draftRecordEntity = em.find(TideCompositeRoleMappingDraftEntity.class, changeSet.getChangeSetId());
             proofDetails = getProofDetails(em, ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).getId());
         } else {
-            throw new IllegalArgumentException("Unsupported change set type");
+            // Return 400 if change set type is unsupported
+            return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
         }
 
         try {
             ObjectMapper objectMapper = new ObjectMapper();
             objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
             JsonNode tempNode = objectMapper.valueToTree(draftRecordEntity);
-            var sortedTemp = ProofGeneration.sortJsonNode(tempNode);
+            JsonNode sortedTemp = ProofGeneration.sortJsonNode(tempNode);
             String draftRecord = objectMapper.writeValueAsString(sortedTemp);
+            // Return success message after signing the changeset
+            return Response.ok("Change set signed successfully").build();
         } catch (JsonProcessingException e) {
-            throw new RuntimeException(e);
+            // Return 500 if there is an error processing JSON
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Error processing JSON").build();
         }
     }
 
     @GET
     @Path("change-set/users/requests")
-    public List<RequestedChanges> getRequestedChangesForUsers() {
+    public Response getRequestedChangesForUsers() {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        return new ArrayList<>(processUserRoleMappings(em));
+        List<RequestedChanges> changes = new ArrayList<>(processUserRoleMappings(em));
+        return Response.ok(changes).build();
     }
 
     @GET
     @Path("change-set/roles/requests")
-    public List<RequestedChanges> getRequestedChanges() {
+    public Response getRequestedChanges() {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> requestedChangesList = new ArrayList<>(processRoleMappings(em));
         requestedChangesList.addAll(processCompositeRoleMappings(em));
-        return requestedChangesList;
+        return Response.ok(requestedChangesList).build();
     }
 
     private List<RequestedChanges> processUserRoleMappings(EntityManager em) {
@@ -144,7 +159,7 @@ public class TideAdminRealmResource {
                 .getResultList();
 
         for (TideUserRoleMappingDraftEntity m : mappings) {
-            em.lock(m, LockModeType.PESSIMISTIC_WRITE);
+            em.lock(m, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
             RoleModel role = realm.getRoleById(m.getRoleId());
             if (role == null || !role.isClientRole()) {
                 continue;
@@ -220,9 +235,10 @@ public class TideAdminRealmResource {
 
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
-    @Path("change-set/approve")
-    public void approveChangeSet(List<DraftChangeSet> changeSets) throws NoSuchAlgorithmException, JsonProcessingException {
+    @Path("change-set/commit")
+    public Response approveChangeSet(List<DraftChangeSet> changeSets) throws NoSuchAlgorithmException, JsonProcessingException {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
         for (DraftChangeSet change : changeSets) {
             ActionType action = change.getActionType();
             ChangeSetType type = change.getType();
@@ -230,173 +246,137 @@ public class TideAdminRealmResource {
 
             if (mappings.isEmpty()) continue;
             Object mapping = mappings.get(0);
-            em.lock(mapping, LockModeType.PESSIMISTIC_WRITE);
+            em.lock(mapping, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
 
-            if (type == ChangeSetType.USER_ROLE) {
-                processUserRoleMapping(change, (TideUserRoleMappingDraftEntity) mapping, em, action);
-            } else if (type == ChangeSetType.COMPOSITE_ROLE) {
-                processCompositeRoleMapping(change, (TideCompositeRoleMappingDraftEntity) mapping, em, action);
-            } else if (type == ChangeSetType.ROLE) {
-                processRole(change, (TideRoleDraftEntity) mapping, em, action);
-            } else if (type == ChangeSetType.USER) {
-                processUser(change, (TideUserDraftEntity) mapping, em, action);
-            } else if (type == ChangeSetType.CLIENT) {
-                processClient(change, (TideClientFullScopeStatusDraftEntity) mapping, em, action);
+            switch (type) {
+                case USER_ROLE -> processUserRoleMapping(change, (TideUserRoleMappingDraftEntity) mapping, em, action);
+                case COMPOSITE_ROLE -> processCompositeRoleMapping(change, (TideCompositeRoleMappingDraftEntity) mapping, em, action);
+                case ROLE -> processRole(change, (TideRoleDraftEntity) mapping, em, action);
+                case USER -> processUser(change, (TideUserDraftEntity) mapping, em, action);
+                case CLIENT -> processClient(change, (TideClientFullScopeStatusDraftEntity) mapping, em, action);
             }
 
-            em.flush();
+            em.flush(); // Persist changes to the database
         }
+        // Return success message after approving the change sets
+        return Response.ok("Change sets approved").build();
     }
 
     private List<?> getMappings(EntityManager em, DraftChangeSet change, ChangeSetType type, ActionType action) {
-        if (type == ChangeSetType.USER_ROLE) {
-            return getUserRoleMappings(em, change, action);
-        } else if (type == ChangeSetType.COMPOSITE_ROLE) {
-            return getCompositeRoleMappings(em, change, action);
-        } else if (type == ChangeSetType.ROLE) {
-            return getRoleMappings(em, change, action);
-        } else if (type == ChangeSetType.USER) {
-            return getUserMappings(em, change, action);
-        } else if (type == ChangeSetType.CLIENT) {
-            return getClientMappings(em, change, action);
-        }
-        return Collections.emptyList();
+        return switch (type) {
+            case USER_ROLE -> getUserRoleMappings(em, change, action);
+            case GROUP, USER_GROUP_MEMBERSHIP, GROUP_ROLE -> null;
+            case COMPOSITE_ROLE -> getCompositeRoleMappings(em, change, action);
+            case ROLE -> getRoleMappings(em, change, action);
+            case USER -> getUserMappings(em, change, action);
+            case CLIENT -> getClientMappings(em, change, action);
+        };
     }
 
+    // Helper methods for retrieving specific mappings
     private List<?> getUserRoleMappings(EntityManager em, DraftChangeSet change, ActionType action) {
-        if (action == ActionType.CREATE) {
-            return em.createNamedQuery("getUserRoleMappingsByStatusAndRealmAndRecordId", TideUserRoleMappingDraftEntity.class)
-                    .setParameter("draftStatus", DraftStatus.DRAFT)
-                    .setParameter("changesetId", change.getChangeSetId())
-                    .setParameter("realmId", realm.getId())
-                    .getResultList();
-        } else if (action == ActionType.DELETE) {
-            return em.createNamedQuery("getUserRoleMappingsByDeleteStatusAndRealmAndRecordId", TideUserRoleMappingDraftEntity.class)
-                    .setParameter("deleteStatus", DraftStatus.DRAFT)
-                    .setParameter("changesetId", change.getChangeSetId())
-                    .setParameter("realmId", realm.getId())
-                    .getResultList();
-        }
-        return Collections.emptyList();
+        String queryName = action == ActionType.CREATE ? "getUserRoleMappingsByStatusAndRealmAndRecordId" : "getUserRoleMappingsByDeleteStatusAndRealmAndRecordId";
+        return em.createNamedQuery(queryName, TideUserRoleMappingDraftEntity.class)
+                .setParameter(action == ActionType.CREATE ? "draftStatus" : "deleteStatus", DraftStatus.DRAFT)
+                .setParameter("changesetId", change.getChangeSetId())
+                .setParameter("realmId", realm.getId())
+                .getResultList();
     }
 
     private List<?> getCompositeRoleMappings(EntityManager em, DraftChangeSet change, ActionType action) {
-        if (action == ActionType.CREATE) {
-            return em.createNamedQuery("getAllCompositeRoleMappingsByStatusAndRealmAndRecordId", TideCompositeRoleMappingDraftEntity.class)
-                    .setParameter("draftStatus", DraftStatus.DRAFT)
-                    .setParameter("changesetId", change.getChangeSetId())
-                    .setParameter("realmId", realm.getId())
-                    .getResultList();
-        } else if (action == ActionType.DELETE) {
-            return em.createNamedQuery("getAllCompositeRoleMappingsByDeletionStatusAndRealmAndRecordId", TideCompositeRoleMappingDraftEntity.class)
-                    .setParameter("deleteStatus", DraftStatus.DRAFT)
-                    .setParameter("changesetId", change.getChangeSetId())
-                    .setParameter("realmId", realm.getId())
-                    .getResultList();
-        }
-        return Collections.emptyList();
+        String queryName = action == ActionType.CREATE ? "getAllCompositeRoleMappingsByStatusAndRealmAndRecordId" : "getAllCompositeRoleMappingsByDeletionStatusAndRealmAndRecordId";
+        return em.createNamedQuery(queryName, TideCompositeRoleMappingDraftEntity.class)
+                .setParameter(action == ActionType.CREATE ? "draftStatus" : "deleteStatus", DraftStatus.DRAFT)
+                .setParameter("changesetId", change.getChangeSetId())
+                .setParameter("realmId", realm.getId())
+                .getResultList();
     }
 
     private List<?> getRoleMappings(EntityManager em, DraftChangeSet change, ActionType action) {
-        if (action == ActionType.DELETE) {
-            return em.createNamedQuery("getRoleDraftByRoleAndDeleteStatus", TideRoleDraftEntity.class)
-                    .setParameter("deleteStatus", DraftStatus.DRAFT)
-                    .setParameter("changesetId", change.getChangeSetId())
-                    .getResultList();
-        }
-        return Collections.emptyList();
+        return em.createNamedQuery("getRoleDraftByRoleAndDeleteStatus", TideRoleDraftEntity.class)
+                .setParameter("deleteStatus", DraftStatus.DRAFT)
+                .setParameter("changesetId", change.getChangeSetId())
+                .getResultList();
     }
 
     private List<?> getUserMappings(EntityManager em, DraftChangeSet change, ActionType action) {
-        if (action == ActionType.CREATE) {
-            return em.createNamedQuery("getTideUserDraftEntityByDraftStatusAndId", TideUserDraftEntity.class)
-                    .setParameter("draftStatus", DraftStatus.DRAFT)
-                    .setParameter("changesetId", change.getChangeSetId())
-                    .getResultList();
-        }
-        return Collections.emptyList();
+        return em.createNamedQuery("getTideUserDraftEntityByDraftStatusAndId", TideUserDraftEntity.class)
+                .setParameter("draftStatus", DraftStatus.DRAFT)
+                .setParameter("changesetId", change.getChangeSetId())
+                .getResultList();
     }
 
     private List<?> getClientMappings(EntityManager em, DraftChangeSet change, ActionType action) {
-        if (action == ActionType.CREATE) {
-            return em.createNamedQuery("getClientFullScopeStatusDraftByIdAndFullScopeEnabled", TideClientFullScopeStatusDraftEntity.class)
-                    .setParameter("fullScopeEnabled", DraftStatus.DRAFT)
-                    .setParameter("changesetId", change.getChangeSetId())
-                    .getResultList();
-        } else if (action == ActionType.DELETE) {
-            return em.createNamedQuery("getClientFullScopeStatusDraftByIdAndFullScopeDisabled", TideClientFullScopeStatusDraftEntity.class)
-                    .setParameter("fullScopeDisabled", DraftStatus.DRAFT)
-                    .setParameter("changesetId", change.getChangeSetId())
-                    .getResultList();
-        }
-        return Collections.emptyList();
+        String queryName = action == ActionType.CREATE ? "getClientFullScopeStatusDraftByIdAndFullScopeEnabled" : "getClientFullScopeStatusDraftByIdAndFullScopeDisabled";
+        return em.createNamedQuery(queryName, TideClientFullScopeStatusDraftEntity.class)
+                .setParameter(action == ActionType.CREATE ? "fullScopeEnabled" : "fullScopeDisabled", DraftStatus.DRAFT)
+                .setParameter("changesetId", change.getChangeSetId())
+                .getResultList();
     }
 
     private void processUserRoleMapping(DraftChangeSet change, TideUserRoleMappingDraftEntity mapping, EntityManager em, ActionType action) throws NoSuchAlgorithmException, JsonProcessingException {
         RoleModel role = realm.getRoleById(mapping.getRoleId());
         if (role == null || !role.isClientRole()) return;
+
         if (action == ActionType.CREATE) {
-            approveDraft(mapping, em, DraftStatus.APPROVED);
-            checkAndUpdateProofRecords(change, mapping, ChangeSetType.USER_ROLE, em);
+            commitDraft(mapping, em, DraftStatus.ACTIVE);
         } else if (action == ActionType.DELETE) {
-            approveDraft(mapping, em, DraftStatus.APPROVED, true);
-            checkAndUpdateProofRecords(change, mapping, ChangeSetType.USER_ROLE, em);
+            commitDraft(mapping, em, DraftStatus.APPROVED, true);
             UserModel user = session.users().getUserById(realm, mapping.getUser().getId());
             user.deleteRoleMapping(role);
         }
+        checkAndUpdateProofRecords(change, mapping, ChangeSetType.USER_ROLE, em);
     }
 
     private void processCompositeRoleMapping(DraftChangeSet change, TideCompositeRoleMappingDraftEntity mapping, EntityManager em, ActionType action) throws NoSuchAlgorithmException, JsonProcessingException {
         if (action == ActionType.CREATE) {
-            approveDraft(mapping, em, DraftStatus.APPROVED);
-            checkAndUpdateProofRecords(change, mapping, ChangeSetType.COMPOSITE_ROLE, em);
+            commitDraft(mapping, em, DraftStatus.ACTIVE);
         } else if (action == ActionType.DELETE) {
-            approveDraft(mapping, em, DraftStatus.APPROVED, true);
-            checkAndUpdateProofRecords(change, mapping, ChangeSetType.COMPOSITE_ROLE, em);
-
+            commitDraft(mapping, em, DraftStatus.APPROVED, true);
             RoleModel composite = realm.getRoleById(mapping.getComposite().getId());
             RoleModel child = realm.getRoleById(mapping.getChildRole().getId());
             composite.removeCompositeRole(child);
         }
+        checkAndUpdateProofRecords(change, mapping, ChangeSetType.COMPOSITE_ROLE, em);
     }
 
     private void processRole(DraftChangeSet change, TideRoleDraftEntity mapping, EntityManager em, ActionType action) throws NoSuchAlgorithmException, JsonProcessingException {
         if (action == ActionType.DELETE) {
-            approveDraft(mapping, em, DraftStatus.APPROVED, true);
-            checkAndUpdateProofRecords(change, mapping, ChangeSetType.ROLE, em);
-
+            commitDraft(mapping, em, DraftStatus.APPROVED, true);
             RoleModel role = realm.getRoleById(mapping.getRole().getId());
             realm.removeRole(role);
             cleanupRoleRecords(em, mapping);
         }
+        checkAndUpdateProofRecords(change, mapping, ChangeSetType.ROLE, em);
     }
 
     private void processUser(DraftChangeSet change, TideUserDraftEntity mapping, EntityManager em, ActionType action) throws NoSuchAlgorithmException, JsonProcessingException {
         if (action == ActionType.CREATE) {
-            approveDraft(mapping, em, DraftStatus.APPROVED);
-            checkAndUpdateProofRecords(change, mapping, ChangeSetType.USER, em);
+            commitDraft(mapping, em, DraftStatus.ACTIVE);
             em.remove(mapping);
             em.flush();
         }
+        checkAndUpdateProofRecords(change, mapping, ChangeSetType.USER, em);
     }
 
     private void processClient(DraftChangeSet change, TideClientFullScopeStatusDraftEntity mapping, EntityManager em, ActionType action) throws NoSuchAlgorithmException, JsonProcessingException {
         if (action == ActionType.CREATE) {
-            approveDraft(mapping, em, DraftStatus.APPROVED);
-            checkAndUpdateProofRecords(change, mapping, ChangeSetType.CLIENT, em);
+            commitDraft(mapping, em, DraftStatus.APPROVED);
+            ClientModel client = new TideClientAdapter(realm, em, session, mapping.getClient());
+            client.setFullScopeAllowed(true);
         } else if (action == ActionType.DELETE) {
-            approveDraft(mapping, em, DraftStatus.APPROVED, true);
-            checkAndUpdateProofRecords(change, mapping, ChangeSetType.CLIENT, em);
+            commitDraft(mapping, em, DraftStatus.APPROVED, true);
             ClientModel client = new TideClientAdapter(realm, em, session, mapping.getClient());
             client.setFullScopeAllowed(false);
         }
+        checkAndUpdateProofRecords(change, mapping, ChangeSetType.CLIENT, em);
     }
 
-    private void approveDraft(Object mapping, EntityManager em, DraftStatus status) {
-        approveDraft(mapping, em, status, false);
+    private void commitDraft(Object mapping, EntityManager em, DraftStatus status) {
+        commitDraft(mapping, em, status, false);
     }
 
-    private void approveDraft(Object mapping, EntityManager em, DraftStatus status, boolean isDelete) {
+    private void commitDraft(Object mapping, EntityManager em, DraftStatus status, boolean isDelete) {
         if (mapping instanceof TideUserRoleMappingDraftEntity) {
             if (isDelete) {
                 ((TideUserRoleMappingDraftEntity) mapping).setDeleteStatus(status);
@@ -463,7 +443,6 @@ public class TideAdminRealmResource {
                 UserModel userModel = session.users().getUserById(realm, user.getId());
                 UserModel wrappedUser = TideRolesUtil.wrapUserModel(userModel, session, realm);
 
-                // This saves the final proof (certificate? Draft + Signature). If this was saved then continue to the next proof for checking.
                 if (saveFinalProofDetailsOnApproval(proofDetail, change, em, user, client)) {
                     continue;
                 }
@@ -481,33 +460,37 @@ public class TideAdminRealmResource {
                     roleSet.add(TideRolesUtil.wrapRoleModel(realm.getRoleById(((TideRoleDraftEntity) entity).getRole().getId()), session, realm));
                     actionType = ((TideRoleDraftEntity) entity).getAction();
                 } else if (entity instanceof TideClientFullScopeStatusDraftEntity) {
+                    Set<RoleModel> activeRoles;
                     if (((TideClientFullScopeStatusDraftEntity) entity).getAction() == ActionType.DELETE) {
-                        Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(wrappedUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE).stream().filter(role -> {
+                        activeRoles = TideRolesUtil.getDeepUserRoleMappings(wrappedUser, session, realm, em, DraftStatus.ACTIVE, ActionType.CREATE).stream().filter(role -> {
                             if (role.isClientRole()) {
                                 return !Objects.equals(((ClientModel) role.getContainer()).getClientId(), client.getClientId());
                             }
                             return true;
                         }).collect(Collectors.toSet());
-                        roleSet.addAll(activeRoles);
                     } else {
-                        Set<RoleModel> activeRoles = new HashSet<>(TideRolesUtil.getDeepUserRoleMappings(wrappedUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE));
-                        roleSet.addAll(activeRoles);
+                        activeRoles = new HashSet<>(TideRolesUtil.getDeepUserRoleMappings(wrappedUser, session, realm, em, DraftStatus.ACTIVE, ActionType.CREATE));
                     }
+                    roleSet.addAll(activeRoles);
                 }
 
                 if (proofDetail.getChangesetType() == ChangeSetType.USER_ROLE) {
                     TideUserRoleMappingDraftEntity draftEntity = em.find(TideUserRoleMappingDraftEntity.class, proofDetail.getRecordId());
                     handleUserRoleMappingDraft(draftEntity, proofDetail, change, roleSet, actionType, client, tideAuthzProofUtil, wrappedUser, em);
-                } else if (proofDetail.getChangesetType() == ChangeSetType.COMPOSITE_ROLE) {
+                }
+                else if (proofDetail.getChangesetType() == ChangeSetType.COMPOSITE_ROLE) {
                     TideCompositeRoleMappingDraftEntity draftEntity = em.find(TideCompositeRoleMappingDraftEntity.class, proofDetail.getRecordId());
-                    handleCompositeRoleMappingDraft(draftEntity, proofDetail, change, roleSet, client, tideAuthzProofUtil, wrappedUser);
-                } else if (proofDetail.getChangesetType() == ChangeSetType.ROLE) {
+                    handleCompositeRoleMappingDraft(draftEntity, proofDetail, change, roleSet, client, tideAuthzProofUtil, wrappedUser, em);
+                }
+                else if (proofDetail.getChangesetType() == ChangeSetType.ROLE) {
                     TideRoleDraftEntity draftEntity = em.find(TideRoleDraftEntity.class, proofDetail.getRecordId());
-                    handleRoleDraft(draftEntity, proofDetail, change, roleSet, client, tideAuthzProofUtil, wrappedUser);
-                } else if (proofDetail.getChangesetType() == ChangeSetType.USER) {
+                    handleRoleDraft(draftEntity, proofDetail, change, roleSet, client, tideAuthzProofUtil, wrappedUser, em);
+                }
+                else if (proofDetail.getChangesetType() == ChangeSetType.USER) {
                     TideUserDraftEntity draftEntity = em.find(TideUserDraftEntity.class, proofDetail.getRecordId());
                     handleUserDraft(draftEntity, proofDetail, client, tideAuthzProofUtil, wrappedUser);
-                } else if (proofDetail.getChangesetType() == ChangeSetType.CLIENT) {
+                }
+                else if (proofDetail.getChangesetType() == ChangeSetType.CLIENT) {
                     TideClientFullScopeStatusDraftEntity draftEntity = em.find(TideClientFullScopeStatusDraftEntity.class, proofDetail.getRecordId());
                     handleClientDraft(draftEntity, proofDetail, change, client, tideAuthzProofUtil, wrappedUser, em);
                 }
@@ -565,20 +548,33 @@ public class TideAdminRealmResource {
             return em.createNamedQuery("getProofDetailsByClient", AccessProofDetailEntity.class)
                     .setParameter("clientId", client.getId())
                     .getResultList();
-        } else if (changeSetType == ChangeSetType.CLIENT) {
+        }
+        else if (changeSetType == ChangeSetType.CLIENT) {
             if (((TideClientFullScopeStatusDraftEntity) entity).getAction() == ActionType.CREATE) {
                 String clientId = ((TideClientFullScopeStatusDraftEntity) entity).getClient().getId();
+
                 List<String> recordIds = em.createNamedQuery("getProofDetailsByClient", AccessProofDetailEntity.class)
                         .setParameter("clientId", clientId)
                         .getResultStream().map(AccessProofDetailEntity::getRecordId).distinct().toList();
 
-                List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraftByChangeSetType", AccessProofDetailEntity.class)
+                List<AccessProofDetailEntity> proofs = new ArrayList<>();
+                proofs.addAll(em.createNamedQuery("getProofDetailsForDraftByChangeSetType", AccessProofDetailEntity.class)
                         .setParameter("changesetType", ChangeSetType.USER_ROLE)
-                        .getResultStream().filter(proof -> !recordIds.contains(proof.getRecordId())).toList();
+                        .getResultStream().filter(proof -> !recordIds.contains(proof.getRecordId())).toList());
 
-                for (AccessProofDetailEntity t : proofs) {
+                proofs.addAll(em.createNamedQuery("getProofDetailsForDraftByChangeSetType", AccessProofDetailEntity.class)
+                        .setParameter("changesetType", ChangeSetType.COMPOSITE_ROLE)
+                        .getResultStream().filter(proof -> !recordIds.contains(proof.getRecordId())).toList());
+
+                proofs.addAll(em.createNamedQuery("getProofDetailsForDraftByChangeSetType", AccessProofDetailEntity.class)
+                        .setParameter("changesetType", ChangeSetType.ROLE)
+                        .getResultStream().filter(proof -> !recordIds.contains(proof.getRecordId())).toList());
+
+                List<AccessProofDetailEntity> uniqueProofs = proofs.stream().distinct().toList();
+                for (AccessProofDetailEntity t : uniqueProofs) {
                     UserModel user = session.users().getUserById(realm, t.getUser().getId());
                     TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
+
                     TideUserRoleMappingDraftEntity role = em.find(TideUserRoleMappingDraftEntity.class, t.getRecordId());
                     Set<RoleModel> roles = new HashSet<>();
                     roles.add(realm.getRoleById(role.getRoleId()));
@@ -597,16 +593,118 @@ public class TideAdminRealmResource {
     }
 
     private void handleUserRoleMappingDraft(TideUserRoleMappingDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSet change, Set<RoleModel> roles, ActionType actionType, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws JsonProcessingException, NoSuchAlgorithmException {
-        if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == null)) {
+        if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() == null)) {
+            return;
+        }
+
+        if (change.getActionType() == ActionType.DELETE) {
+            if (change.getType() == ChangeSetType.CLIENT) {
+                boolean hasCommittedRole = ((TideUserAdapter) wrappedUser).getRoleMappingsStreamByStatusAndAction(DraftStatus.ACTIVE, ActionType.CREATE)
+                        .anyMatch(x -> x.isClientRole() && Objects.equals(x.getContainerId(), client.getId()));
+
+                if (hasCommittedRole) {
+                    String proof = proofDetail.getProofDraft();
+                    TideUserRoleMappingDraftEntity userRoleDraft = em.find(TideUserRoleMappingDraftEntity.class, proofDetail.getRecordId());
+                    if (userRoleDraft != null) {
+                        roles.add(realm.getRoleById(userRoleDraft.getRoleId()));
+                    }
+                    AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, roles, true);
+                    String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
+                    String newProof = tideAuthzProofUtil.removeAudienceFromToken(updatedProof);
+                    proofDetail.setProofDraft(newProof);
+                    return;
+                } else {
+                    em.remove(proofDetail);
+                    em.flush();
+                }
+            }
+
+            if (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() == DraftStatus.PENDING) {
+                draftEntity.setDeleteStatus(DraftStatus.DRAFT);
+            } else if (draftEntity.getDraftStatus() == DraftStatus.APPROVED) {
+                draftEntity.setDraftStatus(DraftStatus.DRAFT);
+            }
+            String proof = proofDetail.getProofDraft();
+            AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, roles, client.isFullScopeAllowed());
+            String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
+            String newProof = tideAuthzProofUtil.removeAudienceFromToken(updatedProof);
+            proofDetail.setProofDraft(newProof);
+            return;
+        }
+
+        roles.add(realm.getRoleById(draftEntity.getRoleId()));
+        draftEntity.setDraftStatus(DraftStatus.DRAFT);
+        String proof = proofDetail.getProofDraft();
+        String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof, roles, actionType, true);
+        proofDetail.setProofDraft(updatedProof);
+    }
+
+    private void handleCompositeRoleMappingDraft(TideCompositeRoleMappingDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSet change, Set<RoleModel> roles, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws JsonProcessingException, NoSuchAlgorithmException {
+        if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() == null)) {
             return;
         }
 
         if (change.getActionType() == ActionType.DELETE) {
             if (change.getType() == ChangeSetType.CLIENT) {
                 String proof = proofDetail.getProofDraft();
-                TideUserRoleMappingDraftEntity userRoleDraft = em.find(TideUserRoleMappingDraftEntity.class, proofDetail.getRecordId());
-                if (userRoleDraft != null) {
-                    roles.add(realm.getRoleById(userRoleDraft.getRoleId()));
+                TideCompositeRoleMappingDraftEntity compositeRoleMappingDraft = em.find(TideCompositeRoleMappingDraftEntity.class, proofDetail.getRecordId());
+                if (compositeRoleMappingDraft != null) {
+                    RoleModel childRole = realm.getRoleById(compositeRoleMappingDraft.getChildRole().getId());
+                    RoleModel compositeRole = realm.getRoleById(compositeRoleMappingDraft.getComposite().getId());
+                    if (childRole.isClientRole() && !Objects.equals(childRole.getContainerId(), client.getId())) {
+                        roles.add(childRole);
+                    }
+                    if (compositeRole.isClientRole() && !Objects.equals(compositeRole.getContainerId(), client.getId())) {
+                        roles.add(compositeRole);
+                    }
+                }
+
+                Set<RoleModel> rolesToAdd = ((TideUserAdapter) wrappedUser).getRoleMappingsStreamByStatusAndAction(DraftStatus.ACTIVE, ActionType.CREATE).filter(r -> r.isClientRole() && Objects.equals(r.getContainerId(), client.getId())).collect(Collectors.toSet());
+                String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof, rolesToAdd, draftEntity.getAction(), true);
+                AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, roles, true);
+                String cleanedProof = tideAuthzProofUtil.removeAccesFromToken(updatedProof, accessDetails);
+                String newProof = tideAuthzProofUtil.removeAudienceFromToken(cleanedProof);
+                proofDetail.setProofDraft(newProof);
+                return;
+            }
+
+            if (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() == DraftStatus.PENDING) {
+                draftEntity.setDeleteStatus(DraftStatus.DRAFT);
+            } else if (draftEntity.getDraftStatus() == DraftStatus.APPROVED) {
+                draftEntity.setDraftStatus(DraftStatus.DRAFT);
+            }
+            String proof = proofDetail.getProofDraft();
+            AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, roles, client.isFullScopeAllowed());
+            String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
+            String newProof = tideAuthzProofUtil.removeAudienceFromToken(updatedProof);
+            proofDetail.setProofDraft(newProof);
+            return;
+        }
+
+        draftEntity.setDraftStatus(DraftStatus.DRAFT);
+        String proof = proofDetail.getProofDraft();
+        String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof, roles, draftEntity.getAction(), true);
+        proofDetail.setProofDraft(updatedProof);
+    }
+
+    private void handleRoleDraft(TideRoleDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSet change, Set<RoleModel> roles, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws JsonProcessingException, NoSuchAlgorithmException {
+        if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() == null)) {
+            return;
+        }
+
+        if (change.getActionType() == ActionType.DELETE) {
+            if (change.getType() == ChangeSetType.CLIENT) {
+                String proof = proofDetail.getProofDraft();
+                TideCompositeRoleMappingDraftEntity compositeRoleMappingDraft = em.find(TideCompositeRoleMappingDraftEntity.class, proofDetail.getRecordId());
+                if (compositeRoleMappingDraft != null) {
+                    RoleModel childRole = realm.getRoleById(compositeRoleMappingDraft.getChildRole().getId());
+                    RoleModel compositeRole = realm.getRoleById(compositeRoleMappingDraft.getComposite().getId());
+                    if (childRole.isClientRole() && !Objects.equals(childRole.getContainerId(), client.getId())) {
+                        roles.add(childRole);
+                    }
+                    if (compositeRole.isClientRole() && !Objects.equals(compositeRole.getContainerId(), client.getId())) {
+                        roles.add(compositeRole);
+                    }
                 }
                 AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, roles, true);
                 String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
@@ -614,79 +712,27 @@ public class TideAdminRealmResource {
                 proofDetail.setProofDraft(newProof);
                 return;
             }
-
-            if (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == DraftStatus.PENDING) {
+            if (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() == DraftStatus.PENDING) {
                 draftEntity.setDeleteStatus(DraftStatus.DRAFT);
-            } else {
+            } else if (draftEntity.getDraftStatus() == DraftStatus.APPROVED) {
                 draftEntity.setDraftStatus(DraftStatus.DRAFT);
             }
             String proof = proofDetail.getProofDraft();
             AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, roles, client.isFullScopeAllowed());
             String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
-            proofDetail.setProofDraft(updatedProof);
-            return;
-        }
-        System.out.println("HELLO YOUR ARE UPDATING A USER ROLE RECORD!");
-        // Add the role this draft change is requesting to the list of roles.
-        roles.add(realm.getRoleById(draftEntity.getRoleId()));
-        // Invalidate any admin signature and set back to draft. ( Can only happen if the record has not yet been committed e.g. set to ACTIVE)
-        draftEntity.setDraftStatus(DraftStatus.DRAFT);
-        String proof = proofDetail.getProofDraft();
-        roles.forEach(role -> System.out.println("THESE ARE THE ROLES I AM TRYING TO ADD ON THIS RECORD " + role.getName()));
-        String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof, roles, actionType, true);
-        proofDetail.setProofDraft(updatedProof);
-    }
-
-    private void handleCompositeRoleMappingDraft(TideCompositeRoleMappingDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSet change, Set<RoleModel> roles, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser) throws JsonProcessingException, NoSuchAlgorithmException {
-        if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == null)) {
-            return;
-        }
-
-        if (change.getActionType() == ActionType.DELETE) {
-            if (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == DraftStatus.PENDING) {
-                draftEntity.setDeleteStatus(DraftStatus.DRAFT);
-            } else {
-                draftEntity.setDraftStatus(DraftStatus.DRAFT);
-            }
-            String proof = proofDetail.getProofDraft();
-            AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, roles, client.isFullScopeAllowed());
-            String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
-            proofDetail.setProofDraft(updatedProof);
+            String newProof = tideAuthzProofUtil.removeAudienceFromToken(updatedProof);
+            proofDetail.setProofDraft(newProof);
             return;
         }
 
         draftEntity.setDraftStatus(DraftStatus.DRAFT);
         String proof = proofDetail.getProofDraft();
-        String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof, roles, draftEntity.getAction(), client.isFullScopeAllowed());
-        proofDetail.setProofDraft(updatedProof);
-    }
-
-    private void handleRoleDraft(TideRoleDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSet change, Set<RoleModel> roles, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser) throws JsonProcessingException, NoSuchAlgorithmException {
-        if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == null)) {
-            return;
-        }
-
-        if (change.getActionType() == ActionType.DELETE) {
-            if (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == DraftStatus.PENDING) {
-                draftEntity.setDeleteStatus(DraftStatus.DRAFT);
-            } else {
-                draftEntity.setDraftStatus(DraftStatus.DRAFT);
-            }
-            String proof = proofDetail.getProofDraft();
-            AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, roles, client.isFullScopeAllowed());
-            String updatedProof = tideAuthzProofUtil.removeAccesFromToken(proof, accessDetails);
-            proofDetail.setProofDraft(updatedProof);
-            return;
-        }
-
-        draftEntity.setDraftStatus(DraftStatus.DRAFT);
-        String proof = proofDetail.getProofDraft();
-        String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof, roles, draftEntity.getAction(), client.isFullScopeAllowed());
+        String updatedProof = tideAuthzProofUtil.updateDraftProofDetails(client, wrappedUser, proof, roles, draftEntity.getAction(), true);
         proofDetail.setProofDraft(updatedProof);
     }
 
     private void handleUserDraft(TideUserDraftEntity draftEntity, AccessProofDetailEntity proofDetail, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser) throws JsonProcessingException, NoSuchAlgorithmException {
-        if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.APPROVED && draftEntity.getDeleteStatus() == null)) {
+        if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() == null)) {
             return;
         }
 
@@ -698,18 +744,18 @@ public class TideAdminRealmResource {
     }
 
     private void handleClientDraft(TideClientFullScopeStatusDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSet change, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws JsonProcessingException, NoSuchAlgorithmException {
-        if (draftEntity == null || (draftEntity.getFullScopeEnabled() == DraftStatus.APPROVED && draftEntity.getFullScopeDisabled() == null)
-                || (draftEntity.getFullScopeDisabled() == DraftStatus.APPROVED && draftEntity.getFullScopeEnabled() == null)) {
+        if (draftEntity == null || (draftEntity.getFullScopeEnabled() == DraftStatus.ACTIVE && draftEntity.getFullScopeDisabled() == null)
+                || (draftEntity.getFullScopeDisabled() == DraftStatus.ACTIVE && draftEntity.getFullScopeEnabled() == DraftStatus.NULL)) {
             return;
         }
 
         if (change.getActionType() == ActionType.DELETE) {
-            if (draftEntity.getFullScopeDisabled() == DraftStatus.APPROVED && draftEntity.getFullScopeEnabled() == DraftStatus.PENDING) {
+            if (draftEntity.getFullScopeDisabled() == DraftStatus.ACTIVE && draftEntity.getFullScopeEnabled() == DraftStatus.PENDING) {
                 draftEntity.setFullScopeEnabled(DraftStatus.DRAFT);
             }
 
             String proof = proofDetail.getProofDraft();
-            Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(wrappedUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE).stream().filter(role -> {
+            Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(wrappedUser, session, realm, em, DraftStatus.ACTIVE, ActionType.CREATE).stream().filter(role -> {
                 if (role.isClientRole()) {
                     return !Objects.equals(((ClientModel) role.getContainer()).getClientId(), client.getClientId());
                 }
@@ -744,23 +790,32 @@ public class TideAdminRealmResource {
                         .setParameter("roleId", record.getComposite().getId())
                         .getResultList();
 
-                if (userRoleRecord.isEmpty() || userRoleRecord.get(0).getDraftStatus() != DraftStatus.APPROVED) {
+
+                if (userRoleRecord.isEmpty() || userRoleRecord.get(0).getDraftStatus() != DraftStatus.ACTIVE) {
                     return false;
                 }
             }
-            String draftProof = em.createNamedQuery("getProofDetailsForUserByClientAndRecordId", AccessProofDetailEntity.class)
-                    .setParameter("user", user)
-                    .setParameter("clientId", client.getId())
-                    .setParameter("recordId", change.getChangeSetId())
-                    .getSingleResult()
-                    .getProofDraft();
+            new TideAuthzProofUtil(session, realm, em).saveProofToDatabase(proofDetail.getProofDraft(), client.getId(), user);
+            em.remove(proofDetail);
+            em.flush();
 
-            new TideAuthzProofUtil(session, realm, em).saveProofToDatabase(draftProof, client.getId(), user);
-            em.createNamedQuery("deleteProofRecordForUserAndClient")
-                    .setParameter("recordId", change.getChangeSetId())
-                    .setParameter("user", user)
-                    .setParameter("clientId", client.getId())
-                    .executeUpdate();
+            if(change.getType() == ChangeSetType.USER_ROLE) {
+                TideUserRoleMappingDraftEntity record = em.find(TideUserRoleMappingDraftEntity.class, proofDetail.getRecordId());
+                UserModel userModel = session.users().getUserById(realm, user.getId());
+                UserModel wrappedUser = TideRolesUtil.wrapUserModel(userModel, session, realm);
+                RoleEntity roleEntity = em.find(RoleEntity.class, record.getRoleId());
+                List<TideCompositeRoleMappingDraftEntity> compositeRoleDrafts = em.createNamedQuery("getCompositeEntityByParent", TideCompositeRoleMappingDraftEntity.class)
+                        .setParameter("composite", roleEntity)
+                        .getResultList();
+                TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
+                for(TideCompositeRoleMappingDraftEntity draft : compositeRoleDrafts){
+                    if(draft.getDraftStatus() != DraftStatus.ACTIVE){
+                        Set<RoleModel> roles = new HashSet<>();
+                        roles.add(realm.getRoleById(draft.getChildRole().getId()));
+                        util.generateAndSaveProofDraft(client, wrappedUser, roles, draft.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE, true);
+                    }
+                }
+            }
             return true;
         }
         return false;

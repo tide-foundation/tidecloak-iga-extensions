@@ -62,11 +62,6 @@ public class TideUserAdapter extends UserAdapter {
         em.persist(entity);
         em.flush();
         em.detach(entity);
-
-//        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-//        List<ClientRole> effectiveGroupClientRoles = proofGeneration.getEffectiveGroupClientRoles(group);
-//        UserModel user = session.users().getUserById(realm, getEntity().getId());
-//        proofGeneration.regenerateProofsForMembers(effectiveGroupClientRoles, List.of(user));
     }
 
     @Override
@@ -102,7 +97,6 @@ public class TideUserAdapter extends UserAdapter {
 
         // Add draft request
         if (entity.toList().isEmpty()) {
-
             // Create a draft record for new user role mapping
             TideUserRoleMappingDraftEntity draftUserRole = new TideUserRoleMappingDraftEntity();
             draftUserRole.setId(KeycloakModelUtils.generateId());
@@ -169,77 +163,106 @@ public class TideUserAdapter extends UserAdapter {
     @Override
     public void deleteRoleMapping(RoleModel roleModel) {
         RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
-        // Check if role mapping is a draft
-        List<TideUserRoleMappingDraftEntity> entity =  em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
-                .setParameter("user", getEntity())
-                .setParameter("roleId", role.getId())
-                .setParameter("draftStatus", DraftStatus.APPROVED)
-                .getResultList();
 
-        if ( entity.isEmpty()){
-            throw new IllegalStateException("No approved draft found for this role.");
+        List<TideUserRoleMappingDraftEntity> activeDraftEntities = getActiveDraftEntities(role);
+
+        if (activeDraftEntities.isEmpty()) {
+            deleteRoleAndProofRecords(role, activeDraftEntities);
+            return;
         }
 
-        TideUserRoleMappingDraftEntity approvedEntity = entity.get(0);
-        if(approvedEntity.getDeleteStatus() == DraftStatus.APPROVED){
-            em.createNamedQuery("deleteUserRoleMappingDraftsByRole")
-                    .setParameter("roleId", role.getId())
-                    .executeUpdate();
-            em.createNamedQuery("deleteProofRecordForUser")
-                    .setParameter("recordId", entity.get(0).getId())
-                    .setParameter("user", getEntity())
-                    .executeUpdate();
-
-            RoleModel userRole = realm.getRoleById( approvedEntity.getRoleId());
-
-            // Remove any composite role proof records, no longer need to keep track of these for this user.
-            if ( userRole.isComposite()){
-                List<AccessProofDetailEntity> proofRecordsToRemove = em.createNamedQuery("FindUserWithCompositeRoleRecord", AccessProofDetailEntity.class)
-                        .setParameter("composite", TideRolesUtil.toRoleEntity(userRole, em))
-                        .setParameter("user", getEntity())
-                        .getResultList();
-
-                proofRecordsToRemove.forEach(record -> em.remove(record));
-
-            }
-
-            super.deleteRoleMapping(role);
-        } else {
-
-            TideUserRoleMappingDraftEntity userRoleMapping =  em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
-                    .setParameter("user", getEntity())
-                    .setParameter("roleId", role.getId())
-                    .setParameter("draftStatus", DraftStatus.APPROVED)
-                    .getSingleResult();
-
-            // GET APPROVAL FOR DELETION
-            userRoleMapping.setDeleteStatus(DraftStatus.DRAFT);
-            userRoleMapping.setTimestamp(System.currentTimeMillis());
-
-            // Generate a proof draft for this changeset and any affected clients with full-scope enabled. These need to be signed.
-            if (role.getContainer() instanceof ClientModel) {
-                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).map(client -> {
-                            ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
-                            return new TideClientAdapter(realm, em, session, clientEntity);
-                        })
-                        .filter(TideClientAdapter::isFullScopeAllowed).toList());
-                UserModel user = session.users().getUserById(realm, getEntity().getId());
-                UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
-                TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-                clientList.forEach(client -> {
-                    Set<RoleModel> roleMappings = new HashSet<>();
-                    roleMappings.add(role);
-                    try {
-                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, userRoleMapping.getId(), ChangeSetType.USER_ROLE, ActionType.DELETE, client.isFullScopeAllowed());
-                    } catch (JsonProcessingException e) {
-                        throw new RuntimeException(e);
-                    }
-                });
-            }
-
+        TideUserRoleMappingDraftEntity committedEntity = activeDraftEntities.get(0);
+        if (committedEntity.getDeleteStatus() == DraftStatus.APPROVED) {
+            deleteRoleAndProofRecords(role, activeDraftEntities);
+            return;
         }
+
+        markForDeletion(activeDraftEntities);
+        generateProofDrafts(role, activeDraftEntities);
         em.flush();
     }
+
+    private List<TideUserRoleMappingDraftEntity> getActiveDraftEntities(RoleModel role) {
+        return em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
+                .setParameter("user", getEntity())
+                .setParameter("roleId", role.getId())
+                .setParameter("draftStatus", DraftStatus.ACTIVE)
+                .getResultList();
+    }
+    private List<TideUserRoleMappingDraftEntity> getDraftEntities(RoleModel role) {
+        return em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class)
+                .setParameter("user", getEntity())
+                .setParameter("roleId", role.getId())
+                .getResultList();
+    }
+
+    private void deleteRoleAndProofRecords(RoleModel role, List<TideUserRoleMappingDraftEntity> activeDraftEntities) {
+        String recordId = activeDraftEntities.isEmpty() ? getDraftEntities(role).get(0).getId() : activeDraftEntities.get(0).getId();
+        deleteProofRecordForUser(recordId);
+        deleteUserRoleMappingDraftsByRole(role.getId());
+
+        if (role.isComposite()) {
+            deleteCompositeRoleProofRecords(role);
+        }
+        super.deleteRoleMapping(role);
+    }
+
+    private void deleteUserRoleMappingDraftsByRole(String roleId) {
+        em.createNamedQuery("deleteUserRoleMappingDraftsByRole")
+                .setParameter("roleId", roleId)
+                .executeUpdate();
+    }
+
+    private void deleteProofRecordForUser(String recordId) {
+        em.createNamedQuery("deleteProofRecordForUser")
+                .setParameter("recordId", recordId)
+                .setParameter("user", getEntity())
+                .executeUpdate();
+    }
+
+    private void deleteCompositeRoleProofRecords(RoleModel role) {
+        List<AccessProofDetailEntity> proofRecords = em.createNamedQuery("FindUserWithCompositeRoleRecord", AccessProofDetailEntity.class)
+                .setParameter("composite", TideRolesUtil.toRoleEntity(role, em))
+                .setParameter("user", getEntity())
+                .getResultList();
+        proofRecords.forEach(em::remove);
+    }
+
+    private void markForDeletion(List<TideUserRoleMappingDraftEntity> activeDraftEntities) {
+        if (!activeDraftEntities.isEmpty()) {
+            TideUserRoleMappingDraftEntity userRoleMapping = activeDraftEntities.get(0);
+            userRoleMapping.setDeleteStatus(DraftStatus.DRAFT);
+            userRoleMapping.setTimestamp(System.currentTimeMillis());
+        }
+    }
+
+    private void generateProofDrafts(RoleModel role, List<TideUserRoleMappingDraftEntity> activeDraftEntities) {
+        if (role.getContainer() instanceof ClientModel) {
+            List<TideClientAdapter> clientList = session.clients().getClientsStream(realm)
+                    .map(client -> new TideClientAdapter(realm, em, session, em.find(ClientEntity.class, client.getId())))
+                    .filter(TideClientAdapter::isFullScopeAllowed)
+                    .toList();
+
+            UserModel user = session.users().getUserById(realm, getEntity().getId());
+            UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
+            TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
+
+            clientList.forEach(client -> generateProofDraftForClient(role, client, wrappedUser, util, activeDraftEntities));
+        }
+    }
+
+    private void generateProofDraftForClient(RoleModel role, ClientModel client, UserModel wrappedUser, TideAuthzProofUtil util, List<TideUserRoleMappingDraftEntity> activeDraftEntities) {
+        Set<RoleModel> roleMappings = new HashSet<>();
+        roleMappings.add(role);
+        try {
+            String draftId = activeDraftEntities.isEmpty() ? role.getId() : activeDraftEntities.get(0).getId();
+            util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftId,
+                    ChangeSetType.USER_ROLE, ActionType.DELETE, client.isFullScopeAllowed());
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
 
     @Override
     public Stream<RoleModel> getRoleMappingsStream() {
@@ -250,19 +273,6 @@ public class TideUserAdapter extends UserAdapter {
         return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
     }
 
-
-    public Stream<RoleModel> getRoleMappingsStreamByStatus(DraftStatus status) {
-        TypedQuery<String> query = em.createNamedQuery("filterUserRoleMappings", String.class);
-        query.setParameter("user", this.getEntity());
-        query.setParameter("draftStatus", status);
-        return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
-    }
-    public Stream<RoleModel> getRoleMappingsStreamByAction(ActionType actionType) {
-        TypedQuery<String> query = em.createNamedQuery("getUserRoleMappingDraftEntityByAction", String.class);
-        query.setParameter("user", this.getEntity());
-        query.setParameter("actionType", actionType);
-        return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
-    }
     public Stream<RoleModel> getRoleMappingsStreamByStatusAndAction(DraftStatus status, ActionType actionType) {
         TypedQuery<String> query = em.createNamedQuery("getUserRoleMappingDraftEntityIdsByStatusAndAction", String.class);
         query.setParameter("user", this.getEntity());
@@ -271,26 +281,5 @@ public class TideUserAdapter extends UserAdapter {
         return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
     }
 
-    public DraftStatus getUserRoleDraftStatus(String roleId) {
-        TypedQuery<TideUserRoleMappingDraftEntity> query = em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class);
-        query.setParameter("user", this.getEntity());
-        query.setParameter("roleId", roleId);
-        return query.getSingleResult().getDraftStatus();
-    }
 
-    private TypedQuery<String> createGetGroupsQuery() {
-        // we query ids only as the group  might be cached and following the @ManyToOne will result in a load
-        // even if we're getting just the id.
-        CriteriaBuilder builder = em.getCriteriaBuilder();
-        CriteriaQuery<String> queryBuilder = builder.createQuery(String.class);
-        Root<UserGroupMembershipEntity> root = queryBuilder.from(UserGroupMembershipEntity.class);
-
-        List<Predicate> predicates = new ArrayList<>();
-        predicates.add(builder.equal(root.get("user"), getEntity()));
-
-        queryBuilder.select(root.get("groupId"));
-        queryBuilder.where(predicates.toArray(new Predicate[0]));
-
-        return em.createQuery(queryBuilder);
-    }
 }

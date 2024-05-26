@@ -46,15 +46,15 @@ public class TideClientAdapter extends ClientAdapter {
         TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
         ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
         List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
-        usersInRealm.forEach(x -> System.out.println(x.getUsername()));
         List<TideClientFullScopeStatusDraftEntity> statusDraft = em.createNamedQuery("getClientFullScopeStatus", TideClientFullScopeStatusDraftEntity.class)
                 .setParameter("client", entity)
                 .getResultList();
         if (usersInRealm.isEmpty() && statusDraft.isEmpty()) {
             createFullScopeStatusDraft(value, DraftStatus.ACTIVE);
+            super.setFullScopeAllowed(value);
             return;
         } else if (statusDraft.isEmpty() && value) {
-            createFullScopeStatusDraft(value, DraftStatus.DRAFT);
+            createFullScopeStatusDraft(true, DraftStatus.DRAFT);
             return;
         }
         TideClientFullScopeStatusDraftEntity clientFullScopeStatuses = statusDraft.get(0);
@@ -70,8 +70,10 @@ public class TideClientAdapter extends ClientAdapter {
         draft.setClient(entity);
         if (value) {
             draft.setFullScopeEnabled(draftStatus);
+            draft.setFullScopeDisabled(DraftStatus.NULL);
         } else {
             draft.setFullScopeDisabled(draftStatus);
+            draft.setFullScopeEnabled(DraftStatus.NULL);
         }
         draft.setAction(ActionType.CREATE);
         em.persist(draft);
@@ -92,16 +94,18 @@ public class TideClientAdapter extends ClientAdapter {
         }
     }
     private void approveFullScope(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, boolean isEnabled) {
-        super.setFullScopeAllowed(isEnabled);
         if (isEnabled) {
+            clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.NULL);
             clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.ACTIVE);
-            clientFullScopeStatuses.setFullScopeDisabled(null);
+            em.persist(clientFullScopeStatuses);
         } else {
+            clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.NULL);
             clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.ACTIVE);
-            clientFullScopeStatuses.setFullScopeEnabled(null);
+            em.persist(clientFullScopeStatuses);
         }
-        em.persist(clientFullScopeStatuses);
+        super.setFullScopeAllowed(isEnabled);
         em.flush();
+
     }
     private void startDraftApproval(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, boolean enable) {
         if (enable && clientFullScopeStatuses.getFullScopeEnabled() == DraftStatus.ACTIVE) {
@@ -123,8 +127,6 @@ public class TideClientAdapter extends ClientAdapter {
         }
     }
     private void createProofDraftsForUsers(TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, String statusId, TideClientFullScopeStatusDraftEntity draft) {
-        ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
-
         usersInRealm.forEach(user -> {
             try {
                 // Find any pending changes
@@ -136,10 +138,8 @@ public class TideClientAdapter extends ClientAdapter {
                     return;
                 }
                 UserModel tideUser = TideRolesUtil.wrapUserModel(user, session, realm);
-                Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE);
+                Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.ACTIVE, ActionType.CREATE);
                 Set<RoleModel> roles = getAccess(activeRoles, client, client.getClientScopes(true).values().stream(), true);
-                System.out.println("CHECKING THE ACCESS HERE IN CREATING DRAFT!!! testing enabling");
-                roles.forEach(x -> System.out.println(x.getName()));
                 util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, roles, statusId, ChangeSetType.CLIENT, ActionType.CREATE, true);
             } catch (JsonProcessingException e) {
                 throw new RuntimeException(e);
@@ -167,13 +167,12 @@ public class TideClientAdapter extends ClientAdapter {
             }
             try {
                 UserModel tideUser = TideRolesUtil.wrapUserModel(user, session, realm);
-                Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE).stream().filter(role -> {
+                Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.ACTIVE, ActionType.CREATE).stream().filter(role -> {
                     if (role.isClientRole()) {
                         return !Objects.equals(((ClientModel) role.getContainer()).getClientId(), client.getClientId());
                     }
                     return true;
                 }).collect(Collectors.toSet());
-                activeRoles.forEach(x -> System.out.println(x.getName()));
                 util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, activeRoles, statusId, ChangeSetType.CLIENT, ActionType.DELETE, true);
             } catch (JsonProcessingException e) {
                 throw new RuntimeException(e);

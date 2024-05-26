@@ -10,7 +10,7 @@ import org.tidecloak.interfaces.DraftStatus;
         @NamedQuery(name="getAllCompositeRoleMappingsByDeletionStatusAndRealmAndRecordId", query="select r from TideCompositeRoleMappingDraftEntity r where r.deleteStatus = :deleteStatus AND r.id = :changesetId AND r.composite IN ( SELECT u from RoleEntity u where u.realmId =:realmId ) "),
         @NamedQuery(name="getAllCompositeRoleMappingsByStatusAndRealm", query="select r from TideCompositeRoleMappingDraftEntity r where r.draftStatus = :draftStatus and r.composite IN ( SELECT u from RoleEntity u where u.realmId =:realmId ) "),
         @NamedQuery(name="getAllCompositeRoleMappingsByStatus", query="select r from TideCompositeRoleMappingDraftEntity r where r.draftStatus = :draftStatus"),
-        @NamedQuery(name="getCompositeEntityByParent", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite ORDER BY r.createdTimestamp DESC"),
+        @NamedQuery(name="getCompositeEntityByParent", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite ORDER BY r.timestamp DESC"),
         @NamedQuery(name="filterChildRoleByStatusAndParentAndAction", query="select r.childRole from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.draftStatus = :draftStatus and r.actionType = :actionType"),
         @NamedQuery(name="filterChildRoleByStatusAndParent", query="select r.childRole from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.draftStatus = :draftStatus"),
         @NamedQuery(name="getCompositeRoleMappingDraft", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole"),

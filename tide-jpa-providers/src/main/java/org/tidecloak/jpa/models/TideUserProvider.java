@@ -21,10 +21,7 @@ import org.tidecloak.jpa.utils.ProofGeneration;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Stream;
 
 import static org.keycloak.models.jpa.PaginationUtils.paginateQuery;
@@ -53,7 +50,7 @@ public class TideUserProvider extends JpaUserProvider {
         draftUser.setAction(ActionType.CREATE);
         em.persist(draftUser);
 
-        // Add draft record for user groups. DEFAULT ROLES ARE APPROVED BY DEFAULT FOR NOW
+        // Add draft record for user groups. DEFAULT ROLES ARE COMMITED BY DEFAULT FOR NOW
         // TODO: have a step here that goes and gets it signed by VVK automatically and save final proof to DB
         RoleModel defaultRole =  realm.getDefaultRole();
         var draftDefaultRoleUserRole = new TideUserRoleMappingDraftEntity();
@@ -61,25 +58,9 @@ public class TideUserProvider extends JpaUserProvider {
         draftDefaultRoleUserRole.setRoleId(defaultRole.getId());
         draftDefaultRoleUserRole.setUser(userEntity);
         draftDefaultRoleUserRole.setAction(ActionType.CREATE);
-        draftDefaultRoleUserRole.setDraftStatus(DraftStatus.APPROVED);
+        draftDefaultRoleUserRole.setDraftStatus(DraftStatus.ACTIVE);
         em.persist(draftDefaultRoleUserRole);
         em.flush();
-
-
-//        // do we care about previously approved client full scopes ?
-//        // We generate proof requests for all full-scoped enabled clients for this client
-//        TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-//        UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
-//        Set<RoleModel> roleMappings = new HashSet<>();
-//        realm.getClientsStream().forEach(client -> {
-//            try {
-//                util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUser.getId(), ChangeSetType.USER, ActionType.CREATE);
-//            } catch (JsonProcessingException e) {
-//                throw new RuntimeException(e);
-//            }
-//        });
-//
-//        em.flush();
 
         return new TideUserAdapter(session, realm, em, userEntity);
     }
@@ -106,20 +87,6 @@ public class TideUserProvider extends JpaUserProvider {
         em.flush();
     }
 
-//    @Override
-//    public void preRemove(RealmModel realm, GroupModel group){
-//
-//        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-//
-//        // get effective roles
-//        //List<ClientRole> effectiveGroupClientRoles = proofGeneration.getEffectiveGroupClientRoles(group);
-//        //List<UserModel> affectedUsers = proofGeneration.getAllGroupMembersIncludingSubgroups(realm, group);
-//
-//        super.preRemove(realm, group);
-//
-//        //proofGeneration.regenerateProofsForMembers(effectiveGroupClientRoles, affectedUsers);
-//
-//    }
 
     /**
      *
@@ -129,116 +96,79 @@ public class TideUserProvider extends JpaUserProvider {
 
     @Override
     public Stream<UserModel> getGroupMembersStream(RealmModel realm, GroupModel group) {
-        TypedQuery<UserEntity> query = em.createNamedQuery("groupMembership", UserEntity.class);
-        query.setParameter("groupId", group.getId());
-        return closing(query.getResultStream().map(entity -> new TideUserAdapter(session, realm, em, entity)));
+        return super.getGroupMembersStream(realm, group)
+                .map(userEntity -> new TideUserAdapter(session, realm, em, (UserEntity) userEntity));
     }
 
     @Override
     public Stream<UserModel> getRoleMembersStream(RealmModel realm, RoleModel role) {
-        TypedQuery<UserEntity> query = em.createNamedQuery("usersInRole", UserEntity.class);
-        query.setParameter("roleId", role.getId());
-        return closing(query.getResultStream().map(entity -> new TideUserAdapter(session, realm, em, entity)));
+        return super.getRoleMembersStream(realm, role)
+                .map(userEntity -> new TideUserAdapter(session, realm, em, (UserEntity) userEntity));
     }
-
 
     @Override
     public UserModel getUserByUsername(RealmModel realm, String username) {
-        TypedQuery<UserEntity> query = em.createNamedQuery("getRealmUserByUsername", UserEntity.class);
-        query.setParameter("username", username.toLowerCase());
-        query.setParameter("realmId", realm.getId());
-        List<UserEntity> results = query.getResultList();
-        if (results.isEmpty()) return null;
-        return new TideUserAdapter(session, realm, em, results.get(0));
+        UserModel userModel = super.getUserByUsername(realm, username);
+        return userModel != null ? new TideUserAdapter(session, realm, em, (UserEntity) userModel) : null;
     }
+
     @Override
     public UserModel getUserByEmail(RealmModel realm, String email) {
-        TypedQuery<UserEntity> query = em.createNamedQuery("getRealmUserByEmail", UserEntity.class);
-        query.setParameter("email", email.toLowerCase());
-        query.setParameter("realmId", realm.getId());
-        List<UserEntity> results = query.getResultList();
-
-        if (results.isEmpty()) return null;
-
-        ensureEmailConstraint(results, realm);
-
-        return new TideUserAdapter(session, realm, em, results.get(0));
+        UserModel userModel = super.getUserByEmail(realm, email);
+        if (userModel != null) {
+            ensureEmailConstraint(Collections.singletonList((UserEntity) userModel), realm);
+            return new TideUserAdapter(session, realm, em, (UserEntity) userModel);
+        }
+        return null;
     }
 
     @Override
     public Stream<UserModel> getGroupMembersStream(RealmModel realm, GroupModel group, Integer firstResult, Integer maxResults) {
-        TypedQuery<UserEntity> query = em.createNamedQuery("groupMembership", UserEntity.class);
-        query.setParameter("groupId", group.getId());
-
-        return closing(paginateQuery(query, firstResult, maxResults).getResultStream().map(user -> new TideUserAdapter(session, realm, em, user)));
+        return super.getGroupMembersStream(realm, group, firstResult, maxResults)
+                .map(userEntity -> new TideUserAdapter(session, realm, em, (UserEntity) userEntity));
     }
 
     @Override
     public Stream<UserModel> getRoleMembersStream(RealmModel realm, RoleModel role, Integer firstResult, Integer maxResults) {
-        TypedQuery<UserEntity> query = em.createNamedQuery("usersInRole", UserEntity.class);
-        query.setParameter("roleId", role.getId());
-
-        return closing(paginateQuery(query, firstResult, maxResults).getResultStream().map(user -> new TideUserAdapter(session, realm, em, user)));
+        return super.getRoleMembersStream(realm, role, firstResult, maxResults)
+                .map(userEntity -> new TideUserAdapter(session, realm, em, (UserEntity) userEntity));
     }
 
     @Override
     public UserModel getUserById(RealmModel realm, String id) {
-        UserEntity userEntity = em.find(UserEntity.class, id);
-        if (userEntity == null || !realm.getId().equals(userEntity.getRealmId())) return null;
-        return new TideUserAdapter(session, realm, em, userEntity);
+        UserModel userModel = super.getUserById(realm, id);
+        return userModel != null ? new TideUserAdapter(session, realm, em, (UserEntity) userModel) : null;
     }
 
     @Override
     public UserModel getUserByFederatedIdentity(RealmModel realm, FederatedIdentityModel identity) {
-        TypedQuery<UserEntity> query = em.createNamedQuery("findUserByFederatedIdentityAndRealm", UserEntity.class);
-        query.setParameter("realmId", realm.getId());
-        query.setParameter("identityProvider", identity.getIdentityProvider());
-        query.setParameter("userId", identity.getUserId());
-        List<UserEntity> results = query.getResultList();
-        if (results.isEmpty()) {
+        UserModel userModel = super.getUserByFederatedIdentity(realm, identity);
+        if (userModel == null) {
             return null;
-        } else if (results.size() > 1) {
+        } else if (userModel instanceof List && ((List<?>) userModel).size() > 1) {
             throw new IllegalStateException("More results found for identityProvider=" + identity.getIdentityProvider() +
-                    ", userId=" + identity.getUserId() + ", results=" + results);
+                    ", userId=" + identity.getUserId() + ", results=" + userModel);
         } else {
-            UserEntity user = results.get(0);
-            return new TideUserAdapter(session, realm, em, user);
+            return new TideUserAdapter(session, realm, em, (UserEntity) userModel);
         }
     }
 
     @Override
     public UserModel getServiceAccount(ClientModel client) {
-        TypedQuery<UserEntity> query = em.createNamedQuery("getRealmUserByServiceAccount", UserEntity.class);
-        query.setParameter("realmId", client.getRealm().getId());
-        query.setParameter("clientInternalId", client.getId());
-        List<UserEntity> results = query.getResultList();
-        if (results.isEmpty()) {
+        UserModel userModel = super.getServiceAccount(client);
+        if (userModel == null) {
             return null;
-        } else if (results.size() > 1) {
+        } else if (userModel instanceof List && ((List<?>) userModel).size() > 1) {
             throw new IllegalStateException("More service account linked users found for client=" + client.getClientId() +
-                    ", results=" + results);
+                    ", results=" + userModel);
         } else {
-            UserEntity user = results.get(0);
-            return new TideUserAdapter(session, client.getRealm(), em, user);
+            return new TideUserAdapter(session, client.getRealm(), em, (UserEntity) userModel);
         }
     }
 
     @Override
     public Stream<UserModel> searchForUserByUserAttributeStream(RealmModel realm, String attrName, String attrValue) {
-        boolean longAttribute = attrValue != null && attrValue.length() > 255;
-        TypedQuery<UserEntity> query = longAttribute ?
-                em.createNamedQuery("getRealmUsersByAttributeNameAndLongValue", UserEntity.class)
-                        .setParameter("realmId", realm.getId())
-                        .setParameter("name", attrName)
-                        .setParameter("longValueHash", JpaHashUtils.hashForAttributeValue(attrValue)):
-                em.createNamedQuery("getRealmUsersByAttributeNameAndValue", UserEntity.class)
-                        .setParameter("realmId", realm.getId())
-                        .setParameter("name", attrName)
-                        .setParameter("value", attrValue);
-
-        return closing(query.getResultStream()
-                // following check verifies that there are no collisions with hashes
-                .filter(longAttribute ? predicateForFilteringUsersByAttributes(Map.of(attrName, attrValue), JpaHashUtils::compareSourceValue) : u -> true)
-                .map(userEntity -> new TideUserAdapter(session, realm, em, userEntity)));
+        return super.searchForUserByUserAttributeStream(realm, attrName, attrValue)
+                .map(userEntity -> new TideUserAdapter(session, realm, em, (UserEntity) userEntity));
     }
 }

@@ -107,13 +107,18 @@ export const ServiceRole = ({ role, client, id, type }: Row) => {
         </Label>
       )}
       {roleStatus === "PENDING" && (
-        <Label color="gold" className="keycloak-admin--role-mapping__client-name">
+        <Label color="orange" className="keycloak-admin--role-mapping__client-name">
           {"PENDING"}
         </Label>
       )}
       {roleStatus === "APPROVED" && (
+          <Label color="gold" className="keycloak-admin--role-mapping__client-name">
+            {"APPROVED"}
+          </Label>
+      )}
+      {roleStatus === "ACTIVE" && (
         <Label color="green" className="keycloak-admin--role-mapping__client-name">
-          {"APPROVED"}
+          {"ACTIVE"}
         </Label>
       )}
     </>

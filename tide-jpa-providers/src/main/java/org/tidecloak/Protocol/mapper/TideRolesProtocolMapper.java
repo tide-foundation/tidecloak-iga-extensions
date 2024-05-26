@@ -14,6 +14,7 @@ import org.keycloak.representations.AccessToken;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.models.TideClientAdapter;
+import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
 import java.util.*;
@@ -43,13 +44,24 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         RealmModel realm = session.getContext().getRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         UserModel tideUser = TideRolesUtil.wrapUserModel(userSession.getUser(), session, realm);
-        Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE);
+        Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.ACTIVE, ActionType.CREATE);
         ClientModel clientModel = session.getContext().getClient();
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
         ClientModel wrapClientModel = new TideClientAdapter(realm, em, session, clientEntity);
         Set<RoleModel> roles = getAccess(activeRoles, wrapClientModel, clientModel.getClientScopes(true).values().stream(), wrapClientModel.isFullScopeAllowed());
         setTokenClaims(token, roles);
 
+        Set<String> clientKeys = token.getResourceAccess().keySet();
+        if (token.getAudience() != null) {
+            String[] cleanAudience = Arrays.stream(token.getAudience())
+                    .filter(clientKeys::contains)
+                    .toArray(String[]::new);
+
+            token.audience(cleanAudience);
+        }else {
+            String[] aud = clientKeys.toArray(String[]::new);
+            token.audience(aud);
+        }
         return token;
     }
 

@@ -103,7 +103,6 @@ public class TideRealmProvider extends JpaRealmProvider {
         }
 
         else {
-            System.out.println("EMPTY ROLE DELETE DRAFT");
             // generate proof drafts for affected users for this change request
             if (role.getContainer() instanceof  ClientModel) {
                 RealmModel realm = ((ClientModel)role.getContainer()).getRealm();
@@ -184,33 +183,25 @@ public class TideRealmProvider extends JpaRealmProvider {
         roleEntity.setClientId(client.getId());
         roleEntity.setClientRole(true);
         em.persist(roleEntity);
-        TideRoleAdapter adapter = new TideRoleAdapter(session, client.getRealm(), em, roleEntity);
-        return adapter;
+        return new TideRoleAdapter(session, client.getRealm(), em, roleEntity);
     }
 
 
     @Override
     public RoleModel addRealmRole(RealmModel realm, String name) {
-        return addRealmRole(realm, KeycloakModelUtils.generateId(), name);
+        RoleModel roleModel = super.addRealmRole(realm, KeycloakModelUtils.generateId(), name);
+        RoleEntity role = em.find(RoleEntity.class, roleModel.getId());
+        return new TideRoleAdapter(session, realm, em, role);
 
     }
     @Override
     public RoleModel addRealmRole(RealmModel realm, String id, String name) {
-        if (getRealmRole(realm, name) != null) {
-            throw new ModelDuplicateException();
-        }
-        RoleEntity entity = new RoleEntity();
-        entity.setId(id);
-        entity.setName(name);
-        entity.setRealmId(realm.getId());
-        em.persist(entity);
-        em.flush();
-        TideRoleAdapter adapter = new TideRoleAdapter(session, realm, em, entity);
-        return adapter;
+        RoleModel roleModel = super.addRealmRole(realm, id, name);
+        RoleEntity role = em.find(RoleEntity.class, roleModel.getId());
+
+        return new TideRoleAdapter(session, realm, em, role);
 
     }
-
-
 
 
     /**
@@ -219,84 +210,30 @@ public class TideRealmProvider extends JpaRealmProvider {
      *
      **/
 
-
     @Override
     public GroupModel getGroupById(RealmModel realm, String id) {
-        GroupEntity groupEntity = em.find(GroupEntity.class, id);
-        if (groupEntity == null) return null;
-        if (!groupEntity.getRealm().equals(realm.getId())) return null;
-        TideGroupAdapter adapter =  new TideGroupAdapter(realm, em, groupEntity, session);
-        return adapter;
+        GroupModel group = super.getGroupById(realm, id);
+        return group != null ? new TideGroupAdapter(realm, em, (GroupEntity) group, session) : null;
     }
-
 
     @Override
     public Stream<GroupModel> getGroupsByRoleStream(RealmModel realm, RoleModel role, Integer firstResult, Integer maxResults) {
-        TypedQuery<GroupEntity> query = em.createNamedQuery("groupsInRole", GroupEntity.class);
-        query.setParameter("roleId", role.getId());
+        Stream<GroupModel> groups = super.getGroupsByRoleStream(realm, role, firstResult, maxResults)
+                .map(group -> new TideGroupAdapter(realm, em, (GroupEntity) group, session));
 
-        Stream<GroupEntity> results = paginateQuery(query, firstResult, maxResults).getResultStream();
-
-        return closing(results
-                .map(g -> (GroupModel) new TideGroupAdapter(realm, em, g, session))
-                .sorted(GroupModel.COMPARE_BY_NAME));
+        return groups.sorted(GroupModel.COMPARE_BY_NAME);
     }
 
     @Override
     public GroupModel createGroup(RealmModel realm, String id, String name, GroupModel toParent) {
-        if (id == null) {
-            id = KeycloakModelUtils.generateId();
-        } else if (GroupEntity.TOP_PARENT_ID.equals(id)) {
-            // maybe it's impossible but better ensure this doesn't happen
-            throw new ModelException("The ID of the new group is equals to the tag used for top level groups");
-        }
-        GroupEntity groupEntity = new GroupEntity();
-        groupEntity.setId(id);
-        groupEntity.setName(name);
-        groupEntity.setRealm(realm.getId());
-        groupEntity.setParentId(toParent == null ? GroupEntity.TOP_PARENT_ID : toParent.getId());
-        em.persist(groupEntity);
-        em.flush();
-
-        return new TideGroupAdapter(realm, em, groupEntity, session);
-
+        GroupModel group = super.createGroup(realm, id, name, toParent);
+        return new TideGroupAdapter(realm, em, (GroupEntity) group, session);
     }
 
     @Override
     public Stream<GroupModel> searchGroupsByAttributes(RealmModel realm, Map<String, String> attributes, Integer firstResult, Integer maxResults) {
-        Map<String, String> filteredAttributes = groupSearchableAttributes == null || groupSearchableAttributes.isEmpty()
-                ? attributes
-                : attributes.entrySet().stream().filter(m -> groupSearchableAttributes.contains(m.getKey()))
-                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-
-        CriteriaBuilder builder = em.getCriteriaBuilder();
-        CriteriaQuery<GroupEntity> queryBuilder = builder.createQuery(GroupEntity.class);
-        Root<GroupEntity> root = queryBuilder.from(GroupEntity.class);
-
-        List<Predicate> predicates = new ArrayList<>();
-
-        predicates.add(builder.equal(root.get("realm"), realm.getId()));
-
-        for (Map.Entry<String, String> entry : filteredAttributes.entrySet()) {
-            String key = entry.getKey();
-            if (key == null || key.isEmpty()) {
-                continue;
-            }
-            String value = entry.getValue();
-
-            Join<GroupEntity, GroupAttributeEntity> attributeJoin = root.join("attributes");
-
-            Predicate attrNamePredicate = builder.equal(attributeJoin.get("name"), key);
-            Predicate attrValuePredicate = builder.equal(attributeJoin.get("value"), value);
-            predicates.add(builder.and(attrNamePredicate, attrValuePredicate));
-        }
-
-        Predicate finalPredicate = builder.and(predicates.toArray(new Predicate[0]));
-        queryBuilder.where(finalPredicate).orderBy(builder.asc(root.get("name")));
-
-        TypedQuery<GroupEntity> query = em.createQuery(queryBuilder);
-        return closing(paginateQuery(query, firstResult, maxResults).getResultStream())
-                .map(g -> new TideGroupAdapter(realm, em, g, session));
+        return super.searchGroupsByAttributes(realm, attributes, firstResult, maxResults)
+                .map(group -> new TideGroupAdapter(realm, em, (GroupEntity) group, session));
     }
 
     /**
@@ -307,35 +244,14 @@ public class TideRealmProvider extends JpaRealmProvider {
 
     @Override
     public ClientModel getClientByClientId(RealmModel realm, String clientId) {
-        logger.tracef("getClientByClientId(%s, %s)%s", realm, clientId, getShortStackTrace());
-
-        TypedQuery<String> query = em.createNamedQuery("findClientIdByClientId", String.class);
-        query.setParameter("clientId", clientId);
-        query.setParameter("realm", realm.getId());
-        List<String> results = query.getResultList();
-        if (results.isEmpty()) return null;
-        String id = results.get(0);
-        return getClientById(realm, id);
+        ClientModel client = super.getClientByClientId(realm, clientId);
+        return client != null ? new TideClientAdapter(realm, em, session, (ClientEntity) client) : null;
     }
+
     @Override
     public ClientModel getClientById(RealmModel realm, String id) {
-        logger.tracef("getClientById(%s, %s)%s", realm, id, getShortStackTrace());
-
-        ClientEntity client = em.find(ClientEntity.class, id);
-        // Check if client belongs to this realm
-        if (client == null || !realm.getId().equals(client.getRealmId())) return null;
-        return toClientModel(realm, client);
-    }
-
-    private ClientModel toClientModel(RealmModel realm, ClientEntity client) {
-        TideClientAdapter adapter = new TideClientAdapter(realm, em, session, client);
-
-        if (Profile.isFeatureEnabled(Profile.Feature.CLIENT_TYPES)) {
-            ClientTypeManager mgr = session.getProvider(ClientTypeManager.class);
-            return mgr.augmentClient(adapter);
-        } else {
-            return adapter;
-        }
+        ClientModel client = super.getClientById(realm, id);
+        return client != null ? new TideClientAdapter(realm, em, session, (ClientEntity) client) : null;
     }
 
     /**
@@ -346,103 +262,44 @@ public class TideRealmProvider extends JpaRealmProvider {
 
     @Override
     public RoleModel getRoleById(RealmModel realm, String id) {
-        RoleEntity entity = em.find(RoleEntity.class, id);
-        if (entity == null) return null;
-        if (!realm.getId().equals(entity.getRealmId())) return null;
-        TideRoleAdapter adapter = new TideRoleAdapter(session, realm, em, entity);
-        return adapter;
+        RoleModel role = super.getRoleById(realm, id);
+        return role != null ? new TideRoleAdapter(session, realm, em, (RoleEntity) role) : null;
     }
 
     @Override
     public Stream<RoleModel> searchForClientRolesStream(RealmModel realm, String search, Stream<String> excludedIds, Integer first, Integer max) {
-        return searchForClientRolesStream(realm, excludedIds, search, first, max, true);
-    }
-
-    private Stream<RoleModel> searchForClientRolesStream(RealmModel realm, Stream<String> ids, String search, Integer first, Integer max, boolean negateIds) {
-        List<String> idList = null;
-        if(ids != null) {
-            idList = ids.collect(Collectors.toList());
-            if(idList.isEmpty() && !negateIds)
-                return Stream.empty();
-        }
-        CriteriaBuilder cb = em.getCriteriaBuilder();
-        CriteriaQuery<RoleEntity> query = cb.createQuery(RoleEntity.class);
-
-        Root<RoleEntity> roleRoot = query.from(RoleEntity.class);
-        Root<ClientEntity> clientRoot = query.from(ClientEntity.class);
-
-        List<Predicate> predicates = new ArrayList<>();
-        predicates.add(cb.equal(roleRoot.get("realmId"), realm.getId()));
-        predicates.add(cb.isTrue(roleRoot.get("clientRole")));
-        predicates.add(cb.equal(roleRoot.get("clientId"),clientRoot.get("id")));
-        if(search != null && !search.isEmpty()) {
-            search = "%" + search.trim().toLowerCase() + "%";
-            predicates.add(cb.or(
-                    cb.like(cb.lower(roleRoot.get("name")), search),
-                    cb.like(cb.lower(clientRoot.get("clientId")), search)
-            ));
-        }
-        if(idList != null && !idList.isEmpty()) {
-            Predicate idFilter = roleRoot.get("id").in(idList);
-            if(negateIds) idFilter = cb.not(idFilter);
-            predicates.add(idFilter);
-        }
-        query.select(roleRoot).where(predicates.toArray(new Predicate[0]))
-                .orderBy(
-                        cb.asc(clientRoot.get("clientId")),
-                        cb.asc(roleRoot.get("name")));
-        return closing(paginateQuery(em.createQuery(query),first,max).getResultStream())
-                .map(roleEntity -> new TideRoleAdapter(session, realm, em, roleEntity));
+        return super.searchForClientRolesStream(realm, search, excludedIds, first, max)
+                .map(role -> new TideRoleAdapter(session, realm, em, (RoleEntity) role));
     }
 
     @Override
     public Stream<RoleModel> searchForRolesStream(RealmModel realm, String search, Integer first, Integer max) {
-        TypedQuery<RoleEntity> query = em.createNamedQuery("searchForRealmRoles", RoleEntity.class);
-        query.setParameter("realm", realm.getId());
-
-        return searchForRoles(query, realm, search, first, max);
-    }
-
-    protected Stream<RoleModel> searchForRoles(TypedQuery<RoleEntity> query, RealmModel realm, String search, Integer first, Integer max) {
-        query.setParameter("search", "%" + search.trim().toLowerCase() + "%");
-        Stream<RoleEntity> results = paginateQuery(query, first, max).getResultStream();
-
-        return closing(results.map(role -> new TideRoleAdapter(session, realm, em, role)));
+        return super.searchForRolesStream(realm, search, first, max)
+                .map(role -> new TideRoleAdapter(session, realm, em, (RoleEntity) role));
     }
 
     @Override
     public Stream<RoleModel> getClientRolesStream(ClientModel client, Integer first, Integer max) {
-        TypedQuery<RoleEntity> query = em.createNamedQuery("getClientRoles", RoleEntity.class);
-        query.setParameter("client", client.getId());
-
-        return getRolesStream(query, client.getRealm(), first, max);
+        return super.getClientRolesStream(client, first, max)
+                .map(role -> new TideRoleAdapter(session, client.getRealm(), em, (RoleEntity) role));
     }
 
-    protected Stream<RoleModel> getRolesStream(TypedQuery<RoleEntity> query, RealmModel realm, Integer first, Integer max) {
-        Stream<RoleEntity> results = paginateQuery(query, first, max).getResultStream();
-
-        return closing(results.map(role -> new TideRoleAdapter(session, realm, em, role)));
-    }
-
-
+    /**
+     *
+     * We are returning our TideRealmAdapter here. Everything else works the same as the super
+     *
+     **/
 
     @Override
     public RealmModel getRealmByName(String name) {
-        TypedQuery<String> query = em.createNamedQuery("getRealmIdByName", String.class);
-        query.setParameter("name", name);
-        List<String> entities = query.getResultList();
-        if (entities.isEmpty()) return null;
-        if (entities.size() > 1) throw new IllegalStateException("Should not be more than one realm with same name");
-        String id = query.getResultList().get(0);
-
-        return getRealm(id);
+        RealmModel realm = super.getRealmByName(name);
+        return realm != null ? new TideRealmAdapter(session, em, (RealmEntity) realm) : null;
     }
+
     @Override
     public RealmModel getRealm(String id) {
-        RealmEntity realm = em.find(RealmEntity.class, id);
-        if (realm == null) return null;
-        TideRealmAdapter adapter = new TideRealmAdapter(session, em, realm);
-        return adapter;
+        RealmModel realm = super.getRealm(id);
+        return realm != null ? new TideRealmAdapter(session, em, (RealmEntity) realm) : null;
     }
 
 }
