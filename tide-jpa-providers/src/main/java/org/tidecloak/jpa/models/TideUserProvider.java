@@ -97,19 +97,29 @@ public class TideUserProvider extends JpaUserProvider {
     @Override
     public Stream<UserModel> getGroupMembersStream(RealmModel realm, GroupModel group) {
         return super.getGroupMembersStream(realm, group)
-                .map(userEntity -> new TideUserAdapter(session, realm, em, (UserEntity) userEntity));
+                .map(user -> {
+                    UserEntity userEntity = em.find(UserEntity.class, user.getId());
+                    return new TideUserAdapter(session, realm, em, userEntity);
+                });
     }
 
     @Override
     public Stream<UserModel> getRoleMembersStream(RealmModel realm, RoleModel role) {
         return super.getRoleMembersStream(realm, role)
-                .map(userEntity -> new TideUserAdapter(session, realm, em, (UserEntity) userEntity));
+                .map(user -> {
+                    UserEntity userEntity = em.find(UserEntity.class, user.getId());
+                    return new TideUserAdapter(session, realm, em, userEntity);
+                });
     }
 
     @Override
     public UserModel getUserByUsername(RealmModel realm, String username) {
         UserModel userModel = super.getUserByUsername(realm, username);
-        return userModel != null ? new TideUserAdapter(session, realm, em, (UserEntity) userModel) : null;
+        if ( userModel == null) {
+            return null;
+        }
+        UserEntity userEntity = em.find(UserEntity.class, userModel.getId());
+        return new TideUserAdapter(session, realm, em, userEntity);
     }
 
     @Override
@@ -117,7 +127,8 @@ public class TideUserProvider extends JpaUserProvider {
         UserModel userModel = super.getUserByEmail(realm, email);
         if (userModel != null) {
             ensureEmailConstraint(Collections.singletonList((UserEntity) userModel), realm);
-            return new TideUserAdapter(session, realm, em, (UserEntity) userModel);
+            UserEntity userEntity = em.find(UserEntity.class, userModel.getId());
+            return new TideUserAdapter(session, realm, em, userEntity);
         }
         return null;
     }
@@ -125,19 +136,29 @@ public class TideUserProvider extends JpaUserProvider {
     @Override
     public Stream<UserModel> getGroupMembersStream(RealmModel realm, GroupModel group, Integer firstResult, Integer maxResults) {
         return super.getGroupMembersStream(realm, group, firstResult, maxResults)
-                .map(userEntity -> new TideUserAdapter(session, realm, em, (UserEntity) userEntity));
+                .map(user -> {
+                    UserEntity userEntity = em.find(UserEntity.class, user.getId());
+                    return new TideUserAdapter(session, realm, em, userEntity);
+                });
     }
 
     @Override
     public Stream<UserModel> getRoleMembersStream(RealmModel realm, RoleModel role, Integer firstResult, Integer maxResults) {
         return super.getRoleMembersStream(realm, role, firstResult, maxResults)
-                .map(userEntity -> new TideUserAdapter(session, realm, em, (UserEntity) userEntity));
+                .map(user -> {
+                    UserEntity userEntity = em.find(UserEntity.class, user.getId());
+                    return new TideUserAdapter(session, realm, em, userEntity);
+                });
     }
 
     @Override
     public UserModel getUserById(RealmModel realm, String id) {
         UserModel userModel = super.getUserById(realm, id);
-        return userModel != null ? new TideUserAdapter(session, realm, em, (UserEntity) userModel) : null;
+        if ( userModel == null) {
+            return null;
+        }
+        UserEntity userEntity = em.find(UserEntity.class, userModel.getId());
+        return new TideUserAdapter(session, realm, em, userEntity);
     }
 
     @Override
@@ -149,7 +170,8 @@ public class TideUserProvider extends JpaUserProvider {
             throw new IllegalStateException("More results found for identityProvider=" + identity.getIdentityProvider() +
                     ", userId=" + identity.getUserId() + ", results=" + userModel);
         } else {
-            return new TideUserAdapter(session, realm, em, (UserEntity) userModel);
+            UserEntity userEntity = em.find(UserEntity.class, userModel.getId());
+            return new TideUserAdapter(session, realm, em, userEntity);
         }
     }
 
@@ -162,13 +184,17 @@ public class TideUserProvider extends JpaUserProvider {
             throw new IllegalStateException("More service account linked users found for client=" + client.getClientId() +
                     ", results=" + userModel);
         } else {
-            return new TideUserAdapter(session, client.getRealm(), em, (UserEntity) userModel);
+            UserEntity userEntity = em.find(UserEntity.class, userModel.getId());
+            return new TideUserAdapter(session, client.getRealm(), em, userEntity);
         }
     }
 
     @Override
     public Stream<UserModel> searchForUserByUserAttributeStream(RealmModel realm, String attrName, String attrValue) {
         return super.searchForUserByUserAttributeStream(realm, attrName, attrValue)
-                .map(userEntity -> new TideUserAdapter(session, realm, em, (UserEntity) userEntity));
+                .map(user -> {
+                    UserEntity userEntity = em.find(UserEntity.class, user.getId());
+                    return new TideUserAdapter(session, realm, em, userEntity);
+                });
     }
 }

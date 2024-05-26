@@ -140,14 +140,18 @@ public final class TideAuthzProofUtil {
             // Apply the filtered roles to the AccessToken
             setTokenClaims(proof, accessDetails, actionType);
             // need to clean the audience somewhere here.
-            Set<String> clientKeys = accessDetails.getClientAccesses().keySet();
-            if (proof.audience() != null) {
+            Set<String> clientKeys = proof.getResourceAccess().keySet();
+            System.out.println(Arrays.toString(clientKeys.toArray()));
+            if (proof.getAudience() != null) {
                 String[] cleanAudience = Arrays.stream(proof.getAudience())
                         .filter(clientKeys::contains)
                         .toArray(String[]::new);
+                System.out.println("this is my current aud "+ Arrays.toString(proof.getAudience()));
+                System.out.println("This is clean aud " + Arrays.toString(cleanAudience));
                 proof.audience(cleanAudience);
             }else {
-                String[] aud = clientKeys.toArray(String[]::new);
+                String[] aud = Arrays.stream(clientKeys.toArray(String[]::new)).filter(x -> !Objects.equals(x, clientModel.getName())).toArray(String[]::new);
+                System.out.println("This is empty aud " + Arrays.toString(aud));
                 proof.audience(aud);
             }
         }
@@ -323,7 +327,8 @@ public final class TideAuthzProofUtil {
 
             accessToken.audience(cleanAudience);
         } else {
-            String[] aud = clientKeys.toArray(String[]::new);
+            System.out.println(Arrays.toString(clientKeys.toArray()));
+            String[] aud = Arrays.stream(clientKeys.toArray(String[]::new)).filter(x -> !Objects.equals(x, clientModel.getName())).toArray(String[]::new);
             accessToken.audience(aud);
         }
         JsonNode finalToken = objectMapper.valueToTree(accessToken);

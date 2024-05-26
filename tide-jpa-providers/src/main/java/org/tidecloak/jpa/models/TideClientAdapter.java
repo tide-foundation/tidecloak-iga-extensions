@@ -154,7 +154,7 @@ public class TideClientAdapter extends ClientAdapter {
             }
         }));
         usersInRealm.forEach(user -> {
-            ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
+            ClientEntity clientEntity = em.getReference(ClientEntity.class, client.getId());
 
             // Find any pending changes
             List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)

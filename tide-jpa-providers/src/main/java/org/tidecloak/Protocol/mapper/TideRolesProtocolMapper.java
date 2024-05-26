@@ -59,7 +59,7 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
 
             token.audience(cleanAudience);
         }else {
-            String[] aud = clientKeys.toArray(String[]::new);
+            String[] aud = Arrays.stream(clientKeys.toArray(String[]::new)).filter(x -> !Objects.equals(x, clientModel.getName())).toArray(String[]::new);
             token.audience(aud);
         }
         return token;

@@ -36,12 +36,10 @@ import static org.keycloak.utils.StreamsUtil.closing;
 
 public class TideRealmProvider extends JpaRealmProvider {
     private final KeycloakSession session;
-    private final Set<String> groupSearchableAttributes;
 
     public TideRealmProvider(KeycloakSession session, EntityManager em, Set<String> clientSearchableAttributes, Set<String> groupSearchableAttributes) {
         super(session, em, clientSearchableAttributes, groupSearchableAttributes);
         this.session = session;
-        this.groupSearchableAttributes = groupSearchableAttributes;
     }
 
     @Override
@@ -97,8 +95,6 @@ public class TideRealmProvider extends JpaRealmProvider {
             TideRoleDraftEntity draft = drafts.get(0);
             em.remove(draft);
             em.flush();
-
-
             return super.removeRole(role);
         }
 
@@ -213,13 +209,20 @@ public class TideRealmProvider extends JpaRealmProvider {
     @Override
     public GroupModel getGroupById(RealmModel realm, String id) {
         GroupModel group = super.getGroupById(realm, id);
-        return group != null ? new TideGroupAdapter(realm, em, (GroupEntity) group, session) : null;
+        if ( group == null) {
+            return null;
+        }
+        GroupEntity groupEntity = em.getReference(GroupEntity.class, group.getId());
+        return new TideGroupAdapter(realm, em, groupEntity, session);
     }
 
     @Override
     public Stream<GroupModel> getGroupsByRoleStream(RealmModel realm, RoleModel role, Integer firstResult, Integer maxResults) {
         Stream<GroupModel> groups = super.getGroupsByRoleStream(realm, role, firstResult, maxResults)
-                .map(group -> new TideGroupAdapter(realm, em, (GroupEntity) group, session));
+                .map(group -> {
+                    GroupEntity groupEntity = em.getReference(GroupEntity.class, group.getId());
+                    return new TideGroupAdapter(realm, em, groupEntity, session);
+                });
 
         return groups.sorted(GroupModel.COMPARE_BY_NAME);
     }
@@ -227,13 +230,20 @@ public class TideRealmProvider extends JpaRealmProvider {
     @Override
     public GroupModel createGroup(RealmModel realm, String id, String name, GroupModel toParent) {
         GroupModel group = super.createGroup(realm, id, name, toParent);
-        return new TideGroupAdapter(realm, em, (GroupEntity) group, session);
+        if ( group == null) {
+            return null;
+        }
+        GroupEntity groupEntity = em.getReference(GroupEntity.class, group.getId());
+        return new TideGroupAdapter(realm, em, groupEntity, session);
     }
 
     @Override
     public Stream<GroupModel> searchGroupsByAttributes(RealmModel realm, Map<String, String> attributes, Integer firstResult, Integer maxResults) {
         return super.searchGroupsByAttributes(realm, attributes, firstResult, maxResults)
-                .map(group -> new TideGroupAdapter(realm, em, (GroupEntity) group, session));
+                .map(group -> {
+                    GroupEntity groupEntity = em.getReference(GroupEntity.class, group.getId());
+                    return new TideGroupAdapter(realm, em, groupEntity, session);
+                });
     }
 
     /**
@@ -245,13 +255,21 @@ public class TideRealmProvider extends JpaRealmProvider {
     @Override
     public ClientModel getClientByClientId(RealmModel realm, String clientId) {
         ClientModel client = super.getClientByClientId(realm, clientId);
-        return client != null ? new TideClientAdapter(realm, em, session, (ClientEntity) client) : null;
+        if ( client == null) {
+            return null;
+        }
+        ClientEntity clientEntity = em.getReference(ClientEntity.class, client.getId());
+        return new TideClientAdapter(realm, em, session, clientEntity);
     }
 
     @Override
     public ClientModel getClientById(RealmModel realm, String id) {
         ClientModel client = super.getClientById(realm, id);
-        return client != null ? new TideClientAdapter(realm, em, session, (ClientEntity) client) : null;
+        if ( client == null) {
+            return null;
+        }
+        ClientEntity clientEntity = em.getReference(ClientEntity.class, client.getId());
+        return new TideClientAdapter(realm, em, session, clientEntity);
     }
 
     /**
@@ -263,25 +281,38 @@ public class TideRealmProvider extends JpaRealmProvider {
     @Override
     public RoleModel getRoleById(RealmModel realm, String id) {
         RoleModel role = super.getRoleById(realm, id);
-        return role != null ? new TideRoleAdapter(session, realm, em, (RoleEntity) role) : null;
+        if ( role == null) {
+            return null;
+        }
+        RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
+        return new TideRoleAdapter(session, realm, em, roleEntity);
     }
 
     @Override
     public Stream<RoleModel> searchForClientRolesStream(RealmModel realm, String search, Stream<String> excludedIds, Integer first, Integer max) {
         return super.searchForClientRolesStream(realm, search, excludedIds, first, max)
-                .map(role -> new TideRoleAdapter(session, realm, em, (RoleEntity) role));
+                .map(role -> {
+                    RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
+                    return new TideRoleAdapter(session, realm, em, roleEntity);
+                });
     }
 
     @Override
     public Stream<RoleModel> searchForRolesStream(RealmModel realm, String search, Integer first, Integer max) {
         return super.searchForRolesStream(realm, search, first, max)
-                .map(role -> new TideRoleAdapter(session, realm, em, (RoleEntity) role));
+                .map(role -> {
+                    RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
+                    return new TideRoleAdapter(session, realm, em, roleEntity);
+                });
     }
 
     @Override
     public Stream<RoleModel> getClientRolesStream(ClientModel client, Integer first, Integer max) {
         return super.getClientRolesStream(client, first, max)
-                .map(role -> new TideRoleAdapter(session, client.getRealm(), em, (RoleEntity) role));
+                .map(role -> {
+                    RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
+                    return new TideRoleAdapter(session, client.getRealm(), em, roleEntity);
+                });
     }
 
     /**
@@ -293,13 +324,21 @@ public class TideRealmProvider extends JpaRealmProvider {
     @Override
     public RealmModel getRealmByName(String name) {
         RealmModel realm = super.getRealmByName(name);
-        return realm != null ? new TideRealmAdapter(session, em, (RealmEntity) realm) : null;
+        if ( realm == null) {
+            return null;
+        }
+        RealmEntity realmEntity = em.getReference(RealmEntity.class, realm.getId());
+        return new TideRealmAdapter(session, em, realmEntity);
     }
 
     @Override
     public RealmModel getRealm(String id) {
         RealmModel realm = super.getRealm(id);
-        return realm != null ? new TideRealmAdapter(session, em, (RealmEntity) realm) : null;
+        if ( realm == null) {
+            return null;
+        }
+        RealmEntity realmEntity = em.getReference(RealmEntity.class, realm.getId());
+        return new TideRealmAdapter(session, em, realmEntity);
     }
 
 }

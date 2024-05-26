@@ -1,6 +1,8 @@
 package org.tidecloak.jpa.models;
 
 import org.keycloak.connections.jpa.entityprovider.JpaEntityProvider;
+import org.tidecloak.jpa.entities.AccessProofDetailDependencyEntity;
+import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.*;
 
@@ -15,7 +17,12 @@ public class TideEntityProvider implements JpaEntityProvider {
                 TideCompositeRoleMappingDraftEntity.class,
                 TideGroupDraftEntity.class,
                 TideUserGroupMembershipEntity.class,
-                TideGroupRoleMappingEntity.class
+                TideGroupRoleMappingEntity.class,
+                TideClientFullScopeStatusDraftEntity.class,
+                TideCompositeRoleDraftEntity.class,
+                AccessProofDetailDependencyEntity.class,
+                AccessProofDetailEntity.class,
+                UserClientAccessProofEntity.class
                 );
     }
 
