@@ -52,16 +52,10 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         setTokenClaims(token, roles);
 
         Set<String> clientKeys = token.getResourceAccess().keySet();
-        if (token.getAudience() != null) {
-            String[] cleanAudience = Arrays.stream(token.getAudience())
-                    .filter(clientKeys::contains)
-                    .toArray(String[]::new);
+        String[] aud = Arrays.stream(clientKeys.toArray(String[]::new)).filter(x -> !Objects.equals(x, clientModel.getName())).toArray(String[]::new);
+        // Set the audience in the access token based on the filtered keys
+        token.audience(aud.length == 0 ? null : aud);
 
-            token.audience(cleanAudience);
-        }else {
-            String[] aud = Arrays.stream(clientKeys.toArray(String[]::new)).filter(x -> !Objects.equals(x, clientModel.getName())).toArray(String[]::new);
-            token.audience(aud);
-        }
         return token;
     }
 

@@ -218,10 +218,10 @@ public class TideClientAdapter extends ClientAdapter {
         });
 
         proofGeneration.regenerateProofForClient(client, usersInClient);
-
         return protocolMapperModel;
 
     }
+
 
     @Override
     public void removeProtocolMapper(ProtocolMapperModel mapping) {

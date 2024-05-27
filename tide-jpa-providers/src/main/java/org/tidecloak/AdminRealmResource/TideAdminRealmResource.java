@@ -507,7 +507,7 @@ public class TideAdminRealmResource {
         }
 
         List<ClientModel> affectedClients = realm.getClientsStream()
-                .map(client -> new TideClientAdapter(realm, em, session, em.find(ClientEntity.class, client.getId())))
+                .map(client -> new TideClientAdapter(realm, em, session, em.getReference(ClientEntity.class, client.getId())))
                 .filter(clientModel -> {
                     ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
                     List<TideClientFullScopeStatusDraftEntity> scopeDraft = em.createNamedQuery("getClientFullScopeStatusByFullScopeEnabledStatus", TideClientFullScopeStatusDraftEntity.class)
@@ -570,7 +570,15 @@ public class TideAdminRealmResource {
                         .setParameter("changesetType", ChangeSetType.ROLE)
                         .getResultStream().filter(proof -> !recordIds.contains(proof.getRecordId())).toList());
 
-                List<AccessProofDetailEntity> uniqueProofs = proofs.stream().distinct().toList();
+                List<AccessProofDetailEntity> uniqueProofs = proofs.stream()
+                        .collect(Collectors.collectingAndThen(
+                                Collectors.toMap(
+                                        AccessProofDetailEntity::getUser,
+                                        e -> e,
+                                        (e1, e2) -> e1 // If there are duplicates, keep the first one
+                                ),
+                                map -> new ArrayList<>(map.values())
+                        ));
                 for (AccessProofDetailEntity t : uniqueProofs) {
                     UserModel user = session.users().getUserById(realm, t.getUser().getId());
                     TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);

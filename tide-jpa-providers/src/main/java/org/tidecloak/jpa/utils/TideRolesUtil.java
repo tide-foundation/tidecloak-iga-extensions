@@ -73,7 +73,7 @@ public class TideRolesUtil {
      * @param roles
      * @return new set with composite roles expanded
      */
-    public static Set<RoleModel> expandCompositeRoles(Set<RoleModel> roles, DraftStatus draftStatus, ActionType actionType) {
+    public static Set<RoleModel> expandCompositeRoles(Set<TideRoleAdapter> roles, DraftStatus draftStatus, ActionType actionType) {
         Set<RoleModel> visited = new HashSet<>();
 
         return roles.stream()
@@ -105,7 +105,8 @@ public class TideRolesUtil {
             user.getRoleMappingsStream().collect(Collectors.toSet());
         }
         user.getGroupsStream().forEach(group -> addGroupRoles(wrapGroupModel(group, session, realm), roleMappings, draftStatus, actionType));
-        return expandCompositeRoles(roleMappings, draftStatus, actionType);
+        Set<TideRoleAdapter> wrappedRoles = roleMappings.stream().map(r -> ((TideRoleAdapter) wrapRoleModel(r, session, realm))).collect(Collectors.toSet());
+        return expandCompositeRoles(wrappedRoles, draftStatus, actionType);
     }
 
 

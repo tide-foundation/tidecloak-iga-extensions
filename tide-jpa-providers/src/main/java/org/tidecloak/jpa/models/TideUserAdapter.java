@@ -33,6 +33,7 @@ import org.tidecloak.jpa.utils.ProofGeneration;
 
 import javax.management.relation.Role;
 import java.util.*;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.keycloak.utils.StreamsUtil.closing;
@@ -123,8 +124,12 @@ public class TideUserAdapter extends UserAdapter {
                     try {
                         util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUserRole.getId(), ChangeSetType.USER_ROLE, ActionType.CREATE, client.isFullScopeAllowed());
                         if(role.isComposite()){
+                            Set<TideRoleAdapter> wrappedRoles = roleMappings.stream().map(r -> {
+                                RoleEntity roleEntity = em.getReference(RoleEntity.class, r.getId());
+                                return new TideRoleAdapter(session, realm, em, roleEntity);
+                            }).collect(Collectors.toSet());
                             // we expand it and create a new record
-                            Set<RoleModel> compositeRoles = TideRolesUtil.expandCompositeRoles(roleMappings,DraftStatus.DRAFT, ActionType.CREATE);
+                            Set<RoleModel> compositeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles,DraftStatus.DRAFT, ActionType.CREATE);
 
                             for(RoleModel r : compositeRoles)
                             {
