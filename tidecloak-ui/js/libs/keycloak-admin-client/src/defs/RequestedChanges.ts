@@ -1,8 +1,12 @@
 import type RequestChangesUserRecord from "./RequestChangesUserRecord.js";
 export default interface RequestedChanges {
-    type: string;
-    parentRecordId: string;
+    action: string;
+    changeSetType: string;
+    requestType: string;
+    clientId: string;
+    actionType: string;
+    draftRecordId: string;
     userRecord: RequestChangesUserRecord[];
-    description: string;
+    status: string;
 }
 

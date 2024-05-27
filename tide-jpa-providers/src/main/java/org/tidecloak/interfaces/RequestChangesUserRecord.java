@@ -6,8 +6,8 @@ public class RequestChangesUserRecord {
     @JsonProperty("username")
     protected String username;
 
-    @JsonProperty("clientName")
-    protected String clientName;
+    @JsonProperty("clientId")
+    protected String clientId;
 
     @JsonProperty("proofDetailId")
     protected String proofDetailId; // need this for requests
@@ -15,10 +15,10 @@ public class RequestChangesUserRecord {
     // show affected user
     // show for affected client
 
-    public RequestChangesUserRecord(String username, String proofDetailId, String clientName) {
+    public RequestChangesUserRecord(String username, String proofDetailId, String clientId) {
         this.username = username;
         this.proofDetailId = proofDetailId;
-        this.clientName = clientName;
+        this.clientId = clientId;
     }
 
 }

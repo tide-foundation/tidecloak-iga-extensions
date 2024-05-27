@@ -5,35 +5,46 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
 
 public class RequestedChanges {
+    @JsonProperty("action")
+    protected  String action;
+
     @JsonProperty("changeSetType")
     protected ChangeSetType changeSetType;
 
-    @JsonProperty("type")
-    protected RequestType type;
+    @JsonProperty("requestType")
+    protected RequestType requestType;
+
+    @JsonProperty("clientId")
+    protected  String clientId;
 
     @JsonProperty("actionType")
     protected ActionType actionType;
 
-    @JsonProperty("parentRecordId")
-    protected String parentRecordId;
+    @JsonProperty("draftRecordId")
+    protected String draftRecordId;
 
     @JsonProperty("userRecord")
     protected List<RequestChangesUserRecord> userRecord;
 
-    @JsonProperty("description")
-    protected String description;
+    @JsonProperty("status")
+    protected DraftStatus status;
 
-    public RequestedChanges(ChangeSetType changeSetType, RequestType type, ActionType actionType, String parentRecordId, List<RequestChangesUserRecord> userRecord, String description) {
-        this.type = type;
+    public RequestedChanges(String action, ChangeSetType changeSetType, RequestType requestType, String clientId, ActionType actionType, String draftRecordId, List<RequestChangesUserRecord> userRecord, DraftStatus status) {
+        this.action = action;
+        this.requestType = requestType;
         this.changeSetType = changeSetType;
+        this.clientId = clientId;
         this.actionType = actionType;
-        this.parentRecordId = parentRecordId;
+        this.draftRecordId = draftRecordId;
         this.userRecord = userRecord;
-        this.description = description;
+        this.status = status;
     }
 
-    public String getParentRecordId() {
-        return parentRecordId;
+    public String getAction() {
+        return action;
+    }
+    public RequestType getRequestType() {
+        return requestType;
     }
     public ChangeSetType getChangeSetType() {
         return changeSetType;
@@ -41,24 +52,29 @@ public class RequestedChanges {
     public ActionType getActionType() {
         return actionType;
     }
+    public String getDraftRecordId() {
+        return draftRecordId;
+    }
     public List<RequestChangesUserRecord> getUserRecord() {
         return userRecord;
     }
-    public String getDescription() {
-        return description;
+    public DraftStatus getStatus() {
+        return status;
     }
 
 
-    public void setParentRecordId(String parentRecordId) {
-        this.parentRecordId = parentRecordId;
+    public void setAction(String action) {this.action = action; }
+    public void setRequestType(RequestType requestType) {this.requestType = requestType; }
+    public void setChangeSetType(ChangeSetType changeSetType) {this.changeSetType = changeSetType; }
+    public void setActionType(ActionType actionType) {this.actionType = actionType; }
+    public void setDraftRecordId(String draftRecordId) {
+        this.draftRecordId = draftRecordId;
     }
-
     public void setUserRecord(List<RequestChangesUserRecord> userRecord) {
         this.userRecord = userRecord;
     }
-    public void setDescription(String description) {
-        this.description = description;
+    public void setStatus(DraftStatus draftStatus) {
+        this.status = draftStatus;
     }
-
 
 }

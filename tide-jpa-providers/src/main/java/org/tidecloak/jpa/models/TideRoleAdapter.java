@@ -235,7 +235,7 @@ public class TideRoleAdapter extends RoleAdapter {
             super.addCompositeRole(roleModel);
             return;
         }
-        // dont care about realm roles
+        // don't care about realm roles
         if(!getEntity().isClientRole()){
             super.addCompositeRole(roleModel);
             RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);

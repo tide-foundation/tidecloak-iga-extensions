@@ -1,6 +1,10 @@
 import type { KeycloakAdminClient } from "../client.js";
 import Resource from "./resource.js";
 import type RequestedChanges from "../defs/RequestedChanges.js";
+import type RoleChangeRequest from "../defs/RoleChangeRequest.js";
+import type CompositeRoleChangeRequest from "../defs/CompositeRoleChangeRequest.js";
+
+
 
 
 interface SearchQuery {
@@ -54,13 +58,19 @@ public getRoleDraftStatus = this.makeRequest<
   urlParamKeys: ["parentId", "childId"],
 });
 
-public getRequestedChangesForUsers = this.makeRequest<void, RequestedChanges[]>({
+public getRequestedChangesForUsers = this.makeRequest<void, RoleChangeRequest[]>({
   method: "GET",
   path: "/change-set/users/requests",
 });
-public getRequestedChangesForRoles = this.makeRequest<void, RequestedChanges[]>({
+
+public getRequestedChangesForRoles = this.makeRequest<void, CompositeRoleChangeRequest[]|RoleChangeRequest[]>({
   method: "GET",
   path: "/change-set/roles/requests",
+});
+
+public getRequestedChangesForClients = this.makeRequest<void, RequestedChanges[]>({
+  method: "GET",
+  path: "/change-set/clients/requests",
 });
 
   constructor(client: KeycloakAdminClient) {

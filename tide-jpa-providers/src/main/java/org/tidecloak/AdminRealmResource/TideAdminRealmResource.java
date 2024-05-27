@@ -101,6 +101,7 @@ public class TideAdminRealmResource {
         return entity.isEmpty() ? Response.status(Response.Status.NOT_FOUND).entity("Draft status not found").build() : Response.ok(entity.get(0).getDraftStatus()).build();
     }
 
+
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign")
@@ -151,6 +152,54 @@ public class TideAdminRealmResource {
         return Response.ok(requestedChangesList).build();
     }
 
+    @GET
+    @Path("change-set/clients/requests")
+    public Response getRequestedChangesForClients() {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<RequestedChanges> changes = new ArrayList<>(processClientDraftRecords(em));
+        return Response.ok(changes).build();
+    }
+
+    private List<RequestedChanges> processClientDraftRecords(EntityManager em) {
+        List<RequestedChanges> changes = new ArrayList<>();
+        List<TideClientFullScopeStatusDraftEntity> mappings = em.createNamedQuery("getClientFullScopeStatusDraftByIdAndEitherFullScopeStatus", TideClientFullScopeStatusDraftEntity.class)
+                .setParameter("status", DraftStatus.DRAFT)
+                .getResultList();
+
+        for (TideClientFullScopeStatusDraftEntity c : mappings) {
+            em.lock(c, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
+            ClientModel client = realm.getClientById(c.getClient().getId());
+            if (client == null) {
+                continue;
+            }
+
+            List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", c.getId())
+                    .getResultList();
+
+
+            RequestedChanges requestChange = new RequestedChanges("",ChangeSetType.CLIENT, RequestType.CLIENT, client.getClientId(), c.getAction(), c.getId(), new ArrayList<>(), DraftStatus.DRAFT);
+            proofs.forEach(p -> {
+                em.lock(p, LockModeType.PESSIMISTIC_WRITE);
+                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), c.getClient().getClientId()));
+            });
+
+            if(c.getFullScopeEnabled() != DraftStatus.ACTIVE) {
+                String action = "Enabling Full-Scope on Client";
+
+                requestChange.setAction(action);
+                requestChange.setStatus(c.getFullScopeEnabled());
+            }
+            else if ( c.getFullScopeDisabled() != DraftStatus.ACTIVE) {
+                String action = "Disabling Full-Scope on Client";
+                requestChange.setAction(action);
+                requestChange.setStatus(c.getFullScopeDisabled());
+            }
+            changes.add(requestChange);
+        }
+        return changes;
+    }
+
     private List<RequestedChanges> processUserRoleMappings(EntityManager em) {
         List<RequestedChanges> changes = new ArrayList<>();
         List<TideUserRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllUserRoleMappingsByStatusAndRealm", TideUserRoleMappingDraftEntity.class)
@@ -169,13 +218,12 @@ public class TideAdminRealmResource {
                     .setParameter("recordId", m.getId())
                     .getResultList();
 
-            RequestedChanges requestChange = new RequestedChanges(ChangeSetType.USER_ROLE, RequestType.USER, m.getAction(), m.getId(), new ArrayList<>(), "");
+            String action = "Granting Role to User";
+            RequestedChanges requestChange = new RoleChangeRequest(realm.getRoleById(m.getRoleId()).getName(), action, ChangeSetType.USER_ROLE, RequestType.USER, clientModel.getClientId(), m.getAction(), m.getId(), new ArrayList<>(), m.getDraftStatus());
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
-                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getName()));
+                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId()));
             });
-
-            requestChange.setDescription(String.format("Granting \"%s\" access in \"%s\" to user\\s: ", role.getName(), clientModel.getClientId()));
             changes.add(requestChange);
         }
         return changes;
@@ -197,11 +245,9 @@ public class TideAdminRealmResource {
                     .setLockMode(LockModeType.PESSIMISTIC_WRITE)
                     .getResultList();
 
-            RequestedChanges requestChange = new RequestedChanges(ChangeSetType.COMPOSITE_ROLE, RequestType.USER, m.getAction(), m.getId(), new ArrayList<>(), "");
+            String action = "Granting Role to Composite Role";
+            RequestedChanges requestChange = new CompositeRoleChangeRequest(m.getComposite().getName(), m.getChildRole().getName(), action, ChangeSetType.COMPOSITE_ROLE, RequestType.ROLE, realm.getClientById(m.getComposite().getClientId()).getClientId(), m.getAction(), m.getId(), new ArrayList<>(), m.getDraftStatus());
             proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getName())));
-
-            ClientModel clientModel = realm.getClientById(m.getComposite().getClientId());
-            requestChange.setDescription(String.format("Adding \"%s\" access to \"%s\" in \"%s\"", m.getChildRole().getName(), m.getComposite().getName(), clientModel.getClientId()));
             changes.add(requestChange);
         }
         return changes;
@@ -222,12 +268,10 @@ public class TideAdminRealmResource {
                     .setParameter("recordId", m.getId())
                     .setLockMode(LockModeType.PESSIMISTIC_WRITE)
                     .getResultList();
+            String action = "Deleting Role from Client";
+            RequestedChanges requestChange = new RoleChangeRequest(m.getRole().getName(), action, ChangeSetType.ROLE, RequestType.ROLE, realm.getClientById(m.getRole().getClientId()).getClientId(),m.getAction(), m.getId(), new ArrayList<>(), m.getDeleteStatus());
+            proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId())));
 
-            RequestedChanges requestChange = new RequestedChanges(ChangeSetType.COMPOSITE_ROLE, RequestType.USER, m.getAction(), m.getId(), new ArrayList<>(), "");
-            proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getName())));
-
-            ClientModel clientModel = realm.getClientById(m.getRole().getClientId());
-            requestChange.setDescription(String.format("Deleting \"%s\" access in \"%s\"", m.getRole().getName(), clientModel.getClientId()));
             changes.add(requestChange);
         }
         return changes;
