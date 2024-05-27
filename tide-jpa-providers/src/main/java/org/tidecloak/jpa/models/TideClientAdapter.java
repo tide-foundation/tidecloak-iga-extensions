@@ -50,11 +50,11 @@ public class TideClientAdapter extends ClientAdapter {
                 .setParameter("client", entity)
                 .getResultList();
         if (usersInRealm.isEmpty() && statusDraft.isEmpty()) {
-            createFullScopeStatusDraft(value, DraftStatus.ACTIVE);
+            createFullScopeStatusDraft(value);
             super.setFullScopeAllowed(value);
             return;
         } else if (statusDraft.isEmpty() && value) {
-            createFullScopeStatusDraft(true, DraftStatus.DRAFT);
+            createFullScopeStatusDraft(false); // New clients defaults to restricted scope if there are users in the realm.
             return;
         }
         TideClientFullScopeStatusDraftEntity clientFullScopeStatuses = statusDraft.get(0);
@@ -64,15 +64,15 @@ public class TideClientAdapter extends ClientAdapter {
             handleFullScopeDisabled(clientFullScopeStatuses, util, usersInRealm, client);
         }
     }
-    private void createFullScopeStatusDraft(boolean value, DraftStatus draftStatus) {
+    private void createFullScopeStatusDraft(boolean value) {
         TideClientFullScopeStatusDraftEntity draft = new TideClientFullScopeStatusDraftEntity();
         draft.setId(KeycloakModelUtils.generateId());
         draft.setClient(entity);
         if (value) {
-            draft.setFullScopeEnabled(draftStatus);
+            draft.setFullScopeEnabled(DraftStatus.ACTIVE);
             draft.setFullScopeDisabled(DraftStatus.NULL);
         } else {
-            draft.setFullScopeDisabled(draftStatus);
+            draft.setFullScopeDisabled(DraftStatus.ACTIVE);
             draft.setFullScopeEnabled(DraftStatus.NULL);
         }
         draft.setAction(ActionType.CREATE);
