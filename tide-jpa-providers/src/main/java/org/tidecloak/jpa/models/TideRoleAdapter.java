@@ -21,6 +21,8 @@ import org.tidecloak.jpa.utils.TideRolesUtil;
 import java.util.*;
 import java.util.stream.Stream;
 
+import static org.keycloak.models.ImpersonationConstants.IMPERSONATION_ROLE;
+
 public class TideRoleAdapter extends RoleAdapter {
     private final KeycloakSession session;
     private final RealmModel realm;
@@ -126,7 +128,7 @@ public class TideRoleAdapter extends RoleAdapter {
         String entityName = getEntity().getName();
         String childName = child.getName();
 
-        if (isRealmAdmin(entityName) && (isInAllRealmRoles(childName) || isCreateRealm(childName))) {
+        if (isRealmAdmin(entityName) && (isInAllRealmRoles(childName) || isCreateRealm(childName) || isImpersonation(childName))) {
             persistDraft(entity);
             return true;
         } else if (isManageAccount(entityName) && isManageAccountLinks(childName)) {
@@ -140,6 +142,10 @@ public class TideRoleAdapter extends RoleAdapter {
             return true;
         } else if (isDefaultRole(entityName) && isDefaultAccountRole(childName)) {
             persistDraft(entity);
+            return true;
+        } else if (isAdminViewUsers(entityName) && (isQueryUsers(childName) || isQueryGroups(childName))) {
+            return true;
+        } else if (isAdminViewClients(entityName) && isQueryClients(childName)) {
             return true;
         }
 
@@ -169,6 +175,19 @@ public class TideRoleAdapter extends RoleAdapter {
     private boolean isManageConsent(String entityName) {
         return Objects.equals(entityName, AccountRoles.MANAGE_CONSENT);
     }
+    private boolean isAdminViewUsers(String entityName) {
+
+        return Objects.equals(entityName, AdminRoles.VIEW_USERS);
+    }
+
+    private boolean isAdminViewClients(String entityName) {
+
+        return Objects.equals(entityName, AdminRoles.VIEW_CLIENTS);
+    }
+
+    private boolean isQueryUsers(String childName) {
+        return Objects.equals(childName, AdminRoles.QUERY_USERS);
+    }
 
     private boolean isViewConsent(String childName) {
         return Objects.equals(childName, AccountRoles.VIEW_CONSENT);
@@ -185,6 +204,11 @@ public class TideRoleAdapter extends RoleAdapter {
     private boolean isQueryGroups(String childName) {
         return Objects.equals(childName, AdminRoles.QUERY_GROUPS);
     }
+
+    private boolean isImpersonation(String childName) {
+        return Objects.equals(childName, IMPERSONATION_ROLE );
+    }
+
 
     private boolean isDefaultRole(String entityName) {
         return Objects.equals(entityName, realm.getDefaultRole().getName());
@@ -209,6 +233,14 @@ public class TideRoleAdapter extends RoleAdapter {
     public void addCompositeRole(RoleModel roleModel) {
         if(commitDefaultRolesOnInitiation(roleModel)){
             super.addCompositeRole(roleModel);
+            return;
+        }
+        // dont care about realm roles
+        if(!getEntity().isClientRole()){
+            super.addCompositeRole(roleModel);
+            RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
+            RoleEntity entity = toRoleEntity(role);
+            persistDraft(entity);
             return;
         }
         RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
