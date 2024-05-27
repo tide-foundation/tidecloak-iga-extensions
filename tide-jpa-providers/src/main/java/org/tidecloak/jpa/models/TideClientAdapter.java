@@ -53,7 +53,8 @@ public class TideClientAdapter extends ClientAdapter {
             createFullScopeStatusDraft(value);
             super.setFullScopeAllowed(value);
             return;
-        } else if (statusDraft.isEmpty() && value) {
+        }
+        else if (!usersInRealm.isEmpty() && statusDraft.isEmpty()) {
             createFullScopeStatusDraft(false); // New clients defaults to restricted scope if there are users in the realm.
             return;
         }
