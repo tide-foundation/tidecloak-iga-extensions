@@ -74,10 +74,10 @@ public class TideUserProvider extends JpaUserProvider {
     }
 
     private void removeUser(UserEntity user) {
-        String id = user.getId();
-        em.createNamedQuery("deleteProofByUser").setParameter("user", user).executeUpdate();
-        em.createNamedQuery("deleteUserDrafts").setParameter("user", user).executeUpdate();
-        em.createNamedQuery("deleteUserRoleMappingDraftsByUser").setParameter("user", user).executeUpdate();
+        em.createNamedQuery("deleteProofByUser").setParameter("user", user).executeUpdate(); // Deletes final proof from UserClientAccessProofEntity
+        em.createNamedQuery("deleteAllDraftProofRecordsForUser").setParameter("user", user).executeUpdate(); // Deletes draft proof from AccessProofDetailEntity
+        em.createNamedQuery("deleteUserDrafts").setParameter("user", user).executeUpdate(); // Not implemented yet, user can be deleted
+        em.createNamedQuery("deleteUserRoleMappingDraftsByUser").setParameter("user", user).executeUpdate(); // Delete user role mapping draft records from TideUserRoleMappingDraftEntity
         em.createNamedQuery("deleteUserRoleMappingsByUser").setParameter("user", user).executeUpdate();
         em.createNamedQuery("deleteUserGroupMembershipsByUser").setParameter("user", user).executeUpdate();
         em.createNamedQuery("deleteUserConsentClientScopesByUser").setParameter("user", user).executeUpdate();

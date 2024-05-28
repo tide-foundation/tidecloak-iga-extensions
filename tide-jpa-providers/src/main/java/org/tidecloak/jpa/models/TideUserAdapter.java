@@ -128,14 +128,13 @@ public class TideUserAdapter extends UserAdapter {
                                 RoleEntity roleEntity = em.getReference(RoleEntity.class, r.getId());
                                 return new TideRoleAdapter(session, realm, em, roleEntity);
                             }).collect(Collectors.toSet());
+
                             // we expand it and create a new record
                             Set<RoleModel> compositeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles,DraftStatus.DRAFT, ActionType.CREATE);
 
                             for(RoleModel r : compositeRoles)
                             {
-                                Set<RoleModel> roleSet = new HashSet<>();
-                                roleSet.add(r);
-                                roleSet.add(role);
+
                                 if(Objects.equals(r.getId(), role.getId())){
                                     continue;
                                 }
@@ -143,14 +142,24 @@ public class TideUserAdapter extends UserAdapter {
 
                                 RoleEntity compositeEntity = TideRolesUtil.toRoleEntity(realm.getRoleById(role.getId()), em);
                                 RoleEntity childEntity = TideRolesUtil.toRoleEntity(r, em);
-                                // find child id here
-                                TideCompositeRoleMappingDraftEntity compositeRecord = em.createNamedQuery("getRecordIdByChildAndComposite", TideCompositeRoleMappingDraftEntity.class)
+
+                                // Need to check if its committed yet, else just ignore
+                                List<TideCompositeRoleMappingDraftEntity> compositeRoleMappingStatus = em.createNamedQuery("getCompositeRoleMappingDraftByStatus", TideCompositeRoleMappingDraftEntity.class)
                                         .setParameter("composite", compositeEntity)
                                         .setParameter("childRole", childEntity)
-                                        .getSingleResult();
+                                        .setParameter("draftStatus", DraftStatus.ACTIVE)
+                                        .getResultList();
 
+                                if(compositeRoleMappingStatus.isEmpty()){
+                                    continue;
+                                }
+
+                                Set<RoleModel> roleSet = new HashSet<>();
+                                roleSet.add(r);
+                                roleSet.add(role);
                                 try {
-                                    util.generateAndSaveProofDraft(client, wrappedUser, roleSet, compositeRecord.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE, client.isFullScopeAllowed());
+                                    // Add proof record for Child Role
+                                    util.generateAndSaveProofDraft(client, wrappedUser, roleSet, compositeRoleMappingStatus.get(0).getChildRole().getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE, client.isFullScopeAllowed());
                                 } catch (JsonProcessingException e) {
                                     throw new RuntimeException(e);
                                 }

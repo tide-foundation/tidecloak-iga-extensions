@@ -20,6 +20,8 @@ import org.tidecloak.interfaces.ChangeSetType;
         @NamedQuery(name="deleteProofRecordForUserAndClient", query="DELETE FROM AccessProofDetailEntity a WHERE a.recordId = :recordId and a.user  = :user AND a.clientId = :clientId"),
         @NamedQuery(name="deleteProofRecordForUser", query="DELETE FROM AccessProofDetailEntity a WHERE a.recordId = :recordId and a.user  = :user"),
         @NamedQuery(name="deleteProofRecords", query="DELETE FROM AccessProofDetailEntity a WHERE a.recordId = :recordId"),
+        @NamedQuery(name="deleteAllDraftProofRecordsForUser", query="DELETE FROM AccessProofDetailEntity a WHERE a.user = :user"),
+
 
 })
 

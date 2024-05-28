@@ -181,7 +181,7 @@ public class TideAdminRealmResource {
             RequestedChanges requestChange = new RequestedChanges("",ChangeSetType.CLIENT, RequestType.CLIENT, client.getClientId(), c.getAction(), c.getId(), new ArrayList<>(), DraftStatus.DRAFT);
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
-                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), c.getClient().getClientId()));
+                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), c.getClient().getClientId(), p.getProofDraft()));
             });
 
             if(c.getFullScopeEnabled() != DraftStatus.ACTIVE) {
@@ -222,7 +222,7 @@ public class TideAdminRealmResource {
             RequestedChanges requestChange = new RoleChangeRequest(realm.getRoleById(m.getRoleId()).getName(), action, ChangeSetType.USER_ROLE, RequestType.USER, clientModel.getClientId(), m.getAction(), m.getId(), new ArrayList<>(), m.getDraftStatus());
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
-                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId()));
+                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
             });
             changes.add(requestChange);
         }
@@ -247,7 +247,7 @@ public class TideAdminRealmResource {
 
             String action = "Granting Role to Composite Role";
             RequestedChanges requestChange = new CompositeRoleChangeRequest(m.getComposite().getName(), m.getChildRole().getName(), action, ChangeSetType.COMPOSITE_ROLE, RequestType.ROLE, realm.getClientById(m.getComposite().getClientId()).getClientId(), m.getAction(), m.getId(), new ArrayList<>(), m.getDraftStatus());
-            proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getName())));
+            proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getName(), p.getProofDraft())));
             changes.add(requestChange);
         }
         return changes;
@@ -270,7 +270,7 @@ public class TideAdminRealmResource {
                     .getResultList();
             String action = "Deleting Role from Client";
             RequestedChanges requestChange = new RoleChangeRequest(m.getRole().getName(), action, ChangeSetType.ROLE, RequestType.ROLE, realm.getClientById(m.getRole().getClientId()).getClientId(),m.getAction(), m.getId(), new ArrayList<>(), m.getDeleteStatus());
-            proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId())));
+            proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft())));
 
             changes.add(requestChange);
         }
