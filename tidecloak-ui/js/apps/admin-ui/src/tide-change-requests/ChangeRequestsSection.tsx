@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   TextContent,
@@ -9,7 +9,8 @@ import {
   TabTitleText,
   ClipboardCopy, 
   ClipboardCopyVariant,
-  Label
+  Label,
+  Button
 } from "@patternfly/react-core";
 import { KeycloakDataTable } from "../components/table-toolbar/KeycloakDataTable";
 import RoleChangeRequest from "@keycloak/keycloak-admin-client/lib/defs/RoleChangeRequest"
@@ -27,6 +28,9 @@ import { useRealm } from "../context/realm-context/RealmContext";
 import { RolesChangeRequestsList } from "./RolesChangeRequestsList"
 import { ClientChangeRequestsList } from './ClientChangeRequestsList';
 import { Table, Thead, Tr, Th, Tbody, Td } from '@patternfly/react-table';
+import { toAddClient } from '../clients/routes/AddClient';
+import { toImportClient } from '../clients/routes/ImportClient';
+import { useAccess } from '../context/access/Access';
 
 
 
@@ -36,31 +40,71 @@ export default function ChangeRequestsSection() {
   const { realm } = useRealm();
   const [key, setKey] = useState(0);
   const refresh = () => setKey(key + 1);
-  const [selectedRows, setSelectedRows] = useState<RoleChangeRequest[]>([]);
+  const [selectedRows, setSelectedRows] = useState<RoleChangeRequest[]>();
+  const [commitRecord, setCommitRecord] = useState<boolean>(false);
+  const [approveRecord, setApproveRecord] = useState<boolean>(false);
+
+  useEffect(() => {
+    console.log(selectedRows)
+    // if (selectedRows && selectedRows.status) {
+    //   if (selectedRows.status === "DRAFT" || selectedRows.status === "PENDING") {
+    //     setApproveRecord(true);
+    //   } else if (selectedRows.status === "APPROVED") {
+    //     setCommitRecord(true);
+    //     setApproveRecord(false);
+    //   } else {
+    //     setCommitRecord(false);
+    //     setApproveRecord(false);
+    //   }
+    // }
+  }, [selectedRows]);
+
+  const ToolbarItemsComponent = () => {
+    const { t } = useTranslation();
+    const { hasAccess } = useAccess();
+    const isManager = hasAccess("manage-clients");
+  
+    if (!isManager) return <span />;
+  
+    return (
+      <>
+        <div>
+          <Button variant="primary" isDisabled={!approveRecord}>
+            {t("Approve Draft")}
+          </Button>
+        </div>
+        <div>
+          <Button variant="secondary" isDisabled={!commitRecord}>
+            {t("Commit Draft")}
+          </Button>
+        </div>
+      </>
+    );
+  };
 
   const columns = [
     {
-      name: t('Action'),
+      name: 'Action',
       displayKey: 'Action',
       cellRenderer: (row: RoleChangeRequest) => row.action
     },
     {
-      name: t('Role'),
+      name: 'Role',
       displayKey: 'Role',
       cellRenderer: (row: RoleChangeRequest) => row.role
     },
     {
-      name: t('Client ID'),
+      name: 'Client ID',
       displayKey: 'Client ID',
       cellRenderer: (row: RoleChangeRequest) => row.clientId
     },
     {
-      name: t('Type'),
+      name: 'Type',
       displayKey: 'Type',
       cellRenderer: (row: RoleChangeRequest) => row.requestType
     },
     {
-      name: t('Status'),
+      name: 'Status',
       displayKey: 'Status',
       cellRenderer: (row: RoleChangeRequest) => statusLabel(row.status)
     },
@@ -143,11 +187,22 @@ export default function ChangeRequestsSection() {
     }
   };
 
+  const handleSelect = (rows: RoleChangeRequest[]) => {
+    // Only keep the last selected row
+    if (rows && rows.length > 0) {
+      setSelectedRows(rows[rows.length - 1]);
+    } else {
+      setSelectedRows(undefined); // Clear selection if no rows are selected
+    }
+  };
+
+
   const useTab = (tab: ChangeRequestsTab) => useRoutableTab(toChangeRequests({ realm, tab }));
 
   const userRequestsTab = useTab("users");
   const roleRequestsTab = useTab("roles");
   const clientRequestsTab = useTab("clients");
+
 
   return (
     <>
@@ -174,6 +229,7 @@ export default function ChangeRequestsSection() {
             <div className="keycloak__events_table">
               <KeycloakDataTable
                 key={key}
+                toolbarItem={<ToolbarItemsComponent />}
                 isRadio={true}
                 loader={loader}
                 ariaLabelKey="Requested Changes"
@@ -186,7 +242,8 @@ export default function ChangeRequestsSection() {
                 ]}
                 columns={columns}
                 isPaginated
-                onSelect={(rows: RoleChangeRequest[]) => setSelectedRows([...rows])}
+                canSelectAll={false}
+                onSelect={(row: RoleChangeRequest[]) => setSelectedRows([...row])}
                 emptyState={
                   <EmptyState variant="lg">
                       <TextContent>

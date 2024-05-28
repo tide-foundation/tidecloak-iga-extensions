@@ -78,7 +78,7 @@ export const RolesChangeRequestsList = () => {
           </Label>
         )}
         {roleStatus === "APPROVED" && (
-            <Label color="gold" className="keycloak-admin--role-mapping__client-name">
+            <Label color="blue" className="keycloak-admin--role-mapping__client-name">
               {"APPROVED"}
             </Label>
         )}
