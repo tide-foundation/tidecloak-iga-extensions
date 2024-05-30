@@ -260,6 +260,13 @@ public class TideRoleAdapter extends RoleAdapter {
         if (role.getContainer() instanceof ClientModel) {
             RoleModel compositeRole = realm.getRoleById(getEntity().getId());
             List<UserModel> users =  session.users().getRoleMembersStream(realm, compositeRole).toList();
+
+            if(users.isEmpty()){
+                draft.setDraftStatus(DraftStatus.ACTIVE);
+                em.persist(draft);
+                return;
+            }
+
             List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).map(client -> {
                         ClientEntity clientEntity = em.getReference(ClientEntity.class, client.getId());
                         return new TideClientAdapter(realm, em, session, clientEntity);

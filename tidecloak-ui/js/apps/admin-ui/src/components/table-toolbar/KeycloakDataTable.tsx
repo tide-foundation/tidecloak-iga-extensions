@@ -95,7 +95,7 @@ function DataTable<T>({
           ? (_, rowIndex, isOpen) => onCollapse(isOpen, rowIndex)
           : undefined
       }
-      selectVariant={isRadio ? "radio" : "checkbox"}
+      selectVariant={"checkbox"}
       canSelectAll={canSelectAll}
       cells={columns.map((column) => {
         return { ...column, title: t(column.displayKey || column.name) };
@@ -243,13 +243,20 @@ export function KeycloakDataTable<T>({
       detailColumns?.[0]?.enabled?.(value);
     return data
       .map((value, index) => {
+        console.log(value)
+        console.log(get(value, "id"))
+        console.log(selected)
         const disabledRow = isRowDisabled ? isRowDisabled(value) : false;
         const row: (Row<T> | SubRow<T>)[] = [
           {
             data: value,
             disableSelection: disabledRow,
             disableActions: disabledRow,
-            selected: !!selected.find((v) => get(v, "id") === get(value, "id")),
+            selected: !!selected.find((v) => {
+              const recordId = get(value, "id") ?? get(value, "draftRecordId");
+              const selectedId = get(v, "id") ?? get(v, "draftRecordId");
+              return recordId === selectedId;
+            }),
             isOpen: isDetailColumnsEnabled(value) ? false : undefined,
             cells: renderCell(columns, value),
           },
@@ -345,6 +352,13 @@ export function KeycloakDataTable<T>({
       }
 
       const result = convertToColumns(data);
+      console.log(result)
+      // if(isRadio){
+      //   // ensure to deselect all
+      //   result.forEach((rows) => {
+      //     (rows as Row<T>).selected = false;
+      //   });
+      // }
       setRows(result);
       setLoading(false);
     },
@@ -375,38 +389,60 @@ export function KeycloakDataTable<T>({
       return action;
     });
 
-  const _onSelect = (isSelected: boolean, rowIndex: number) => {
-    const data = filteredData || rows;
-    if (rowIndex === -1) {
-      setRows(
-        data!.map((row) => {
-          (row as Row<T>).selected = isSelected;
-          return row;
-        }),
-      );
-    } else {
-      (data![rowIndex] as Row<T>).selected = isSelected;
-
-      setRows([...rows!]);
-    }
-
-    // Keeps selected items when paginating
-    const difference = differenceBy(
-      selected,
-      data!.map((row) => row.data),
-      "id",
-    );
-
-    // Selected rows are any rows previously selected from a different page, plus current page selections
-    const selectedRows = [
-      ...difference,
-      ...data!.filter((row) => (row as Row<T>).selected).map((row) => row.data),
-    ];
-
-    setSelected(selectedRows);
-    onSelect!(selectedRows);
-  };
-
+    const _onSelect = (isSelected: boolean, rowIndex: number) => {
+      const data = filteredData || rows;
+      if (isRadio) {
+        // When isRadio is true, only handle single row selection
+          // // Deselect all rows first
+          data!.forEach((row) => {
+            (row as Row<T>).selected = false;
+          });
+    
+          // Select the specific row
+          (data![rowIndex] as Row<T>).selected = isSelected;
+    
+          // Update rows state with only one row selected
+          console.log(rows);
+          setRows([...rows!]);
+    
+          // Update selected state with the single selected row's data
+          const selectedRowData = isSelected ? [(data![rowIndex] as Row<T>).data] : [];
+          setSelected(selectedRowData);
+          onSelect!(selectedRowData);
+        
+      } else {
+        if (rowIndex === -1) {
+          // Handle Select All
+          setRows(
+            data!.map((row) => {
+              (row as Row<T>).selected = isSelected;
+              return row;
+            }),
+          );
+        } else {
+          // Handle individual row selection
+          (data![rowIndex] as Row<T>).selected = isSelected;
+          setRows([...rows!]);
+        }
+    
+        // Keeps selected items when paginating
+        const difference = differenceBy(
+          selected,
+          data!.map((row) => row.data),
+          "id",
+        );
+    
+        // Selected rows are any rows previously selected from a different page, plus current page selections
+        const selectedRows = [
+          ...difference,
+          ...data!.filter((row) => (row as Row<T>).selected).map((row) => row.data),
+        ];
+    
+        setSelected(selectedRows);
+        onSelect!(selectedRows);
+      }
+    };
+    
   const onCollapse = (isOpen: boolean, rowIndex: number) => {
     (data![rowIndex] as Row<T>).isOpen = isOpen;
     setRows([...data!]);

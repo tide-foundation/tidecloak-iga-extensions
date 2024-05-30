@@ -10,7 +10,8 @@ import {
   ClipboardCopy, 
   ClipboardCopyVariant,
   Label,
-  Button
+  Button,
+  ToolbarItem,
 } from "@patternfly/react-core";
 import { KeycloakDataTable } from "../components/table-toolbar/KeycloakDataTable";
 import RoleChangeRequest from "@keycloak/keycloak-admin-client/lib/defs/RoleChangeRequest"
@@ -31,33 +32,37 @@ import { Table, Thead, Tr, Th, Tbody, Td } from '@patternfly/react-table';
 import { toAddClient } from '../clients/routes/AddClient';
 import { toImportClient } from '../clients/routes/ImportClient';
 import { useAccess } from '../context/access/Access';
+import CompositeRoleChangeRequest from "@keycloak/keycloak-admin-client/lib/defs/CompositeRoleChangeRequest"
+import RequestedChanges from "@keycloak/keycloak-admin-client/lib/defs/RequestedChanges"
 
 
-
+export interface ChangeRequestsListProps {
+  setSelectedRow: RoleChangeRequest[] | CompositeRoleChangeRequest[] | RequestedChanges[];
+}
 
 export default function ChangeRequestsSection() {
   const { t } = useTranslation();
   const { realm } = useRealm();
   const [key, setKey] = useState(0);
   const refresh = () => setKey(key + 1);
-  const [selectedRows, setSelectedRows] = useState<RoleChangeRequest[]>();
+  const [selectedRow, setSelectedRow] = useState<RoleChangeRequest[]>([]);
   const [commitRecord, setCommitRecord] = useState<boolean>(false);
   const [approveRecord, setApproveRecord] = useState<boolean>(false);
 
   useEffect(() => {
-    console.log(selectedRows)
-    // if (selectedRows && selectedRows.status) {
-    //   if (selectedRows.status === "DRAFT" || selectedRows.status === "PENDING") {
-    //     setApproveRecord(true);
-    //   } else if (selectedRows.status === "APPROVED") {
-    //     setCommitRecord(true);
-    //     setApproveRecord(false);
-    //   } else {
-    //     setCommitRecord(false);
-    //     setApproveRecord(false);
-    //   }
-    // }
-  }, [selectedRows]);
+    console.log(selectedRow)
+    if (selectedRow && selectedRow[0] && selectedRow[0].status) {
+      if (selectedRow[0].status === "DRAFT" || selectedRow[0].status === "PENDING") {
+        setApproveRecord(true); // maybe we disable button if admin already signed this record or show messaged after we check on backend
+      } else if (selectedRow[0].status === "APPROVED") {
+        setCommitRecord(true);
+        setApproveRecord(false);
+      } else {
+        setCommitRecord(false);
+        setApproveRecord(false);
+      }
+    }
+  }, [selectedRow]);
 
   const ToolbarItemsComponent = () => {
     const { t } = useTranslation();
@@ -68,16 +73,16 @@ export default function ChangeRequestsSection() {
   
     return (
       <>
-        <div>
-          <Button variant="primary" isDisabled={!approveRecord}>
+        <ToolbarItem>
+          <Button variant="primary" isDisabled={!approveRecord} onClick={ () => console.log(selectedRow)}>
             {t("Approve Draft")}
           </Button>
-        </div>
-        <div>
+        </ToolbarItem>
+        <ToolbarItem>
           <Button variant="secondary" isDisabled={!commitRecord}>
             {t("Commit Draft")}
           </Button>
-        </div>
+        </ToolbarItem>
       </>
     );
   };
@@ -187,17 +192,9 @@ export default function ChangeRequestsSection() {
     }
   };
 
-  const handleSelect = (rows: RoleChangeRequest[]) => {
-    // Only keep the last selected row
-    if (rows && rows.length > 0) {
-      setSelectedRows(rows[rows.length - 1]);
-    } else {
-      setSelectedRows(undefined); // Clear selection if no rows are selected
-    }
+  const useTab = (tab: ChangeRequestsTab) => {
+    return useRoutableTab(toChangeRequests({ realm, tab }))
   };
-
-
-  const useTab = (tab: ChangeRequestsTab) => useRoutableTab(toChangeRequests({ realm, tab }));
 
   const userRequestsTab = useTab("users");
   const roleRequestsTab = useTab("roles");
@@ -243,7 +240,7 @@ export default function ChangeRequestsSection() {
                 columns={columns}
                 isPaginated
                 canSelectAll={false}
-                onSelect={(row: RoleChangeRequest[]) => setSelectedRows([...row])}
+                onSelect={(value: RoleChangeRequest[]) => setSelectedRow([...value])}
                 emptyState={
                   <EmptyState variant="lg">
                       <TextContent>

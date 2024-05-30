@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   TextContent,
@@ -6,25 +6,43 @@ import {
   EmptyState,
   ClipboardCopy, 
   ClipboardCopyVariant,
-  Label
+  Label,
+  Button,
+  ToolbarItem
 } from "@patternfly/react-core";
 import { KeycloakDataTable } from "../components/table-toolbar/KeycloakDataTable";
 import RequestChangesUserRecord from "@keycloak/keycloak-admin-client/lib/defs/RequestChangesUserRecord"
 import CompositeRoleChangeRequest from "@keycloak/keycloak-admin-client/lib/defs/CompositeRoleChangeRequest"
 import RoleChangeRequest from "@keycloak/keycloak-admin-client/lib/defs/RoleChangeRequest"
 import { Table, Thead, Tr, Th, Tbody, Td } from '@patternfly/react-table';
-
-
+import { useAccess } from '../context/access/Access';
 import { adminClient } from "../admin-client";
-
 import "../events/events.css";
 
 
-export const RolesChangeRequestsList = () => {
+
+export const RolesChangeRequestsList = () =>  {
   const { t } = useTranslation();
   const [key, setKey] = useState(0);
   const refresh = () => setKey(key + 1);
-  const [selectedRows, setSelectedRows] = useState<CompositeRoleChangeRequest[]| RoleChangeRequest[]>([]);
+  const [selectedRow, setSelectedRow] = useState<CompositeRoleChangeRequest[] | RoleChangeRequest[]>([]);
+  const [commitRecord, setCommitRecord] = useState<boolean>(false);
+  const [approveRecord, setApproveRecord] = useState<boolean>(false);
+
+  useEffect(() => {
+    console.log(selectedRow)
+    if (selectedRow && selectedRow[0] && selectedRow[0].status) {
+      if (selectedRow[0].status === "DRAFT" || selectedRow[0].status === "PENDING") {
+        setApproveRecord(true); // maybe we disable button if admin already signed this record or show messaged after we check on backend
+      } else if (selectedRow[0].status === "APPROVED") {
+        setCommitRecord(true);
+        setApproveRecord(false);
+      } else {
+        setCommitRecord(false);
+        setApproveRecord(false);
+      }
+    }
+  }, [selectedRow]);
 
   function isCompositeRoleChangeRequest(row: RoleChangeRequest | CompositeRoleChangeRequest): row is CompositeRoleChangeRequest {
     return 'compositeRole' in row;
@@ -134,39 +152,66 @@ export const RolesChangeRequestsList = () => {
     );
 
   const loader = async () => {
+    console.log("HELLO SASHA")
     try {
-        return await adminClient.tideUsersExt.getRequestedChangesForRoles();
+      return await adminClient.tideUsersExt.getRequestedChangesForRoles();
     } catch (error) {
         return [];
     }
   };
 
+  const ToolbarItemsComponent = () => {
+    const { t } = useTranslation();
+    const { hasAccess } = useAccess();
+    const isManager = hasAccess("manage-clients");
+  
+    if (!isManager) return <span />;
+  
+    return (
+      <>
+        <ToolbarItem>
+          <Button variant="primary" isDisabled={!approveRecord} onClick={() => console.log(selectedRow)}>
+            {t("Approve Draft")}
+          </Button>
+        </ToolbarItem>
+        <ToolbarItem>
+          <Button variant="secondary" isDisabled={!commitRecord}>
+            {t("Commit Draft")}
+          </Button>
+        </ToolbarItem>
+      </>
+    );
+  };
+
   return (
     <>
-        <KeycloakDataTable
-        isSearching={false}
-        key={key}
-        isRadio={true}
-        loader={loader}
-        ariaLabelKey="roleChangeRequestsList"
-        detailColumns={[
-            {
-            name: "details",
-            enabled: (row) => row.userRecord.length > 0,
-            cellRenderer: DetailCell,
-            },
-        ]}
-        columns={columns}
-        isPaginated
-        onSelect={(rows: RoleChangeRequest[]|CompositeRoleChangeRequest[]) => setSelectedRows([...rows])}
-        emptyState={
-            <EmptyState variant="lg">
-                <TextContent>
-                <Text>No requested changes found.</Text>
-                </TextContent>
-            </EmptyState>
-        }
-        />
+      <KeycloakDataTable
+      toolbarItem={<ToolbarItemsComponent />}
+      isSearching={false}
+      key={key}
+      isRadio={true}
+      loader={loader}
+      ariaLabelKey="roleChangeRequestsList"
+      detailColumns={[
+          {
+          name: "details",
+          enabled: (row) => row.userRecord.length > 0,
+          cellRenderer: DetailCell,
+          },
+      ]}
+      columns={columns}
+      isPaginated
+      canSelectAll={false}
+      onSelect={(value: RoleChangeRequest[]|CompositeRoleChangeRequest[]) => setSelectedRow([...value])}
+      emptyState={
+          <EmptyState variant="lg">
+              <TextContent>
+              <Text>No requested changes found.</Text>
+              </TextContent>
+          </EmptyState>
+      }
+      />
     </>
+
   );
 };

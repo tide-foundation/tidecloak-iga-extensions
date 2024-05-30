@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   TextContent,
@@ -7,24 +7,41 @@ import {
   ClipboardCopy, 
   ClipboardCopyVariant,
   Label,
+  Button,
+  ToolbarItem
 } from "@patternfly/react-core";
 import { KeycloakDataTable } from "../components/table-toolbar/KeycloakDataTable";
 import RequestedChanges from "@keycloak/keycloak-admin-client/lib/defs/RequestedChanges"
 import RequestChangesUserRecord from "@keycloak/keycloak-admin-client/lib/defs/RequestChangesUserRecord"
 import { Table, Thead, Tr, Th, Tbody, Td } from '@patternfly/react-table';
-
-
-
+import { useAccess } from '../context/access/Access';
 import { adminClient } from "../admin-client";
-
 import "../events/events.css";
+
 
 
 export const ClientChangeRequestsList = () => {
   const { t } = useTranslation();
   const [key, setKey] = useState(0);
   const refresh = () => setKey(key + 1);
-  const [selectedRows, setSelectedRows] = useState<RequestedChanges[]>([]);
+  const [selectedRow, setSelectedRow] = useState<RequestedChanges[]>([]);
+  const [commitRecord, setCommitRecord] = useState<boolean>(false);
+  const [approveRecord, setApproveRecord] = useState<boolean>(false);
+
+  useEffect(() => {
+    console.log(selectedRow)
+    if (selectedRow && selectedRow[0] && selectedRow[0].status) {
+      if (selectedRow[0].status === "DRAFT" || selectedRow[0].status === "PENDING") {
+        setApproveRecord(true); // maybe we disable button if admin already signed this record or show messaged after we check on backend
+      } else if (selectedRow[0].status === "APPROVED") {
+        setCommitRecord(true);
+        setApproveRecord(false);
+      } else {
+        setCommitRecord(false);
+        setApproveRecord(false);
+      }
+    }
+  }, [selectedRow]);
 
   const columns = [
     {
@@ -127,10 +144,35 @@ export const ClientChangeRequestsList = () => {
     }
   };
 
+  const ToolbarItemsComponent = () => {
+    const { t } = useTranslation();
+    const { hasAccess } = useAccess();
+    const isManager = hasAccess("manage-clients");
+  
+    if (!isManager) return <span />;
+  
+    return (
+      <>
+        <ToolbarItem>
+          <Button variant="primary" isDisabled={!approveRecord} onClick={() => console.log(selectedRow)}>
+            {t("Approve Draft")}
+          </Button>
+        </ToolbarItem>
+        <ToolbarItem>
+          <Button variant="secondary" isDisabled={!commitRecord}>
+            {t("Commit Draft")}
+          </Button>
+        </ToolbarItem>
+      </>
+    );
+  };
+
+
   return (
     <>
         <KeycloakDataTable
         isSearching={false}
+        toolbarItem={<ToolbarItemsComponent />}
         key={key}
         isRadio={true}
         loader={loader}
@@ -144,7 +186,8 @@ export const ClientChangeRequestsList = () => {
         ]}
         columns={columns}
         isPaginated
-        onSelect={(rows: RequestedChanges[]) => setSelectedRows([...rows])}
+        canSelectAll={false}
+        onSelect={(values: RequestedChanges[]) => setSelectedRow([...values])}
         emptyState={
             <EmptyState variant="lg">
                 <TextContent>
