@@ -129,8 +129,8 @@ public class TideAdminRealmResource {
 //            ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
 
         } else if (changeSet.getType() == ChangeSetType.CLIENT) {
-            draftRecordEntity = em.find(TideClientScopeMappingDraftEntity.class, changeSet.getChangeSetId());
-            proofDetails = getProofDetails(em, ((TideClientScopeMappingDraftEntity) draftRecordEntity).getId());
+            draftRecordEntity = em.find(TideClientFullScopeStatusDraftEntity.class, changeSet.getChangeSetId());
+            proofDetails = getProofDetails(em, ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).getId());
 //            ((TideClientScopeMappingDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
 
         }else {
@@ -138,15 +138,15 @@ public class TideAdminRealmResource {
             return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
         }
 
-        try {
+//        try {
             // TODO: send stuff to be signed by admin\s, have a check to see if this request was the last signature needed and update draft records to "APPROVE" status
             // update from "DRAFT" to "PENDING" if its the first signature.
             // leave as "PENDING" if still needing more signatures
-            ObjectMapper objectMapper = new ObjectMapper();
-            objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
-            JsonNode tempNode = objectMapper.valueToTree(draftRecordEntity);
-            JsonNode sortedTemp = TideAuthzProofUtil.sortJsonNode(tempNode);
-            String draftRecord = objectMapper.writeValueAsString(sortedTemp);
+//            ObjectMapper objectMapper = new ObjectMapper();
+//            objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+//            JsonNode tempNode = objectMapper.valueToTree(draftRecordEntity);
+//            JsonNode sortedTemp = TideAuthzProofUtil.sortJsonNode(tempNode);
+//            String draftRecord = objectMapper.writeValueAsString(sortedTemp);
             // Return success message after signing the changeset
             //TODO: clean this up
             if (changeSet.getType() == ChangeSetType.USER_ROLE) {
@@ -158,17 +158,20 @@ public class TideAdminRealmResource {
             ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
 
             } else if (changeSet.getType() == ChangeSetType.CLIENT) {
-            ((TideClientScopeMappingDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                if ( changeSet.getActionType() == ActionType.CREATE){
+                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeEnabled(DraftStatus.APPROVED);
+                }else if ( changeSet.getActionType() == ActionType.DELETE) {
+                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeDisabled(DraftStatus.APPROVED);
+                }
             }
-
             em.persist(draftRecordEntity);
             em.flush();
 
             return Response.ok("Change set signed successfully").build();
-        } catch (JsonProcessingException e) {
-            // Return 500 if there is an error processing JSON
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Error processing JSON").build();
-        }
+//        } catch (JsonProcessingException e) {
+//            // Return 500 if there is an error processing JSON
+//            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Error processing JSON").build();
+//        }
     }
 
     @GET

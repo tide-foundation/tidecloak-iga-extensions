@@ -18,8 +18,7 @@ import { Table, Thead, Tr, Th, Tbody, Td } from '@patternfly/react-table';
 import { useAccess } from '../context/access/Access';
 import { adminClient } from "../admin-client";
 import "../events/events.css";
-
-
+import DraftChangeSetRequest from "@keycloak/keycloak-admin-client/lib/defs/DraftChangeSetRequest"
 
 export const RolesChangeRequestsList = () =>  {
   const { t } = useTranslation();
@@ -43,6 +42,60 @@ export const RolesChangeRequestsList = () =>  {
       }
     }
   }, [selectedRow]);
+
+  const ToolbarItemsComponent = () => {
+    const { t } = useTranslation();
+    const { hasAccess } = useAccess();
+    const isManager = hasAccess("manage-clients");
+  
+    if (!isManager) return <span />;
+  
+    return (
+      <>
+        <ToolbarItem>
+          <Button variant="primary" isDisabled={!approveRecord} onClick={ () => handleApproveButtonClick(selectedRow[0])}>
+            {t("Approve Draft")}
+          </Button>
+        </ToolbarItem>
+        <ToolbarItem>
+          <Button variant="secondary" isDisabled={!commitRecord} onClick={ () => handleCommitButtonClick(selectedRow[0])}>
+            {t("Commit Draft")}
+          </Button>
+        </ToolbarItem>
+      </>
+    );
+  };
+
+  const handleApproveButtonClick = async (selectedRow: RoleChangeRequest | CompositeRoleChangeRequest) => {
+    try {
+      await adminClient.tideUsersExt.approveDraftChangeSet(
+        {
+          changeSetId: selectedRow.draftRecordId, 
+          changeSetType: selectedRow.changeSetType, 
+          actionType: selectedRow.actionType
+        });
+        refresh();
+        return;
+    } catch (error) {
+      return error;
+    }
+  };
+
+  const handleCommitButtonClick = async (selectedRow: RoleChangeRequest | CompositeRoleChangeRequest) => {
+    try {
+      const changeSetArray: DraftChangeSetRequest =
+        {
+          changeSetId: selectedRow.draftRecordId,
+          changeSetType: selectedRow.changeSetType,
+          actionType: selectedRow.actionType
+        };
+      await adminClient.tideUsersExt.commitDraftChangeSet(changeSetArray);
+        refresh();
+        return;
+    } catch (error) {
+      return error;
+    }
+  };
 
   function isCompositeRoleChangeRequest(row: RoleChangeRequest | CompositeRoleChangeRequest): row is CompositeRoleChangeRequest {
     return 'compositeRole' in row;
@@ -158,29 +211,6 @@ export const RolesChangeRequestsList = () =>  {
     } catch (error) {
         return [];
     }
-  };
-
-  const ToolbarItemsComponent = () => {
-    const { t } = useTranslation();
-    const { hasAccess } = useAccess();
-    const isManager = hasAccess("manage-clients");
-  
-    if (!isManager) return <span />;
-  
-    return (
-      <>
-        <ToolbarItem>
-          <Button variant="primary" isDisabled={!approveRecord} onClick={() => console.log(selectedRow)}>
-            {t("Approve Draft")}
-          </Button>
-        </ToolbarItem>
-        <ToolbarItem>
-          <Button variant="secondary" isDisabled={!commitRecord}>
-            {t("Commit Draft")}
-          </Button>
-        </ToolbarItem>
-      </>
-    );
   };
 
   return (

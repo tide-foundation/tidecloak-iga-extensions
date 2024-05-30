@@ -36,10 +36,6 @@ import CompositeRoleChangeRequest from "@keycloak/keycloak-admin-client/lib/defs
 import RequestedChanges from "@keycloak/keycloak-admin-client/lib/defs/RequestedChanges"
 import DraftChangeSetRequest from "@keycloak/keycloak-admin-client/lib/defs/DraftChangeSetRequest"
 
-export interface ChangeRequestsListProps {
-  setSelectedRow: RoleChangeRequest[] | CompositeRoleChangeRequest[] | RequestedChanges[];
-}
-
 export default function ChangeRequestsSection() {
   const { t } = useTranslation();
   const { realm } = useRealm();

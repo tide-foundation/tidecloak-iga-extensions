@@ -243,6 +243,7 @@ public class TideRoleAdapter extends RoleAdapter {
             persistDraft(entity);
             return;
         }
+
         RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
         RoleEntity entity = toRoleEntity(role);
 
@@ -254,9 +255,7 @@ public class TideRoleAdapter extends RoleAdapter {
         draft.setChildRole(entity);
         draft.setDraftStatus(DraftStatus.DRAFT);
         draft.setAction(ActionType.CREATE);
-
         em.persist(draft);
-        em.flush();
 
         if (role.getContainer() instanceof ClientModel) {
             RoleModel compositeRole = realm.getRoleById(getEntity().getId());
@@ -288,6 +287,7 @@ public class TideRoleAdapter extends RoleAdapter {
                         return new TideClientAdapter(realm, em, session, clientEntity);
                     })
                     .filter(TideClientAdapter::isFullScopeAllowed).toList());
+
             TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
             clientList.forEach(client -> {
                 for( UserModel user : activeUsers) {

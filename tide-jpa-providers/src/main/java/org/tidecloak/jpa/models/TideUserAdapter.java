@@ -130,9 +130,16 @@ public class TideUserAdapter extends UserAdapter {
                             }).collect(Collectors.toSet());
 
                             // we expand it and create a new record
-                            Set<RoleModel> compositeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles,DraftStatus.DRAFT, ActionType.CREATE);
+                            Set<RoleModel> compositeRoles = new HashSet<>();
+                            Set<RoleModel> draftCompositeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles,DraftStatus.DRAFT, ActionType.CREATE);
+                            Set<RoleModel> pendingCompositeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles,DraftStatus.PENDING, ActionType.CREATE);
+                            Set<RoleModel> approvedCompositeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles,DraftStatus.APPROVED, ActionType.CREATE);// what is happening here need one for draft, pending and approved
+                            compositeRoles.addAll(draftCompositeRoles);
+                            compositeRoles.addAll(pendingCompositeRoles);
+                            compositeRoles.addAll(approvedCompositeRoles);
+                            Set<RoleModel> uniqueCompositeRoles = compositeRoles.stream().distinct().collect(Collectors.toSet());
 
-                            for(RoleModel r : compositeRoles)
+                            for(RoleModel r : uniqueCompositeRoles)
                             {
 
                                 if(Objects.equals(r.getId(), role.getId())){

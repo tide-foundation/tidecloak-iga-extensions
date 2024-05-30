@@ -124,7 +124,7 @@ public final class TideAuthzProofUtil {
             RoleEntity roleEntity = em.getReference(RoleEntity.class, r.getId());
             return new TideRoleAdapter(session, realm, em, roleEntity);
         }).collect(Collectors.toSet());
-        Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.APPROVED, ActionType.CREATE);
+        Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.ACTIVE, ActionType.CREATE);
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
         ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
         Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream(), isFullScopeAllowed);
@@ -339,7 +339,7 @@ public final class TideAuthzProofUtil {
             RoleEntity roleEntity = em.getReference(RoleEntity.class, r.getId());
             return new TideRoleAdapter(session, realm, em, roleEntity);
         }).collect(Collectors.toSet());
-        Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.APPROVED, ActionType.CREATE);
+        Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.ACTIVE, ActionType.CREATE);
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
         ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
         Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream(), isFullScopeAllowed);
