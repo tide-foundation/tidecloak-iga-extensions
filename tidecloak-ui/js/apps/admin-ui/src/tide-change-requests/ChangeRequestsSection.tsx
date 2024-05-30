@@ -34,7 +34,7 @@ import { toImportClient } from '../clients/routes/ImportClient';
 import { useAccess } from '../context/access/Access';
 import CompositeRoleChangeRequest from "@keycloak/keycloak-admin-client/lib/defs/CompositeRoleChangeRequest"
 import RequestedChanges from "@keycloak/keycloak-admin-client/lib/defs/RequestedChanges"
-
+import DraftChangeSetRequest from "@keycloak/keycloak-admin-client/lib/defs/DraftChangeSetRequest"
 
 export interface ChangeRequestsListProps {
   setSelectedRow: RoleChangeRequest[] | CompositeRoleChangeRequest[] | RequestedChanges[];
@@ -74,17 +74,48 @@ export default function ChangeRequestsSection() {
     return (
       <>
         <ToolbarItem>
-          <Button variant="primary" isDisabled={!approveRecord} onClick={ () => console.log(selectedRow)}>
+          <Button variant="primary" isDisabled={!approveRecord} onClick={ () => handleApproveButtonClick(selectedRow[0])}>
             {t("Approve Draft")}
           </Button>
         </ToolbarItem>
         <ToolbarItem>
-          <Button variant="secondary" isDisabled={!commitRecord}>
+          <Button variant="secondary" isDisabled={!commitRecord} onClick={ () => handleCommitButtonClick(selectedRow[0])}>
             {t("Commit Draft")}
           </Button>
         </ToolbarItem>
       </>
     );
+  };
+
+  const handleApproveButtonClick = async (selectedRow: RoleChangeRequest) => {
+    try {
+      await adminClient.tideUsersExt.approveDraftChangeSet(
+        {
+          changeSetId: selectedRow.draftRecordId, 
+          changeSetType: selectedRow.changeSetType, 
+          actionType: selectedRow.actionType
+        });
+        refresh();
+        return;
+    } catch (error) {
+      return error;
+    }
+  };
+
+  const handleCommitButtonClick = async (selectedRow: RoleChangeRequest) => {
+    try {
+      const changeSetArray: DraftChangeSetRequest =
+        {
+          changeSetId: selectedRow.draftRecordId,
+          changeSetType: selectedRow.changeSetType,
+          actionType: selectedRow.actionType
+        };
+      await adminClient.tideUsersExt.commitDraftChangeSet(changeSetArray);
+        refresh();
+        return;
+    } catch (error) {
+      return error;
+    }
   };
 
   const columns = [

@@ -5,7 +5,7 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.interfaces.ChangeSetType;
 
 @NamedQueries({
-        @NamedQuery(name="getProofDetailsForDraft", query="SELECT a FROM AccessProofDetailEntity a WHERE a.recordId = :recordId"),
+        @NamedQuery(name="getProofDetailsForDraft", query="SELECT a FROM AccessProofDetailEntity a WHERE a.recordId = :recordId ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForDraftByChangeSetType", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType"),
         @NamedQuery(name="getProofDetailsForUserByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user and a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForUserByClientAndRecordId", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user and a.clientId = :clientId and a.recordId = :recordId ORDER BY a.createdTimestamp DESC"),

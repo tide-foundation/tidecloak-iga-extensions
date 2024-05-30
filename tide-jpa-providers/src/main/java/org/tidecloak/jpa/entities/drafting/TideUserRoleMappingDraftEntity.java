@@ -11,6 +11,7 @@ import java.io.Serializable;
         @NamedQuery(name="getUserRoleMappingsByStatusAndRealmAndRecordId", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.id = :changesetId AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
         @NamedQuery(name="getUserRoleMappingsByDeleteStatusAndRealmAndRecordId", query="select m from TideUserRoleMappingDraftEntity m where m.deleteStatus = :deleteStatus AND m.id = :changesetId AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
         @NamedQuery(name="getAllUserRoleMappingsByStatusAndRealm", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
+        @NamedQuery(name="getAllUserRoleMappingsByRealmAndStatusNotEqualTo", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus != :draftStatus AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
         @NamedQuery(name="getAllUserRoleMappingsByStatus", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus"),
         @NamedQuery(name="getUserRoleMappingStatus", query="select m from TideUserRoleMappingDraftEntity m where m.user = :user"),
         @NamedQuery(name="getUserRoleAssignmentDraftEntity", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId"),

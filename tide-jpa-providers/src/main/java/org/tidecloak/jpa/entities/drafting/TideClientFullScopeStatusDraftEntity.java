@@ -8,17 +8,18 @@ import org.tidecloak.interfaces.DraftStatus;
 
 @NamedQueries({
         @NamedQuery(
-                name = "getClientFullScopeStatusDraftByIdAndEitherFullScopeStatus",
-                query = "SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE (t.fullScopeEnabled = :status OR t.fullScopeDisabled = :status)"
+                name = "getClientFullScopeStatusDraftThatDoesNotHaveStatus",
+                query = "SELECT t FROM TideClientFullScopeStatusDraftEntity t " +
+                        "WHERE ((t.fullScopeEnabled = :status) " +
+                        "AND (t.fullScopeDisabled != : status2 AND t.fullScopeDisabled != :status)) " +
+                        "OR ((t.fullScopeDisabled = :status) " +
+                        "AND (t.fullScopeEnabled != : status2 AND t.fullScopeEnabled != :status))"
         ),
         @NamedQuery(name="getClientFullScopeStatusDraftByIdAndFullScopeEnabled", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.id = :changesetId AND t.fullScopeEnabled = :fullScopeEnabled"),
         @NamedQuery(name="getClientFullScopeStatusDraftByIdAndFullScopeDisabled", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.id = :changesetId AND t.fullScopeDisabled = :fullScopeDisabled"),
         @NamedQuery(name="getClientFullScopeStatus", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.client = :client"),
         @NamedQuery(name="getClientFullScopeStatusByFullScopeEnabledStatus", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.client = :client AND t.fullScopeEnabled = :fullScopeEnabled"),
         @NamedQuery(name="getClientFullScopeStatusByFullScopeDisabledStatus", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.client = :client AND t.fullScopeDisabled = :fullScopeDisabled"),
-
-
-
 })
 
 

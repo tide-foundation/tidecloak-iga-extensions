@@ -2,7 +2,8 @@ package org.tidecloak.interfaces;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 
-public class DraftChangeSet {
+
+public class DraftChangeSetRequest {
 
     @JsonProperty("changeSetId")
     protected String changeSetId;
@@ -20,8 +21,5 @@ public class DraftChangeSet {
     public ActionType getActionType() {
         return actionType;
     }
-
-
-
 
 }

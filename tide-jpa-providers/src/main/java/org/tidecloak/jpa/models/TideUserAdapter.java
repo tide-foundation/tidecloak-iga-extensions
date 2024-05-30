@@ -186,7 +186,7 @@ public class TideUserAdapter extends UserAdapter {
         }
 
         TideUserRoleMappingDraftEntity committedEntity = activeDraftEntities.get(0);
-        if (committedEntity.getDeleteStatus() == DraftStatus.APPROVED) {
+        if (committedEntity.getDeleteStatus() == DraftStatus.ACTIVE) {
             deleteRoleAndProofRecords(role, activeDraftEntities);
             return;
         }

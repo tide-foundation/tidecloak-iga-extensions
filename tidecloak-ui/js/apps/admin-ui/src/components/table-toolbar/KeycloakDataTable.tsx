@@ -352,13 +352,6 @@ export function KeycloakDataTable<T>({
       }
 
       const result = convertToColumns(data);
-      console.log(result)
-      // if(isRadio){
-      //   // ensure to deselect all
-      //   result.forEach((rows) => {
-      //     (rows as Row<T>).selected = false;
-      //   });
-      // }
       setRows(result);
       setLoading(false);
     },

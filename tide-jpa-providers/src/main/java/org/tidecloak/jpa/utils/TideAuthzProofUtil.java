@@ -29,6 +29,8 @@ import org.keycloak.sessions.RootAuthenticationSessionModel;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakDraftChangeSetDetails;
+import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakDraftChangeSetRequest;
 import org.tidecloak.jpa.entities.AccessProofDetailDependencyEntity;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
@@ -231,6 +233,23 @@ public final class TideAuthzProofUtil {
         return Base64.getEncoder().encodeToString(changeBytes);
     }
 
+    public <T> TidecloakDraftChangeSetRequest generateTidecloakDraftChangeSetRequest(EntityManager em, String recordId, T mapping, long timestamp) throws JsonProcessingException {
+
+        // This returns the access proof in descending order by timestamp
+        List<String> userAccessDrafts = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                .setParameter("recordId", recordId)
+                .getResultStream().map(AccessProofDetailEntity::getProofDraft)
+                .toList();
+
+        JsonNode mappingObject = objectMapper.valueToTree(mapping);
+        JsonNode sortedMapping = sortJsonNode(mappingObject);
+        String draftRecord = objectMapper.writeValueAsString(sortedMapping);
+
+        return new TidecloakDraftChangeSetRequest(draftRecord, timestamp, userAccessDrafts);
+
+    };
+
+    // TODO: SAVING FINAL PROOF HERE
     public void saveProofToDatabase(String proof, String clientId, UserEntity user) throws NoSuchAlgorithmException, JsonProcessingException {
 
         // find if proof exists, update if it does else we create a new one for the user

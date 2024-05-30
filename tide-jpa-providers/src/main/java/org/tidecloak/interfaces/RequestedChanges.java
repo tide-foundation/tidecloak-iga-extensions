@@ -61,8 +61,6 @@ public class RequestedChanges {
     public DraftStatus getStatus() {
         return status;
     }
-
-
     public void setAction(String action) {this.action = action; }
     public void setRequestType(RequestType requestType) {this.requestType = requestType; }
     public void setChangeSetType(ChangeSetType changeSetType) {this.changeSetType = changeSetType; }

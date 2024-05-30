@@ -8,6 +8,7 @@ import org.keycloak.Config;
 import org.keycloak.admin.ui.rest.model.ClientRole;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.JpaUserProvider;
+import org.keycloak.models.jpa.UserAdapter;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.storage.jpa.JpaHashUtils;
@@ -105,12 +106,26 @@ public class TideUserProvider extends JpaUserProvider {
 
     @Override
     public Stream<UserModel> getRoleMembersStream(RealmModel realm, RoleModel role) {
-        return super.getRoleMembersStream(realm, role)
+        System.out.println("HELLO GETTING ACTIVE MEMBERS ONLY HERE !!");
+        Stream<UserModel> activeMembers = super.getRoleMembersStream(realm, role)
                 .map(user -> {
                     UserEntity userEntity = em.find(UserEntity.class, user.getId());
+                    List<TideUserRoleMappingDraftEntity> userRecords = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
+                            .setParameter("draftStatus", DraftStatus.ACTIVE)
+                            .setParameter("user", userEntity)
+                            .setParameter("roleId", role.getId())
+                            .getResultList();
+
+
+                    if(userRecords.isEmpty()){
+                        return null;
+                    }
                     return new TideUserAdapter(session, realm, em, userEntity);
                 });
+
+        return activeMembers.filter(Objects::nonNull);
     }
+
 
     @Override
     public UserModel getUserByUsername(RealmModel realm, String username) {

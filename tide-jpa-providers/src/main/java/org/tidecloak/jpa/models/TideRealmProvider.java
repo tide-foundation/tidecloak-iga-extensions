@@ -88,7 +88,7 @@ public class TideRealmProvider extends JpaRealmProvider {
 
         List<TideRoleDraftEntity> drafts = em.createNamedQuery("getRoleDraftByRoleEntityAndDeleteStatus", TideRoleDraftEntity.class)
                 .setParameter("role", roleEntity)
-                .setParameter("deleteStatus", DraftStatus.APPROVED)
+                .setParameter("deleteStatus", DraftStatus.ACTIVE)
                 .getResultList();
 
         if (!drafts.isEmpty()){
