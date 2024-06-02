@@ -5,12 +5,14 @@ import jakarta.persistence.EntityManager;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.ClientAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
+import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
@@ -34,7 +36,7 @@ public class TideClientAdapter extends ClientAdapter {
                 .setParameter("client", entity)
                 .getResultList();
 
-        if ( entity.isFullScopeAllowed() || !draft.isEmpty()){
+        if ( entity.isFullScopeAllowed() || (draft != null && !draft.isEmpty())){
             return draft.get(0).getFullScopeEnabled() == DraftStatus.ACTIVE;
         }else{
             return false;
@@ -135,7 +137,7 @@ public class TideClientAdapter extends ClientAdapter {
                         .setParameter("recordId", draft.getId())
                         .getResultList();
 
-                if(!pendingChanges.isEmpty()){
+                if(pendingChanges != null && !pendingChanges.isEmpty()){
                     return;
                 }
                 UserModel tideUser = TideRolesUtil.wrapUserModel(user, session, realm);
@@ -150,20 +152,25 @@ public class TideClientAdapter extends ClientAdapter {
     private void regenerateAccessProofForUsers(TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, String statusId, TideClientFullScopeStatusDraftEntity draft) {
         List<UserModel> usersInClient = new ArrayList<>();
         client.getRolesStream().forEach(role -> session.users().getRoleMembersStream(realm, role).forEach(user -> {
-            if (!usersInClient.contains(user)) {
+            UserEntity userEntity = em.find(UserEntity.class, user.getId());
+            List<TideUserRoleMappingDraftEntity> userRecords = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
+                    .setParameter("draftStatus", DraftStatus.ACTIVE)
+                    .setParameter("user", userEntity)
+                    .setParameter("roleId", role.getId())
+                    .getResultList();
+
+            if (userRecords != null && !userRecords.isEmpty() && !usersInClient.contains(user)) {
                 usersInClient.add(user);
             }
         }));
-        usersInRealm.forEach(user -> {
-            ClientEntity clientEntity = em.getReference(ClientEntity.class, client.getId());
 
+        usersInClient.forEach(user -> {
             // Find any pending changes
             List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                     .setParameter("recordId", draft.getId())
                     .getResultList();
 
-            // if there is a pending change, we dont override
-            if ( !pendingChanges.isEmpty()) {
+            if ( pendingChanges != null && !pendingChanges.isEmpty()) {
                 return;
             }
             try {
@@ -174,6 +181,7 @@ public class TideClientAdapter extends ClientAdapter {
                     }
                     return true;
                 }).collect(Collectors.toSet());
+                activeRoles.forEach(role -> System.out.println("WE ARE REMOVING THESE " + role.getName()));
                 util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, activeRoles, statusId, ChangeSetType.CLIENT, ActionType.DELETE, true);
             } catch (JsonProcessingException e) {
                 throw new RuntimeException(e);

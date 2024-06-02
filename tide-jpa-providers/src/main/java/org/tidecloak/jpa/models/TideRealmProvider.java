@@ -2,24 +2,15 @@ package org.tidecloak.jpa.models;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.persistence.EntityManager;
-import jakarta.persistence.TypedQuery;
-import jakarta.persistence.criteria.*;
 import org.keycloak.admin.ui.rest.model.ClientRole;
-import org.keycloak.client.clienttype.ClientTypeManager;
-import org.keycloak.common.Profile;
-import org.keycloak.connections.jpa.JpaConnectionProvider;
-import org.keycloak.connections.jpa.util.JpaUtils;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.JpaRealmProvider;
 
-import org.keycloak.models.jpa.RealmAdapter;
-import org.keycloak.models.jpa.RoleAdapter;
 import org.keycloak.models.jpa.entities.*;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
-import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
@@ -91,7 +82,7 @@ public class TideRealmProvider extends JpaRealmProvider {
                 .setParameter("deleteStatus", DraftStatus.ACTIVE)
                 .getResultList();
 
-        if (!drafts.isEmpty()){
+        if (drafts != null && !drafts.isEmpty()){
             TideRoleDraftEntity draft = drafts.get(0);
             em.remove(draft);
             em.flush();
@@ -115,11 +106,7 @@ public class TideRealmProvider extends JpaRealmProvider {
                 newDeletionRequest.setDeleteStatus(DraftStatus.DRAFT);
                 em.persist(newDeletionRequest);
 
-                List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).map(client -> {
-                            ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
-                            return new TideClientAdapter(realm, em, session, clientEntity);
-                        })
-                        .filter(TideClientAdapter::isFullScopeAllowed).toList());
+                List<ClientModel> clientList = getUniqueClientList(role, realm);
                 TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
                 clientList.forEach(client -> {
                     users.forEach(user -> {
@@ -339,6 +326,17 @@ public class TideRealmProvider extends JpaRealmProvider {
         }
         RealmEntity realmEntity = em.getReference(RealmEntity.class, realm.getId());
         return new TideRealmAdapter(session, em, realmEntity);
+    }
+
+    private List<ClientModel> getUniqueClientList(RoleModel role, RealmModel realm) {
+        List<ClientModel> clientList = session.clients().getClientsStream(realm)
+                .map(client -> new TideClientAdapter(realm, em, session, em.find(ClientEntity.class, client.getId())))
+                .filter(TideClientAdapter::isFullScopeAllowed)
+                .collect(Collectors.toList());
+
+        clientList.add((ClientModel) role.getContainer());
+
+        return clientList.stream().distinct().collect(Collectors.toList());
     }
 
 }

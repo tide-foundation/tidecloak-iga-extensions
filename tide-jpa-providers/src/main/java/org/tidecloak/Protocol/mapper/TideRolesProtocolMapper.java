@@ -73,7 +73,7 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
 
         // Conditionally set realmAccess if the original token had it and it's not empty
         if (token.getRealmAccess() != null) {
-            if (!realmAccess.getRoles().isEmpty()) {
+            if (realmAccess.getRoles() != null && !realmAccess.getRoles().isEmpty()) {
                 token.setRealmAccess(realmAccess);
             } else {
                 token.setRealmAccess(null); // Remove realmAccess if empty

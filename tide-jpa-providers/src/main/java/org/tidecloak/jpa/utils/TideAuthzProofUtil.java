@@ -134,14 +134,14 @@ public final class TideAuthzProofUtil {
     public void generateAndSaveProofDraft(ClientModel clientModel, UserModel userModel, Set<RoleModel> newRoleMappings, String recordId, ChangeSetType type, ActionType actionType, Boolean isFullScopeAllowed) throws JsonProcessingException {
         // Generate AccessToken based on the client and user information with openid scope
         AccessToken proof = generateAccessToken(clientModel, userModel, "openid");
-        TideUserAdapter wrappedUser = new TideUserAdapter(session, realm, em, em.getReference(UserEntity.class, userModel.getId()));
-        Stream<RoleModel> currentRoles = wrappedUser.getRoleMappingsStreamByStatusAndAction(DraftStatus.ACTIVE, ActionType.CREATE);
-        newRoleMappings.addAll(currentRoles.collect(Collectors.toSet()));
+//        TideUserAdapter wrappedUser = new TideUserAdapter(session, realm, em, em.getReference(UserEntity.class, userModel.getId()));
+        //Stream<RoleModel> currentRoles = wrappedUser.getRoleMappingsStreamByStatusAndAction(DraftStatus.ACTIVE, ActionType.CREATE);
+        //newRoleMappings.addAll(currentRoles.collect(Collectors.toSet()));
         AccessDetails accessDetails = null;
         UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
         // Filter and expand roles based on the provided mappings; only approved roles are considered
 
-        if (!newRoleMappings.isEmpty()){
+        if ( newRoleMappings != null && !newRoleMappings.isEmpty()){
             // ensure our roles are TideRoleAdapters
             Set<TideRoleAdapter> wrappedRoles = newRoleMappings.stream().map(roles -> {
                 RoleEntity roleEntity = em.getReference(RoleEntity.class, roles.getId());
@@ -158,7 +158,6 @@ public final class TideAuthzProofUtil {
 
         }
         JsonNode proofDraftNode = objectMapper.valueToTree(proof);
-
         if ( actionType == ActionType.DELETE && accessDetails != null){
             proofDraftNode = removeAccessFromJsonNode(proofDraftNode, accessDetails);
         }
@@ -254,7 +253,6 @@ public final class TideAuthzProofUtil {
 
         // find if proof exists, update if it does else we create a new one for the user
         UserClientAccessProofEntity userClientAccess = em.find(UserClientAccessProofEntity.class, new UserClientAccessProofEntity.Key(user, clientId ));
-        System.out.println("THE FINAL PROOF IS :" + proof);
         String proofChecksum = generateProofChecksum(proof);
         String proofMeta = getProofMeta(proof);
 
@@ -317,7 +315,7 @@ public final class TideAuthzProofUtil {
         } else if (jsonNode.isArray()) {
             ArrayNode arrayNode = objectMapper.createArrayNode();
             // Recursively sort elements of the array and handle string arrays for sorting
-            if (!jsonNode.isEmpty() && jsonNode.get(0).isTextual()) {
+            if (jsonNode != null && !jsonNode.isEmpty() && jsonNode.get(0).isTextual()) {
                 List<String> sortedList = StreamSupport.stream(jsonNode.spliterator(), false)
                         .map(JsonNode::asText)
                         .sorted()
@@ -555,41 +553,50 @@ public final class TideAuthzProofUtil {
         }
     }
     private static void mergeRealmAccess(AccessToken token, AccessToken.Access realmAccess) {
-        if (realmAccess.getRoles() != null && !realmAccess.getRoles().isEmpty()) {
+        if (realmAccess != null && realmAccess.getRoles() != null && !realmAccess.getRoles().isEmpty()) {
             if (token.getRealmAccess() == null) {
-                token.setRealmAccess(realmAccess);
-            } else {
-                realmAccess.getRoles().forEach(role -> {
-                    token.getRealmAccess().addRole(role);
-                });
+                token.setRealmAccess(new AccessToken.Access());
             }
+            realmAccess.getRoles().forEach(role -> token.getRealmAccess().addRole(role));
         }
     }
 
     private static void mergeClientAccesses(AccessToken token, Map<String, AccessToken.Access> clientAccesses) {
-        // Ensure token.getResourceAccess() returns a modifiable map
-        Map<String, AccessToken.Access> resourceAccess = new HashMap<>(token.getResourceAccess());
-        clientAccesses.forEach((clientKey, access) -> {
-            AccessToken.Access tokenClientAccess = resourceAccess.computeIfAbsent(clientKey, k -> new AccessToken.Access());
-            if (access.getRoles() != null) {
-                access.getRoles().forEach(tokenClientAccess::addRole);
+        if (clientAccesses != null && !clientAccesses.isEmpty()) {
+            // Ensure the resource access map is modifiable
+            Map<String, AccessToken.Access> resourceAccess = token.getResourceAccess();
+            if (resourceAccess == null || resourceAccess.isEmpty()) {
+                resourceAccess = new HashMap<>();
+                token.setResourceAccess(resourceAccess);
             }
-        });
-        token.setResourceAccess(resourceAccess);
+
+            Map<String, AccessToken.Access> finalResourceAccess = resourceAccess;
+            clientAccesses.forEach((clientKey, access) -> {
+                AccessToken.Access tokenClientAccess = finalResourceAccess.computeIfAbsent(clientKey, k -> new AccessToken.Access());
+                if (access.getRoles() != null) {
+                    access.getRoles().forEach(tokenClientAccess::addRole);
+                }
+            });
+        }
     }
 
     private static void removeRealmAccess(AccessToken token, AccessToken.Access realmAccess) {
-        if (token.getRealmAccess() != null && realmAccess.getRoles() != null) {
+        if (token.getRealmAccess() != null && realmAccess != null && realmAccess.getRoles() != null) {
             token.getRealmAccess().getRoles().removeAll(realmAccess.getRoles());
         }
     }
 
     private static void removeClientAccesses(AccessToken token, Map<String, AccessToken.Access> clientAccesses) {
-        clientAccesses.forEach((clientKey, access) -> {
-            if (token.getResourceAccess().containsKey(clientKey) && access.getRoles() != null) {
-                token.getResourceAccess().get(clientKey).getRoles().removeAll(access.getRoles());
-            }
-        });
+        if (token.getResourceAccess() != null && clientAccesses != null) {
+            clientAccesses.forEach((clientKey, access) -> {
+                if (access != null && access.getRoles() != null) {
+                    AccessToken.Access tokenClientAccess = token.getResourceAccess().get(clientKey);
+                    if (tokenClientAccess != null) {
+                        tokenClientAccess.getRoles().removeAll(access.getRoles());
+                    }
+                }
+            });
+        }
     }
 
     private void setAudience(AccessToken token, ClientModel clientModel, Set<RoleModel> roleModelSet ) {

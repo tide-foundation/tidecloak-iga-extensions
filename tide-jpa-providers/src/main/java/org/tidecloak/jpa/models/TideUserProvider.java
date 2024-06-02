@@ -1,33 +1,19 @@
 package org.tidecloak.jpa.models;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
-import jakarta.persistence.TypedQuery;
-import org.keycloak.Config;
-import org.keycloak.admin.ui.rest.model.ClientRole;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.JpaUserProvider;
-import org.keycloak.models.jpa.UserAdapter;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
-import org.keycloak.storage.jpa.JpaHashUtils;
 
 import org.tidecloak.interfaces.ActionType;
-import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.entities.drafting.TideUserDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
-import org.tidecloak.jpa.utils.ProofGeneration;
-import org.tidecloak.jpa.utils.TideAuthzProofUtil;
-import org.tidecloak.jpa.utils.TideRolesUtil;
 
 import java.util.*;
 import java.util.stream.Stream;
-
-import static org.keycloak.models.jpa.PaginationUtils.paginateQuery;
-import static org.keycloak.storage.jpa.JpaHashUtils.predicateForFilteringUsersByAttributes;
-import static org.keycloak.utils.StreamsUtil.*;
 
 public class TideUserProvider extends JpaUserProvider {
     private final KeycloakSession session;
@@ -117,7 +103,7 @@ public class TideUserProvider extends JpaUserProvider {
                             .getResultList();
 
 
-                    if(userRecords.isEmpty()){
+                    if(userRecords == null || userRecords.isEmpty()){
                         return null;
                     }
                     return new TideUserAdapter(session, realm, em, userEntity);

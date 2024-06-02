@@ -19,6 +19,7 @@ import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
 import java.util.*;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.keycloak.models.ImpersonationConstants.IMPERSONATION_ROLE;
@@ -40,7 +41,7 @@ public class TideRoleAdapter extends RoleAdapter {
         RoleEntity roleEntity = toRoleEntity(role);
         List<TideCompositeRoleMappingDraftEntity> entity = findCompositeRoleMappingDrafts(getEntity(), roleEntity, DraftStatus.ACTIVE);
 
-        if (entity.isEmpty()) {
+        if (entity == null || entity.isEmpty()) {
             handleUncommittedCompositeRole(role, roleEntity);
             return;
         }
@@ -62,7 +63,7 @@ public class TideRoleAdapter extends RoleAdapter {
         deleteCompositeRoleMapping(getEntity(), roleEntity);
 
         List<TideCompositeRoleMappingDraftEntity> proofRecords = findCompositeRoleMappingDrafts(getEntity(), roleEntity, DraftStatus.DRAFT);
-        if (!proofRecords.isEmpty()) {
+        if (proofRecords != null && !proofRecords.isEmpty()) {
             deleteProofRecords(proofRecords.get(0).getId());
         }
 
@@ -98,8 +99,21 @@ public class TideRoleAdapter extends RoleAdapter {
     private void handleClientRoleProofs(RoleModel role, TideCompositeRoleMappingDraftEntity compositeRoleEntity) {
         if (role.getContainer() instanceof ClientModel) {
             RoleModel compositeRole = realm.getRoleById(getEntity().getId());
-            List<UserModel> users = session.users().getRoleMembersStream(realm, compositeRole).toList();
-            List<ClientModel> clientList = getClientList();
+            Stream<UserModel> users =  session.users().getRoleMembersStream(realm, compositeRole).map(user -> {
+                UserEntity userEntity = em.find(UserEntity.class, user.getId());
+                List<TideUserRoleMappingDraftEntity> userRecords = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
+                        .setParameter("draftStatus", DraftStatus.ACTIVE)
+                        .setParameter("user", userEntity)
+                        .setParameter("roleId", compositeRole.getId())
+                        .getResultList();
+
+                if(userRecords == null || userRecords.isEmpty()){
+                    return null;
+                }
+                return new TideUserAdapter(session, realm, em, userEntity);
+            });
+
+            List<ClientModel> clientList = getUniqueClientList(role);
 
             TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
             clientList.forEach(client -> users.forEach(user -> {
@@ -115,11 +129,15 @@ public class TideRoleAdapter extends RoleAdapter {
         }
     }
 
-    private List<ClientModel> getClientList() {
-        return new ArrayList<>(session.clients().getClientsStream(realm).map(client -> {
-            ClientEntity clientEntity = em.getReference(ClientEntity.class, client.getId());
-            return new TideClientAdapter(realm, em, session, clientEntity);
-        }).filter(TideClientAdapter::isFullScopeAllowed).toList());
+    private List<ClientModel> getUniqueClientList(RoleModel role) {
+        List<ClientModel> clientList = session.clients().getClientsStream(realm)
+                .map(client -> new TideClientAdapter(realm, em, session, em.find(ClientEntity.class, client.getId())))
+                .filter(TideClientAdapter::isFullScopeAllowed)
+                .collect(Collectors.toList());
+
+        clientList.add((ClientModel) role.getContainer());
+
+        return clientList.stream().distinct().collect(Collectors.toList());
     }
 
     private Boolean commitDefaultRolesOnInitiation(RoleModel child) {
@@ -244,30 +262,30 @@ public class TideRoleAdapter extends RoleAdapter {
             return;
         }
 
-        RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
-        RoleEntity entity = toRoleEntity(role);
+        RoleModel childRole = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
+        RoleEntity childEntity = toRoleEntity(childRole);
 
         super.addCompositeRole(roleModel);
 
         TideCompositeRoleMappingDraftEntity draft = new TideCompositeRoleMappingDraftEntity();
         draft.setId(KeycloakModelUtils.generateId());
         draft.setComposite(getEntity());
-        draft.setChildRole(entity);
+        draft.setChildRole(childEntity);
         draft.setDraftStatus(DraftStatus.DRAFT);
         draft.setAction(ActionType.CREATE);
         em.persist(draft);
 
-        if (role.getContainer() instanceof ClientModel) {
+        if (childRole.getContainer() instanceof ClientModel) {
             RoleModel compositeRole = realm.getRoleById(getEntity().getId());
             Stream<UserModel> users =  session.users().getRoleMembersStream(realm, compositeRole).map(user -> {
                 UserEntity userEntity = em.find(UserEntity.class, user.getId());
                 List<TideUserRoleMappingDraftEntity> userRecords = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
                         .setParameter("draftStatus", DraftStatus.ACTIVE)
                         .setParameter("user", userEntity)
-                        .setParameter("roleId", role.getId())
+                        .setParameter("roleId", compositeRole.getId())
                         .getResultList();
 
-                if(userRecords.isEmpty()){
+                if(userRecords == null || userRecords.isEmpty()){
                     return null;
                 }
                 return new TideUserAdapter(session, realm, em, userEntity);
@@ -282,11 +300,7 @@ public class TideRoleAdapter extends RoleAdapter {
                 return;
             }
 
-            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).map(client -> {
-                        ClientEntity clientEntity = em.getReference(ClientEntity.class, client.getId());
-                        return new TideClientAdapter(realm, em, session, clientEntity);
-                    })
-                    .filter(TideClientAdapter::isFullScopeAllowed).toList());
+            List<ClientModel> clientList = getUniqueClientList(roleModel);
 
             TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
             clientList.forEach(client -> {
@@ -299,13 +313,13 @@ public class TideRoleAdapter extends RoleAdapter {
                             .setParameter("draftStatus", DraftStatus.ACTIVE)
                             .getResultList();
                     // Check if user has been granted the composite\parent role.
-                    if (userCompositeRoleDraft.isEmpty()){
+                    if (userCompositeRoleDraft == null || userCompositeRoleDraft.isEmpty()){
                         continue;
                     }
                     UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                     Set<RoleModel> roleMappings = new HashSet<>();
-                    roleMappings.add(role);// this is the new role we are adding to the parent role.
-                    roleMappings.add(realm.getRoleById(getEntity().getId()));// ensure the parent role is in there too
+                    roleMappings.add(childRole);// this is the new role we are adding to the parent role.
+                    roleMappings.add(compositeRole);// ensure the parent role is in there too
                     try {
                         util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draft.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE, client.isFullScopeAllowed());
                     } catch (JsonProcessingException e) {
