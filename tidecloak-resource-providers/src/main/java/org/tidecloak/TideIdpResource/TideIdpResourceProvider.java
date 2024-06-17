@@ -41,7 +41,7 @@ public class TideIdpResourceProvider implements RealmResourceProvider {
         // Find the file with the specified type
         File[] files = uploadDirFile.listFiles((dir, name) -> name.startsWith(type + "_"));
         if (files == null || files.length == 0) {
-            return Response.status(Response.Status.NOT_FOUND).entity("File not found").type(MediaType.TEXT_PLAIN).build();
+            return Response.ok().build();
         }
 
         File file = files[0]; // There should be only one file per type
@@ -87,5 +87,3 @@ public class TideIdpResourceProvider implements RealmResourceProvider {
         }
     }
 }
-
-

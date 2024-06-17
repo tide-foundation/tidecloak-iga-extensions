@@ -1,8 +1,6 @@
 package org.tidecloak.TideIdpResource;
 
-import jakarta.ws.rs.Consumes;
-import jakarta.ws.rs.POST;
-import jakarta.ws.rs.Path;
+import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.resteasy.reactive.multipart.FileUpload;
@@ -108,5 +106,50 @@ public class TideIdpAdminRealmResource {
             e.printStackTrace();
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("File upload failed: " + e.getMessage()).type(MediaType.TEXT_PLAIN).build();
         }
+    }
+    @DELETE
+    @Path("images/{type}/delete")
+    public Response deleteImage(@PathParam("type") String type) {
+        // Define the directory where files are saved
+        String uploadDir = "uploads";
+        File uploadDirFile = new File(uploadDir);
+        if (!uploadDirFile.exists() || !uploadDirFile.isDirectory()) {
+            return Response.status(Response.Status.NOT_FOUND).entity("Upload directory does not exist").type(MediaType.TEXT_PLAIN).build();
+        }
+
+        // Get all files that match the given file type
+        File[] filesToDelete = uploadDirFile.listFiles((dir, name) -> name.startsWith(type + "_"));
+        if (filesToDelete == null || filesToDelete.length == 0) {
+            return Response.status(Response.Status.NOT_FOUND).entity("No files found for the specified type").type(MediaType.TEXT_PLAIN).build();
+        }
+
+        // Attempt to delete each file
+        for (File file : filesToDelete) {
+            if (!file.delete()) {
+                return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Failed to delete file: " + file.getName()).type(MediaType.TEXT_PLAIN).build();
+            }
+        }
+
+        return Response.ok("Files of type " + type + " deleted successfully").type(MediaType.TEXT_PLAIN).build();
+    }
+
+
+    @GET
+    @Path("images/{type}/name")
+    @Produces(MediaType.TEXT_PLAIN)
+    public Response getFileName(@PathParam("type") String type) {
+        // Define the directory where files are saved
+        String uploadDir = "uploads";
+        File uploadDirFile = new File(uploadDir);
+
+        // Find the file with the specified type
+        File[] files = uploadDirFile.listFiles((dir, name) -> name.startsWith(type + "_"));
+        if (files == null || files.length == 0) {
+            return Response.ok().build();
+        }
+        File file = files[0]; // There should be only one file per type
+        String fileName = file.getName().substring(type.length() + 1); // Extract the original file name without the type prefix
+
+        return Response.ok(fileName).build();
     }
 }
