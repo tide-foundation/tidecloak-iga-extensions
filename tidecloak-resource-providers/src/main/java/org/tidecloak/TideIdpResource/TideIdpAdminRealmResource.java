@@ -69,7 +69,7 @@ public class TideIdpAdminRealmResource {
             }
 
             // Define the directory where files will be saved
-            String uploadDir = "uploads";
+            String uploadDir = String.format("Uploads/%s", session.getContext().getRealm());
             File uploadDirFile = new File(uploadDir);
             if (!uploadDirFile.exists()) {
                 uploadDirFile.mkdirs();
@@ -111,10 +111,10 @@ public class TideIdpAdminRealmResource {
     @Path("images/{type}/delete")
     public Response deleteImage(@PathParam("type") String type) {
         // Define the directory where files are saved
-        String uploadDir = "uploads";
+        String uploadDir = String.format("Uploads/%s", session.getContext().getRealm());
         File uploadDirFile = new File(uploadDir);
         if (!uploadDirFile.exists() || !uploadDirFile.isDirectory()) {
-            return Response.status(Response.Status.NOT_FOUND).entity("Upload directory does not exist").type(MediaType.TEXT_PLAIN).build();
+            return Response.status(Response.Status.NOT_FOUND).entity("Directory does not exist").type(MediaType.TEXT_PLAIN).build();
         }
 
         // Get all files that match the given file type
@@ -139,13 +139,13 @@ public class TideIdpAdminRealmResource {
     @Produces(MediaType.TEXT_PLAIN)
     public Response getFileName(@PathParam("type") String type) {
         // Define the directory where files are saved
-        String uploadDir = "uploads";
+        String uploadDir = String.format("Uploads/%s", session.getContext().getRealm());
         File uploadDirFile = new File(uploadDir);
 
         // Find the file with the specified type
         File[] files = uploadDirFile.listFiles((dir, name) -> name.startsWith(type + "_"));
         if (files == null || files.length == 0) {
-            return Response.ok().build();
+            return Response.ok().type(MediaType.TEXT_PLAIN).build();
         }
         File file = files[0]; // There should be only one file per type
         String fileName = file.getName().substring(type.length() + 1); // Extract the original file name without the type prefix

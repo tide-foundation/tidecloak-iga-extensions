@@ -35,14 +35,13 @@ public class TideIdpResourceProvider implements RealmResourceProvider {
     @Produces(MediaType.APPLICATION_OCTET_STREAM)
     public Response getFile(@PathParam("type") String type) {
         // Define the directory where files are saved
-        String uploadDir = "uploads";
+        String uploadDir = String.format("Uploads/%s", session.getContext().getRealm());
         File uploadDirFile = new File(uploadDir);
 
         // Find the file with the specified type
         File[] files = uploadDirFile.listFiles((dir, name) -> name.startsWith(type + "_"));
         if (files == null || files.length == 0) {
-            return Response.ok().build();
-        }
+            return Response.ok().type(MediaType.TEXT_PLAIN).build();        }
 
         File file = files[0]; // There should be only one file per type
 
@@ -58,6 +57,7 @@ public class TideIdpResourceProvider implements RealmResourceProvider {
                     .header("Content-Disposition", "inline; filename=\"" + fileName.substring(type.length() + 1) + "\"")
                     .build();
         } catch (Exception e) {
+            System.out.println("EXCEPTION CAUGHT!");
             e.printStackTrace();
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("File retrieval failed: " + e.getMessage()).type(MediaType.TEXT_PLAIN).build();
         }
