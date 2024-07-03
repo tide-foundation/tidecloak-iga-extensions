@@ -35,7 +35,7 @@ public class TideIdpResourceProvider implements RealmResourceProvider {
     @Produces(MediaType.APPLICATION_OCTET_STREAM)
     public Response getFile(@PathParam("type") String type) {
         // Define the directory where files are saved
-        String uploadDir = String.format("Uploads/%s", session.getContext().getRealm());
+        String uploadDir = String.format("Uploads/%s", session.getContext().getRealm().getId());
         File uploadDirFile = new File(uploadDir);
 
         // Find the file with the specified type

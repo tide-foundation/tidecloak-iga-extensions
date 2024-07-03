@@ -68,7 +68,7 @@ public class TideIdpAdminRealmResource {
             }
 
             // Define the directory where files will be saved
-            String uploadDir = String.format("Uploads/%s", session.getContext().getRealm());
+            String uploadDir = String.format("Uploads/%s", session.getContext().getRealm().getId());
             File uploadDirFile = new File(uploadDir);
             if (!uploadDirFile.exists()) {
                 uploadDirFile.mkdirs();
@@ -110,7 +110,7 @@ public class TideIdpAdminRealmResource {
     @Path("images/{type}/delete")
     public Response deleteImage(@PathParam("type") String type) {
         // Define the directory where files are saved
-        String uploadDir = String.format("Uploads/%s", session.getContext().getRealm());
+        String uploadDir = String.format("Uploads/%s", session.getContext().getRealm().getId());
         File uploadDirFile = new File(uploadDir);
         if (!uploadDirFile.exists() || !uploadDirFile.isDirectory()) {
             return Response.status(Response.Status.NOT_FOUND).entity("Directory does not exist").type(MediaType.TEXT_PLAIN).build();
@@ -138,7 +138,7 @@ public class TideIdpAdminRealmResource {
     @Produces(MediaType.TEXT_PLAIN)
     public Response getFileName(@PathParam("type") String type) {
         // Define the directory where files are saved
-        String uploadDir = String.format("Uploads/%s", session.getContext().getRealm());
+        String uploadDir = String.format("Uploads/%s", session.getContext().getRealm().getId());
         File uploadDirFile = new File(uploadDir);
 
         // Find the file with the specified type
