@@ -36,64 +36,66 @@ public class TideGroupAdapter extends GroupAdapter {
     @Override
     public void grantRole(RoleModel role) {
         super.grantRole(role);
-        TideGroupRoleMappingEntity entity = new TideGroupRoleMappingEntity();
-
-        // Probably check if it exists firsts then add
-        // TODO !!!
-        entity.setId(KeycloakModelUtils.generateId());
-        entity.setGroup(getEntity());
-        entity.setRoleId(role.getId());
-        entity.setDraftStatus(DraftStatus.DRAFT);
-        entity.setAction(ActionType.CREATE);
-        em.persist(entity);
-        em.flush();
-        em.detach(entity);
-
-
-//        if (role.getContainer() instanceof ClientModel clientModel) {
-//            GroupEntity groupEntity = getEntity();
-//            GroupModel group = session.groups().getGroupById(realm, groupEntity.getId());
-//            ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-//            List<UserModel> users = proofGeneration.getAllGroupMembersIncludingSubgroups(realm, group);
-//            // Regen for any clients with full scope enabled as well
-//            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
-//            clientList.add(clientModel);
+//        TideGroupRoleMappingEntity entity = new TideGroupRoleMappingEntity();
 //
-//            users.forEach(user -> {
-//                clientList.forEach(client ->{
-//                    proofGeneration.generateProofAndSaveToTable(user.getId(), client);
-//                });
-//            });
-//        }
+//        // Probably check if it exists firsts then add
+//        // TODO !!!
+//        entity.setId(KeycloakModelUtils.generateId());
+//        entity.setGroup(getEntity());
+//        entity.setRoleId(role.getId());
+//        entity.setDraftStatus(DraftStatus.DRAFT);
+//        entity.setAction(ActionType.CREATE);
+//        em.persist(entity);
+//        em.flush();
+//        em.detach(entity);
+//
+//
+//
+////        if (role.getContainer() instanceof ClientModel clientModel) {
+////            GroupEntity groupEntity = getEntity();
+////            GroupModel group = session.groups().getGroupById(realm, groupEntity.getId());
+////            ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
+////            List<UserModel> users = proofGeneration.getAllGroupMembersIncludingSubgroups(realm, group);
+////            // Regen for any clients with full scope enabled as well
+////            List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+////            clientList.add(clientModel);
+////
+////            users.forEach(user -> {
+////                clientList.forEach(client ->{
+////                    proofGeneration.generateProofAndSaveToTable(user.getId(), client);
+////                });
+////            });
+////        }
     }
 
     @Override
     public void deleteRoleMapping(RoleModel role) {
-        List<TideGroupRoleMappingEntity> groupEntity = em.createNamedQuery("groupRoleMappingDraftsByStatusAndGroupAndRole", TideGroupRoleMappingEntity.class)
-                .setParameter("group", getEntity())
-                .setParameter("roleId", role.getId())
-                .setParameter("draftStatus", DraftStatus.DRAFT)
-                .getResultList();
-
-
-        if (!groupEntity.isEmpty()){
-            em.createNamedQuery("deleteGroupRoleMappingDraftsByRole").setParameter("roleId", role.getId())
-                    .executeUpdate();
-            super.deleteRoleMapping(role);
-        }
-        else {
-            // GET APPROVAL FOR DELETION
-            TideGroupRoleMappingEntity entity = new TideGroupRoleMappingEntity();
-            entity.setId(KeycloakModelUtils.generateId());
-            entity.setGroup(getEntity());
-            entity.setRoleId(role.getId());
-            entity.setDraftStatus(DraftStatus.DRAFT);
-            entity.setAction(ActionType.DELETE);
-
-            em.persist(entity);
-            em.flush();
-            em.detach(entity);
-        }
+        super.deleteRoleMapping(role);
+//        List<TideGroupRoleMappingEntity> groupEntity = em.createNamedQuery("groupRoleMappingDraftsByStatusAndGroupAndRole", TideGroupRoleMappingEntity.class)
+//                .setParameter("group", getEntity())
+//                .setParameter("roleId", role.getId())
+//                .setParameter("draftStatus", DraftStatus.DRAFT)
+//                .getResultList();
+//
+//
+//        if (!groupEntity.isEmpty()){
+//            em.createNamedQuery("deleteGroupRoleMappingDraftsByRole").setParameter("roleId", role.getId())
+//                    .executeUpdate();
+//            super.deleteRoleMapping(role);
+//        }
+//        else {
+//            // GET APPROVAL FOR DELETION
+//            TideGroupRoleMappingEntity entity = new TideGroupRoleMappingEntity();
+//            entity.setId(KeycloakModelUtils.generateId());
+//            entity.setGroup(getEntity());
+//            entity.setRoleId(role.getId());
+//            entity.setDraftStatus(DraftStatus.DRAFT);
+//            entity.setAction(ActionType.DELETE);
+//
+//            em.persist(entity);
+//            em.flush();
+//            em.detach(entity);
+//        }
 //        Optional<ClientModel> clientModel = Optional.empty();
 //        List<UserModel> users = new ArrayList<>();
 //        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);

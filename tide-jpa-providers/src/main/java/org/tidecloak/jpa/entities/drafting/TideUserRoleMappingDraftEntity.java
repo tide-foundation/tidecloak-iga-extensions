@@ -8,6 +8,12 @@ import org.tidecloak.interfaces.DraftStatus;
 import java.io.Serializable;
 
 @NamedQueries({
+        @NamedQuery(name="getUserRoleMappingsByStatusAndRealmAndRecordId", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.id = :changesetId AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
+        @NamedQuery(name="getUserRoleMappingsByDeleteStatusAndRealmAndRecordId", query="select m from TideUserRoleMappingDraftEntity m where m.deleteStatus = :deleteStatus AND m.id = :changesetId AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
+        @NamedQuery(name="getAllUserRoleMappingsByStatusAndRealm", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
+        @NamedQuery(name="getAllUserRoleMappingsByRealmAndStatusNotEqualTo", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus != :draftStatus AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
+        @NamedQuery(name="getAllUserRoleMappingsByStatus", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus"),
+        @NamedQuery(name="getUserRoleMappingStatus", query="select m from TideUserRoleMappingDraftEntity m where m.user = :user"),
         @NamedQuery(name="getUserRoleAssignmentDraftEntity", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId"),
         @NamedQuery(name="getUserRoleMappingDraftEntityByAction", query="SELECT m.roleId  FROM TideUserRoleMappingDraftEntity m WHERE m.user = :user and m.actionType = :actionType"),
         @NamedQuery(name="getUserRoleAssignmentDraftEntityByStatus", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId and draftStatus = :draftStatus"),
@@ -18,8 +24,18 @@ import java.io.Serializable;
         @NamedQuery(name="deleteUserRoleMappingDraftsByRealmAndLink", query="delete from TideUserRoleMappingDraftEntity mapping where mapping.user IN (select u from UserEntity u where u.realmId=:realmId and u.federationLink=:link)"),
         @NamedQuery(name="deleteUserRoleMappingDraftsByRole", query="delete from TideUserRoleMappingDraftEntity m where m.roleId = :roleId"),
         @NamedQuery(name="deleteUserRoleMappingDraftsByUser", query="delete from TideUserRoleMappingDraftEntity m where m.user = :user"),
-})
+        @NamedQuery(name="getUserRoleMappingDraftsByRole", query="SELECT t.id FROM TideUserRoleMappingDraftEntity t WHERE t.roleId = :roleId"),
+        @NamedQuery(
+                name = "getUserRoleMappingsByUserAndClientId",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.user =:user AND m.roleId IN (" +
+                        "   SELECT r.id FROM RoleEntity r " +
+                        "   WHERE r.clientRole = true AND r.clientId = :clientId" +
+                        ")"
+        ),
 
+})
+//where mapping.user IN (select u from UserEntity u where u.realmId=:realmId)")
 @Entity
 @Table(name = "USER_ROLE_MAPPING_DRAFT")
 public class TideUserRoleMappingDraftEntity {
@@ -43,6 +59,16 @@ public class TideUserRoleMappingDraftEntity {
     @Enumerated(EnumType.STRING)
     @Column(name = "ACTION_TYPE")
     private ActionType actionType = ActionType.CREATE; // Default to NONE
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "DELETE_STATUS")
+    private DraftStatus deleteStatus;
+    @Column(name = "TIMESTAMP")
+    protected Long timestamp = System.currentTimeMillis();
+
+
+//    @Column(name = "CHECKSUM")
+//    protected String checksum;
 
     public String getId() {
         return id;
@@ -84,6 +110,31 @@ public class TideUserRoleMappingDraftEntity {
     public void setAction(ActionType actionType) {
         this.actionType = actionType;
     }
+
+    public DraftStatus getDeleteStatus() {
+        return deleteStatus;
+    }
+
+    public void setDeleteStatus(DraftStatus deleteStatus) {
+        this.deleteStatus = deleteStatus;
+    }
+
+    public Long getTimestamp() {
+        return timestamp;
+    }
+
+    public void setTimestamp(Long timestamp) {
+        this.timestamp = timestamp;
+    }
+
+//    public String getChecksum() {
+//        return checksum;
+//    }
+//
+//    public void setChecksum(String checksum) {
+//        this.checksum = checksum;
+//    }
+
 
 
     @Override

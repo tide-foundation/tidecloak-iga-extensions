@@ -33,6 +33,9 @@ public class TideUserGroupMembershipEntity {
     @Column(name = "ACTION_TYPE")
     private ActionType actionType = ActionType.CREATE; // Default to NONE
 
+    @Column(name = "CREATED_TIMESTAMP")
+    protected Long createdTimestamp = System.currentTimeMillis();
+
     public String getId() {
         return id;
     }
@@ -72,6 +75,14 @@ public class TideUserGroupMembershipEntity {
 
     public void setAction(ActionType actionType) {
         this.actionType = actionType;
+    }
+
+    public Long getCreatedTimestamp() {
+        return createdTimestamp;
+    }
+
+    public void setCreatedTimestamp(Long timestamp) {
+        createdTimestamp = timestamp;
     }
 
     @Override

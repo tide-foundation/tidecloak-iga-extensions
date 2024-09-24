@@ -30,7 +30,6 @@ public class TideRealmAdapter extends RealmAdapter {
 
     @Override
     public RoleModel getRoleById(String id) {
-        System.out.println("YOU MADE IT");
         return this.session.roles().getRoleById(this, id);
     }
 

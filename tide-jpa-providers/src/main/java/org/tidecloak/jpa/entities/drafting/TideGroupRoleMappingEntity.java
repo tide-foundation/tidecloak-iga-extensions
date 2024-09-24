@@ -43,6 +43,9 @@ public class TideGroupRoleMappingEntity {
     @Column(name = "ACTION_TYPE")
     private ActionType actionType = ActionType.CREATE; // Default to NONE
 
+    @Column(name = "CREATED_TIMESTAMP")
+    protected Long createdTimestamp = System.currentTimeMillis();
+
     public String getId() {
         return id;
     }
@@ -84,6 +87,13 @@ public class TideGroupRoleMappingEntity {
         this.actionType = actionType;
     }
 
+    public Long getCreatedTimestamp() {
+        return createdTimestamp;
+    }
+
+    public void setCreatedTimestamp(Long timestamp) {
+        createdTimestamp = timestamp;
+    }
 
     @Override
     public boolean equals(Object o) {

@@ -24,12 +24,11 @@ public class TideCompositeRoleDraftEntity {
     private RoleEntity composite;
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "DRAFT_STATUS")
-    private DraftStatus draftStatus;
+    @Column(name = "DELETE_STATUS")
+    private DraftStatus deleteStatus;
 
-    @Enumerated(EnumType.STRING)
-    @Column(name = "ACTION_TYPE")
-    private ActionType actionType;
+    @Column(name = "TIMESTAMP")
+    protected Long timestamp = System.currentTimeMillis();
 
     public String getId() {
         return id;
@@ -47,22 +46,21 @@ public class TideCompositeRoleDraftEntity {
         this.composite = composite;
     }
 
-
     // Getters and setters for new fields
-    public DraftStatus getDraftStatus() {
-        return draftStatus;
+    public DraftStatus getDeleteStatus() {
+        return deleteStatus;
     }
 
-    public void setDraftStatus(DraftStatus draftStatus) {
-        this.draftStatus = draftStatus;
+    public void setDeleteStatus(DraftStatus deleteStatus) {
+        this.deleteStatus = deleteStatus;
     }
 
-    public ActionType getAction() {
-        return actionType;
+    public Long getTimestamp() {
+        return timestamp;
     }
 
-    public void setAction(ActionType actionType) {
-        this.actionType = actionType;
+    public void setTimestamp(Long timestamp) {
+        this.timestamp = timestamp;
     }
 
     @Override

@@ -23,6 +23,7 @@ import jakarta.persistence.*;
 import org.keycloak.admin.ui.rest.model.ClientRole;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.protocol.oidc.TokenManager;
@@ -35,6 +36,7 @@ import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.sessions.RootAuthenticationSessionModel;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.models.ProofData;
+import org.tidecloak.jpa.models.TideClientAdapter;
 
 import static org.keycloak.admin.ui.rest.model.RoleMapper.convertToModel;
 
@@ -71,7 +73,11 @@ public class ProofGeneration {
     }
 
     public void regenerateProofsForMembers(List<ClientRole> clientRoles, List<UserModel> members) {
-        List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).filter(ClientModel::isFullScopeAllowed).toList());
+        List<ClientModel> clientList = new ArrayList<>(session.clients().getClientsStream(realm).map(client -> {
+                    ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
+                    return new TideClientAdapter(realm, em, session, clientEntity);
+                })
+                .filter(TideClientAdapter::isFullScopeAllowed).toList());
         List<ClientModel> effectiveList = clientRoles.stream().map(role -> realm.getClientById(role.getClientId())).toList();
         clientList.addAll(effectiveList);
 
@@ -114,7 +120,7 @@ public class ProofGeneration {
                 .collect(Collectors.toList());
     }
 
-    private String generateAccessToken(ClientModel client, UserModel user, String scopeParam){
+    public String generateAccessTokenString(ClientModel client, UserModel user, String scopeParam){
         try{
             objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
 
@@ -130,6 +136,16 @@ public class ProofGeneration {
 
             throw new RuntimeException("Failed to process token", e);
         }
+    }
+
+    public AccessToken generateAccessToken(ClientModel client, UserModel user, String scopeParam){
+
+        return sessionAware(client, user, scopeParam, (userSession, clientSessionCtx) -> {
+            TokenManager tokenManager = new TokenManager();
+            return tokenManager.responseBuilder(realm, client, null, session, userSession, clientSessionCtx)
+                    .generateAccessToken().getAccessToken();
+        });
+
     }
 
     private void updateOrAddEntity(UserModel user, ClientModel client){
@@ -160,7 +176,7 @@ public class ProofGeneration {
     }
 
     private ProofData cleanTokenAndGetChecksum(ClientModel client, UserModel user) {
-        String newAccessProof = generateAccessToken(client, user, "openid"); // scopeParam can be dyanmic when we support saml.
+        String newAccessProof = generateAccessTokenString(client, user, "openid"); // scopeParam can be dyanmic when we support saml.
 
         try{
             ObjectMapper objMapper = new ObjectMapper();
@@ -202,6 +218,33 @@ public class ProofGeneration {
             throw new RuntimeException("Failed to process token", e);
         } catch (NoSuchAlgorithmException e) {
             throw new RuntimeException(e);
+        }
+    }
+    public String cleanProofDraft (AccessToken token) {
+        try{
+            ObjectMapper objMapper = new ObjectMapper();
+            objMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+
+            JsonNode jsonNode = objMapper.valueToTree(token);
+            ObjectNode object = (ObjectNode) jsonNode;
+            objMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY);
+
+            // Remove what we don't need
+            object.remove("exp");
+            object.remove("iat");
+            object.remove("jti");
+            object.remove("sid");
+            object.remove("auth_time");
+            object.remove("session_state");
+            // Removing ACR for now. This changes by the type of authenticate taken. Explicit login is 1 and "remembered" session is 0.
+            object.remove("acr");
+
+            JsonNode sortedJson = sortJsonNode(object);
+
+            return objMapper.writeValueAsString(sortedJson);
+        }
+        catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to process token", e);
         }
     }
 
@@ -265,7 +308,7 @@ public class ProofGeneration {
         }
     }
 
-    private static JsonNode sortJsonNode(JsonNode jsonNode) {
+    public static JsonNode sortJsonNode(JsonNode jsonNode) {
         if (jsonNode.isObject()) {
             ObjectNode sortedObject = objectMapper.createObjectNode();
 
