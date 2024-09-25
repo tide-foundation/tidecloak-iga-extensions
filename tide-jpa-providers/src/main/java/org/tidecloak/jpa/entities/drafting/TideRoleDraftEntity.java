@@ -14,10 +14,9 @@ import org.tidecloak.interfaces.DraftStatus;
         @NamedQuery(
                 name = "getAllRolesByRealmAndStatusNotEqualTo",
                 query = "SELECT r FROM TideRoleDraftEntity r WHERE (r.deleteStatus != :deleteStatus OR r.deleteStatus IS NULL) AND r.role IN (SELECT u FROM RoleEntity u WHERE u.realmId = :realmId)"
-        )
-
-
-
+        ),
+        @NamedQuery(name="DeleteRoleDraftByRealm", query = "DELETE FROM TideRoleDraftEntity r WHERE r.role IN (SELECT u FROM RoleEntity u WHERE u.realmId = :realmId)"
+        ),
 })
 
 @Entity

@@ -21,6 +21,10 @@ import org.tidecloak.interfaces.DraftStatus;
         @NamedQuery(name="getClientFullScopeStatus", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.client = :client"),
         @NamedQuery(name="getClientFullScopeStatusByFullScopeEnabledStatus", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.client = :client AND t.fullScopeEnabled = :fullScopeEnabled"),
         @NamedQuery(name="getClientFullScopeStatusByFullScopeDisabledStatus", query="SELECT t FROM TideClientFullScopeStatusDraftEntity t WHERE t.client = :client AND t.fullScopeDisabled = :fullScopeDisabled"),
+        @NamedQuery(name="deleteClientFullScopeStatusByRealm",
+                query = "DELETE FROM TideClientFullScopeStatusDraftEntity r " +
+                        "WHERE r.client.id IN (SELECT c.id FROM ClientEntity c WHERE c.realmId = :realmId)"
+        ),
 })
 
 

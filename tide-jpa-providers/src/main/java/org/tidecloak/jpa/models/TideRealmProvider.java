@@ -2,10 +2,13 @@ package org.tidecloak.jpa.models;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.LockModeType;
 import org.keycloak.admin.ui.rest.model.ClientRole;
+import org.keycloak.connections.jpa.util.JpaUtils;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.JpaRealmProvider;
 
+import org.keycloak.models.jpa.RealmAdapter;
 import org.keycloak.models.jpa.entities.*;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.interfaces.ActionType;
@@ -21,8 +24,6 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.keycloak.common.util.StackUtil.getShortStackTrace;
-import static org.keycloak.models.jpa.PaginationUtils.paginateQuery;
-import static org.keycloak.utils.StreamsUtil.closing;
 
 
 public class TideRealmProvider extends JpaRealmProvider {
@@ -186,6 +187,110 @@ public class TideRealmProvider extends JpaRealmProvider {
 
     }
 
+
+    /**
+     *
+     * Same as super class, instead we explicity use the remove roles else it'll use the tide drafting delete
+     *
+     **/
+    @Override
+    public boolean removeRealm(String id) {
+        RealmEntity realm = (RealmEntity)this.em.find(RealmEntity.class, id, LockModeType.PESSIMISTIC_WRITE);
+        if (realm == null) {
+            return false;
+        } else {
+            final RealmAdapter adapter = new RealmAdapter(this.session, this.em, realm);
+            this.session.users().preRemove(adapter);
+            realm.getDefaultGroupIds().clear();
+            this.em.flush();
+            this.em.createNamedQuery("deleteGroupRoleMappingsByRealm").setParameter("realm", realm.getId()).executeUpdate();
+            session.clients().removeClients(adapter);
+            this.em.createNamedQuery("deleteDefaultClientScopeRealmMappingByRealm").setParameter("realm", realm).executeUpdate();
+            this.session.clientScopes().removeClientScopes(adapter);
+            adapter.getRolesStream().forEach(this::removeRoleOnRealmDelete);
+            Stream<GroupModel> var10000 = this.session.groups().getTopLevelGroupsStream(adapter);
+            Objects.requireNonNull(adapter);
+            var10000.forEach(adapter::removeGroup);
+            this.em.createNamedQuery("removeClientInitialAccessByRealm").setParameter("realm", realm).executeUpdate();
+            this.em.remove(realm);
+            this.em.flush();
+            this.em.clear();
+            this.session.getKeycloakSessionFactory().publish(new RealmModel.RealmRemovedEvent() {
+                public RealmModel getRealm() {
+                    return adapter;
+                }
+
+                public KeycloakSession getKeycloakSession() {
+                    return TideRealmProvider.this.session;
+                }
+            });
+            return true;
+        }
+    }
+
+    public void removeRoleOnRealmDelete(RoleModel role) {
+        RealmModel realm;
+        if (role.getContainer() instanceof RealmModel) {
+            realm = (RealmModel)role.getContainer();
+        } else {
+            if (!(role.getContainer() instanceof ClientModel)) {
+                throw new IllegalStateException("RoleModel's container isn not instance of either RealmModel or ClientModel");
+            }
+
+            realm = ((ClientModel)role.getContainer()).getRealm();
+        }
+        this.session.users().preRemove(realm, role);
+        RoleEntity roleEntity = (RoleEntity)this.em.getReference(RoleEntity.class, role.getId());
+        if (roleEntity != null && roleEntity.getRealmId().equals(realm.getId())) {
+            String compositeRoleTable = JpaUtils.getTableNameForNativeQuery("COMPOSITE_ROLE", this.em);
+            this.em.createNativeQuery("delete from " + compositeRoleTable + " where CHILD_ROLE = :role").setParameter("role", roleEntity.getId()).executeUpdate();
+            this.em.createNamedQuery("deleteClientScopeRoleMappingByRole").setParameter("role", roleEntity).executeUpdate();
+            this.em.flush();
+            this.em.remove(roleEntity);
+            this.session.getKeycloakSessionFactory().publish(this.roleRemovedEvent(role));
+            this.em.flush();
+        } else {
+            throw new ModelException("Role not found or trying to remove role from incorrect realm");
+        }
+    }
+
+    @Override
+    public boolean removeClient(RealmModel realm, String id) {
+        logger.tracef("removeClient(%s, %s)%s", realm, id, getShortStackTrace());
+
+        final ClientModel client = getClientById(realm, id);
+        if (client == null) return false;
+
+        session.users().preRemove(realm, client);
+        client.getRolesStream().forEach(this::removeRoleOnRealmDelete);
+        ClientEntity clientEntity = em.find(ClientEntity.class, id, LockModeType.PESSIMISTIC_WRITE);
+
+        session.getKeycloakSessionFactory().publish(new ClientModel.ClientRemovedEvent() {
+            @Override
+            public ClientModel getClient() {
+                return client;
+            }
+
+            @Override
+            public KeycloakSession getKeycloakSession() {
+                return session;
+            }
+        });
+
+        int countRemoved = em.createNamedQuery("deleteClientScopeClientMappingByClient")
+                .setParameter("clientId", clientEntity.getId())
+                .executeUpdate();
+        em.remove(clientEntity);  // i have no idea why, but this needs to come before deleteScopeMapping
+
+        try {
+            em.flush();
+        } catch (RuntimeException e) {
+            logger.errorv("Unable to delete client entity: {0} from realm {1}", client.getClientId(), realm.getName());
+            throw e;
+        }
+
+        return true;
+    }
 
     /**
      *

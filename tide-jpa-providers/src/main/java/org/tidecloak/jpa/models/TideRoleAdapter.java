@@ -99,7 +99,7 @@ public class TideRoleAdapter extends RoleAdapter {
     private void handleClientRoleProofs(RoleModel role, TideCompositeRoleMappingDraftEntity compositeRoleEntity) {
         if (role.getContainer() instanceof ClientModel) {
             RoleModel compositeRole = realm.getRoleById(getEntity().getId());
-            Stream<UserModel> users =  session.users().getRoleMembersStream(realm, compositeRole).map(user -> {
+            List<TideUserAdapter> users =  session.users().getRoleMembersStream(realm, compositeRole).map(user -> {
                 UserEntity userEntity = em.find(UserEntity.class, user.getId());
                 List<TideUserRoleMappingDraftEntity> userRecords = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
                         .setParameter("draftStatus", DraftStatus.ACTIVE)
@@ -111,7 +111,7 @@ public class TideRoleAdapter extends RoleAdapter {
                     return null;
                 }
                 return new TideUserAdapter(session, realm, em, userEntity);
-            });
+            }).toList();
 
             List<ClientModel> clientList = getUniqueClientList(role);
 

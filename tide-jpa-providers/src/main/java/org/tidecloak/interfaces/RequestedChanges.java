@@ -29,7 +29,10 @@ public class RequestedChanges {
     @JsonProperty("status")
     protected DraftStatus status;
 
-    public RequestedChanges(String action, ChangeSetType changeSetType, RequestType requestType, String clientId, ActionType actionType, String draftRecordId, List<RequestChangesUserRecord> userRecord, DraftStatus status) {
+    @JsonProperty("deleteStatus")
+    protected DraftStatus deleteStatus;
+
+    public RequestedChanges(String action, ChangeSetType changeSetType, RequestType requestType, String clientId, ActionType actionType, String draftRecordId, List<RequestChangesUserRecord> userRecord, DraftStatus status, DraftStatus deleteStatus) {
         this.action = action;
         this.requestType = requestType;
         this.changeSetType = changeSetType;
@@ -38,6 +41,8 @@ public class RequestedChanges {
         this.draftRecordId = draftRecordId;
         this.userRecord = userRecord;
         this.status = status;
+        this.deleteStatus = deleteStatus;
+
     }
 
     public String getAction() {
@@ -61,6 +66,9 @@ public class RequestedChanges {
     public DraftStatus getStatus() {
         return status;
     }
+    public DraftStatus getDeleteStatus() {
+        return deleteStatus;
+    }
     public void setAction(String action) {this.action = action; }
     public void setRequestType(RequestType requestType) {this.requestType = requestType; }
     public void setChangeSetType(ChangeSetType changeSetType) {this.changeSetType = changeSetType; }
@@ -74,5 +82,9 @@ public class RequestedChanges {
     public void setStatus(DraftStatus draftStatus) {
         this.status = draftStatus;
     }
+    public void setDeleteStatus(DraftStatus draftStatus) {
+        this.deleteStatus = draftStatus;
+    }
+
 
 }

@@ -172,13 +172,21 @@ public class TideAdminRealmResource {
     private void updateDraftStatus(DraftChangeSetRequest changeSet, Object draftRecordEntity) {
         switch (changeSet.getType()) {
             case USER_ROLE:
-                ((TideUserRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                if(changeSet.getActionType() == ActionType.CREATE){
+                    ((TideUserRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                } else if (changeSet.getActionType() == ActionType.DELETE){
+                    ((TideUserRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(DraftStatus.APPROVED);
+                }
                 break;
             case ROLE:
-                ((TideRoleDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                ((TideRoleDraftEntity) draftRecordEntity).setDeleteStatus(DraftStatus.APPROVED);
                 break;
             case COMPOSITE_ROLE:
-                ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                if(changeSet.getActionType() == ActionType.CREATE){
+                    ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                } else if (changeSet.getActionType() == ActionType.DELETE){
+                    ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(DraftStatus.APPROVED);
+                }
                 break;
             case CLIENT:
                 if (changeSet.getActionType() == ActionType.CREATE) {
@@ -234,7 +242,7 @@ public class TideAdminRealmResource {
                     .getResultList();
 
 
-            RequestedChanges requestChange = new RequestedChanges("",ChangeSetType.CLIENT, RequestType.CLIENT, client.getClientId(), c.getAction(), c.getId(), new ArrayList<>(), DraftStatus.DRAFT);
+            RequestedChanges requestChange = new RequestedChanges("",ChangeSetType.CLIENT, RequestType.CLIENT, client.getClientId(), c.getAction(), c.getId(), new ArrayList<>(), DraftStatus.DRAFT, DraftStatus.NULL);
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
                 requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), c.getClient().getClientId(), p.getProofDraft()));
@@ -260,8 +268,11 @@ public class TideAdminRealmResource {
 
     private List<RequestedChanges> processUserRoleMappings(EntityManager em) {
         List<RequestedChanges> changes = new ArrayList<>();
-        List<TideUserRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllUserRoleMappingsByRealmAndStatusNotEqualTo", TideUserRoleMappingDraftEntity.class)
+
+        // Get all pending changes
+        List<TideUserRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllPendingUserRoleMappingsByRealm", TideUserRoleMappingDraftEntity.class)
                 .setParameter("draftStatus", DraftStatus.ACTIVE)
+                .setParameter("deleteStatus", DraftStatus.ACTIVE)
                 .setParameter("realmId", realm.getId())
                 .getResultList();
 
@@ -275,9 +286,10 @@ public class TideAdminRealmResource {
             List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                     .setParameter("recordId", m.getId())
                     .getResultList();
-
-            String action = "Granting Role to User";
-            RequestedChanges requestChange = new RoleChangeRequest(realm.getRoleById(m.getRoleId()).getName(), action, ChangeSetType.USER_ROLE, RequestType.USER, clientModel.getClientId(), m.getAction(), m.getId(), new ArrayList<>(), m.getDraftStatus());
+            boolean isDeleteRequest = m.getDraftStatus() == DraftStatus.ACTIVE && (m.getDeleteStatus() != DraftStatus.ACTIVE || m.getDeleteStatus() != null);
+            String actionDescription = isDeleteRequest ? "Unassigning Role from User" : "Granting Role to User";
+            ActionType action = isDeleteRequest ? ActionType.DELETE : ActionType.CREATE;
+            RequestedChanges requestChange = new RoleChangeRequest(realm.getRoleById(m.getRoleId()).getName(), actionDescription, ChangeSetType.USER_ROLE, RequestType.USER, clientModel.getClientId(), action, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
                 requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
@@ -289,8 +301,9 @@ public class TideAdminRealmResource {
 
     private List<RequestedChanges> processCompositeRoleMappings(EntityManager em) {
         List<RequestedChanges> changes = new ArrayList<>();
-        List<TideCompositeRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllCompositeRoleMappingsByRealmAndStatusNotEqualTo", TideCompositeRoleMappingDraftEntity.class)
+        List<TideCompositeRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllCompositeRoleMappingsByRealm", TideCompositeRoleMappingDraftEntity.class)
                 .setParameter("draftStatus", DraftStatus.ACTIVE)
+                .setParameter("deleteStatus", DraftStatus.ACTIVE)
                 .setParameter("realmId", realm.getId())
                 .getResultList();
 
@@ -302,10 +315,12 @@ public class TideAdminRealmResource {
                     .setParameter("recordId", m.getId())
                     .setLockMode(LockModeType.PESSIMISTIC_WRITE)
                     .getResultList();
+            boolean isDeleteRequest = m.getDraftStatus() == DraftStatus.ACTIVE && (m.getDeleteStatus() != DraftStatus.ACTIVE || m.getDeleteStatus() != null);
+            String actionDescription = isDeleteRequest ? "Removing Role from Composite Role": "Granting Role to Composite Role";
+            ActionType action = isDeleteRequest ? ActionType.DELETE : ActionType.CREATE;
 
-            String action = "Granting Role to Composite Role";
-            RequestedChanges requestChange = new CompositeRoleChangeRequest(m.getComposite().getName(), m.getChildRole().getName(), action, ChangeSetType.COMPOSITE_ROLE, RequestType.ROLE, realm.getClientById(m.getComposite().getClientId()).getClientId(), m.getAction(), m.getId(), new ArrayList<>(), m.getDraftStatus());
-            proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getName(), p.getProofDraft())));
+            RequestedChanges requestChange = new CompositeRoleChangeRequest(m.getComposite().getName(), m.getChildRole().getName(), actionDescription, ChangeSetType.COMPOSITE_ROLE, RequestType.ROLE, realm.getClientById(m.getComposite().getClientId()).getClientId(), action, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
+            proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft())));
             changes.add(requestChange);
         }
         return changes;
@@ -327,7 +342,7 @@ public class TideAdminRealmResource {
                     .setLockMode(LockModeType.PESSIMISTIC_WRITE)
                     .getResultList();
             String action = "Deleting Role from Client";
-            RequestedChanges requestChange = new RoleChangeRequest(m.getRole().getName(), action, ChangeSetType.ROLE, RequestType.ROLE, realm.getClientById(m.getRole().getClientId()).getClientId(),m.getAction(), m.getId(), new ArrayList<>(), m.getDeleteStatus());
+            RequestedChanges requestChange = new RoleChangeRequest(m.getRole().getName(), action, ChangeSetType.ROLE, RequestType.ROLE, realm.getClientById(m.getRole().getClientId()).getClientId(), ActionType.DELETE, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
             proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft())));
 
             changes.add(requestChange);
@@ -615,7 +630,6 @@ public class TideAdminRealmResource {
             // Get all draft access proof details for this client.
             List<AccessProofDetailEntity> proofDetails = getProofDetailsByChangeSetType(em, client, entity, changeSetType);
             for (AccessProofDetailEntity proofDetail : proofDetails) {
-                System.out.println(proofDetail.getId());
                 em.lock(proofDetail, LockModeType.PESSIMISTIC_WRITE);
                 UserEntity user = proofDetail.getUser();
                 UserModel userModel = session.users().getUserById(realm, user.getId());
@@ -843,7 +857,6 @@ public class TideAdminRealmResource {
                         .anyMatch(x -> x.isClientRole() && Objects.equals(x.getContainer().getId(), client.getId()));
 
                 if (hasCommittedRole) {
-                    System.out.println("I HAVE A COMMITED ROLE FOR THIS CLIENT "+ client.getId());
                     String proof = proofDetail.getProofDraft();
 
                     TideUserRoleMappingDraftEntity userRoleDraft = em.find(TideUserRoleMappingDraftEntity.class, proofDetail.getRecordId());

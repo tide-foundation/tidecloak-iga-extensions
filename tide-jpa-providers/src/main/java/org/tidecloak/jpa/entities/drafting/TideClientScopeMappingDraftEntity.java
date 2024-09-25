@@ -10,6 +10,10 @@ import org.tidecloak.interfaces.DraftStatus;
         @NamedQuery(name="tideClientScopeClientMappingIdsByClient", query="select m.clientScopeId from TideClientScopeMappingDraftEntity m where m.clientId = :clientId AND m.clientScopeId = :clientScopeId AND draftStatus = :draftStatus"),
         @NamedQuery(name="deleteTideClientScopeClientMapping", query="delete from TideClientScopeMappingDraftEntity where clientId = :clientId and clientScopeId = :clientScopeId"),
         @NamedQuery(name="deleteTideClientScopeClientMappingByClient", query="delete from TideClientScopeMappingDraftEntity where clientId = :clientId"),
+        @NamedQuery(name="deleteTideClientScopeClientMappingByRealm",
+                query = "DELETE FROM TideClientScopeMappingDraftEntity r " +
+                        "WHERE r.clientId IN (SELECT c.id FROM ClientEntity c WHERE c.realmId = :realmId)"
+        ),
 })
 
 @Entity

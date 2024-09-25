@@ -8,6 +8,14 @@ import org.tidecloak.interfaces.DraftStatus;
 @NamedQueries({
         @NamedQuery(name="getCompositeRoleDraft", query="select r from TideCompositeRoleDraftEntity r where r.composite = :composite and r.draftStatus = :draftStatus"),
         @NamedQuery(name="deleteCompositeRole", query="delete from TideCompositeRoleDraftEntity r where r.composite = :composite"),
+        @NamedQuery(name="DeleteAllCompositeRoleDraftsByRealm",
+                query = "DELETE FROM TideCompositeRoleDraftEntity r " +
+                        "WHERE r.composite IN (SELECT r FROM RoleEntity r WHERE r.realmId = :realmId)"
+        ),
+        @NamedQuery(name="DeleteAllCompositeRoleDraftsByRole",
+                query = "DELETE FROM TideCompositeRoleDraftEntity r " +
+                        "WHERE r.composite.id = :roleId"
+        )
 })
 
 @Entity

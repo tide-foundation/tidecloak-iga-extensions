@@ -30,9 +30,24 @@ import org.tidecloak.interfaces.DraftStatus;
         @NamedQuery(
                 name="selectIdsForRemoval",
                 query="select r.id from TideCompositeRoleMappingDraftEntity r where r.composite = :role or r.childRole = :role"
+        ),
+        @NamedQuery(name="getAllCompositeRoleMappingsByRealm",
+                query = "SELECT r FROM TideCompositeRoleMappingDraftEntity r " +
+                        "WHERE (r.draftStatus != :draftStatus OR " +
+                        "(r.draftStatus = :draftStatus AND r.deleteStatus != :deleteStatus)) " +
+                        "AND r.composite IN (SELECT u FROM RoleEntity u WHERE u.realmId = :realmId)"
+        ),
+        @NamedQuery(
+                name = "DeleteAllCompositeRoleMappingsByRealm",
+                query = "DELETE FROM TideCompositeRoleMappingDraftEntity r " +
+                        "WHERE r.composite IN (SELECT role FROM RoleEntity role WHERE role.realmId = :realmId) " +
+                        "OR r.childRole IN (SELECT role FROM RoleEntity role WHERE role.realmId = :realmId)"
+        ),
+        @NamedQuery(name = "DeleteAllCompositeRoleMappingsByRoleId",
+                query = "DELETE FROM TideCompositeRoleMappingDraftEntity r " +
+                        "WHERE r.composite.id = :roleId " +
+                        "OR r.childRole.id = :roleId"
         )
-
-
 })
 
 @Entity

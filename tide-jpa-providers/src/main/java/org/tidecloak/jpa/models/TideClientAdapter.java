@@ -181,7 +181,6 @@ public class TideClientAdapter extends ClientAdapter {
                     }
                     return true;
                 }).collect(Collectors.toSet());
-                activeRoles.forEach(role -> System.out.println("WE ARE REMOVING THESE " + role.getName()));
                 util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, activeRoles, statusId, ChangeSetType.CLIENT, ActionType.DELETE, true);
             } catch (JsonProcessingException e) {
                 throw new RuntimeException(e);

@@ -33,6 +33,23 @@ import java.io.Serializable;
                         "   WHERE r.clientRole = true AND r.clientId = :clientId" +
                         ")"
         ),
+        @NamedQuery(name="getAllPendingUserRoleMappingsByRealm",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE (m.draftStatus != :draftStatus OR " +
+                        "(m.draftStatus = :draftStatus AND m.deleteStatus != :deleteStatus)) " +
+                        "AND m.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
+        ),
+
+        @NamedQuery(name="DeleteAllUserRoleMappingDraftsByRealm",
+                query = "DELETE FROM TideUserRoleMappingDraftEntity r " +
+                        "WHERE r.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
+        ),
+
+        @NamedQuery(name="DeleteAllUserRoleMappingDraftsByRole",
+                query = "DELETE FROM TideUserRoleMappingDraftEntity r " +
+                        "WHERE r.roleId = :roleId"
+        ),
+
 
 })
 //where mapping.user IN (select u from UserEntity u where u.realmId=:realmId)")

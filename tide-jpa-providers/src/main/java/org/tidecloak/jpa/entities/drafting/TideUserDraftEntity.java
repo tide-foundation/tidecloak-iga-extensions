@@ -11,6 +11,10 @@ import org.tidecloak.interfaces.DraftStatus;
         @NamedQuery(name="getTideUserDraftEntityByDraftStatusAndId", query="SELECT t FROM TideUserDraftEntity t WHERE t.id = :changesetId AND t.draftStatus = :draftStatus"),
         @NamedQuery(name="getTideUserDraftEntity", query="SELECT t FROM TideUserDraftEntity t WHERE t.user = :user"),
         @NamedQuery(name="deleteUserDrafts", query="delete from TideUserDraftEntity m where m.user = :user"),
+        @NamedQuery(name="DeleteAllTideUserDraftEntityByRealm",
+                query = "DELETE FROM TideUserDraftEntity r " +
+                        "WHERE r.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
+        ),
 })
 
 @Entity

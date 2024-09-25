@@ -2,6 +2,7 @@ package org.tidecloak.jpa.models;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
+import org.keycloak.Config;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.JpaUserProvider;
 import org.keycloak.models.jpa.entities.UserEntity;
@@ -74,6 +75,63 @@ public class TideUserProvider extends JpaUserProvider {
         em.flush();
     }
 
+    @Override
+    public void preRemove(RealmModel realm){
+        ClientModel masterAdminClient = realm.getMasterAdminClient();
+        RealmModel masterRealm =  this.session.realms().getRealmByName(Config.getAdminRealm());
+        ClientModel client = this.session.clients().getClientById(masterRealm, masterAdminClient.getId());
+        if (client != null){
+            client.getRolesStream().forEach(r -> {
+                em.createNamedQuery("DeleteAllCompositeRoleMappingsByRoleId")
+                        .setParameter("roleId", r.getId())
+                        .executeUpdate();
+                em.createNamedQuery("DeleteAllCompositeRoleDraftsByRole")
+                        .setParameter("roleId", r.getId())
+                        .executeUpdate();
+                em.createNamedQuery("DeleteRoleDraftByRole")
+                        .setParameter("id", r.getId())
+                        .executeUpdate();
+                em.createNamedQuery("DeleteAllUserRoleMappingDraftsByRole")
+                        .setParameter("roleId", r.getId())
+                        .executeUpdate();
+            });
+            em.createNamedQuery("DeleteAllAccessProofsByClient")
+                    .setParameter("clientId", client.getId())
+                    .executeUpdate();
+        }
+
+        em.createNamedQuery("deleteClientFullScopeStatusByRealm")
+                .setParameter("realmId", realm.getId())
+                .executeUpdate();
+        em.createNamedQuery("DeleteAllCompositeRoleDraftsByRealm")
+                .setParameter("realmId", realm.getId())
+                .executeUpdate();
+        em.createNamedQuery("DeleteAllCompositeRoleMappingsByRealm").setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("DeleteRoleDraftByRealm").setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("DeleteAllUserProofsByRealm").setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("DeleteAllAccessProofsByRealm").setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("DeleteAllTideUserDraftEntityByRealm").setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("DeleteAllUserRoleMappingDraftsByRealm").setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("deleteUserConsentClientScopesByRealm")
+                .setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("deleteUserConsentsByRealm")
+                .setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("deleteUserRoleMappingsByRealm")
+                .setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("deleteUserRequiredActionsByRealm")
+                .setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("deleteFederatedIdentityByRealm")
+                .setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("deleteCredentialsByRealm")
+                .setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("deleteUserAttributesByRealm")
+                .setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("deleteUserGroupMembershipByRealm")
+                .setParameter("realmId", realm.getId()).executeUpdate();
+        em.createNamedQuery("deleteUsersByRealm")
+                .setParameter("realmId", realm.getId()).executeUpdate();
+        
+    }
 
     /**
      *
@@ -92,7 +150,6 @@ public class TideUserProvider extends JpaUserProvider {
 
     @Override
     public Stream<UserModel> getRoleMembersStream(RealmModel realm, RoleModel role) {
-        System.out.println("HELLO GETTING ACTIVE MEMBERS ONLY HERE !!");
         Stream<UserModel> activeMembers = super.getRoleMembersStream(realm, role)
                 .map(user -> {
                     UserEntity userEntity = em.find(UserEntity.class, user.getId());
