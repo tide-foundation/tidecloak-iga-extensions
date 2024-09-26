@@ -119,9 +119,9 @@ public class TideUserAdapter extends UserAdapter {
 
                             // we expand it and create a new record
                             Set<RoleModel> compositeRoles = new HashSet<>();
-                            Set<RoleModel> draftCompositeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles,DraftStatus.DRAFT, ActionType.CREATE);
-                            Set<RoleModel> pendingCompositeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles,DraftStatus.PENDING, ActionType.CREATE);
-                            Set<RoleModel> approvedCompositeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles,DraftStatus.APPROVED, ActionType.CREATE);
+                            Set<RoleModel> draftCompositeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles,DraftStatus.DRAFT);
+                            Set<RoleModel> pendingCompositeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles,DraftStatus.PENDING);
+                            Set<RoleModel> approvedCompositeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles,DraftStatus.APPROVED);
                             compositeRoles.addAll(draftCompositeRoles);
                             compositeRoles.addAll(pendingCompositeRoles);
                             compositeRoles.addAll(approvedCompositeRoles);
@@ -295,6 +295,13 @@ public class TideUserAdapter extends UserAdapter {
         query.setParameter("user", this.getEntity());
         query.setParameter("draftStatus", status);
         query.setParameter("actionType", actionType);
+        return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
+    }
+
+    public Stream<RoleModel> getRoleMappingsStreamByStatus(DraftStatus status) {
+        TypedQuery<String> query = em.createNamedQuery("getUserRoleMappingDraftEntityIdsByStatus", String.class);
+        query.setParameter("user", this.getEntity());
+        query.setParameter("draftStatus", status);
         return closing(query.getResultStream().map(realm::getRoleById).filter(Objects::nonNull));
     }
 

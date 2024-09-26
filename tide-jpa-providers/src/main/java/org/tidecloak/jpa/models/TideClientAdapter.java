@@ -141,7 +141,7 @@ public class TideClientAdapter extends ClientAdapter {
                     return;
                 }
                 UserModel tideUser = TideRolesUtil.wrapUserModel(user, session, realm);
-                Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.ACTIVE, ActionType.CREATE);
+                Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.ACTIVE);
                 Set<RoleModel> roles = getAccess(activeRoles, client, client.getClientScopes(true).values().stream(), true);
                 util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, roles, statusId, ChangeSetType.CLIENT, ActionType.CREATE, true);
             } catch (JsonProcessingException e) {
@@ -175,7 +175,7 @@ public class TideClientAdapter extends ClientAdapter {
             }
             try {
                 UserModel tideUser = TideRolesUtil.wrapUserModel(user, session, realm);
-                Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.ACTIVE, ActionType.CREATE).stream().filter(role -> {
+                Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.ACTIVE).stream().filter(role -> {
                     if (role.isClientRole()) {
                         return !Objects.equals(((ClientModel) role.getContainer()).getClientId(), client.getClientId());
                     }

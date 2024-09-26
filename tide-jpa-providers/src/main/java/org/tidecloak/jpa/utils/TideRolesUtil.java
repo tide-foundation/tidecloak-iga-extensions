@@ -30,7 +30,7 @@ public class TideRolesUtil {
      *                the "visited" set itself will be updated as a result of this method call and all the tracked roles will be added to it
      * @return Stream of containing all of the composite roles and their components. Never returns {@code null}.
      */
-    private static Stream<RoleModel> expandCompositeRolesStream(RoleModel role, Set<RoleModel> visited, DraftStatus draftStatus, ActionType actionType) {
+    private static Stream<RoleModel> expandCompositeRolesStream(RoleModel role, Set<RoleModel> visited, DraftStatus draftStatus) {
         Stream.Builder<RoleModel> sb = Stream.builder();
 
         if (!visited.add(role)) {
@@ -52,7 +52,7 @@ public class TideRolesUtil {
 
                 // Check if the role can be cast to CustomRoleAdapter and has the method
                 if (role instanceof TideRoleAdapter) {
-                    compositesStream = ((TideRoleAdapter) current).getCompositesStreamByStatusAndAction(draftStatus, actionType);
+                    compositesStream = ((TideRoleAdapter) current).getCompositesStreamByStatus(draftStatus);
                 } else {
                     // Fallback to default composites if not a CustomRoleAdapter
                     compositesStream = current.getCompositesStream();
@@ -73,11 +73,11 @@ public class TideRolesUtil {
      * @param roles
      * @return new set with composite roles expanded
      */
-    public static Set<RoleModel> expandCompositeRoles(Set<TideRoleAdapter> roles, DraftStatus draftStatus, ActionType actionType) {
+    public static Set<RoleModel> expandCompositeRoles(Set<TideRoleAdapter> roles, DraftStatus draftStatus) {
         Set<RoleModel> visited = new HashSet<>();
 
         return roles.stream()
-                .flatMap(roleModel -> TideRolesUtil.expandCompositeRolesStream(roleModel, visited, draftStatus, actionType))
+                .flatMap(roleModel -> TideRolesUtil.expandCompositeRolesStream(roleModel, visited, draftStatus))
                 .collect(Collectors.toSet());
     }
 
@@ -85,39 +85,39 @@ public class TideRolesUtil {
      * @param roles
      * @return stream with composite roles expanded
      */
-    public static Stream<RoleModel> expandCompositeRolesStream(Stream<RoleModel> roles, DraftStatus draftStatus, ActionType actionType) {
+    public static Stream<RoleModel> expandCompositeRolesStream(Stream<RoleModel> roles, DraftStatus draftStatus) {
         Set<RoleModel> visited = new HashSet<>();
 
-        return roles.flatMap(roleModel -> TideRolesUtil.expandCompositeRolesStream(roleModel, visited, draftStatus, actionType));
+        return roles.flatMap(roleModel -> TideRolesUtil.expandCompositeRolesStream(roleModel, visited, draftStatus));
     }
 
     /**
      * @param user
      * @return all user role mappings including all groups of user. Composite roles will be expanded
      */
-    public static Set<RoleModel> getDeepUserRoleMappings(UserModel user, KeycloakSession session, RealmModel realm, EntityManager manager, DraftStatus draftStatus, ActionType actionType) {
+    public static Set<RoleModel> getDeepUserRoleMappings(UserModel user, KeycloakSession session, RealmModel realm, EntityManager manager, DraftStatus draftStatus) {
         Set<RoleModel> roleMappings;
         if (user instanceof TideUserAdapter) {
-            roleMappings = ((TideUserAdapter) user).getRoleMappingsStreamByStatusAndAction(draftStatus, actionType).map(x-> wrapRoleModel(x, session, realm)).collect(Collectors.toSet());
+            roleMappings = ((TideUserAdapter) user).getRoleMappingsStreamByStatus(draftStatus).map(x-> wrapRoleModel(x, session, realm)).collect(Collectors.toSet());
         }
         else{
             roleMappings = new HashSet<>();
             user.getRoleMappingsStream().collect(Collectors.toSet());
         }
-        user.getGroupsStream().forEach(group -> addGroupRoles(wrapGroupModel(group, session, realm), roleMappings, draftStatus, actionType));
+        user.getGroupsStream().forEach(group -> addGroupRoles(wrapGroupModel(group, session, realm), roleMappings, draftStatus));
         Set<TideRoleAdapter> wrappedRoles = roleMappings.stream().map(r -> ((TideRoleAdapter) wrapRoleModel(r, session, realm))).collect(Collectors.toSet());
-        return expandCompositeRoles(wrappedRoles, draftStatus, actionType);
+        return expandCompositeRoles(wrappedRoles, draftStatus);
     }
 
 
-    public static void addGroupRoles(GroupModel group, Set<RoleModel> roleMappings, DraftStatus draftStatus, ActionType actionType) {
+    public static void addGroupRoles(GroupModel group, Set<RoleModel> roleMappings, DraftStatus draftStatus) {
         if(group instanceof TideGroupAdapter){
-            roleMappings.addAll(((TideGroupAdapter) group).getRoleMappingsStreamByStatusAndAction(draftStatus, actionType).collect(Collectors.toSet()));
+            roleMappings.addAll(((TideGroupAdapter) group).getRoleMappingsStreamByStatus(draftStatus).collect(Collectors.toSet()));
         }else{
             roleMappings.addAll(group.getRoleMappingsStream().collect(Collectors.toSet()));
         }
         if (group.getParentId() == null) return;
-        addGroupRoles(group.getParent(), roleMappings, draftStatus, actionType);
+        addGroupRoles(group.getParent(), roleMappings, draftStatus);
     }
 
     public static GroupModel wrapGroupModel(GroupModel groupModel, KeycloakSession session, RealmModel realm) {

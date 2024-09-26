@@ -124,7 +124,7 @@ public final class TideAuthzProofUtil {
             RoleEntity roleEntity = em.getReference(RoleEntity.class, r.getId());
             return new TideRoleAdapter(session, realm, em, roleEntity);
         }).collect(Collectors.toSet());
-        Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.ACTIVE, ActionType.CREATE);
+        Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.ACTIVE);
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
         ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
         Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream(), isFullScopeAllowed);
@@ -134,7 +134,7 @@ public final class TideAuthzProofUtil {
     public void generateAndSaveProofDraft(ClientModel clientModel, UserModel userModel, Set<RoleModel> newRoleMappings, String recordId, ChangeSetType type, ActionType actionType, Boolean isFullScopeAllowed) throws JsonProcessingException {
         // Generate AccessToken based on the client and user information with openid scope
         AccessToken proof = generateAccessToken(clientModel, userModel, "openid");
-//        TideUserAdapter wrappedUser = new TideUserAdapter(session, realm, em, em.getReference(UserEntity.class, userModel.getId()));
+        //TideUserAdapter wrappedUser = new TideUserAdapter(session, realm, em, em.getReference(UserEntity.class, userModel.getId()));
         //Stream<RoleModel> currentRoles = wrappedUser.getRoleMappingsStreamByStatusAndAction(DraftStatus.ACTIVE, ActionType.CREATE);
         //newRoleMappings.addAll(currentRoles.collect(Collectors.toSet()));
         AccessDetails accessDetails = null;
@@ -147,7 +147,7 @@ public final class TideAuthzProofUtil {
                 RoleEntity roleEntity = em.getReference(RoleEntity.class, roles.getId());
                 return new TideRoleAdapter(session, realm, em, roleEntity);
             }).collect(Collectors.toSet());
-            Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.ACTIVE, ActionType.CREATE);
+            Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.ACTIVE);
             ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
             ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
             Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream(), isFullScopeAllowed);
@@ -337,7 +337,7 @@ public final class TideAuthzProofUtil {
             RoleEntity roleEntity = em.getReference(RoleEntity.class, r.getId());
             return new TideRoleAdapter(session, realm, em, roleEntity);
         }).collect(Collectors.toSet());
-        Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.ACTIVE, ActionType.CREATE);
+        Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.ACTIVE);
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
         ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
         Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream(), isFullScopeAllowed);
@@ -426,7 +426,7 @@ public final class TideAuthzProofUtil {
          return objectMapper.writeValueAsString(sortJsonNode(objectMapper.valueToTree(token)));
     }
 
-    public String removeAccesFromToken(String proof, AccessDetails accessDetails) throws JsonProcessingException {
+    public String removeAccessFromToken(String proof, AccessDetails accessDetails) throws JsonProcessingException {
         JsonNode currentProof = objectMapper.readTree(proof);
         JsonNode removedAccess = removeAccessFromJsonNode(currentProof, accessDetails);
         return cleanProofDraft(removedAccess);
