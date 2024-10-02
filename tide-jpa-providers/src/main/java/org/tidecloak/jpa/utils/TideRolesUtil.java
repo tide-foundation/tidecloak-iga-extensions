@@ -55,6 +55,7 @@ public class TideRolesUtil {
                     compositesStream = ((TideRoleAdapter) current).getCompositesStreamByStatus(draftStatus);
                 } else {
                     // Fallback to default composites if not a CustomRoleAdapter
+                    System.out.println("NOT A CUSTOME ROLE ADAPTER!!");
                     compositesStream = current.getCompositesStream();
                 }
 

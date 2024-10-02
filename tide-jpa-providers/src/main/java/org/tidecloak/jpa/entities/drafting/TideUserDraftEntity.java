@@ -1,5 +1,6 @@
 package org.tidecloak.jpa.entities.drafting;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import org.keycloak.models.jpa.entities.UserEntity;
 
 import jakarta.persistence.*;
@@ -28,6 +29,7 @@ public class TideUserDraftEntity {
 
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="USER_ID")
+    @JsonIgnoreProperties({"credentials", "federatedIdentities"})
     protected UserEntity user;
 
     @Enumerated(EnumType.STRING)

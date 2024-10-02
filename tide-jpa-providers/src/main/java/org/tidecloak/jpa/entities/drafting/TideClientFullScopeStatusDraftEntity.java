@@ -1,6 +1,9 @@
 package org.tidecloak.jpa.entities.drafting;
 
+import com.fasterxml.jackson.annotation.JsonIdentityInfo;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.ObjectIdGenerators;
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.tidecloak.interfaces.ActionType;
@@ -39,7 +42,7 @@ public class TideClientFullScopeStatusDraftEntity {
 
     @OneToOne(fetch = FetchType.LAZY)  // Defining the relationship
     @JoinColumn(name = "CLIENT", referencedColumnName = "ID")  // Ensure 'ID' is the correct primary key field name in ClientEntity
-    @JsonIgnoreProperties("attributes") // Ignore the attributes property in ClientEntity
+    @JsonIgnore
     private ClientEntity client;
 
     @Enumerated(EnumType.STRING)

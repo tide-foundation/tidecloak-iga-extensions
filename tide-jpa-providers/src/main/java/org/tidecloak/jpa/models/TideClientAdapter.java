@@ -9,6 +9,7 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.interfaces.DraftChangeSetRequest;
 import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
@@ -17,6 +18,7 @@ import org.tidecloak.jpa.utils.ProofGeneration;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -52,13 +54,21 @@ public class TideClientAdapter extends ClientAdapter {
                 .setParameter("client", entity)
                 .getResultList();
         if (usersInRealm.isEmpty() && statusDraft.isEmpty()) {
+            System.out.println("NO USER IN REALM!!! AND NEW CLIENT!!");
             createFullScopeStatusDraft(value);
             super.setFullScopeAllowed(value);
             return;
         }
         else if (!usersInRealm.isEmpty() && statusDraft.isEmpty()) {
+            System.out.println("USER IN REALM!!! BUT NEW CLIENT!!");
+            //TODO: We ch
             createFullScopeStatusDraft(false); // New clients defaults to restricted scope if there are users in the realm.
             return;
+        }
+        else if (!usersInRealm.isEmpty() && !statusDraft.isEmpty()){
+            //TODO: check if the users are affected, if no users affected we activated immediately and update any drafts
+
+
         }
         TideClientFullScopeStatusDraftEntity clientFullScopeStatuses = statusDraft.get(0);
         if (value) {
@@ -150,6 +160,7 @@ public class TideClientAdapter extends ClientAdapter {
         });
     }
     private void regenerateAccessProofForUsers(TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, String statusId, TideClientFullScopeStatusDraftEntity draft) {
+        //TODO: if restricted scope need to check who is affected
         List<UserModel> usersInClient = new ArrayList<>();
         client.getRolesStream().forEach(role -> session.users().getRoleMembersStream(realm, role).forEach(user -> {
             UserEntity userEntity = em.find(UserEntity.class, user.getId());
@@ -163,6 +174,10 @@ public class TideClientAdapter extends ClientAdapter {
                 usersInClient.add(user);
             }
         }));
+
+        if (usersInClient.isEmpty()){
+            
+        }
 
         usersInClient.forEach(user -> {
             // Find any pending changes
@@ -181,6 +196,7 @@ public class TideClientAdapter extends ClientAdapter {
                     }
                     return true;
                 }).collect(Collectors.toSet());
+                // why do i pass isFullScopeAllowed true here ?!?
                 util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, activeRoles, statusId, ChangeSetType.CLIENT, ActionType.DELETE, true);
             } catch (JsonProcessingException e) {
                 throw new RuntimeException(e);

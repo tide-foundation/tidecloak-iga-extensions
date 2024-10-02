@@ -1,5 +1,6 @@
 package org.tidecloak.jpa.entities;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.UserEntity;
 
@@ -23,6 +24,7 @@ public class UserClientAccessProofEntity {
     @Id
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="USER_ID")
+    @JsonIgnoreProperties({"credentials", "federatedIdentities"})
     protected UserEntity user;
 
     @Id

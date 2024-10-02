@@ -1,5 +1,6 @@
 package org.tidecloak.jpa.entities.drafting;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.interfaces.ActionType;
@@ -13,6 +14,7 @@ import java.io.Serializable;
         @NamedQuery(name="getAllUserRoleMappingsByStatusAndRealm", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
         @NamedQuery(name="getAllUserRoleMappingsByRealmAndStatusNotEqualTo", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus != :draftStatus AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
         @NamedQuery(name="getAllUserRoleMappingsByStatus", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus"),
+        @NamedQuery(name="getAllUserRoleMappingsByStatusNotEqualTo", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus != :draftStatus"),
         @NamedQuery(name="getUserRoleMappingStatus", query="select m from TideUserRoleMappingDraftEntity m where m.user = :user"),
         @NamedQuery(name="getUserRoleAssignmentDraftEntity", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId"),
         @NamedQuery(name="getUserRoleMappingDraftEntityByAction", query="SELECT m.roleId  FROM TideUserRoleMappingDraftEntity m WHERE m.user = :user and m.actionType = :actionType"),
@@ -65,6 +67,7 @@ public class TideUserRoleMappingDraftEntity {
 
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="USER_ID")
+    @JsonIgnoreProperties({"credentials", "federatedIdentities"})
     protected UserEntity user;
 
     @Column(name = "ROLE_ID")

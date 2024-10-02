@@ -22,4 +22,14 @@ public class DraftChangeSetRequest {
         return actionType;
     }
 
+    public void setType(ChangeSetType changeSetType) {
+        this.changeSetType = changeSetType;
+    }
+    public void setChangeSetId(String changeSetId) {
+        this.changeSetId = changeSetId;
+    }
+    public void setActionType(ActionType actionType) {
+        this.actionType = actionType;
+    }
+
 }
