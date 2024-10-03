@@ -794,19 +794,13 @@ public final class TideAuthzProofUtil {
                     RoleModel childRole = realm.getRoleById(compositeRoleMappingDraft.getChildRole().getId());
                     RoleModel compositeRole = realm.getRoleById(compositeRoleMappingDraft.getComposite().getId());
                     if (childRole.isClientRole() && !Objects.equals(childRole.getContainerId(), client.getId())) {
-                        System.out.println("ADDING CHILD ROLE!!");
-                        System.out.println(childRole.getContainerId());
-                        System.out.println(client.getId());
-                        System.out.println(client.getClientId());
                         roles.add(childRole);
                     }
                     if (compositeRole.isClientRole() && !Objects.equals(compositeRole.getContainerId(), client.getId())) {
-                        System.out.println("ADDING PARENT ROLE!!");
-                        System.out.println(compositeRole.getContainerId());
-                        System.out.println(client.getId());
-                        System.out.println(client.getClientId());
                         roles.add(compositeRole);
                     }
+                    // we want to keep the parent role, this is been deleted
+                    roles.remove(compositeRole);
                 }
 
 //                Set<RoleModel> rolesToAdd = ((TideUserAdapter) wrappedUser).getRoleMappingsStreamByStatusAndAction(DraftStatus.ACTIVE, ActionType.CREATE).filter(r -> r.isClientRole() && Objects.equals(r.getContainerId(), client.getId())).collect(Collectors.toSet());
@@ -833,6 +827,7 @@ public final class TideAuthzProofUtil {
             proofDetail.setProofDraft(newProof);
             return;
         }
+        //TODO: else if its create and its client then we add extra changesets
 
         String proof = proofDetail.getProofDraft();
         if (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() != null) {
