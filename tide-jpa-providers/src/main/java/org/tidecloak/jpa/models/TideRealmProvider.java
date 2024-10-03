@@ -11,6 +11,8 @@ import org.keycloak.models.jpa.JpaRealmProvider;
 import org.keycloak.models.jpa.RealmAdapter;
 import org.keycloak.models.jpa.entities.*;
 import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.models.utils.RepresentationToModel;
+import org.keycloak.representations.idm.ProtocolMapperRepresentation;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftStatus;
@@ -68,6 +70,9 @@ public class TideRealmProvider extends JpaRealmProvider {
     @Override
     public ClientModel addClient(RealmModel realm, String id, String clientId) {
         ClientModel clientModel = super.addClient(realm, id, clientId);
+        createAndAddProtocolMapper(clientModel, "tideuserkey", "tideUserKey", "Tide User Key");
+        createAndAddProtocolMapper(clientModel, "vuid", "vuid", "Tide vuid");
+        createAndAddRolesMapper(clientModel, "", "Tide IGA Role Mapper");
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
         return new TideClientAdapter(realm, em, session, clientEntity);
     }
@@ -444,4 +449,60 @@ public class TideRealmProvider extends JpaRealmProvider {
         return clientList.stream().distinct().collect(Collectors.toList());
     }
 
+    private static void createAndAddProtocolMapper(ClientModel clientModel,
+                                                  String claimName,
+                                                  String userAttribute,
+                                                  String mapperName) {
+
+        // Create a new ProtocolMapperRepresentation
+        ProtocolMapperRepresentation rep = new ProtocolMapperRepresentation();
+
+        // Set the mapper's name, protocol type, and protocol mapper type
+        rep.setName(mapperName);
+        rep.setProtocol("openid-connect");
+        rep.setProtocolMapper("oidc-usermodel-attribute-mapper");
+
+        // Set the configuration for the mapper dynamically
+        rep.setConfig(Map.of(
+                "claim.name", claimName,            // The dynamic claim name
+                "jsonType.label", "String",         // JSON type label (can be other types like boolean, etc.)
+                "id.token.claim", "true",           // Include in ID token
+                "access.token.claim", "true",       // Include in Access token
+                "userinfo.token.claim", "true",     // Include in UserInfo endpoint
+                "introspection.token.claim", "true",// Include in Introspection
+                "lightweight.claim", "true",        // Lightweight claim
+                "user.attribute", userAttribute     // The dynamic user attribute to map
+        ));
+
+        // Convert the ProtocolMapperRepresentation to ProtocolMapperModel
+        ProtocolMapperModel model = RepresentationToModel.toModel(rep);
+
+        // Add the protocol mapper to the client
+        clientModel.addProtocolMapper(model);
+    }
+
+    private static void createAndAddRolesMapper(ClientModel clientModel,
+                                               String claimName,
+                                               String mapperName) {
+        // Create a new ProtocolMapperRepresentation
+        ProtocolMapperRepresentation rep = new ProtocolMapperRepresentation();
+
+        // Set the mapper's name, protocol type, and protocol mapper type
+        rep.setName(mapperName);
+        rep.setProtocol("openid-connect");
+        rep.setProtocolMapper("tide-roles-mapper");
+
+        // Set the configuration for the mapper dynamically
+        rep.setConfig(Map.of(
+                "claim.name", claimName,              // The dynamic claim name (can be empty)
+                "access.token.claim", "true",         // Include in Access token
+                "lightweight.claim", "true"           // Lightweight claim
+        ));
+
+        // Convert the ProtocolMapperRepresentation to ProtocolMapperModel
+        ProtocolMapperModel model = RepresentationToModel.toModel(rep);
+
+        // Add the protocol mapper to the client
+        clientModel.addProtocolMapper(model);
+    }
 }

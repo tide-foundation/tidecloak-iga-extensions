@@ -699,84 +699,7 @@ public final class TideAuthzProofUtil {
                     .setParameter("user", user)
                     .setParameter("clientId", client.getId())
                     .getResultList();
-        } else if (changeSetType == ChangeSetType.COMPOSITE_ROLE || changeSetType == ChangeSetType.ROLE) {
-            return em.createNamedQuery("getProofDetailsByClient", AccessProofDetailEntity.class)
-                    .setParameter("clientId", client.getId())
-                    .getResultList();
-        }
-        else if (changeSetType == ChangeSetType.CLIENT) {
-            if (((TideClientFullScopeStatusDraftEntity) entity).getAction() == ActionType.CREATE) {
-                String clientId = ((TideClientFullScopeStatusDraftEntity) entity).getClient().getId();
-
-                List<String> recordIds = em.createNamedQuery("getProofDetailsByClient", AccessProofDetailEntity.class)
-                        .setParameter("clientId", clientId)
-                        .getResultStream().map(AccessProofDetailEntity::getRecordId).distinct().toList();
-
-                List<AccessProofDetailEntity> proofs = new ArrayList<>();
-                proofs.addAll(em.createNamedQuery("getProofDetailsForDraftByChangeSetType", AccessProofDetailEntity.class)
-                        .setParameter("changesetType", ChangeSetType.USER_ROLE)
-                        .getResultStream().filter(proof -> !recordIds.contains(proof.getRecordId())).toList());
-
-                proofs.addAll(em.createNamedQuery("getProofDetailsForDraftByChangeSetType", AccessProofDetailEntity.class)
-                        .setParameter("changesetType", ChangeSetType.COMPOSITE_ROLE)
-                        .getResultStream().filter(proof -> !recordIds.contains(proof.getRecordId())).toList());
-
-                proofs.addAll(em.createNamedQuery("getProofDetailsForDraftByChangeSetType", AccessProofDetailEntity.class)
-                        .setParameter("changesetType", ChangeSetType.ROLE)
-                        .getResultStream().filter(proof -> !recordIds.contains(proof.getRecordId())).toList());
-
-                List<AccessProofDetailEntity> uniqueProofs = proofs.stream()
-                        .collect(Collectors.collectingAndThen(
-                                Collectors.toMap(
-                                        AccessProofDetailEntity::getUser,
-                                        e -> e,
-                                        (e1, e2) -> e1 // If there are duplicates, keep the first one
-                                ),
-                                map -> new ArrayList<>(map.values())
-                        ));
-                for (AccessProofDetailEntity t : uniqueProofs) {
-
-                    if (t.getChangesetType() == ChangeSetType.USER_ROLE) {
-                        UserModel user = session.users().getUserById(realm, t.getUser().getId());
-                        TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-
-                        TideUserRoleMappingDraftEntity role = em.find(TideUserRoleMappingDraftEntity.class, t.getRecordId());
-                        Set<RoleModel> roles = new HashSet<>();
-                        RoleModel roleModel = realm.getRoleById(role.getRoleId());
-                        if (roleModel != null){
-                            roles.add(roleModel);
-                        }
-
-                        util.generateAndSaveProofDraft(client, user, roles, t.getRecordId(), ChangeSetType.USER_ROLE, ActionType.CREATE, true);
-
-                    } else if ( t.getChangesetType() == ChangeSetType.COMPOSITE_ROLE) {
-                        UserModel user = session.users().getUserById(realm, t.getUser().getId());
-                        TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-
-                        TideCompositeRoleMappingDraftEntity role = em.find(TideCompositeRoleMappingDraftEntity.class, t.getRecordId());
-                        Set<RoleModel> roles = new HashSet<>();
-                        RoleModel roleModel = realm.getRoleById(role.getChildRole().getId());
-                        if (roleModel != null){
-                            roles.add(roleModel);
-                        }
-                        util.generateAndSaveProofDraft(client, user, roles, t.getRecordId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE, true);
-
-                    } else if ( t.getChangesetType() == ChangeSetType.ROLE) {
-                        UserModel user = session.users().getUserById(realm, t.getUser().getId());
-                        TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-
-                        TideRoleDraftEntity role = em.find(TideRoleDraftEntity.class, t.getRecordId());
-                        Set<RoleModel> roles = new HashSet<>();
-                        RoleModel roleModel = realm.getRoleById(role.getRole().getId());
-                        if (roleModel != null){
-                            roles.add(roleModel);
-                        }
-                        util.generateAndSaveProofDraft(client, user, roles, t.getRecordId(), ChangeSetType.ROLE, ActionType.DELETE, true);
-
-                    }
-
-                }
-            }
+        } else if (changeSetType == ChangeSetType.COMPOSITE_ROLE || changeSetType == ChangeSetType.ROLE || changeSetType == ChangeSetType.CLIENT) {
             return em.createNamedQuery("getProofDetailsByClient", AccessProofDetailEntity.class)
                     .setParameter("clientId", client.getId())
                     .getResultList();
@@ -806,17 +729,7 @@ public final class TideAuthzProofUtil {
                         }
                         roles.add(realm.getRoleById(userRoleDraft.getRoleId()));
                     }
-                    var uniqRoles = roles.stream().distinct().filter(Objects::nonNull).collect(Collectors.toSet());
-                    AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, uniqRoles, true);
-                    String updatedProof = tideAuthzProofUtil.removeAccessFromToken(proof, accessDetails);
-                    String newProof = tideAuthzProofUtil.removeAudienceFromToken(updatedProof);
-                    proofDetail.setProofDraft(newProof);
-                } else {
-                    // Remove the proof detail if this no longer affects the client
-                    em.remove(proofDetail);
-                    em.flush();
                 }
-                return;
             }
 
             if (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() != null) {

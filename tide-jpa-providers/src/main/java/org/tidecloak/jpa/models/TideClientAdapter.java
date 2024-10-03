@@ -54,27 +54,25 @@ public class TideClientAdapter extends ClientAdapter {
                 .setParameter("client", entity)
                 .getResultList();
         if (usersInRealm.isEmpty() && statusDraft.isEmpty()) {
-            System.out.println("NO USER IN REALM!!! AND NEW CLIENT!!");
             createFullScopeStatusDraft(value);
             super.setFullScopeAllowed(value);
             return;
         }
         else if (!usersInRealm.isEmpty() && statusDraft.isEmpty()) {
-            System.out.println("USER IN REALM!!! BUT NEW CLIENT!!");
-            //TODO: We ch
             createFullScopeStatusDraft(false); // New clients defaults to restricted scope if there are users in the realm.
             return;
         }
-        else if (!usersInRealm.isEmpty() && !statusDraft.isEmpty()){
-            //TODO: check if the users are affected, if no users affected we activated immediately and update any drafts
-
-
-        }
         TideClientFullScopeStatusDraftEntity clientFullScopeStatuses = statusDraft.get(0);
-        if (value) {
-            handleFullScopeEnabled(clientFullScopeStatuses, util, usersInRealm, client);
-        } else {
-            handleFullScopeDisabled(clientFullScopeStatuses, util, usersInRealm, client);
+        try{
+            if (value) {
+                handleFullScopeEnabled(clientFullScopeStatuses, util, usersInRealm, client);
+
+            } else {
+                handleFullScopeDisabled(clientFullScopeStatuses, util, usersInRealm, client);
+            }
+
+        } catch (NoSuchAlgorithmException | JsonProcessingException e) {
+            throw new RuntimeException(e);
         }
     }
     private void createFullScopeStatusDraft(boolean value) {
@@ -92,14 +90,14 @@ public class TideClientAdapter extends ClientAdapter {
         em.persist(draft);
         em.flush();
     }
-    private void handleFullScopeEnabled(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client) {
+    private void handleFullScopeEnabled(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client) throws NoSuchAlgorithmException, JsonProcessingException {
         if (clientFullScopeStatuses.getFullScopeEnabled() == DraftStatus.APPROVED) {
             approveFullScope(clientFullScopeStatuses, true);
         } else {
             startDraftApproval(clientFullScopeStatuses, util, usersInRealm, client, true);
         }
     }
-    private void handleFullScopeDisabled(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client) {
+    private void handleFullScopeDisabled(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client) throws NoSuchAlgorithmException, JsonProcessingException {
         if (clientFullScopeStatuses.getFullScopeDisabled() == DraftStatus.APPROVED) {
             approveFullScope(clientFullScopeStatuses, false);
         } else {
@@ -120,19 +118,12 @@ public class TideClientAdapter extends ClientAdapter {
         em.flush();
 
     }
-    private void startDraftApproval(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, boolean enable) {
+    private void startDraftApproval(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, boolean enable) throws NoSuchAlgorithmException, JsonProcessingException {
         if (enable && clientFullScopeStatuses.getFullScopeEnabled() == DraftStatus.ACTIVE) {
             return;
         } else if (!enable && clientFullScopeStatuses.getFullScopeDisabled() == DraftStatus.ACTIVE) {
             return;
         }
-        if (enable) {
-            clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.DRAFT);
-        } else {
-            clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.DRAFT);
-        }
-        em.persist(clientFullScopeStatuses);
-        em.flush();
         if (enable) {
             createProofDraftsForUsers(util, usersInRealm, client, clientFullScopeStatuses.getId(), clientFullScopeStatuses);
         } else {
@@ -140,6 +131,9 @@ public class TideClientAdapter extends ClientAdapter {
         }
     }
     private void createProofDraftsForUsers(TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, String statusId, TideClientFullScopeStatusDraftEntity draft) {
+        draft.setFullScopeEnabled(DraftStatus.DRAFT);
+        em.persist(draft);
+        em.flush();
         usersInRealm.forEach(user -> {
             try {
                 // Find any pending changes
@@ -159,8 +153,7 @@ public class TideClientAdapter extends ClientAdapter {
             }
         });
     }
-    private void regenerateAccessProofForUsers(TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, String statusId, TideClientFullScopeStatusDraftEntity draft) {
-        //TODO: if restricted scope need to check who is affected
+    private void regenerateAccessProofForUsers(TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, String statusId, TideClientFullScopeStatusDraftEntity draft) throws NoSuchAlgorithmException, JsonProcessingException {
         List<UserModel> usersInClient = new ArrayList<>();
         client.getRolesStream().forEach(role -> session.users().getRoleMembersStream(realm, role).forEach(user -> {
             UserEntity userEntity = em.find(UserEntity.class, user.getId());
@@ -174,10 +167,21 @@ public class TideClientAdapter extends ClientAdapter {
                 usersInClient.add(user);
             }
         }));
+        if(usersInClient.isEmpty()){
+            super.setFullScopeAllowed(false);
+            createFullScopeStatusDraft(false);
+            DraftChangeSetRequest draftChangeSetRequest = new DraftChangeSetRequest();
+            draftChangeSetRequest.setType(ChangeSetType.CLIENT);
+            draftChangeSetRequest.setActionType(ActionType.DELETE);
+            draftChangeSetRequest.setChangeSetId(draft.getId());
 
-        if (usersInClient.isEmpty()){
-            
+            util.checkAndUpdateProofRecords(draftChangeSetRequest, draft, ChangeSetType.CLIENT, em);
+            return;
         }
+
+        draft.setFullScopeDisabled(DraftStatus.DRAFT);
+        em.persist(draft);
+        em.flush();
 
         usersInClient.forEach(user -> {
             // Find any pending changes
@@ -196,7 +200,6 @@ public class TideClientAdapter extends ClientAdapter {
                     }
                     return true;
                 }).collect(Collectors.toSet());
-                // why do i pass isFullScopeAllowed true here ?!?
                 util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, activeRoles, statusId, ChangeSetType.CLIENT, ActionType.DELETE, true);
             } catch (JsonProcessingException e) {
                 throw new RuntimeException(e);
@@ -205,161 +208,9 @@ public class TideClientAdapter extends ClientAdapter {
     }
 
     @Override
-    public void deleteScopeMapping(RoleModel role) {
-        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-        ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
-
-        // get all users who have this role for this client.
-        List<UserModel> usersWithRole = new ArrayList<>();
-        session.users().getRoleMembersStream(realm, role).forEach(user -> {
-            if (!usersWithRole.contains(user)) {
-                usersWithRole.add(user);
-            }
-        });
-
-        super.deleteScopeMapping(role);
-
-        proofGeneration.regenerateProofForClient(client, usersWithRole);
-
-    }
-
-    @Override
     public ProtocolMapperModel addProtocolMapper(ProtocolMapperModel model) {
-        ProtocolMapperModel protocolMapperModel = super.addProtocolMapper(model);
+        return super.addProtocolMapper(model);
 
-        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-        ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
-        Stream<RoleModel> rolesStream = client.getRolesStream();
-
-        // get all users who have roles for this client.
-        List<UserModel> usersInClient = new ArrayList<>();
-        rolesStream.forEach(role -> {
-            session.users().getRoleMembersStream(realm, role).forEach(user -> {
-                if (!usersInClient.contains(user)) {
-                    usersInClient.add(user);
-                }
-            });
-        });
-
-        proofGeneration.regenerateProofForClient(client, usersInClient);
-        return protocolMapperModel;
-
-    }
-
-
-    @Override
-    public void removeProtocolMapper(ProtocolMapperModel mapping) {
-        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-        ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
-        Stream<RoleModel> rolesStream = client.getRolesStream();
-
-        // get all users who have roles for this client.
-        List<UserModel> usersInClient = new ArrayList<>();
-        rolesStream.forEach(role -> {
-            session.users().getRoleMembersStream(realm, role).forEach(user -> {
-                if (!usersInClient.contains(user)) {
-                    usersInClient.add(user);
-                }
-            });
-        });
-
-        super.removeProtocolMapper(mapping);
-
-        proofGeneration.regenerateProofForClient(client, usersInClient);
-
-    }
-
-    @Override
-    public void updateProtocolMapper(ProtocolMapperModel mapping) {
-        super.updateProtocolMapper(mapping);
-
-        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-        ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
-        Stream<RoleModel> rolesStream = client.getRolesStream();
-
-        // get all users who have roles for this client.
-        List<UserModel> usersInClient = new ArrayList<>();
-        rolesStream.forEach(role -> {
-            session.users().getRoleMembersStream(realm, role).forEach(user -> {
-                if (!usersInClient.contains(user)) {
-                    usersInClient.add(user);
-                }
-            });
-        });
-
-        proofGeneration.regenerateProofForClient(client, usersInClient);
-    }
-
-    @Override
-    public void addClientScopes(Set<ClientScopeModel> clientScopes, boolean defaultScope) {
-        super.addClientScopes(clientScopes, defaultScope);
-        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-        ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
-        Stream<RoleModel> rolesStream = client.getRolesStream();
-
-        // get all users who have roles for this client.
-        List<UserModel> usersInClient = new ArrayList<>();
-        rolesStream.forEach(role -> {
-            session.users().getRoleMembersStream(realm, role).forEach(user -> {
-                if (!usersInClient.contains(user)) {
-                    usersInClient.add(user);
-                }
-            });
-        });
-
-        proofGeneration.regenerateProofForClient(client, usersInClient);
-    }
-
-    @Override
-    public void removeClientScope(ClientScopeModel clientScope) {
-        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-        ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
-        Stream<RoleModel> rolesStream = client.getRolesStream();
-
-        // get all users who have roles for this client.
-        List<UserModel> usersInClient = new ArrayList<>();
-        rolesStream.forEach(role -> {
-            session.users().getRoleMembersStream(realm, role).forEach(user -> {
-                if (!usersInClient.contains(user)) {
-                    usersInClient.add(user);
-                }
-            });
-        });
-
-        super.removeClientScope(clientScope);
-
-        proofGeneration.regenerateProofForClient(client, usersInClient);
-    }
-
-    @Override
-    public void updateClient() {
-        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-        session.getKeycloakSessionFactory().publish(new ClientModel.ClientUpdatedEvent() {
-
-            @Override
-            public ClientModel getUpdatedClient() {
-                return TideClientAdapter.this;
-            }
-
-            @Override
-            public KeycloakSession getKeycloakSession() {
-                return session;
-            }
-        });
-
-        ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
-        Stream<RoleModel> rolesStream = client.getRolesStream();
-        // get all users who have roles for this client.
-        List<UserModel> usersInClient = new ArrayList<>();
-        rolesStream.forEach(role -> {
-            session.users().getRoleMembersStream(realm, role).forEach(user -> {
-                if (!usersInClient.contains(user)) {
-                    usersInClient.add(user);
-                }
-            });
-        });
-
-        proofGeneration.regenerateProofForClient(client, usersInClient);
     }
 
     @Override
