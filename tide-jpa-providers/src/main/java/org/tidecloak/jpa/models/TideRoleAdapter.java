@@ -44,27 +44,35 @@ public class TideRoleAdapter extends RoleAdapter {
         List<TideCompositeRoleMappingDraftEntity> entity = findCompositeRoleMappingDrafts(getEntity(), roleEntity, DraftStatus.ACTIVE);
 
         if (entity == null || entity.isEmpty()) {
+            System.out.println("Uncommitted role");
             handleUncommittedCompositeRole(role, roleEntity);
             return;
         }
 
         TideCompositeRoleMappingDraftEntity committedEntity = entity.get(0);
 
-        List<TideUserAdapter> activeUsers =  session.users().getRoleMembersStream(realm, roleModel).map(user -> {
+        List<TideUserAdapter> activeUsers =  session.users().getRoleMembersStream(realm, realm.getRoleById(getEntity().getId())).map(user -> {
             UserEntity userEntity = em.find(UserEntity.class, user.getId());
             List<TideUserRoleMappingDraftEntity> userRecords = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
                     .setParameter("draftStatus", DraftStatus.ACTIVE)
                     .setParameter("user", userEntity)
-                    .setParameter("roleId", roleModel.getId())
+                    .setParameter("roleId", this.getEntity().getId())
                     .getResultList();
 
+
             if(userRecords == null || userRecords.isEmpty()){
+                System.out.println("apparently empty?");
                 return null;
             }
             return new TideUserAdapter(session, realm, em, userEntity);
         }).filter(Objects::nonNull).toList();
 
+        System.out.println( this.getEntity().getName());
+        System.out.println( this.getEntity().getId());
+        System.out.println(activeUsers.isEmpty());
+        System.out.println(committedEntity.getDeleteStatus() == DraftStatus.ACTIVE);
         if(activeUsers.isEmpty() || committedEntity.getDeleteStatus() == DraftStatus.ACTIVE){
+
             var draft = entity.get(0);
             var draftChangeSetRequest = new DraftChangeSetRequest();
             draftChangeSetRequest.setChangeSetId(draft.getId());

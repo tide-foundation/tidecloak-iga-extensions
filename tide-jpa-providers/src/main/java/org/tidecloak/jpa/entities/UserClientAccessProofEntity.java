@@ -24,7 +24,7 @@ public class UserClientAccessProofEntity {
     @Id
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="USER_ID")
-    @JsonIgnoreProperties({"credentials", "federatedIdentities"})
+    @JsonIgnoreProperties({"credentials", "federatedIdentities", "attributes"})
     protected UserEntity user;
 
     @Id

@@ -67,7 +67,7 @@ public class TideUserRoleMappingDraftEntity {
 
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="USER_ID")
-    @JsonIgnoreProperties({"credentials", "federatedIdentities"})
+    @JsonIgnoreProperties({"credentials", "federatedIdentities", "attributes"})
     protected UserEntity user;
 
     @Column(name = "ROLE_ID")
