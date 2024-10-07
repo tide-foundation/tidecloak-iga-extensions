@@ -373,35 +373,30 @@ public class TideAdminRealmResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/commit")
     public Response commitChangeSet(DraftChangeSetRequest change) throws NoSuchAlgorithmException, JsonProcessingException {
-        try{
-            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
 
-                ActionType action = change.getActionType();
-                ChangeSetType type = change.getType();
-                List<?> mappings = getMappings(em, change, type, action);
+        ActionType action = change.getActionType();
+        ChangeSetType type = change.getType();
+        List<?> mappings = getMappings(em, change, type, action);
 
-                if (mappings == null || mappings.isEmpty()) {
-                    return Response.status(Response.Status.NOT_FOUND).entity("Change request was not found.").build();
-                }
-                Object mapping = mappings.get(0);
-                em.lock(mapping, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
-
-                switch (type) {
-                    case USER_ROLE -> processUserRoleMapping(change, (TideUserRoleMappingDraftEntity) mapping, em, action);
-                    case COMPOSITE_ROLE -> processCompositeRoleMapping(change, (TideCompositeRoleMappingDraftEntity) mapping, em, action);
-                    case ROLE -> processRole(change, (TideRoleDraftEntity) mapping, em, action);
-                    case USER -> processUser(change, (TideUserDraftEntity) mapping, em, action);
-                    case CLIENT -> processClient(change, (TideClientFullScopeStatusDraftEntity) mapping, em, action);
-                }
-
-                em.flush(); // Persist changes to the database
-            // Return success message after approving the change sets
-            return Response.ok("Change sets approved").build();
-
-        }catch(RuntimeException e){
-            return Response.status(Response.Status.BAD_REQUEST).entity(e.getMessage()).build();
+        if (mappings == null || mappings.isEmpty()) {
+            return Response.status(Response.Status.NOT_FOUND).entity("Change request was not found.").build();
         }
+        Object mapping = mappings.get(0);
+        em.lock(mapping, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
+
+        switch (type) {
+            case USER_ROLE -> processUserRoleMapping(change, (TideUserRoleMappingDraftEntity) mapping, em, action);
+            case COMPOSITE_ROLE -> processCompositeRoleMapping(change, (TideCompositeRoleMappingDraftEntity) mapping, em, action);
+            case ROLE -> processRole(change, (TideRoleDraftEntity) mapping, em, action);
+            case USER -> processUser(change, (TideUserDraftEntity) mapping, em, action);
+            case CLIENT -> processClient(change, (TideClientFullScopeStatusDraftEntity) mapping, em, action);
+        }
+
+        em.flush(); // Persist changes to the database
+        // Return success message after approving the change sets
+        return Response.ok("Change sets approved").build();
 
     }
 

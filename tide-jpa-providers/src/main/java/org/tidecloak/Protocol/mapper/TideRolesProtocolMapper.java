@@ -44,6 +44,18 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         RealmModel realm = session.getContext().getRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         UserModel tideUser = TideRolesUtil.wrapUserModel(userSession.getUser(), session, realm);
+        String tideUserKey = tideUser.getFirstAttribute("tideuserkey");
+        String vuid = tideUser.getFirstAttribute("vuid");
+
+        // 2. Set these attributes as claims in the token
+        if (tideUserKey != null) {
+            token.getOtherClaims().put("tideuserkey", tideUserKey);
+        }
+
+        if (vuid != null) {
+            token.getOtherClaims().put("vuid", vuid);
+        }
+
         Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.ACTIVE);
         ClientModel clientModel = session.getContext().getClient();
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());

@@ -169,7 +169,7 @@ public class TideClientAdapter extends ClientAdapter {
         }));
         if(usersInClient.isEmpty()){
             super.setFullScopeAllowed(false);
-            createFullScopeStatusDraft(false);
+            approveFullScope(draft, false);
             DraftChangeSetRequest draftChangeSetRequest = new DraftChangeSetRequest();
             draftChangeSetRequest.setType(ChangeSetType.CLIENT);
             draftChangeSetRequest.setActionType(ActionType.DELETE);
