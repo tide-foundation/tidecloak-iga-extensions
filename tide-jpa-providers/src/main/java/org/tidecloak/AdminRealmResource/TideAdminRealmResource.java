@@ -16,6 +16,10 @@ import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
+import org.midgard.Midgard;
+import org.midgard.models.ModelRequest;
+import org.midgard.models.SignRequestSettingsMidgard;
+import org.midgard.models.SignatureResponse;
 import org.tidecloak.Protocol.mapper.TideRolesProtocolMapper;
 import org.tidecloak.interfaces.*;
 import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakDraftChangeSetRequest;
@@ -132,11 +136,35 @@ public class TideAdminRealmResource {
         proofDetails = getProofDetails(em, getEntityId(draftRecordEntity));
 
         try {
+            System.out.println("HELLOO SASHA");
             // TODO: send stuff to be signed by admin\s, have a check to see if this request was the last signature needed and update draft records to "APPROVE" status
             // update from "DRAFT" to "PENDING" if its the first signature.
             // leave as "PENDING" if still needing more signatures
             // Process the draft record entity
             String draftRecord = processDraftRecord(draftRecordEntity);
+            var idp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+            String currentSecretKeys = (String) idp.getConfig().get("clientSecret");
+            ObjectMapper objectMapper = new ObjectMapper();
+            SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
+            System.out.println("THIS IS WHAT IM SIGNING  " +proofDetails.get(0));
+
+            SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
+            settings.VVKId = (String) idp.getConfig().get("vvkId");
+            settings.HomeOrkUrl = (String) idp.getConfig().get("homeORKurl");
+            settings.PayerPublicKey = (String) idp.getConfig().get("payerPub");
+            settings.ObfuscatedVendorPublicKey = (String) idp.getConfig().get("obfGVVK");
+            settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
+            settings.Threshold_T = 3;
+            settings.Threshold_N = 5;
+            ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", proofDetails.get(0).getBytes());
+            System.out.println(settings.ToString());
+            req.SetAuthorization(
+                    Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
+            );
+
+            SignatureResponse response = Midgard.SignModel(settings, req);
+
+            System.out.println(response.Signatures[0]);
 
             // Update the draft status
             updateDraftStatus(changeSet, draftRecordEntity);
@@ -147,7 +175,7 @@ public class TideAdminRealmResource {
 
             return Response.ok("Change set signed successfully").build();
         } catch (JsonProcessingException e) {
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Error processing JSON").build();
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Error processing JSON " + e.getMessage()).build();
         } catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
 
@@ -1089,5 +1117,17 @@ public class TideAdminRealmResource {
                 .getResultStream()
                 .map(AccessProofDetailEntity::getProofDraft)
                 .collect(Collectors.toList());
+    }
+
+    public static class SecretKeys {
+        public String activeVrk;
+        public String pendingVrk;
+        public String VZK;
+        public List<String> history = new ArrayList<>();
+
+        // Method to add a new entry to the history
+        public void addToHistory(String newEntry) {
+            history.add(newEntry);
+        }
     }
 }
