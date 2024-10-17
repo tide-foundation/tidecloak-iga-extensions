@@ -12,22 +12,18 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
-import org.keycloak.models.jpa.entities.ClientEntity;
-import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.ModelRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
-import org.tidecloak.Protocol.mapper.TideRolesProtocolMapper;
 import org.tidecloak.interfaces.*;
 import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakDraftChangeSetRequest;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.SignatureEntry;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.jpa.models.TideClientAdapter;
-import org.tidecloak.jpa.models.TideUserAdapter;
-import org.tidecloak.jpa.utils.AccessDetails;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
@@ -126,18 +122,18 @@ public class TideAdminRealmResource {
     public Response signChangeset(DraftChangeSetRequest changeSet) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         Object draftRecordEntity;
-        List<String> proofDetails;
+        List<AccessProofDetailEntity> proofDetails;
 
         // Fetch the draft record entity and proof details based on the change set type
         draftRecordEntity = fetchDraftRecordEntity(em, changeSet);
         if (draftRecordEntity == null) {
             return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
         }
-        proofDetails = getProofDetails(em, getEntityId(draftRecordEntity));
+        proofDetails = getAccessProofs(em, getEntityId(draftRecordEntity));
 
         try {
-            System.out.println("HELLOO SASHA");
             // TODO: send stuff to be signed by admin\s, have a check to see if this request was the last signature needed and update draft records to "APPROVE" status
+            // TODO: currently on signed by VRK, NO MULTI ADMINS YET!!!
             // update from "DRAFT" to "PENDING" if its the first signature.
             // leave as "PENDING" if still needing more signatures
             // Process the draft record entity
@@ -146,7 +142,6 @@ public class TideAdminRealmResource {
             String currentSecretKeys = (String) idp.getConfig().get("clientSecret");
             ObjectMapper objectMapper = new ObjectMapper();
             SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
-            System.out.println("THIS IS WHAT IM SIGNING  " +proofDetails.get(0));
 
             SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
             settings.VVKId = (String) idp.getConfig().get("vvkId");
@@ -156,15 +151,26 @@ public class TideAdminRealmResource {
             settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
             settings.Threshold_T = 3;
             settings.Threshold_N = 5;
-            ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", proofDetails.get(0).getBytes());
-            System.out.println(settings.ToString());
-            req.SetAuthorization(
-                    Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
-            );
 
-            SignatureResponse response = Midgard.SignModel(settings, req);
+            String tideUserKey = auth.adminAuth().getUser().getFirstAttribute("tideUserKey");
+            if(tideUserKey == null){
+                return Response.ok("User is not authorised to sign this request").build();
+            }
+            proofDetails.forEach(p -> {
+                try {
+                    ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", p.getProofDraft().getBytes());
+                    req.SetAuthorization(
+                            Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
+                    );
+                    SignatureResponse response = Midgard.SignModel(settings, req);
+                    SignatureEntry signatureEntry = new SignatureEntry(response.Signatures[0], tideUserKey);
+                    p.addSignature(signatureEntry);
+                    em.merge(p);
 
-            System.out.println(response.Signatures[0]);
+                } catch (JsonProcessingException e) {
+                    throw new RuntimeException(e);
+                }
+            });
 
             // Update the draft status
             updateDraftStatus(changeSet, draftRecordEntity);
@@ -1116,6 +1122,13 @@ public class TideAdminRealmResource {
                 .setParameter("recordId", recordId)
                 .getResultStream()
                 .map(AccessProofDetailEntity::getProofDraft)
+                .collect(Collectors.toList());
+    }
+
+    private List<AccessProofDetailEntity> getAccessProofs(EntityManager em, String recordId) {
+        return em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                .setParameter("recordId", recordId)
+                .getResultStream()
                 .collect(Collectors.toList());
     }
 

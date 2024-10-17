@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import org.keycloak.common.ClientConnection;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
@@ -27,12 +28,10 @@ import org.keycloak.services.managers.AuthenticationSessionManager;
 import org.keycloak.services.managers.UserSessionManager;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.sessions.RootAuthenticationSessionModel;
-import org.tidecloak.Protocol.mapper.TideRolesProtocolMapper;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftChangeSetRequest;
 import org.tidecloak.interfaces.DraftStatus;
-import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakDraftChangeSetDetails;
 import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakDraftChangeSetRequest;
 import org.tidecloak.jpa.entities.AccessProofDetailDependencyEntity;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
@@ -251,22 +250,23 @@ public final class TideAuthzProofUtil {
     };
 
     // TODO: SAVING FINAL PROOF HERE
-    public void saveProofToDatabase(String proof, String clientId, UserEntity user) throws NoSuchAlgorithmException, JsonProcessingException {
+    public void saveProofToDatabase(AccessProofDetailEntity proof) throws NoSuchAlgorithmException, JsonProcessingException {
 
         // find if proof exists, update if it does else we create a new one for the user
-        UserClientAccessProofEntity userClientAccess = em.find(UserClientAccessProofEntity.class, new UserClientAccessProofEntity.Key(user, clientId ));
-        String proofChecksum = generateProofChecksum(proof);
-        String proofMeta = getProofMeta(proof);
+        UserClientAccessProofEntity userClientAccess = em.find(UserClientAccessProofEntity.class, new UserClientAccessProofEntity.Key(proof.getUser(), proof.getClientId()));
+//        String proofChecksum = generateProofChecksum(proof.getProofDraft());
+        String sig = proof.getSignatures().get(0).getSignature();
+        String proofMeta = getProofMeta(proof.getProofDraft());
 
         if (userClientAccess == null){
             UserClientAccessProofEntity newAccess = new UserClientAccessProofEntity();
-            newAccess.setUser(user);
-            newAccess.setClientId(clientId);
-            newAccess.setAccessProof(proofChecksum);
+            newAccess.setUser(proof.getUser());
+            newAccess.setClientId(proof.getClientId());
+            newAccess.setAccessProof(sig);
             newAccess.setAccessProofMeta(proofMeta);
             em.persist(newAccess);
         } else{
-            userClientAccess.setAccessProof(proofChecksum);
+            userClientAccess.setAccessProof(sig);
             userClientAccess.setAccessProofMeta(proofMeta);
         }
     }
@@ -519,7 +519,9 @@ public final class TideAuthzProofUtil {
                             }
                         }
                     }
-                    saveProofToDatabase(proofDetail.getProofDraft(), proofDetail.getClientId(), proofDetail.getUser());
+
+                    // TODO: update this part for multi admin. UNSURE what that looks like after we got threshold signatures, whats the artifact after that? e.g. all 3 admins approve so 3 signatures + admin gCMKAUTH, what happens after???
+                    saveProofToDatabase(proofDetail);
                     em.remove(proofDetail); // this proof is commited, so now we remove
                     em.flush();
                     continue;
@@ -574,6 +576,15 @@ public final class TideAuthzProofUtil {
                 }
             }
         }
+    }
+
+    public static UserClientAccessProofEntity getUserClientAccessProof(KeycloakSession session, UserModel userModel){
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
+
+        return em.createNamedQuery("getAccessProofByUserIdAndClientId", UserClientAccessProofEntity.class)
+                .setParameter("user", user)
+                .setParameter("clientId", session.getContext().getClient().getId()).getSingleResult();
     }
 
 

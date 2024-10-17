@@ -5,6 +5,9 @@ import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.interfaces.ChangeSetType;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @NamedQueries({
         @NamedQuery(name="getProofDetailsForDraft", query="SELECT a FROM AccessProofDetailEntity a WHERE a.recordId = :recordId ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForDraftByChangeSetType", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType"),
@@ -61,7 +64,12 @@ public class AccessProofDetailEntity {
     protected String proofDraft;
 
     @Column(name = "CREATED_TIMESTAMP")
-    protected Long createdTimestamp = System.currentTimeMillis();;
+    protected Long createdTimestamp = System.currentTimeMillis();
+
+    @ElementCollection
+    @CollectionTable(name = "DRAFT_SIGNATURES", joinColumns = @JoinColumn(name = "PROOF_ID"))
+    @Column(name = "SIGNATURES")
+    protected List<SignatureEntry> signatures = new ArrayList<>();
 
     public String getId() {
         return id;
@@ -117,6 +125,16 @@ public class AccessProofDetailEntity {
 
     public void setCreatedTimestamp(Long timestamp) {
         createdTimestamp = timestamp;
+    }
+
+    public List<SignatureEntry> getSignatures() {
+        return signatures;
+    }
+    public void addSignature(SignatureEntry signatures) {
+        this.signatures.add(signatures);
+    }
+    public void setSignatures(List<SignatureEntry> signatures) {
+        this.signatures = signatures;
     }
 
 
