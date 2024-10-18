@@ -152,18 +152,21 @@ public class TideAdminRealmResource {
             settings.Threshold_T = 3;
             settings.Threshold_N = 5;
 
-            String tideUserKey = auth.adminAuth().getUser().getFirstAttribute("tideUserKey");
-            if(tideUserKey == null){
-                return Response.ok("User is not authorised to sign this request").build();
-            }
+            System.out.println("PROOF SETTINGS ---- " + session.getContext().getRealm().getName());
+
+            System.out.println("PROOF SETTINGS ---- " + settings.ToString());
+
             proofDetails.forEach(p -> {
                 try {
+                    System.out.println(p.getProofDraft());
                     ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", p.getProofDraft().getBytes());
                     req.SetAuthorization(
                             Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
                     );
                     SignatureResponse response = Midgard.SignModel(settings, req);
-                    SignatureEntry signatureEntry = new SignatureEntry(response.Signatures[0], tideUserKey);
+
+                    //TODO: add admin gcmkauth to adminPublicKey
+                    SignatureEntry signatureEntry = new SignatureEntry(response.Signatures[0], "");
                     p.addSignature(signatureEntry);
                     em.merge(p);
 

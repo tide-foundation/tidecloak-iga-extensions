@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeType;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
+import jakarta.persistence.NoResultException;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
@@ -257,6 +258,10 @@ public final class TideAuthzProofUtil {
 //        String proofChecksum = generateProofChecksum(proof.getProofDraft());
         String sig = proof.getSignatures().get(0).getSignature();
         String proofMeta = getProofMeta(proof.getProofDraft());
+
+        System.out.println("COMMITING THIS !!" );
+        System.out.println(proof.getProofDraft());
+
 
         if (userClientAccess == null){
             UserClientAccessProofEntity newAccess = new UserClientAccessProofEntity();
@@ -578,14 +583,20 @@ public final class TideAuthzProofUtil {
         }
     }
 
-    public static UserClientAccessProofEntity getUserClientAccessProof(KeycloakSession session, UserModel userModel){
+    public static UserClientAccessProofEntity getUserClientAccessProof(KeycloakSession session, UserModel userModel) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
 
-        return em.createNamedQuery("getAccessProofByUserIdAndClientId", UserClientAccessProofEntity.class)
-                .setParameter("user", user)
-                .setParameter("clientId", session.getContext().getClient().getId()).getSingleResult();
+        try {
+            return em.createNamedQuery("getAccessProofByUserIdAndClientId", UserClientAccessProofEntity.class)
+                    .setParameter("user", user)
+                    .setParameter("clientId", session.getContext().getClient().getId())
+                    .getSingleResult();
+        } catch (NoResultException e) {
+            return null;
+        }
     }
+
 
 
     private void handleRoleDraft(TideRoleDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSetRequest change, Set<RoleModel> roles, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws JsonProcessingException, NoSuchAlgorithmException {
