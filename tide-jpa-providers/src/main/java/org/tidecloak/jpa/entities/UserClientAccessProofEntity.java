@@ -34,6 +34,9 @@ public class UserClientAccessProofEntity {
     @Column(name = "ACCESS_PROOF")
     protected String accessProof;
 
+    @Column(name = "ACCESS_PROOF_SIG")
+    protected String accessProofSig;
+
     @Column(name = "ACCESS_PROOF_META")
     protected String accessProofMeta;
 
@@ -58,6 +61,14 @@ public class UserClientAccessProofEntity {
 
     public void setAccessProof(String proof) {
         this.accessProof = proof;
+    }
+
+    public String getAccessProofSig() {
+        return accessProofSig;
+    }
+
+    public void setAccessProofSig(String sig) {
+        this.accessProofSig = sig;
     }
 
     public String getAccessProofMeta() {

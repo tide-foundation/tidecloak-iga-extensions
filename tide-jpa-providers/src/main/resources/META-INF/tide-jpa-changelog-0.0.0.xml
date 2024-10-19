@@ -13,6 +13,9 @@
             <column name="ACCESS_PROOF" type="TEXT">
                 <constraints nullable="false"/>
             </column>
+            <column name="ACCESS_PROOF_SIG" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
             <column name="ACCESS_PROOF_META" type="TEXT">
                 <constraints nullable="false"/>
             </column>
