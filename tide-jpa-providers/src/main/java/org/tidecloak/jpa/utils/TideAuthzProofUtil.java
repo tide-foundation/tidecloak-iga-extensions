@@ -256,7 +256,9 @@ public final class TideAuthzProofUtil {
         // find if proof exists, update if it does else we create a new one for the user
         UserClientAccessProofEntity userClientAccess = em.find(UserClientAccessProofEntity.class, new UserClientAccessProofEntity.Key(proof.getUser(), proof.getClientId()));
 
-        String sig = proof.getSignatures().get(0).getSignature();
+        String accessProofSig = proof.getSignatures().get(0).getACCESS_PROOF_SIGNATURE();
+        String idProofSig = proof.getSignatures().get(0).getID_TOKEN_SIGNATURE();
+
         String proofMeta = getProofMeta(proof.getProofDraft());
 
         if (userClientAccess == null){
@@ -264,13 +266,16 @@ public final class TideAuthzProofUtil {
             newAccess.setUser(proof.getUser());
             newAccess.setClientId(proof.getClientId());
             newAccess.setAccessProof(proof.getProofDraft());
-            newAccess.setAccessProofSig(sig);
+            newAccess.setAccessProofSig(accessProofSig);
+            newAccess.setIdProofSig(idProofSig);
             newAccess.setAccessProofMeta(proofMeta);
             em.persist(newAccess);
+
         } else{
-            userClientAccess.setAccessProof(sig);
+            userClientAccess.setAccessProof(proof.getProofDraft());
             userClientAccess.setAccessProofMeta(proofMeta);
-            userClientAccess.setAccessProofSig(sig);
+            userClientAccess.setAccessProofSig(accessProofSig);
+            userClientAccess.setIdProofSig(idProofSig);
             em.merge(userClientAccess);
         }
     }

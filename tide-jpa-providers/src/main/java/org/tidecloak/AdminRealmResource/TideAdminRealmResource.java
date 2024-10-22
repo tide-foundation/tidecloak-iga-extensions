@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.json.Json;
+import jakarta.json.JsonArray;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.NoResultException;
@@ -13,6 +15,8 @@ import jakarta.ws.rs.core.Response;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.representations.IDToken;
+import org.keycloak.representations.JsonWebToken;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.ModelRequest;
@@ -149,24 +153,32 @@ public class TideAdminRealmResource {
             settings.PayerPublicKey = (String) idp.getConfig().get("payerPub");
             settings.ObfuscatedVendorPublicKey = (String) idp.getConfig().get("obfGVVK");
             settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
+
+            // TODO: get this from environment variables!
             settings.Threshold_T = 3;
             settings.Threshold_N = 5;
 
-            System.out.println("PROOF SETTINGS ---- " + session.getContext().getRealm().getName());
-
-            System.out.println("PROOF SETTINGS ---- " + settings.ToString());
 
             proofDetails.forEach(p -> {
                 try {
                     System.out.println(p.getProofDraft());
                     ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", p.getProofDraft().getBytes());
+                    JsonArray idTokenMeta = Json.createArrayBuilder()
+                            .add("sub")
+                            .add("aud")
+                            .add("tideuserkey")
+                            .add("vuid")
+                            .build();
+
+
+                    req.SetDynamicData(idTokenMeta.toString().getBytes());
                     req.SetAuthorization(
                             Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
                     );
                     SignatureResponse response = Midgard.SignModel(settings, req);
 
                     //TODO: add admin gcmkauth to adminPublicKey
-                    SignatureEntry signatureEntry = new SignatureEntry(response.Signatures[0], "");
+                    SignatureEntry signatureEntry = new SignatureEntry(response.Signatures[0], response.Signatures[1], "");
                     p.addSignature(signatureEntry);
                     em.merge(p);
 
