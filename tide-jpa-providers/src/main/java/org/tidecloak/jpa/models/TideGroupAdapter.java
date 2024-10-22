@@ -1,24 +1,15 @@
 package org.tidecloak.jpa.models;
 
-import com.google.errorprone.annotations.Var;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.GroupAdapter;
 import org.keycloak.models.jpa.entities.GroupEntity;
-import org.keycloak.models.jpa.entities.GroupRoleMappingEntity;
-import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.RoleUtils;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
-import org.tidecloak.jpa.entities.drafting.TideGroupDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideGroupRoleMappingEntity;
-import org.tidecloak.jpa.utils.ProofGeneration;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.stream.Stream;
 
 import static org.keycloak.utils.StreamsUtil.closing;
@@ -28,7 +19,7 @@ public class TideGroupAdapter extends GroupAdapter {
     private final RealmModel realm;
 
     public TideGroupAdapter(RealmModel realm, EntityManager em, GroupEntity group, KeycloakSession session) {
-        super(realm, em, group);
+        super(session, realm, em, group);
         this.session = session;
         this.realm = realm;
     }
