@@ -146,18 +146,22 @@ public class TideAdminRealmResource {
             String currentSecretKeys = (String) idp.getConfig().get("clientSecret");
             ObjectMapper objectMapper = new ObjectMapper();
             SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
+            int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
+            int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
+
+            if ( threshold == 0 || max == 0){
+                throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
+            }
 
             SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
             settings.VVKId = (String) idp.getConfig().get("vvkId");
-            settings.HomeOrkUrl = (String) idp.getConfig().get("homeORKurl");
+            settings.HomeOrkUrl = (String) idp.getConfig().get("systemHomeOrk");
             settings.PayerPublicKey = (String) idp.getConfig().get("payerPub");
             settings.ObfuscatedVendorPublicKey = (String) idp.getConfig().get("obfGVVK");
             settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
 
-            // TODO: get this from environment variables!
-            settings.Threshold_T = 3;
-            settings.Threshold_N = 5;
-
+            settings.Threshold_T = threshold;
+            settings.Threshold_N = max;
 
             proofDetails.forEach(p -> {
                 try {
@@ -195,7 +199,11 @@ public class TideAdminRealmResource {
             em.flush();
 
             return Response.ok("Change set signed successfully").build();
-        } catch (JsonProcessingException e) {
+        }
+        catch (NumberFormatException e) {
+            throw new RuntimeException("Environemnt variables THRESHOLD_T or THRESHOLD_N is invalid: " + e.getMessage());
+        }
+        catch (JsonProcessingException e) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Error processing JSON " + e.getMessage()).build();
         } catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
