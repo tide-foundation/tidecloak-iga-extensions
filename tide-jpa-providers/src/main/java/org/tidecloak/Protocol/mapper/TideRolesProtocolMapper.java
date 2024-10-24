@@ -61,7 +61,7 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
         ClientModel wrapClientModel = new TideClientAdapter(realm, em, session, clientEntity);
         Set<RoleModel> roles = getAccess(activeRoles, wrapClientModel, clientModel.getClientScopes(true).values().stream(), wrapClientModel.isFullScopeAllowed());
-        setTokenClaims(token, roles);
+        setTokenClaims(token, roles, wrapClientModel.isFullScopeAllowed());
 
         Set<String> clientKeys = token.getResourceAccess().keySet();
         String[] aud = Arrays.stream(clientKeys.toArray(String[]::new)).filter(x -> !Objects.equals(x, clientModel.getName())).toArray(String[]::new);
@@ -71,7 +71,7 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         return token;
     }
 
-    private void setTokenClaims(AccessToken token, Set<RoleModel> roles) {
+    private void setTokenClaims(AccessToken token, Set<RoleModel> roles, Boolean isFullScopeAllowed) {
         AccessToken.Access realmAccess = new AccessToken.Access();
         Map<String, AccessToken.Access> clientAccesses = new HashMap<>();
         for (RoleModel role : roles) {
@@ -84,7 +84,7 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
         }
 
         // Conditionally set realmAccess if the original token had it and it's not empty
-        if (token.getRealmAccess() != null) {
+        if (isFullScopeAllowed) {
             if (realmAccess.getRoles() != null && !realmAccess.getRoles().isEmpty()) {
                 token.setRealmAccess(realmAccess);
             } else {
