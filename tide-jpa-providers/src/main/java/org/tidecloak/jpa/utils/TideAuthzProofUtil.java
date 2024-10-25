@@ -493,12 +493,9 @@ public final class TideAuthzProofUtil {
         TideAuthzProofUtil tideAuthzProofUtil = new TideAuthzProofUtil(session, realm, em);
 
         for (ClientModel client : affectedClients) {
-            System.out.println(client.getClientId());
             // Get all draft access proof details for this client.
             List<AccessProofDetailEntity> proofDetails = getProofDetailsByChangeSetType(em, client, entity, changeSetType);
             for (AccessProofDetailEntity proofDetail : proofDetails) {
-                System.out.println("Proof id here");
-                System.out.println(proofDetail.getId());
                 em.lock(proofDetail, LockModeType.PESSIMISTIC_WRITE);
                 UserEntity user = proofDetail.getUser();
                 UserModel userModel = session.users().getUserById(realm, user.getId());
@@ -507,7 +504,6 @@ public final class TideAuthzProofUtil {
                 //TODO: NEED TO ENSURE ITS COMMITED HERE
                 // Check if this draft access proof is for this draft change request
                 if (Objects.equals(proofDetail.getRecordId(), change.getChangeSetId())) {
-                    System.out.println("apparently commited?!");
                     // If this draft change request is a user role grant, we need to check if it is granting a composite role to the user.
                     if(change.getType() == ChangeSetType.USER_ROLE) {
                         TideUserRoleMappingDraftEntity record = em.find(TideUserRoleMappingDraftEntity.class, proofDetail.getRecordId());
@@ -631,7 +627,6 @@ public final class TideAuthzProofUtil {
             }
             String proof = proofDetail.getProofDraft();
             var uniqRoles = roles.stream().distinct().filter(Objects::nonNull).collect(Collectors.toSet());
-            uniqRoles.forEach(test -> System.out.println(test.getName()));
             AccessDetails accessDetails = tideAuthzProofUtil.getAccessToRemove(client, uniqRoles, client.isFullScopeAllowed());
             String updatedProof = tideAuthzProofUtil.removeAccessFromToken(proof, accessDetails);
             String newProof = tideAuthzProofUtil.removeAudienceFromToken(updatedProof);
@@ -678,7 +673,6 @@ public final class TideAuthzProofUtil {
         }
 
         if (change.getActionType() == ActionType.DELETE) {
-            System.out.println("Made it this far!!!");
             if (draftEntity.getFullScopeDisabled() == DraftStatus.ACTIVE && draftEntity.getFullScopeEnabled() == DraftStatus.PENDING) {
                 draftEntity.setFullScopeEnabled(DraftStatus.DRAFT);
             }
@@ -839,8 +833,6 @@ public final class TideAuthzProofUtil {
                     draftEntity.setDraftStatus(DraftStatus.DRAFT);
                 }
 
-                System.out.println("CHECKING THE ROLES!!!");
-                roles.forEach(xr -> System.out.println(xr.getName()));
                 roles.add(realm.getRoleById(draftEntity.getRoleId()));
                 // remove and re-add
                 em.remove(proofDetail);
@@ -1039,6 +1031,13 @@ public final class TideAuthzProofUtil {
             object.remove("sid");
             object.remove("auth_time");
             object.remove("session_state");
+            object.remove("session_state");
+            object.remove("given_name");
+            object.remove("family_name");
+            object.remove("email_verified");
+            object.remove("email_verified");
+            object.remove("email");
+            object.remove("name");
             // Removing ACR for now. This changes by the type of authenticate taken. Explicit login is 1 and "remembered" session is 0.
             object.remove("acr");
 

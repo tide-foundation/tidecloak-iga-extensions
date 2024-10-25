@@ -44,7 +44,6 @@ public class TideRoleAdapter extends RoleAdapter {
         List<TideCompositeRoleMappingDraftEntity> entity = findCompositeRoleMappingDrafts(getEntity(), roleEntity, DraftStatus.ACTIVE);
 
         if (entity == null || entity.isEmpty()) {
-            System.out.println("Uncommitted role");
             handleUncommittedCompositeRole(role, roleEntity);
             return;
         }
@@ -61,16 +60,11 @@ public class TideRoleAdapter extends RoleAdapter {
 
 
             if(userRecords == null || userRecords.isEmpty()){
-                System.out.println("apparently empty?");
                 return null;
             }
             return new TideUserAdapter(session, realm, em, userEntity);
         }).filter(Objects::nonNull).toList();
 
-        System.out.println( this.getEntity().getName());
-        System.out.println( this.getEntity().getId());
-        System.out.println(activeUsers.isEmpty());
-        System.out.println(committedEntity.getDeleteStatus() == DraftStatus.ACTIVE);
         if(activeUsers.isEmpty() || committedEntity.getDeleteStatus() == DraftStatus.ACTIVE){
 
             var draft = entity.get(0);
@@ -138,12 +132,8 @@ public class TideRoleAdapter extends RoleAdapter {
     private void handleClientRoleProofs(RoleModel role, TideCompositeRoleMappingDraftEntity compositeRoleEntity) {
         if (role.getContainer() instanceof ClientModel) {
             RoleModel compositeRole = realm.getRoleById(getEntity().getId());
-            System.out.println(role.getName());
             List<TideUserAdapter> users =  session.users().getRoleMembersStream(realm, compositeRole).map(user -> {
                 UserEntity userEntity = em.find(UserEntity.class, user.getId());
-                System.out.println("HELLO!!");
-                System.out.println(user.getFirstName());
-
                 List<TideUserRoleMappingDraftEntity> userRecords = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
                         .setParameter("draftStatus", DraftStatus.ACTIVE)
                         .setParameter("user", userEntity)
@@ -166,7 +156,6 @@ public class TideRoleAdapter extends RoleAdapter {
 
             TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
                 clientList.forEach(client -> users.forEach(user -> {
-                    System.out.println(user.getFirstName());
                     UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
                     Set<RoleModel> roleMappings = new HashSet<>(Collections.singleton(role));
 

@@ -4,8 +4,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.json.Json;
-import jakarta.json.JsonArray;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.NoResultException;
@@ -15,8 +14,6 @@ import jakarta.ws.rs.core.Response;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
-import org.keycloak.representations.IDToken;
-import org.keycloak.representations.JsonWebToken;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.ModelRequest;
@@ -165,17 +162,12 @@ public class TideAdminRealmResource {
 
             proofDetails.forEach(p -> {
                 try {
-                    System.out.println(p.getProofDraft());
                     ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", p.getProofDraft().getBytes());
-                    JsonArray idTokenMeta = Json.createArrayBuilder()
-                            .add("sub")
-                            .add("aud")
-                            .add("tideuserkey")
-                            .add("vuid")
-                            .build();
 
+                    Set<String> allowedKeys = Set.of("sub", "tideuserkey", "vuid");
+                    var idToken = constructIdToken(p.getProofDraft(), allowedKeys, session.clients().getClientById(realm, p.getClientId()).getClientId());
 
-                    req.SetDynamicData(idTokenMeta.toString().getBytes());
+                    req.SetDynamicData(idToken.getBytes());
                     req.SetAuthorization(
                             Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
                     );
@@ -186,7 +178,7 @@ public class TideAdminRealmResource {
                     p.addSignature(signatureEntry);
                     em.merge(p);
 
-                } catch (JsonProcessingException e) {
+                } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
             });
@@ -209,6 +201,40 @@ public class TideAdminRealmResource {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
 
         }
+    }
+
+    public static String constructIdToken(String jsonString, Set<String> allowedKeys, String client) throws Exception {
+        // Create a copy to avoid modifying the original node
+        ObjectMapper objectMapper = new ObjectMapper();
+        JsonNode proofDraftNode = objectMapper.readTree(jsonString);
+
+        // Ensure the JsonNode is an ObjectNode
+        if (!(proofDraftNode instanceof ObjectNode)) {
+            throw new IllegalArgumentException("Expected an ObjectNode as input");
+        }
+
+        ObjectNode filteredNode = ((ObjectNode) proofDraftNode).deepCopy();
+
+        // Collect keys to remove to avoid ConcurrentModificationException
+        List<String> keysToRemove = new ArrayList<>();
+        Iterator<String> fieldNames = filteredNode.fieldNames();
+        while (fieldNames.hasNext()) {
+            String fieldName = fieldNames.next();
+            if (!allowedKeys.contains(fieldName)) {
+                keysToRemove.add(fieldName);
+            }
+        }
+
+        // Remove the collected keys
+        for (String key : keysToRemove) {
+            filteredNode.remove(key);
+        }
+
+        // Add the new key-value pair
+        filteredNode.put("aud", client);
+
+        // Return the filtered and sorted JsonNode as a string
+        return objectMapper.writeValueAsString(TideAuthzProofUtil.sortJsonNode(filteredNode));
     }
 
     private Object fetchDraftRecordEntity(EntityManager em, DraftChangeSetRequest changeSet) {

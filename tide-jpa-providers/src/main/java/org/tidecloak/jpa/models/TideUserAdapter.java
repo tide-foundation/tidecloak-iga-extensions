@@ -281,7 +281,6 @@ public class TideUserAdapter extends UserAdapter {
     private void generateProofDrafts(RoleModel role, List<TideUserRoleMappingDraftEntity> activeDraftEntities) {
         if (role.getContainer() instanceof ClientModel) {
             List<ClientModel> clientList = getUniqueClientList(session, realm, role, em);
-            clientList.forEach(client -> System.out.println(client.getClientId()));
 
             UserModel user = session.users().getUserById(realm, getEntity().getId());
             UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
