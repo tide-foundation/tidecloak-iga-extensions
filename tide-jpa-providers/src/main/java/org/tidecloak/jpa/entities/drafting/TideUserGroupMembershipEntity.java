@@ -1,6 +1,7 @@
 package org.tidecloak.jpa.entities.drafting;
 
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.jpa.entities.UserGroupMembershipEntity;
@@ -20,6 +21,7 @@ public class TideUserGroupMembershipEntity {
 
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="USER_ID")
+    @JsonIgnoreProperties({"credentials", "federatedIdentities", "attributes"})
     protected UserEntity user;
 
     @Column(name = "GROUP_ID")
@@ -32,6 +34,9 @@ public class TideUserGroupMembershipEntity {
     @Enumerated(EnumType.STRING)
     @Column(name = "ACTION_TYPE")
     private ActionType actionType = ActionType.CREATE; // Default to NONE
+
+    @Column(name = "CREATED_TIMESTAMP")
+    protected Long createdTimestamp = System.currentTimeMillis();
 
     public String getId() {
         return id;
@@ -72,6 +77,14 @@ public class TideUserGroupMembershipEntity {
 
     public void setAction(ActionType actionType) {
         this.actionType = actionType;
+    }
+
+    public Long getCreatedTimestamp() {
+        return createdTimestamp;
+    }
+
+    public void setCreatedTimestamp(Long timestamp) {
+        createdTimestamp = timestamp;
     }
 
     @Override

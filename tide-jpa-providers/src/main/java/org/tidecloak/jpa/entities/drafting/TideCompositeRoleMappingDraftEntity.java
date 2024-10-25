@@ -6,13 +6,48 @@ import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
 
 @NamedQueries({
+        @NamedQuery(name="getAllCompositeRoleMappingsByStatusAndRealmAndRecordId", query="select r from TideCompositeRoleMappingDraftEntity r where r.draftStatus = :draftStatus AND r.id = :changesetId AND r.composite IN ( SELECT u from RoleEntity u where u.realmId =:realmId ) "),
+        @NamedQuery(name="getAllCompositeRoleMappingsByDeletionStatusAndRealmAndRecordId", query="select r from TideCompositeRoleMappingDraftEntity r where r.deleteStatus = :deleteStatus AND r.id = :changesetId AND r.composite IN ( SELECT u from RoleEntity u where u.realmId =:realmId ) "),
+        @NamedQuery(name="getAllCompositeRoleMappingsByStatusAndRealm", query="select r from TideCompositeRoleMappingDraftEntity r where r.draftStatus = :draftStatus and r.composite IN ( SELECT u from RoleEntity u where u.realmId =:realmId ) "),
+        @NamedQuery(name="getAllCompositeRoleMappingsByRealmAndStatusNotEqualTo", query="select r from TideCompositeRoleMappingDraftEntity r where r.draftStatus != :draftStatus and r.composite IN ( SELECT u from RoleEntity u where u.realmId =:realmId ) "),
+        @NamedQuery(name="getAllCompositeRoleMappingsByStatus", query="select r from TideCompositeRoleMappingDraftEntity r where r.draftStatus = :draftStatus"),
+        @NamedQuery(name="getCompositeEntityByParent", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite ORDER BY r.timestamp DESC"),
         @NamedQuery(name="filterChildRoleByStatusAndParentAndAction", query="select r.childRole from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.draftStatus = :draftStatus and r.actionType = :actionType"),
         @NamedQuery(name="filterChildRoleByStatusAndParent", query="select r.childRole from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.draftStatus = :draftStatus"),
         @NamedQuery(name="getCompositeRoleMappingDraft", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole"),
         @NamedQuery(name="getCompositeRoleMappingDraftByStatus", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole and r.draftStatus = :draftStatus"),
-        @NamedQuery(name="deleteCompositeRoleMapping", query="delete from TideCompositeRoleMappingDraftEntity r where r.composite = :composite"),
+        @NamedQuery(name="getCompositeRoleMappingDraftByStatusAndDeleteStatus", query="select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole and r.draftStatus = :draftStatus AND r.deleteStatus = :deleteStatus"),
 
-
+        @NamedQuery(name="deleteCompositeRoleMapping", query="delete from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole"),
+        @NamedQuery(
+                name = "getRecordIdByChildAndComposite",
+                query = "SELECT t FROM TideCompositeRoleMappingDraftEntity t WHERE t.composite = :composite and t.childRole = :childRole "
+        ),
+        @NamedQuery(
+                name="removeDraftRequestsOnRemovalOfRole",
+                query="delete from TideCompositeRoleMappingDraftEntity r where r.composite = :role or r.childRole = :role"
+        ),
+        @NamedQuery(
+                name="selectIdsForRemoval",
+                query="select r.id from TideCompositeRoleMappingDraftEntity r where r.composite = :role or r.childRole = :role"
+        ),
+        @NamedQuery(name="getAllCompositeRoleMappingsByRealm",
+                query = "SELECT r FROM TideCompositeRoleMappingDraftEntity r " +
+                        "WHERE (r.draftStatus != :draftStatus OR " +
+                        "(r.draftStatus = :draftStatus AND r.deleteStatus != :deleteStatus)) " +
+                        "AND r.composite IN (SELECT u FROM RoleEntity u WHERE u.realmId = :realmId)"
+        ),
+        @NamedQuery(
+                name = "DeleteAllCompositeRoleMappingsByRealm",
+                query = "DELETE FROM TideCompositeRoleMappingDraftEntity r " +
+                        "WHERE r.composite IN (SELECT role FROM RoleEntity role WHERE role.realmId = :realmId) " +
+                        "OR r.childRole IN (SELECT role FROM RoleEntity role WHERE role.realmId = :realmId)"
+        ),
+        @NamedQuery(name = "DeleteAllCompositeRoleMappingsByRoleId",
+                query = "DELETE FROM TideCompositeRoleMappingDraftEntity r " +
+                        "WHERE r.composite.id = :roleId " +
+                        "OR r.childRole.id = :roleId"
+        )
 })
 
 @Entity
@@ -41,6 +76,12 @@ public class TideCompositeRoleMappingDraftEntity {
     @Enumerated(EnumType.STRING)
     @Column(name = "ACTION_TYPE")
     private ActionType actionType;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "DELETE_STATUS")
+    private DraftStatus deleteStatus;
+    @Column(name = "TIMESTAMP")
+    protected Long timestamp = System.currentTimeMillis();
 
     public String getId() {
         return id;
@@ -81,6 +122,22 @@ public class TideCompositeRoleMappingDraftEntity {
 
     public void setAction(ActionType actionType) {
         this.actionType = actionType;
+    }
+
+    public DraftStatus getDeleteStatus() {
+        return deleteStatus;
+    }
+
+    public void setDeleteStatus(DraftStatus deleteStatus) {
+        this.deleteStatus = deleteStatus;
+    }
+
+    public Long getTimestamp() {
+        return timestamp;
+    }
+
+    public void setTimestamp(Long timestamp) {
+        this.timestamp = timestamp;
     }
 
     @Override

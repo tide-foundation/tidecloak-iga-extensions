@@ -3,6 +3,9 @@ package org.tidecloak.Protocol.mapper;
 import jakarta.persistence.EntityManager;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.ClientEntity;
+import org.keycloak.models.utils.RoleUtils;
+import org.keycloak.protocol.ProtocolMapperUtils;
 import org.keycloak.protocol.oidc.mappers.AbstractOIDCProtocolMapper;
 import org.keycloak.protocol.oidc.mappers.OIDCAccessTokenMapper;
 import org.keycloak.protocol.oidc.mappers.OIDCAttributeMapperHelper;
@@ -10,8 +13,13 @@ import org.keycloak.provider.ProviderConfigProperty;
 import org.keycloak.representations.AccessToken;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.jpa.models.TideClientAdapter;
+import org.tidecloak.jpa.utils.TideAuthzProofUtil;
+import org.tidecloak.jpa.utils.TideRolesUtil;
 
 import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.keycloak.protocol.ProtocolMapperUtils.PRIORITY_SCRIPT_MAPPER;
 
@@ -35,19 +43,38 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
     public AccessToken transformAccessToken(AccessToken token, ProtocolMapperModel mappingModel, KeycloakSession session, UserSessionModel userSession, ClientSessionContext clientSessionCtx) {
         RealmModel realm = session.getContext().getRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        UserModel tideUser = TideRolesUtil.wrapUserModel(userSession.getUser(), session, realm, em);
-        Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.APPROVED, ActionType.CREATE);
-        setTokenClaims(token, activeRoles, session);
+        UserModel tideUser = TideRolesUtil.wrapUserModel(userSession.getUser(), session, realm);
+        String tideUserKey = tideUser.getFirstAttribute("tideuserkey");
+        String vuid = tideUser.getFirstAttribute("vuid");
+
+        // 2. Set these attributes as claims in the token
+        if (tideUserKey != null) {
+            token.getOtherClaims().put("tideuserkey", tideUserKey);
+        }
+
+        if (vuid != null) {
+            token.getOtherClaims().put("vuid", vuid);
+        }
+
+        Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.ACTIVE);
+        ClientModel clientModel = session.getContext().getClient();
+        ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
+        ClientModel wrapClientModel = new TideClientAdapter(realm, em, session, clientEntity);
+        Set<RoleModel> roles = getAccess(activeRoles, wrapClientModel, clientModel.getClientScopes(true).values().stream(), wrapClientModel.isFullScopeAllowed());
+        setTokenClaims(token, roles, wrapClientModel.isFullScopeAllowed());
+
+        Set<String> clientKeys = token.getResourceAccess().keySet();
+        String[] aud = Arrays.stream(clientKeys.toArray(String[]::new)).filter(x -> !Objects.equals(x, clientModel.getName())).toArray(String[]::new);
+        // Set the audience in the access token based on the filtered keys
+        token.audience(aud.length == 0 ? null : aud);
 
         return token;
     }
 
-    private void setTokenClaims(AccessToken token, Set<RoleModel> roles, KeycloakSession session) {
+    private void setTokenClaims(AccessToken token, Set<RoleModel> roles, Boolean isFullScopeAllowed) {
         AccessToken.Access realmAccess = new AccessToken.Access();
         Map<String, AccessToken.Access> clientAccesses = new HashMap<>();
-        System.out.println(token);
         for (RoleModel role : roles) {
-            System.out.println(role.getContainer() instanceof RealmModel);
             if (role.getContainer() instanceof RealmModel) {
                 realmAccess.addRole(role.getName());
             } else if (role.getContainer() instanceof ClientModel client) {
@@ -55,12 +82,69 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
                         .addRole(role.getName());
             }
         }
-        // If original token does not include any roles we dont add.
-        if (token.getRealmAccess() != null) {
-            token.setRealmAccess(realmAccess);
+
+        // Conditionally set realmAccess if the original token had it and it's not empty
+        if (isFullScopeAllowed) {
+            if (realmAccess.getRoles() != null && !realmAccess.getRoles().isEmpty()) {
+                token.setRealmAccess(realmAccess);
+            } else {
+                token.setRealmAccess(null); // Remove realmAccess if empty
+            }
         }
-        if (!token.getResourceAccess().values().isEmpty()) {
-            token.setResourceAccess(clientAccesses);
+
+        // Conditionally set resourceAccess if the original token had it and it's not empty
+        if (token.getResourceAccess() != null && !token.getResourceAccess().isEmpty()) {
+            if (!clientAccesses.isEmpty()) {
+                token.setResourceAccess(clientAccesses);
+            } else {
+                token.getResourceAccess().clear(); // Remove resourceAccess if empty
+            }
+        }
+    }
+    public static ProtocolMapperModel create(String clientId, String clientRolePrefix,
+                                             String name,
+                                             String tokenClaimName,
+                                             boolean accessToken, boolean idToken, boolean introspectionEndpoint) {
+        return create(clientId, clientRolePrefix, name, tokenClaimName, accessToken, idToken, introspectionEndpoint, false);
+
+    }
+
+    public static ProtocolMapperModel create(String clientId, String clientRolePrefix,
+                                             String name,
+                                             String tokenClaimName,
+                                             boolean accessToken, boolean idToken, boolean introspectionEndpoint, boolean multiValued) {
+        ProtocolMapperModel mapper = OIDCAttributeMapperHelper.createClaimMapper(name, "foo",
+                tokenClaimName, "String",
+                accessToken, idToken, false, introspectionEndpoint,
+                PROVIDER_ID);
+
+        mapper.getConfig().put(ProtocolMapperUtils.MULTIVALUED, String.valueOf(multiValued));
+        mapper.getConfig().put(ProtocolMapperUtils.USER_MODEL_CLIENT_ROLE_MAPPING_CLIENT_ID, clientId);
+        mapper.getConfig().put(ProtocolMapperUtils.USER_MODEL_CLIENT_ROLE_MAPPING_ROLE_PREFIX, clientRolePrefix);
+        return mapper;
+    }
+
+    public static Set<RoleModel> getAccess(Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes, boolean isFullScopeAllowed) {
+        if (isFullScopeAllowed) {
+            return roleModels;
+        } else {
+
+            // 1 - Client roles of this client itself
+            Stream<RoleModel> scopeMappings = client.getRolesStream();
+
+            // 2 - Role mappings of client itself + default client scopes + optional client scopes requested by scope parameter (if applyScopeParam is true)
+            Stream<RoleModel> clientScopesMappings;
+            clientScopesMappings = clientScopes.flatMap(ScopeContainerModel::getScopeMappingsStream);
+
+            scopeMappings = Stream.concat(scopeMappings, clientScopesMappings);
+
+            // 3 - Expand scope mappings
+            scopeMappings = RoleUtils.expandCompositeRolesStream(scopeMappings);
+
+            // Intersection of expanded user roles and expanded scopeMappings
+            roleModels.retainAll(scopeMappings.collect(Collectors.toSet()));
+
+            return roleModels;
         }
     }
 
