@@ -14,6 +14,7 @@ import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
+import org.tidecloak.jpa.utils.IGAUtils;
 import org.tidecloak.jpa.utils.ProofGeneration;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
@@ -38,11 +39,7 @@ public class TideClientAdapter extends ClientAdapter {
                 .setParameter("client", entity)
                 .getResultList();
 
-        if ( entity.isFullScopeAllowed() || (draft != null && !draft.isEmpty())){
-            return draft.get(0).getFullScopeEnabled() == DraftStatus.ACTIVE;
-        }else{
-            return false;
-        }
+        return entity.isFullScopeAllowed() || (draft != null && !draft.isEmpty() && draft.get(0).getFullScopeEnabled() == DraftStatus.ACTIVE);
     }
 
     @Override
