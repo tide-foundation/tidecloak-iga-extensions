@@ -38,7 +38,6 @@ public class TideAdminRealmResource {
         try{
             auth.realm().requireManageRealm();
             session.getContext().getRealm().setAttribute("isIGAEnabled", isEnabled);
-
             logger.info("IGA has been toggled to : " + isEnabled);
             return buildResponse(200, "IGA has been toggled to : " + isEnabled);
         }catch(Exception e) {

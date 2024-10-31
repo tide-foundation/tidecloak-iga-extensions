@@ -33,6 +33,7 @@ public class TideIdpAdminRealmResource {
     @Path("images/upload")
     @Consumes(MediaType.MULTIPART_FORM_DATA)
     public Response uploadImage(MultipartFormDataInput input) {
+        auth.realm().requireManageRealm();
         String fileName = "";
         String fileType = "";
         InputStream fileData = null;
@@ -109,6 +110,7 @@ public class TideIdpAdminRealmResource {
     @DELETE
     @Path("images/{type}/delete")
     public Response deleteImage(@PathParam("type") String type) {
+        auth.realm().requireManageRealm();
         // Define the directory where files are saved
         String uploadDir = String.format("Uploads/%s", session.getContext().getRealm().getId());
         File uploadDirFile = new File(uploadDir);
@@ -137,6 +139,7 @@ public class TideIdpAdminRealmResource {
     @Path("images/{type}/name")
     @Produces(MediaType.TEXT_PLAIN)
     public Response getFileName(@PathParam("type") String type) {
+        auth.realm().requireManageRealm();
         // Define the directory where files are saved
         String uploadDir = String.format("Uploads/%s", session.getContext().getRealm().getId());
         File uploadDirFile = new File(uploadDir);

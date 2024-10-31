@@ -14,6 +14,7 @@ import org.keycloak.representations.AccessToken;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.models.TideClientAdapter;
+import org.tidecloak.jpa.utils.IGAUtils;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
@@ -42,6 +43,11 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
     @Override
     public AccessToken transformAccessToken(AccessToken token, ProtocolMapperModel mappingModel, KeycloakSession session, UserSessionModel userSession, ClientSessionContext clientSessionCtx) {
         RealmModel realm = session.getContext().getRealm();
+
+        if(!IGAUtils.isIGAEnabled(realm)){
+            return super.transformAccessToken(token, mappingModel, session, userSession, clientSessionCtx);
+        }
+
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         UserModel tideUser = TideRolesUtil.wrapUserModel(userSession.getUser(), session, realm);
         String tideUserKey = tideUser.getFirstAttribute("tideuserkey");

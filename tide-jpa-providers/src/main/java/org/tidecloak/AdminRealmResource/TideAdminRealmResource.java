@@ -25,6 +25,7 @@ import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.SignatureEntry;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.jpa.models.TideClientAdapter;
+import org.tidecloak.jpa.utils.IGAUtils;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
@@ -65,8 +66,7 @@ public class TideAdminRealmResource {
 
             return Response.ok(statusMap).build();
         } catch (NoResultException e) {
-            // Return 404 if no draft status is found
-            return Response.status(Response.Status.NOT_FOUND).entity("Draft status not found").build();
+            return Response.status(Response.Status.OK).entity("Draft status not found. IGA is enabled: " + IGAUtils.isIGAEnabled(realm)).build();
         }
     }
 
@@ -85,8 +85,7 @@ public class TideAdminRealmResource {
                     .getDraftStatus();
             return Response.ok(draftStatus).build();
         } catch (NoResultException e) {
-            // Return 404 if no draft status is found
-            return Response.status(Response.Status.NOT_FOUND).entity("Draft status not found").build();
+            return Response.status(Response.Status.OK).entity("Draft status not found. IGA is enabled: " + IGAUtils.isIGAEnabled(realm)).build();
         }
     }
 
@@ -111,7 +110,7 @@ public class TideAdminRealmResource {
             return Response.ok(statusMap).build();
         }
         catch (NoResultException e) {
-            return Response.status(Response.Status.NOT_FOUND).entity("Draft status not found").build();
+            return Response.status(Response.Status.OK).entity("Draft status not found. IGA is enabled: " + IGAUtils.isIGAEnabled(realm)).build();
         }
     }
 
