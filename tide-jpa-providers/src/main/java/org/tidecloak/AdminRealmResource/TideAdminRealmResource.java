@@ -48,6 +48,9 @@ public class TideAdminRealmResource {
     @GET
     @Path("users/{user-id}/roles/{role-id}/draft/status")
     public Response getUserRoleAssignmentDraftStatus(@PathParam("user-id") String userId, @PathParam("role-id") String roleId) {
+        if(!IGAUtils.isIGAEnabled(realm)){
+            return Response.ok().build();
+        }
         auth.users().requireQuery(); // Ensure the user has the necessary permissions
 
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
@@ -73,6 +76,9 @@ public class TideAdminRealmResource {
     @GET
     @Path("users/{user-id}/draft/status")
     public Response getUserDraftStatus(@PathParam("user-id") String id) {
+        if(!IGAUtils.isIGAEnabled(realm)){
+            return Response.ok().build();
+        }
         auth.users().requireQuery(); // Ensure the user has the necessary permissions
 
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
@@ -92,6 +98,9 @@ public class TideAdminRealmResource {
     @GET
     @Path("composite/{parent-id}/child/{child-id}/draft/status")
     public Response getRoleDraftStatus(@PathParam("parent-id") String parentId, @PathParam("child-id") String childId) {
+        if(!IGAUtils.isIGAEnabled(realm)){
+            return Response.ok().build();
+        }
         auth.users().requireQuery(); // Ensure the user has the necessary permissions
 
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
@@ -299,6 +308,9 @@ public class TideAdminRealmResource {
     @GET
     @Path("change-set/users/requests")
     public Response getRequestedChangesForUsers() {
+        if(!IGAUtils.isIGAEnabled(realm)){
+            return Response.ok().build();
+        }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> changes = new ArrayList<>(processUserRoleMappings(em));
         return Response.ok(changes).build();
@@ -307,6 +319,9 @@ public class TideAdminRealmResource {
     @GET
     @Path("change-set/roles/requests")
     public Response getRequestedChanges() {
+        if(!IGAUtils.isIGAEnabled(realm)){
+            return Response.ok().build();
+        }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> requestedChangesList = new ArrayList<>(processRoleMappings(em));
         requestedChangesList.addAll(processCompositeRoleMappings(em));
@@ -316,6 +331,9 @@ public class TideAdminRealmResource {
     @GET
     @Path("change-set/clients/requests")
     public Response getRequestedChangesForClients() {
+        if(!IGAUtils.isIGAEnabled(realm)){
+            return Response.ok().build();
+        }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> changes = new ArrayList<>(processClientDraftRecords(em));
         return Response.ok(changes).build();
