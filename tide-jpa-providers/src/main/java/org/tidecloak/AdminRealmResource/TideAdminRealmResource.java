@@ -49,7 +49,7 @@ public class TideAdminRealmResource {
     @Path("users/{user-id}/roles/{role-id}/draft/status")
     public Response getUserRoleAssignmentDraftStatus(@PathParam("user-id") String userId, @PathParam("role-id") String roleId) {
         if(!IGAUtils.isIGAEnabled(realm)){
-            return Response.ok().build();
+            return Response.ok().entity(new ArrayList<>()).build();
         }
         auth.users().requireQuery(); // Ensure the user has the necessary permissions
 
@@ -69,7 +69,7 @@ public class TideAdminRealmResource {
 
             return Response.ok(statusMap).build();
         } catch (NoResultException e) {
-            return Response.status(Response.Status.OK).entity("Draft status not found. IGA is enabled: " + IGAUtils.isIGAEnabled(realm)).build();
+            return Response.status(Response.Status.OK).entity(new ArrayList<>()).build();
         }
     }
 
@@ -77,7 +77,7 @@ public class TideAdminRealmResource {
     @Path("users/{user-id}/draft/status")
     public Response getUserDraftStatus(@PathParam("user-id") String id) {
         if(!IGAUtils.isIGAEnabled(realm)){
-            return Response.ok().build();
+            return Response.ok().entity(new ArrayList<>()).build();
         }
         auth.users().requireQuery(); // Ensure the user has the necessary permissions
 
@@ -91,7 +91,7 @@ public class TideAdminRealmResource {
                     .getDraftStatus();
             return Response.ok(draftStatus).build();
         } catch (NoResultException e) {
-            return Response.status(Response.Status.OK).entity("Draft status not found. IGA is enabled: " + IGAUtils.isIGAEnabled(realm)).build();
+            return Response.status(Response.Status.OK).entity(new ArrayList<>()).build();
         }
     }
 
@@ -99,7 +99,7 @@ public class TideAdminRealmResource {
     @Path("composite/{parent-id}/child/{child-id}/draft/status")
     public Response getRoleDraftStatus(@PathParam("parent-id") String parentId, @PathParam("child-id") String childId) {
         if(!IGAUtils.isIGAEnabled(realm)){
-            return Response.ok().build();
+            return Response.ok().entity(new ArrayList<>()).build();
         }
         auth.users().requireQuery(); // Ensure the user has the necessary permissions
 
@@ -119,7 +119,7 @@ public class TideAdminRealmResource {
             return Response.ok(statusMap).build();
         }
         catch (NoResultException e) {
-            return Response.status(Response.Status.OK).entity("Draft status not found. IGA is enabled: " + IGAUtils.isIGAEnabled(realm)).build();
+            return Response.status(Response.Status.OK).entity(new ArrayList<>()).build();
         }
     }
 
@@ -309,7 +309,7 @@ public class TideAdminRealmResource {
     @Path("change-set/users/requests")
     public Response getRequestedChangesForUsers() {
         if(!IGAUtils.isIGAEnabled(realm)){
-            return Response.ok().build();
+            return Response.ok().entity(new ArrayList<>()).build();
         }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> changes = new ArrayList<>(processUserRoleMappings(em));
@@ -320,7 +320,7 @@ public class TideAdminRealmResource {
     @Path("change-set/roles/requests")
     public Response getRequestedChanges() {
         if(!IGAUtils.isIGAEnabled(realm)){
-            return Response.ok().build();
+            return Response.ok().entity(new ArrayList<>()).build();
         }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> requestedChangesList = new ArrayList<>(processRoleMappings(em));
@@ -332,7 +332,7 @@ public class TideAdminRealmResource {
     @Path("change-set/clients/requests")
     public Response getRequestedChangesForClients() {
         if(!IGAUtils.isIGAEnabled(realm)){
-            return Response.ok().build();
+            return Response.ok().entity(new ArrayList<>()).build();
         }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> changes = new ArrayList<>(processClientDraftRecords(em));

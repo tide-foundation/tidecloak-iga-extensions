@@ -50,11 +50,15 @@ public class TideClientAdapter extends ClientAdapter {
         List<TideClientFullScopeStatusDraftEntity> statusDraft = em.createNamedQuery("getClientFullScopeStatus", TideClientFullScopeStatusDraftEntity.class)
                 .setParameter("client", entity)
                 .getResultList();
+
+        // if no users and no drafts
         if (usersInRealm.isEmpty() && statusDraft.isEmpty()) {
             createFullScopeStatusDraft(value);
             super.setFullScopeAllowed(value);
             return;
         }
+
+        // if theres users and no drafts
         else if (!usersInRealm.isEmpty() && statusDraft.isEmpty()) {
             createFullScopeStatusDraft(false); // New clients defaults to restricted scope if there are users in the realm.
             return;
@@ -90,14 +94,36 @@ public class TideClientAdapter extends ClientAdapter {
     private void handleFullScopeEnabled(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client) throws NoSuchAlgorithmException, JsonProcessingException {
         if (clientFullScopeStatuses.getFullScopeEnabled() == DraftStatus.APPROVED) {
             approveFullScope(clientFullScopeStatuses, true);
-        } else {
+        }
+        else if (clientFullScopeStatuses.getFullScopeEnabled() == DraftStatus.ACTIVE){
+            List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", clientFullScopeStatuses.getId())
+                    .getResultList();
+
+            if (!pendingChanges.isEmpty()) {
+                em.remove(pendingChanges.get(0));
+                em.flush();
+            }
+        }
+        else {
             startDraftApproval(clientFullScopeStatuses, util, usersInRealm, client, true);
         }
     }
     private void handleFullScopeDisabled(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client) throws NoSuchAlgorithmException, JsonProcessingException {
         if (clientFullScopeStatuses.getFullScopeDisabled() == DraftStatus.APPROVED) {
             approveFullScope(clientFullScopeStatuses, false);
-        } else {
+        }
+        else if (clientFullScopeStatuses.getFullScopeDisabled() == DraftStatus.ACTIVE){
+            List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", clientFullScopeStatuses.getId())
+                    .getResultList();
+
+            if (!pendingChanges.isEmpty()) {
+                em.remove(pendingChanges.get(0));
+                em.flush();
+            }
+        }
+        else {
             startDraftApproval(clientFullScopeStatuses, util, usersInRealm, client, false);
         }
     }
@@ -116,11 +142,6 @@ public class TideClientAdapter extends ClientAdapter {
 
     }
     private void startDraftApproval(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, boolean enable) throws NoSuchAlgorithmException, JsonProcessingException {
-        if (enable && clientFullScopeStatuses.getFullScopeEnabled() == DraftStatus.ACTIVE) {
-            return;
-        } else if (!enable && clientFullScopeStatuses.getFullScopeDisabled() == DraftStatus.ACTIVE) {
-            return;
-        }
         if (enable) {
             createProofDraftsForUsers(util, usersInRealm, client, clientFullScopeStatuses.getId(), clientFullScopeStatuses);
         } else {
