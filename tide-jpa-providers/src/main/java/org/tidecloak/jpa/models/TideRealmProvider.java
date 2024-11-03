@@ -12,6 +12,7 @@ import org.keycloak.models.jpa.RealmAdapter;
 import org.keycloak.models.jpa.entities.*;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.RepresentationToModel;
+import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.representations.idm.ProtocolMapperRepresentation;
 import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
@@ -74,6 +75,8 @@ public class TideRealmProvider extends JpaRealmProvider {
         createAndAddProtocolMapper(clientModel, "vuid", "vuid", "Tide vuid");
         createAndAddRolesMapper(clientModel, "", "Tide IGA Role Mapper");
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
+        // TODO: update this to support other protocols
+        clientEntity.setProtocol(OIDCLoginProtocol.LOGIN_PROTOCOL);
         return new TideClientAdapter(realm, em, session, clientEntity);
     }
 

@@ -39,6 +39,13 @@ public class TideAdminRealmResource {
             auth.realm().requireManageRealm();
             session.getContext().getRealm().setAttribute("isIGAEnabled", isEnabled);
             logger.info("IGA has been toggled to : " + isEnabled);
+
+            // if IGA is on, we need to enable EDDSA as default sig
+            // TODO: this should be removed once we have IDP-LESS IGA
+            if(isEnabled){
+                session.getContext().getRealm().setDefaultSignatureAlgorithm("EdDSA");
+                logger.info("IGA has been enabled, default signature algorithm updated to EdDSA");
+            }
             return buildResponse(200, "IGA has been toggled to : " + isEnabled);
         }catch(Exception e) {
             logger.error("Error toggling IGA on realm: ", e);
