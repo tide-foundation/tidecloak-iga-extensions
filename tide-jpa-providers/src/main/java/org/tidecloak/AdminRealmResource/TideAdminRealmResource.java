@@ -11,6 +11,8 @@ import jakarta.persistence.NoResultException;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
@@ -148,9 +150,16 @@ public class TideAdminRealmResource {
             // Process the draft record entity
             String draftRecord = processDraftRecord(draftRecordEntity);
             var idp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+            ComponentModel componentModel = realm.getComponentsStream()
+                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
 
-            if (idp != null) {
-                String currentSecretKeys = (String) idp.getConfig().get("clientSecret");
+            if (idp != null && componentModel != null) {
+
+                MultivaluedHashMap<String, String> config = componentModel.getConfig();
+
+                String currentSecretKeys = config.getFirst("clientSecret");
                 ObjectMapper objectMapper = new ObjectMapper();
                 SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
                 int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
@@ -160,11 +169,12 @@ public class TideAdminRealmResource {
                     throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
                 }
 
+
                 SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
-                settings.VVKId = (String) idp.getConfig().get("vvkId");
-                settings.HomeOrkUrl = (String) idp.getConfig().get("systemHomeOrk");
-                settings.PayerPublicKey = (String) idp.getConfig().get("payerPub");
-                settings.ObfuscatedVendorPublicKey = (String) idp.getConfig().get("obfGVVK");
+                settings.VVKId = config.getFirst("vvkId");
+                settings.HomeOrkUrl = config.getFirst("systemHomeOrk");
+                settings.PayerPublicKey = config.getFirst("payerPub");
+                settings.ObfuscatedVendorPublicKey = config.getFirst("obfGVVK");
                 settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
 
                 settings.Threshold_T = threshold;
