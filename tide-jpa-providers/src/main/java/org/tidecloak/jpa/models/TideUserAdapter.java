@@ -183,6 +183,15 @@ public class TideUserAdapter extends UserAdapter {
     public void deleteRoleMapping(RoleModel roleModel) {
         RoleModel role = wrapRoleModel(roleModel, session, realm);
 
+        String igaAttribute = session.getContext().getRealm().getAttribute("isIGAEnabled");
+        boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
+
+        if (!isIGAEnabled){
+            List<TideUserRoleMappingDraftEntity> draftEntities = getDraftEntities(role);
+            deleteRoleAndProofRecords(role, draftEntities);
+            return;
+        }
+
         List<TideUserRoleMappingDraftEntity> activeDraftEntities = getActiveDraftEntities(role);
 
         if (activeDraftEntities.isEmpty()) {

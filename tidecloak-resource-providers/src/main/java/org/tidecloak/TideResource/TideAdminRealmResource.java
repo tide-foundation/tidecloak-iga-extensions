@@ -44,10 +44,22 @@ public class TideAdminRealmResource {
             IdentityProviderModel tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
 
             // if IGA is on and tideIdp exists, we need to enable EDDSA as default sig
-            if(isEnabled && tideIdp != null){
-                if ( !session.getContext().getRealm().getDefaultSignatureAlgorithm().equalsIgnoreCase("EdDsa")){
-                    session.getContext().getRealm().setDefaultSignatureAlgorithm("EdDSA");
-                    logger.info("IGA has been enabled, default signature algorithm updated to EdDSA");
+            if (tideIdp != null) {
+                String currentAlgorithm = session.getContext().getRealm().getDefaultSignatureAlgorithm();
+
+                if (isEnabled) {
+                    if (!"EdDSA".equalsIgnoreCase(currentAlgorithm)) {
+                        session.getContext().getRealm().setDefaultSignatureAlgorithm("EdDSA");
+                        logger.info("IGA has been enabled, default signature algorithm updated to EdDSA");
+                    }
+                } else {
+                    // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA
+                    // TODO: Fix error: Uncaught server error: java.lang.RuntimeException: org.keycloak.crypto.SignatureException:
+                    // Signing failed. java.security.InvalidKeyException: Unsupported key type (tide eddsa key)
+                    if ("EdDSA".equalsIgnoreCase(currentAlgorithm)) {
+                        session.getContext().getRealm().setDefaultSignatureAlgorithm("RS256");
+                        logger.info("IGA has been disabled, default signature algorithm updated to RS256");
+                    }
                 }
             }
             return buildResponse(200, "IGA has been toggled to : " + isEnabled);

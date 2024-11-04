@@ -42,8 +42,11 @@ public class TideRoleAdapter extends RoleAdapter {
         RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
         RoleEntity roleEntity = toRoleEntity(role);
         List<TideCompositeRoleMappingDraftEntity> entity = findCompositeRoleMappingDrafts(getEntity(), roleEntity, DraftStatus.ACTIVE);
+        String igaAttribute = session.getContext().getRealm().getAttribute("isIGAEnabled");
+        boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
 
-        if (entity == null || entity.isEmpty()) {
+
+        if (entity == null || entity.isEmpty() ) {
             handleUncommittedCompositeRole(role, roleEntity);
             return;
         }
@@ -65,7 +68,7 @@ public class TideRoleAdapter extends RoleAdapter {
             return new TideUserAdapter(session, realm, em, userEntity);
         }).filter(Objects::nonNull).toList();
 
-        if(activeUsers.isEmpty() || committedEntity.getDeleteStatus() == DraftStatus.ACTIVE){
+        if(activeUsers.isEmpty() || committedEntity.getDeleteStatus() == DraftStatus.ACTIVE || !isIGAEnabled){
 
             var draft = entity.get(0);
             var draftChangeSetRequest = new DraftChangeSetRequest();
