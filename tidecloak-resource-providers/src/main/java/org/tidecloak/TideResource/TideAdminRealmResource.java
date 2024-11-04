@@ -1,23 +1,19 @@
 package org.tidecloak.TideResource;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-import org.eclipse.microprofile.openapi.annotations.parameters.RequestBody;
 import org.jboss.logging.Logger;
-import org.jboss.resteasy.reactive.server.multipart.FormValue;
-import org.jboss.resteasy.reactive.server.multipart.MultipartFormDataInput;
+import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.component.ComponentModel;
 import org.keycloak.models.IdentityProviderModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
-
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.util.Collection;
-import java.util.Map;
-
+import org.midgard.Midgard;
+import org.tidecloak.AdminRealmResource.TideAdminRealmResource.SecretKeys;
 
 public class TideAdminRealmResource {
 
@@ -31,6 +27,53 @@ public class TideAdminRealmResource {
         this.realm = realm;
         this.auth = auth;
     }
+    @POST
+    @Path("new")
+    @Produces(MediaType.TEXT_PLAIN)
+    public Response GetAdminVouchers(@FormParam("voucherRequest") String voucherRequest){
+        try{
+            auth.realm().requireManageRealm();
+            // Now that we know this is an admin - we provided whatever voucher they want
+            return Response.status(200)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .entity(getVouchers(voucherRequest))
+                    .type(MediaType.TEXT_PLAIN)
+                    .build();
+
+        }catch(Exception ex){
+            ex.printStackTrace();
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("File upload failed: " + ex.getMessage()).type(MediaType.TEXT_PLAIN).build();
+        }
+    }
+    private String getVouchers(
+            String voucherRequest
+    ) throws JsonProcessingException {
+        ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .findFirst()
+                .orElse(null);
+
+        MultivaluedHashMap<String, String> config = componentModel.getConfig();
+
+        String currentSecretKeys = config.getFirst("clientSecret");
+        ObjectMapper objectMapper = new ObjectMapper();
+        SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
+        String vvkId = config.getFirst("vvkId");
+
+
+        String payerPublicKey = config.getFirst("payerPublic");
+
+        // Always use the active vrk unless this is the initial license. The initial license does not yet have an active VRK and is waiting on the pending vrk to be commited
+        String vrk = vvkId == null || vvkId.isEmpty() ? secretKeys.pendingVrk : secretKeys.activeVrk;
+        String response = Midgard.GetVouchers(
+                voucherRequest,
+                config.getFirst("obfGVVK"),
+                payerPublicKey,
+                vrk);
+
+        return response;
+    }
+
     @POST
     @Path("toggle-iga")
     @Produces(MediaType.TEXT_PLAIN)
