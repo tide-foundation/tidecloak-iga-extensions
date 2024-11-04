@@ -28,7 +28,7 @@ public class TideAdminRealmResource {
         this.auth = auth;
     }
     @POST
-    @Path("new")
+    @Path("new-voucher")
     @Produces(MediaType.TEXT_PLAIN)
     public Response GetAdminVouchers(@FormParam("voucherRequest") String voucherRequest){
         try{
