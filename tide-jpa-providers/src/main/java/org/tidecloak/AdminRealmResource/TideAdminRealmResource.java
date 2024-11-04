@@ -169,19 +169,18 @@ public class TideAdminRealmResource {
                     throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
                 }
 
-
                 SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
                 settings.VVKId = config.getFirst("vvkId");
                 settings.HomeOrkUrl = config.getFirst("systemHomeOrk");
-                settings.PayerPublicKey = config.getFirst("payerPub");
+                settings.PayerPublicKey = config.getFirst("payerPublic");
                 settings.ObfuscatedVendorPublicKey = config.getFirst("obfGVVK");
                 settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
-
                 settings.Threshold_T = threshold;
                 settings.Threshold_N = max;
 
                 proofDetails.forEach(p -> {
                     try {
+                        System.out.println(p.getProofDraft());
                         ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", p.getProofDraft().getBytes());
 
                         Set<String> allowedKeys = Set.of("sub", "tideuserkey", "vuid");
