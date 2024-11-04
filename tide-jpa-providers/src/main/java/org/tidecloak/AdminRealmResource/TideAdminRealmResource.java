@@ -11,6 +11,8 @@ import jakarta.persistence.NoResultException;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
@@ -25,6 +27,7 @@ import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.SignatureEntry;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.jpa.models.TideClientAdapter;
+import org.tidecloak.jpa.utils.IGAUtils;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
@@ -47,6 +50,9 @@ public class TideAdminRealmResource {
     @GET
     @Path("users/{user-id}/roles/{role-id}/draft/status")
     public Response getUserRoleAssignmentDraftStatus(@PathParam("user-id") String userId, @PathParam("role-id") String roleId) {
+        if(!IGAUtils.isIGAEnabled(realm)){
+            return Response.ok().entity(new ArrayList<>()).build();
+        }
         auth.users().requireQuery(); // Ensure the user has the necessary permissions
 
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
@@ -65,14 +71,16 @@ public class TideAdminRealmResource {
 
             return Response.ok(statusMap).build();
         } catch (NoResultException e) {
-            // Return 404 if no draft status is found
-            return Response.status(Response.Status.NOT_FOUND).entity("Draft status not found").build();
+            return Response.status(Response.Status.OK).entity(new ArrayList<>()).build();
         }
     }
 
     @GET
     @Path("users/{user-id}/draft/status")
     public Response getUserDraftStatus(@PathParam("user-id") String id) {
+        if(!IGAUtils.isIGAEnabled(realm)){
+            return Response.ok().entity(new ArrayList<>()).build();
+        }
         auth.users().requireQuery(); // Ensure the user has the necessary permissions
 
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
@@ -85,14 +93,16 @@ public class TideAdminRealmResource {
                     .getDraftStatus();
             return Response.ok(draftStatus).build();
         } catch (NoResultException e) {
-            // Return 404 if no draft status is found
-            return Response.status(Response.Status.NOT_FOUND).entity("Draft status not found").build();
+            return Response.status(Response.Status.OK).entity(new ArrayList<>()).build();
         }
     }
 
     @GET
     @Path("composite/{parent-id}/child/{child-id}/draft/status")
     public Response getRoleDraftStatus(@PathParam("parent-id") String parentId, @PathParam("child-id") String childId) {
+        if(!IGAUtils.isIGAEnabled(realm)){
+            return Response.ok().entity(new ArrayList<>()).build();
+        }
         auth.users().requireQuery(); // Ensure the user has the necessary permissions
 
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
@@ -111,7 +121,7 @@ public class TideAdminRealmResource {
             return Response.ok(statusMap).build();
         }
         catch (NoResultException e) {
-            return Response.status(Response.Status.NOT_FOUND).entity("Draft status not found").build();
+            return Response.status(Response.Status.OK).entity(new ArrayList<>()).build();
         }
     }
 
@@ -140,49 +150,65 @@ public class TideAdminRealmResource {
             // Process the draft record entity
             String draftRecord = processDraftRecord(draftRecordEntity);
             var idp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
-            String currentSecretKeys = (String) idp.getConfig().get("clientSecret");
-            ObjectMapper objectMapper = new ObjectMapper();
-            SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
-            int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
-            int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
+            ComponentModel componentModel = realm.getComponentsStream()
+                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
 
-            if ( threshold == 0 || max == 0){
-                throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
-            }
+            if (idp != null && componentModel != null) {
 
-            SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
-            settings.VVKId = (String) idp.getConfig().get("vvkId");
-            settings.HomeOrkUrl = (String) idp.getConfig().get("systemHomeOrk");
-            settings.PayerPublicKey = (String) idp.getConfig().get("payerPub");
-            settings.ObfuscatedVendorPublicKey = (String) idp.getConfig().get("obfGVVK");
-            settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
+                MultivaluedHashMap<String, String> config = componentModel.getConfig();
 
-            settings.Threshold_T = threshold;
-            settings.Threshold_N = max;
+                String currentSecretKeys = config.getFirst("clientSecret");
+                ObjectMapper objectMapper = new ObjectMapper();
+                SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
+                int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
+                int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
 
-            proofDetails.forEach(p -> {
-                try {
-                    ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", p.getProofDraft().getBytes());
-
-                    Set<String> allowedKeys = Set.of("sub", "tideuserkey", "vuid");
-                    var idToken = constructIdToken(p.getProofDraft(), allowedKeys, session.clients().getClientById(realm, p.getClientId()).getClientId());
-
-                    req.SetDynamicData(idToken.getBytes());
-                    req.SetAuthorization(
-                            Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
-                    );
-                    SignatureResponse response = Midgard.SignModel(settings, req);
-
-                    //TODO: add admin gcmkauth to adminPublicKey
-                    SignatureEntry signatureEntry = new SignatureEntry(response.Signatures[0], response.Signatures[1], "");
-                    p.addSignature(signatureEntry);
-                    em.merge(p);
-
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
+                if ( threshold == 0 || max == 0){
+                    throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
                 }
-            });
 
+                SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
+                settings.VVKId = config.getFirst("vvkId");
+                settings.HomeOrkUrl = config.getFirst("systemHomeOrk");
+                settings.PayerPublicKey = config.getFirst("payerPublic");
+                settings.ObfuscatedVendorPublicKey = config.getFirst("obfGVVK");
+                settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
+                settings.Threshold_T = threshold;
+                settings.Threshold_N = max;
+
+                proofDetails.forEach(p -> {
+                    try {
+                        System.out.println(p.getProofDraft());
+                        ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", p.getProofDraft().getBytes());
+
+                        Set<String> allowedKeys = Set.of("sub", "tideuserkey", "vuid");
+                        var idToken = constructIdToken(p.getProofDraft(), allowedKeys, session.clients().getClientById(realm, p.getClientId()).getClientId());
+
+                        req.SetDynamicData(idToken.getBytes());
+                        req.SetAuthorization(
+                                Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
+                        );
+                        SignatureResponse response = Midgard.SignModel(settings, req);
+
+                        //TODO: add admin gcmkauth to adminPublicKey
+                        SignatureEntry signatureEntry = new SignatureEntry(response.Signatures[0], response.Signatures[1], "");
+                        p.addSignature(signatureEntry);
+                        em.merge(p);
+
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+            }else {
+                proofDetails.forEach(p -> {
+                        SignatureEntry signatureEntry = new SignatureEntry("", "", auth.adminAuth().getUser().getId());
+                        p.addSignature(signatureEntry);
+                        em.merge(p);
+                });
+
+            }
             // Update the draft status
             updateDraftStatus(changeSet, draftRecordEntity);
 
@@ -300,6 +326,9 @@ public class TideAdminRealmResource {
     @GET
     @Path("change-set/users/requests")
     public Response getRequestedChangesForUsers() {
+        if(!IGAUtils.isIGAEnabled(realm)){
+            return Response.ok().entity(new ArrayList<>()).build();
+        }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> changes = new ArrayList<>(processUserRoleMappings(em));
         return Response.ok(changes).build();
@@ -308,6 +337,9 @@ public class TideAdminRealmResource {
     @GET
     @Path("change-set/roles/requests")
     public Response getRequestedChanges() {
+        if(!IGAUtils.isIGAEnabled(realm)){
+            return Response.ok().entity(new ArrayList<>()).build();
+        }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> requestedChangesList = new ArrayList<>(processRoleMappings(em));
         requestedChangesList.addAll(processCompositeRoleMappings(em));
@@ -317,6 +349,9 @@ public class TideAdminRealmResource {
     @GET
     @Path("change-set/clients/requests")
     public Response getRequestedChangesForClients() {
+        if(!IGAUtils.isIGAEnabled(realm)){
+            return Response.ok().entity(new ArrayList<>()).build();
+        }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> changes = new ArrayList<>(processClientDraftRecords(em));
         return Response.ok(changes).build();

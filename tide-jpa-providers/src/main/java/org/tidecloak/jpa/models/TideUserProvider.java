@@ -184,8 +184,8 @@ public class TideUserProvider extends JpaUserProvider {
     public UserModel getUserByEmail(RealmModel realm, String email) {
         UserModel userModel = super.getUserByEmail(realm, email);
         if (userModel != null) {
-            ensureEmailConstraint(Collections.singletonList((UserEntity) userModel), realm);
             UserEntity userEntity = em.find(UserEntity.class, userModel.getId());
+            ensureEmailConstraint(Collections.singletonList(userEntity), realm);
             return new TideUserAdapter(session, realm, em, userEntity);
         }
         return null;
