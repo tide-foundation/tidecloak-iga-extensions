@@ -7,6 +7,7 @@ import org.eclipse.microprofile.openapi.annotations.parameters.RequestBody;
 import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.server.multipart.FormValue;
 import org.jboss.resteasy.reactive.server.multipart.MultipartFormDataInput;
+import org.keycloak.models.IdentityProviderModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
@@ -40,18 +41,20 @@ public class TideAdminRealmResource {
             session.getContext().getRealm().setAttribute("isIGAEnabled", isEnabled);
             logger.info("IGA has been toggled to : " + isEnabled);
 
-            // if IGA is on, we need to enable EDDSA as default sig
-            // TODO: this should be removed once we have IDP-LESS IGA
-            if(isEnabled){
-                session.getContext().getRealm().setDefaultSignatureAlgorithm("EdDSA");
-                logger.info("IGA has been enabled, default signature algorithm updated to EdDSA");
+            IdentityProviderModel tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+
+            // if IGA is on and tideIdp exists, we need to enable EDDSA as default sig
+            if(isEnabled && tideIdp != null){
+                if ( !session.getContext().getRealm().getDefaultSignatureAlgorithm().equalsIgnoreCase("EdDsa")){
+                    session.getContext().getRealm().setDefaultSignatureAlgorithm("EdDSA");
+                    logger.info("IGA has been enabled, default signature algorithm updated to EdDSA");
+                }
             }
             return buildResponse(200, "IGA has been toggled to : " + isEnabled);
         }catch(Exception e) {
             logger.error("Error toggling IGA on realm: ", e);
             throw e;
         }
-
     }
 
     private Response buildResponse(int status, String message) {

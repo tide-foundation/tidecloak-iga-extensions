@@ -75,8 +75,6 @@ public class TideRealmProvider extends JpaRealmProvider {
         createAndAddProtocolMapper(clientModel, "vuid", "vuid", "Tide vuid");
         createAndAddRolesMapper(clientModel, "", "Tide IGA Role Mapper");
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
-        // TODO: update this to support other protocols
-        clientEntity.setProtocol(OIDCLoginProtocol.LOGIN_PROTOCOL);
         return new TideClientAdapter(realm, em, session, clientEntity);
     }
 

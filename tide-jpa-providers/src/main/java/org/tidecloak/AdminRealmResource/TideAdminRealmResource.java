@@ -148,49 +148,58 @@ public class TideAdminRealmResource {
             // Process the draft record entity
             String draftRecord = processDraftRecord(draftRecordEntity);
             var idp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
-            String currentSecretKeys = (String) idp.getConfig().get("clientSecret");
-            ObjectMapper objectMapper = new ObjectMapper();
-            SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
-            int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
-            int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
 
-            if ( threshold == 0 || max == 0){
-                throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
-            }
+            if (idp != null) {
+                String currentSecretKeys = (String) idp.getConfig().get("clientSecret");
+                ObjectMapper objectMapper = new ObjectMapper();
+                SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
+                int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
+                int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
 
-            SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
-            settings.VVKId = (String) idp.getConfig().get("vvkId");
-            settings.HomeOrkUrl = (String) idp.getConfig().get("systemHomeOrk");
-            settings.PayerPublicKey = (String) idp.getConfig().get("payerPub");
-            settings.ObfuscatedVendorPublicKey = (String) idp.getConfig().get("obfGVVK");
-            settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
-
-            settings.Threshold_T = threshold;
-            settings.Threshold_N = max;
-
-            proofDetails.forEach(p -> {
-                try {
-                    ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", p.getProofDraft().getBytes());
-
-                    Set<String> allowedKeys = Set.of("sub", "tideuserkey", "vuid");
-                    var idToken = constructIdToken(p.getProofDraft(), allowedKeys, session.clients().getClientById(realm, p.getClientId()).getClientId());
-
-                    req.SetDynamicData(idToken.getBytes());
-                    req.SetAuthorization(
-                            Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
-                    );
-                    SignatureResponse response = Midgard.SignModel(settings, req);
-
-                    //TODO: add admin gcmkauth to adminPublicKey
-                    SignatureEntry signatureEntry = new SignatureEntry(response.Signatures[0], response.Signatures[1], "");
-                    p.addSignature(signatureEntry);
-                    em.merge(p);
-
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
+                if ( threshold == 0 || max == 0){
+                    throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
                 }
-            });
 
+                SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
+                settings.VVKId = (String) idp.getConfig().get("vvkId");
+                settings.HomeOrkUrl = (String) idp.getConfig().get("systemHomeOrk");
+                settings.PayerPublicKey = (String) idp.getConfig().get("payerPub");
+                settings.ObfuscatedVendorPublicKey = (String) idp.getConfig().get("obfGVVK");
+                settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
+
+                settings.Threshold_T = threshold;
+                settings.Threshold_N = max;
+
+                proofDetails.forEach(p -> {
+                    try {
+                        ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", p.getProofDraft().getBytes());
+
+                        Set<String> allowedKeys = Set.of("sub", "tideuserkey", "vuid");
+                        var idToken = constructIdToken(p.getProofDraft(), allowedKeys, session.clients().getClientById(realm, p.getClientId()).getClientId());
+
+                        req.SetDynamicData(idToken.getBytes());
+                        req.SetAuthorization(
+                                Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
+                        );
+                        SignatureResponse response = Midgard.SignModel(settings, req);
+
+                        //TODO: add admin gcmkauth to adminPublicKey
+                        SignatureEntry signatureEntry = new SignatureEntry(response.Signatures[0], response.Signatures[1], "");
+                        p.addSignature(signatureEntry);
+                        em.merge(p);
+
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+            }else {
+                proofDetails.forEach(p -> {
+                        SignatureEntry signatureEntry = new SignatureEntry("", "", auth.adminAuth().getUser().getId());
+                        p.addSignature(signatureEntry);
+                        em.merge(p);
+                });
+
+            }
             // Update the draft status
             updateDraftStatus(changeSet, draftRecordEntity);
 
