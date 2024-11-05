@@ -10,8 +10,8 @@
 
     <properties>
         <version.keycloak>KEYCLOAKVERSION</version.keycloak>
-        <quarkus.version>3.8.5</quarkus.version>
-        <quarkus.build.version>3.8.5</quarkus.build.version>
+        <quarkus.version>3.15.0</quarkus.version>
+        <quarkus.build.version>3.15.0</quarkus.build.version>
     </properties>
 
     <dependencyManagement>
