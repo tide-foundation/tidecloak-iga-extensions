@@ -13,7 +13,6 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
-import org.tidecloak.AdminRealmResource.TideAdminRealmResource.SecretKeys;
 
 public class TideAdminRealmResource {
 
