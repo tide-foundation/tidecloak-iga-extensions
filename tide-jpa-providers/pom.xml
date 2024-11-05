@@ -19,6 +19,12 @@
 
     <dependencies>
         <dependency>
+            <groupId>org.tide</groupId>
+            <artifactId>MidgardJava</artifactId>
+            <version>1.0-SNAPSHOT</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
             <groupId>org.keycloak</groupId>
             <artifactId>keycloak-server-spi</artifactId>
             <scope>provided</scope>

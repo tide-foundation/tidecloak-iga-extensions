@@ -1,5 +1,6 @@
 package org.tidecloak.jpa.entities;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.UserEntity;
 
@@ -7,9 +8,13 @@ import java.io.Serializable;
 
 @NamedQueries({
         @NamedQuery(name="getAccessProofByUserId", query="select u from UserClientAccessProofEntity u where u.user = :user"),
+        @NamedQuery(name="getAccessProofByClientId", query="select u from UserClientAccessProofEntity u where u.clientId = :clientId"),
         @NamedQuery(name="getAccessProofByUserIdAndClientId", query="select u from UserClientAccessProofEntity u where u.user = :user and u.clientId = :clientId "),
         @NamedQuery(name="deleteProofByUser", query="delete from UserClientAccessProofEntity m where m.user = :user"),
-
+        @NamedQuery(name="DeleteAllUserProofsByRealm",
+                query = "DELETE FROM UserClientAccessProofEntity r " +
+                        "WHERE r.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
+        ),
 })
 @Entity
 @Table(name = "USER_CLIENT_ACCESS_PROOF")
@@ -19,6 +24,7 @@ public class UserClientAccessProofEntity {
     @Id
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="USER_ID")
+    @JsonIgnoreProperties({"credentials", "federatedIdentities", "attributes"})
     protected UserEntity user;
 
     @Id
@@ -27,6 +33,12 @@ public class UserClientAccessProofEntity {
 
     @Column(name = "ACCESS_PROOF")
     protected String accessProof;
+
+    @Column(name = "ACCESS_PROOF_SIG")
+    protected String accessProofSig;
+
+    @Column(name = "ID_PROOF_SIG")
+    protected String idProofSig;
 
     @Column(name = "ACCESS_PROOF_META")
     protected String accessProofMeta;
@@ -52,6 +64,22 @@ public class UserClientAccessProofEntity {
 
     public void setAccessProof(String proof) {
         this.accessProof = proof;
+    }
+
+    public String getAccessProofSig() {
+        return accessProofSig;
+    }
+
+    public void setAccessProofSig(String sig) {
+        this.accessProofSig = sig;
+    }
+
+    public String getIdProofSig() {
+        return idProofSig;
+    }
+
+    public void setIdProofSig(String sig) {
+        this.idProofSig = sig;
     }
 
     public String getAccessProofMeta() {

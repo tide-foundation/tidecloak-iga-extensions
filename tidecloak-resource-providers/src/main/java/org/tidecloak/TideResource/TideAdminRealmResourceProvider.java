@@ -1,4 +1,4 @@
-package org.tidecloak.TideIdpResource;
+package org.tidecloak.TideResource;
 
 import org.keycloak.Config;
 import org.keycloak.models.KeycloakSession;
@@ -9,10 +9,10 @@ import org.keycloak.services.resources.admin.ext.AdminRealmResourceProvider;
 import org.keycloak.services.resources.admin.ext.AdminRealmResourceProviderFactory;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 
-public class TideIdpAdminRealmResourceProvider
+public class TideAdminRealmResourceProvider
         implements AdminRealmResourceProviderFactory, AdminRealmResourceProvider {
 
-    public static final String PROVIDER_ID = "tide-idp-admin-resources";
+    public static final String PROVIDER_ID = "tideAdminResources";
 
     @Override
     public AdminRealmResourceProvider create(KeycloakSession session) {
@@ -21,7 +21,7 @@ public class TideIdpAdminRealmResourceProvider
 
     @Override
     public Object getResource(KeycloakSession session, RealmModel realm, AdminPermissionEvaluator auth, AdminEventBuilder adminEvent) {
-        return new TideIdpAdminRealmResource(session, realm, auth);
+        return new TideAdminRealmResource(session, realm, auth);
     }
 
     @Override
