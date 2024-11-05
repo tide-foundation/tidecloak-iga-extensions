@@ -13,7 +13,6 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
-import org.tidecloak.AdminRealmResource.TideAdminRealmResource.SecretKeys;
 
 public class TideAdminRealmResource {
 
@@ -119,8 +118,16 @@ public class TideAdminRealmResource {
                 .type(MediaType.TEXT_PLAIN)
                 .build();
     }
+    
+    public static class SecretKeys {
+        public String activeVrk;
+        public String pendingVrk;
+        public String VZK;
+        public List<String> history = new ArrayList<>();
 
-
+        // Method to add a new entry to the history
+        public void addToHistory(String newEntry) {
+            history.add(newEntry);
+        }
+    }
 }
-
-
