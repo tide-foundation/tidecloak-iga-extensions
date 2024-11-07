@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.NoResultException;
+import org.keycloak.authorization.policy.evaluation.Realm;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
@@ -940,14 +941,20 @@ public final class TideAuthzProofUtil {
 
         if (changeSetType == ChangeSetType.USER_ROLE) {
             roleModel = realm.getRoleById(((TideUserRoleMappingDraftEntity) entity).getRoleId());
-            affectedClients.add(realm.getClientById(roleModel.getContainerId()));
+            if(roleModel.isClientRole()){
+                affectedClients.add(realm.getClientById(roleModel.getContainerId()));
+            }
 
         } else if (changeSetType == ChangeSetType.COMPOSITE_ROLE) {
             roleModel = realm.getRoleById(((TideCompositeRoleMappingDraftEntity) entity).getChildRole().getId());
-            affectedClients.add(realm.getClientById(roleModel.getContainerId()));
+            if(roleModel.isClientRole()){
+                affectedClients.add(realm.getClientById(roleModel.getContainerId()));
+            }
         } else if (changeSetType == ChangeSetType.ROLE) {
             roleModel = realm.getRoleById(((TideRoleDraftEntity) entity).getRole().getId());
-            affectedClients.add(realm.getClientById(roleModel.getContainerId()));
+            if(roleModel.isClientRole()){
+                affectedClients.add(realm.getClientById(roleModel.getContainerId()));
+            }
         }
 
         if(roleModel != null && roleModel.isComposite()){

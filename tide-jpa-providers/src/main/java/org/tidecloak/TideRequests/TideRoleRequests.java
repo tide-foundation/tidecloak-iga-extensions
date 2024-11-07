@@ -8,6 +8,8 @@ import org.keycloak.component.ComponentModel;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RoleModel;
+import org.midgard.Midgard;
+import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.tidecloak.AdminRealmResource.TideAdminRealmResource;
 
 import java.util.*;
@@ -21,13 +23,19 @@ public class TideRoleRequests {
     public static void createRealmAdminRole(KeycloakSession session) throws JsonProcessingException {
         String realmAdminRoleName = "tide-realm-admin";
         String realmManagementId = "realm-management";
-        var realmAdminRole = session.getContext().getClient().addRole(realmAdminRoleName);
+        String resource = "security-admin-console";
+
+        var realmAdminRole = session.getContext().getRealm().addRole(realmAdminRoleName);
         session.getContext().getRealm().getClientByClientId(realmManagementId).getRolesStream().forEach(realmAdminRole::addCompositeRole);
-        var finalRealmAdminRole = session.getContext().getClient().addRole(realmAdminRoleName);
-        createRoleInitCert(session,finalRealmAdminRole);
+        var finalRealmAdminRole = session.getContext().getRealm().getRole(realmAdminRoleName);
+        ArrayList<String> signModels = new ArrayList<String>();
+        signModels.add("AccessTokens");
+        InitializerCertifcate initCert = createRoleInitCert(session, resource,finalRealmAdminRole, "0.0.0", "EdDSA", signModels);
+
+        // store against realm role
     }
 
-    public static void createRoleInitCert(KeycloakSession session, RoleModel role) throws JsonProcessingException {
+    public static InitializerCertifcate createRoleInitCert(KeycloakSession session, String resource, RoleModel role , String certVersion, String algorithm, ArrayList<String> signModels) throws JsonProcessingException {
         ClientModel client = session.getContext().getClient();
 
         // Grab from tide key provider
@@ -48,12 +56,13 @@ public class TideRoleRequests {
             throw new RuntimeException("Cannot generate Role initializer certificate, no active license was found");
         }
 
+        String vvkId = config.getFirst("vvkId");
+        String vendor = session.getContext().getRealm().getName();
 
         // Expand role to grab the lowest role e.g. superAdmin:read
         Map<String, Object> groups = expandCompositeRolesAsNestedStructure(role);
-        objectMapper.enable(SerializationFeature.INDENT_OUTPUT);
-        String json = objectMapper.writeValueAsString(groups);
-        System.out.println(json);
+
+        return Midgard.constructInitCert(vvkId, algorithm, certVersion, vendor, resource, groups,  signModels);
 
     }
 

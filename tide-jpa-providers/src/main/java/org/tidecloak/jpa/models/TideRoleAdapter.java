@@ -296,13 +296,13 @@ public class TideRoleAdapter extends RoleAdapter {
             return;
         }
         // don't care about realm roles
-        if(!getEntity().isClientRole() || !roleModel.isClientRole()){
-            super.addCompositeRole(roleModel);
-            RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
-            RoleEntity entity = toRoleEntity(role);
-            persistDraft(entity);
-            return;
-        }
+//        if(!getEntity().isClientRole() || !roleModel.isClientRole()){
+//            super.addCompositeRole(roleModel);
+//            RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
+//            RoleEntity entity = toRoleEntity(role);
+//            persistDraft(entity);
+//            return;
+//        }
 
         RoleModel childRole = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
         RoleEntity childEntity = toRoleEntity(childRole);

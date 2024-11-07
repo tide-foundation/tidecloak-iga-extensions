@@ -155,7 +155,7 @@ public class TideAdminRealmResource {
                     .findFirst()
                     .orElse(null);
 
-            if (idp != null && componentModel != null) {
+
 
                 MultivaluedHashMap<String, String> config = componentModel.getConfig();
 
@@ -179,36 +179,35 @@ public class TideAdminRealmResource {
                 settings.Threshold_N = max;
 
                 proofDetails.forEach(p -> {
-                    try {
-                        System.out.println(p.getProofDraft());
-                        ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", p.getProofDraft().getBytes());
-
-                        Set<String> allowedKeys = Set.of("sub", "tideuserkey", "vuid");
-                        var idToken = constructIdToken(p.getProofDraft(), allowedKeys, session.clients().getClientById(realm, p.getClientId()).getClientId());
-
-                        req.SetDynamicData(idToken.getBytes());
-                        req.SetAuthorization(
-                                Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
-                        );
-                        SignatureResponse response = Midgard.SignModel(settings, req);
-
-                        //TODO: add admin gcmkauth to adminPublicKey
-                        SignatureEntry signatureEntry = new SignatureEntry(response.Signatures[0], response.Signatures[1], "");
-                        p.addSignature(signatureEntry);
-                        em.merge(p);
-
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    }
-                });
-            }else {
-                proofDetails.forEach(p -> {
+                    boolean tideUser = p.getUser().getAttributes().stream().anyMatch(k -> k.equals("tideuserkey"));
+                    if(!tideUser || (idp != null && componentModel != null)){
                         SignatureEntry signatureEntry = new SignatureEntry("", "", auth.adminAuth().getUser().getId());
                         p.addSignature(signatureEntry);
                         em.merge(p);
+                    } else {
+                        try {
+                            ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", p.getProofDraft().getBytes());
+
+                            Set<String> allowedKeys = Set.of("sub", "tideuserkey", "vuid");
+                            var idToken = constructIdToken(p.getProofDraft(), allowedKeys, session.clients().getClientById(realm, p.getClientId()).getClientId());
+
+                            req.SetDynamicData(idToken.getBytes());
+                            req.SetAuthorization(
+                                    Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
+                            );
+                            SignatureResponse response = Midgard.SignModel(settings, req);
+
+                            //TODO: add admin gcmkauth to adminPublicKey
+                            SignatureEntry signatureEntry = new SignatureEntry(response.Signatures[0], response.Signatures[1], "");
+                            p.addSignature(signatureEntry);
+                            em.merge(p);
+
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
                 });
 
-            }
             // Update the draft status
             updateDraftStatus(changeSet, draftRecordEntity);
 
@@ -376,7 +375,7 @@ public class TideAdminRealmResource {
                     .getResultList();
 
 
-            RequestedChanges requestChange = new RequestedChanges("",ChangeSetType.CLIENT, RequestType.CLIENT, client.getClientId(), c.getAction(), c.getId(), new ArrayList<>(), DraftStatus.DRAFT, DraftStatus.NULL);
+            RequestedChanges requestChange = new RequestedChanges("",ChangeSetType.CLIENT, RequestType.CLIENT, client.getClientId(), realm.getName(), c.getAction(), c.getId(), new ArrayList<>(), DraftStatus.DRAFT, DraftStatus.NULL);
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
                 requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), c.getClient().getClientId(), p.getProofDraft()));
@@ -413,17 +412,17 @@ public class TideAdminRealmResource {
         for (TideUserRoleMappingDraftEntity m : mappings) {
             em.lock(m, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
             RoleModel role = realm.getRoleById(m.getRoleId());
-            if (role == null || !role.isClientRole()) {
+            if (role == null ) {
                 continue;
             }
-            ClientModel clientModel = realm.getClientById(role.getContainerId());
+            String clientId = role.isClientRole() ? realm.getClientById(role.getContainerId()).getClientId() : null;
             List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                     .setParameter("recordId", m.getId())
                     .getResultList();
             boolean isDeleteRequest = m.getDraftStatus() == DraftStatus.ACTIVE && (m.getDeleteStatus() != DraftStatus.ACTIVE || m.getDeleteStatus() != null);
             String actionDescription = isDeleteRequest ? "Unassigning Role from User" : "Granting Role to User";
             ActionType action = isDeleteRequest ? ActionType.DELETE : ActionType.CREATE;
-            RequestedChanges requestChange = new RoleChangeRequest(realm.getRoleById(m.getRoleId()).getName(), actionDescription, ChangeSetType.USER_ROLE, RequestType.USER, clientModel.getClientId(), action, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
+            RequestedChanges requestChange = new RoleChangeRequest(realm.getRoleById(m.getRoleId()).getName(), actionDescription, ChangeSetType.USER_ROLE, RequestType.USER, clientId, realm.getName(), action, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
                 requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
@@ -453,7 +452,7 @@ public class TideAdminRealmResource {
             String actionDescription = isDeleteRequest ? "Removing Role from Composite Role": "Granting Role to Composite Role";
             ActionType action = isDeleteRequest ? ActionType.DELETE : ActionType.CREATE;
 
-            RequestedChanges requestChange = new CompositeRoleChangeRequest(m.getChildRole().getName(), m.getComposite().getName(), actionDescription, ChangeSetType.COMPOSITE_ROLE, RequestType.ROLE, realm.getClientById(m.getComposite().getClientId()).getClientId(), action, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
+            RequestedChanges requestChange = new CompositeRoleChangeRequest(m.getChildRole().getName(), m.getComposite().getName(), actionDescription, ChangeSetType.COMPOSITE_ROLE, RequestType.ROLE, realm.getClientById(m.getComposite().getClientId()).getClientId(), realm.getName(), action, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
             proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft())));
             changes.add(requestChange);
         }
@@ -468,15 +467,13 @@ public class TideAdminRealmResource {
                 .getResultList();
 
         for (TideRoleDraftEntity m : mappings) {
-            if (!m.getRole().isClientRole()) {
-                continue;
-            }
+            String clientId = m.getRole().isClientRole() ? m.getRole().getClientId() : null;
             List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                     .setParameter("recordId", m.getId())
                     .setLockMode(LockModeType.PESSIMISTIC_WRITE)
                     .getResultList();
             String action = "Deleting Role from Client";
-            RequestedChanges requestChange = new RoleChangeRequest(m.getRole().getName(), action, ChangeSetType.ROLE, RequestType.ROLE, realm.getClientById(m.getRole().getClientId()).getClientId(), ActionType.DELETE, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
+            RequestedChanges requestChange = new RoleChangeRequest(m.getRole().getName(), action, ChangeSetType.ROLE, RequestType.ROLE, clientId, realm.getName(), ActionType.DELETE, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
             proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft())));
 
             changes.add(requestChange);
@@ -572,7 +569,7 @@ public class TideAdminRealmResource {
 
     private void processUserRoleMapping(DraftChangeSetRequest change, TideUserRoleMappingDraftEntity mapping, EntityManager em, ActionType action) throws NoSuchAlgorithmException, JsonProcessingException {
         RoleModel role = realm.getRoleById(mapping.getRoleId());
-        if (role == null || !role.isClientRole()) return;
+        if (role == null) return;
         //TODO: SEND THE TIDECLOAKDRAFTCHANGESET request to orks here
         TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
         TidecloakDraftChangeSetRequest tidecloakDraftChangeSetRequest = util.generateTidecloakDraftChangeSetRequest(em, change.getChangeSetId(), mapping, mapping.getTimestamp());
