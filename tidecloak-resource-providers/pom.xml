@@ -27,6 +27,12 @@
     </dependencyManagement>
 
     <dependencies>
+        <dependency>
+            <groupId>org.tidecloak</groupId>
+            <artifactId>tide-jpa-providers</artifactId>
+            <version>1.0-SNAPSHOT</version>
+            <scope>provided</scope>
+        </dependency>
          <dependency>
             <groupId>org.tide</groupId>
             <artifactId>MidgardJava</artifactId>
