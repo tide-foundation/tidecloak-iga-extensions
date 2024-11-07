@@ -44,7 +44,6 @@ public class TideRoleDraftEntity {
     @Column(name = "DELETE_STATUS")
     private DraftStatus deleteStatus;
 
-    @Enumerated(EnumType.STRING)
     @Column(name = "INIT_CERT")
     private String initCert;
 
