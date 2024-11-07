@@ -2,6 +2,7 @@ package org.tidecloak.TideRequests;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.ClientModel;
@@ -17,13 +18,13 @@ public class TideRoleRequests {
 
 
      // Creates a Realm Admin role for current realm. The role has full access to manage the current realm.
-    public static void createRealmAdminRole(KeycloakSession session) {
-        String realmAdminRoleName = "realm-admin";
+    public static void createRealmAdminRole(KeycloakSession session) throws JsonProcessingException {
+        String realmAdminRoleName = "tide-realm-admin";
         String realmManagementId = "realm-management";
         var realmAdminRole = session.getContext().getClient().addRole(realmAdminRoleName);
         session.getContext().getRealm().getClientByClientId(realmManagementId).getRolesStream().forEach(realmAdminRole::addCompositeRole);
-
-
+        var finalRealmAdminRole = session.getContext().getClient().addRole(realmAdminRoleName);
+        createRoleInitCert(session,finalRealmAdminRole);
     }
 
     public static void createRoleInitCert(KeycloakSession session, RoleModel role) throws JsonProcessingException {
@@ -43,64 +44,58 @@ public class TideRoleRequests {
         TideAdminRealmResource.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, TideAdminRealmResource.SecretKeys.class);
         String vrk = secretKeys.activeVrk;
 
-        // Expand role to grab the lowest role e.g. superAdmin:read
-        HashSet<RoleModel> roleSet = new HashSet<RoleModel>();
-        roleSet.add(role);
-        Set<String> groups = expandCompositeRoles(roleSet);
-
-
-        groups.forEach(System.out::println);
-
-    }
-
-    private static Set<String> expandCompositeRoles(Set<RoleModel> roles) {
-        Set<RoleModel> visited = new HashSet<>();
-        Set<String> expandedRoles = new HashSet<>();
-
-        roles.forEach(roleModel -> {
-            expandedRoles.addAll(expandCompositeRolesWithPaths(roleModel, visited));
-        });
-
-        return expandedRoles;
-    }
-
-
-    private static Set<String> expandCompositeRolesWithPaths(RoleModel role, Set<RoleModel> visited) {
-        Set<String> rolePaths = new HashSet<>();
-
-        if (!visited.contains(role)) {
-            Deque<Pair<RoleModel, String>> stack = new ArrayDeque<>();
-            stack.add(new Pair<>(role, ""));
-
-            while (!stack.isEmpty()) {
-                Pair<RoleModel, String> currentPair = stack.pop();
-                RoleModel currentRole = currentPair.getKey();
-                String path = currentPair.getValue();
-
-                // Append current role to the path
-                String rolePath = path.isEmpty() ? currentRole.getName() : path + ":" + currentRole.getName();
-
-                // Check if it's a leaf node (not composite)
-                if (!currentRole.isComposite()) {
-                    // TODO: update to be more dyanmic for other attributes
-                    String attributeValue = currentRole.getFirstAttribute("threshold");
-                    String finalPath = (attributeValue != null && !attributeValue.isEmpty())
-                            ? rolePath + "=" + attributeValue
-                            : rolePath;
-                    rolePaths.add(finalPath);
-                } else {
-                    // Traverse only if it's a composite to find child roles
-                    currentRole.getCompositesStream()
-                            .filter(r -> !visited.contains(r))
-                            .forEach(r -> {
-                                visited.add(r);
-                                stack.add(new Pair<>(r, rolePath));
-                            });
-                }
-            }
+        if (secretKeys.activeVrk.isEmpty()){
+            throw new RuntimeException("Cannot generate Role initializer certificate, no active license was found");
         }
 
-        return rolePaths;
+
+        // Expand role to grab the lowest role e.g. superAdmin:read
+        Map<String, Object> groups = expandCompositeRolesAsNestedStructure(role);
+        objectMapper.enable(SerializationFeature.INDENT_OUTPUT);
+        String json = objectMapper.writeValueAsString(groups);
+        System.out.println(json);
+
+    }
+
+    private static Map<String, Object> expandCompositeRolesAsNestedStructure(RoleModel rootRole) {
+        Set<RoleModel> visited = new HashSet<>();
+        return expandCompositeRolesToNestedJson(rootRole, visited);
+    }
+
+
+    private static Map<String, Object> expandCompositeRolesToNestedJson(RoleModel role, Set<RoleModel> visited) {
+        if (visited.contains(role)) {
+            return null; // Prevent circular references
+        }
+        visited.add(role);
+
+        Map<String, Object> roleJson = new HashMap<>();
+        Map<String, Object> currentRole = new HashMap<>();
+
+        if (!role.isComposite()) {
+            // If the role is a leaf, add attributes if they exist
+            Map<String, List<String>> attributes = role.getAttributes();
+            if (!attributes.isEmpty()) {
+                Map<String, Object> attributesMap = new HashMap<>();
+                attributes.forEach((key, values) -> {
+                    attributesMap.put(key, values.size() > 1 ? values : values.get(0));
+                });
+                currentRole.put("attributes", attributesMap);
+            }
+        } else {
+            // Process child roles if composite
+            role.getCompositesStream()
+                    .filter(childRole -> !visited.contains(childRole))
+                    .forEach(childRole -> {
+                        Map<String, Object> childJson = expandCompositeRolesToNestedJson(childRole, visited);
+                        if (childJson != null) {
+                            currentRole.putAll(childJson); // Add child role JSON to current role
+                        }
+                    });
+        }
+
+        roleJson.put(role.getName(), currentRole);
+        return roleJson;
     }
 
     public static class Pair<K, V> {

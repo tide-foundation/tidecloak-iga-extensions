@@ -31,7 +31,7 @@ public class TideEntityProvider implements JpaEntityProvider {
     // "META-INF/example-changelog.xml"
     @Override
     public String getChangelogLocation() {
-        return "META-INF/tide-jpa-changelog-0.0.0.xml";
+        return "META-INF/tide-jpa-changelog-master.xml";
     }
 
     // Helper method, which will be used internally by Liquibase.

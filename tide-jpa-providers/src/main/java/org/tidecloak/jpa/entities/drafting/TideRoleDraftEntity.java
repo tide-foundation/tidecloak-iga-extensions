@@ -44,6 +44,10 @@ public class TideRoleDraftEntity {
     @Column(name = "DELETE_STATUS")
     private DraftStatus deleteStatus;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "INIT_CERT")
+    private String initCert;
+
     @Column(name = "TIMESTAMP")
     protected Long timestamp = System.currentTimeMillis();
 
@@ -94,6 +98,14 @@ public class TideRoleDraftEntity {
 
     public void setTimestamp(Long timestamp) {
         this.timestamp = timestamp;
+    }
+
+    public String getInitCert() {
+        return initCert;
+    }
+
+    public void setInitCert(String initCert) {
+        this.initCert = initCert;
     }
 
 }
