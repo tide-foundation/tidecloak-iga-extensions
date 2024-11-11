@@ -2,7 +2,6 @@ package org.tidecloak.TideRequests;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.ClientModel;
@@ -10,7 +9,7 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RoleModel;
 import org.midgard.Midgard;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
-import org.tidecloak.AdminRealmResource.TideAdminRealmResource;
+import org.tidecloak.jpa.utils.IGAUtils;
 
 import java.util.*;
 
@@ -49,7 +48,7 @@ public class TideRoleRequests {
         // grab vrk
         ObjectMapper objectMapper = new ObjectMapper();
         String currentSecretKeys = config.getFirst("clientSecret");
-        TideAdminRealmResource.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, TideAdminRealmResource.SecretKeys.class);
+        IGAUtils.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, IGAUtils.SecretKeys.class);
         String vrk = secretKeys.activeVrk;
 
         if (secretKeys.activeVrk.isEmpty()){

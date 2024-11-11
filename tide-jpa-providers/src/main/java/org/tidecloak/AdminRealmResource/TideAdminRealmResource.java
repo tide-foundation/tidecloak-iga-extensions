@@ -35,6 +35,9 @@ import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import static org.tidecloak.jpa.utils.IGAUtils.getAccessProofs;
+import static org.tidecloak.jpa.utils.IGAUtils.getEntityId;
+
 public class TideAdminRealmResource {
 
     private final KeycloakSession session;
@@ -157,56 +160,25 @@ public class TideAdminRealmResource {
 
 
 
-                MultivaluedHashMap<String, String> config = componentModel.getConfig();
+            MultivaluedHashMap<String, String> config = componentModel.getConfig();
 
-                String currentSecretKeys = config.getFirst("clientSecret");
-                ObjectMapper objectMapper = new ObjectMapper();
-                SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
-                int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
-                int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
-
-                if ( threshold == 0 || max == 0){
-                    throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
-                }
-
-                SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
-                settings.VVKId = config.getFirst("vvkId");
-                settings.HomeOrkUrl = config.getFirst("systemHomeOrk");
-                settings.PayerPublicKey = config.getFirst("payerPublic");
-                settings.ObfuscatedVendorPublicKey = config.getFirst("obfGVVK");
-                settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
-                settings.Threshold_T = threshold;
-                settings.Threshold_N = max;
-
-                proofDetails.forEach(p -> {
-                    boolean tideUser = p.getUser().getAttributes().stream().anyMatch(k -> k.equals("tideuserkey"));
-                    if(!tideUser || (idp != null && componentModel != null)){
-                        SignatureEntry signatureEntry = new SignatureEntry("", "", auth.adminAuth().getUser().getId());
+            proofDetails.forEach(p -> {
+                boolean tideUser = p.getUser().getAttributes().stream().anyMatch(k -> k.equals("tideuserkey"));
+                if(!tideUser || (idp != null && componentModel != null)){
+                    SignatureEntry signatureEntry = new SignatureEntry("", "", auth.adminAuth().getUser().getId());
+                    p.addSignature(signatureEntry);
+                    em.merge(p);
+                } else {
+                    try {
+                        SignatureEntry signatureEntry = IGAUtils.signDraft(config, realm, p.getProofDraft(), realm.getClientById(p.getClientId()).getClientId());
                         p.addSignature(signatureEntry);
                         em.merge(p);
-                    } else {
-                        try {
-                            ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", p.getProofDraft().getBytes());
 
-                            Set<String> allowedKeys = Set.of("sub", "tideuserkey", "vuid");
-                            var idToken = constructIdToken(p.getProofDraft(), allowedKeys, session.clients().getClientById(realm, p.getClientId()).getClientId());
-
-                            req.SetDynamicData(idToken.getBytes());
-                            req.SetAuthorization(
-                                    Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
-                            );
-                            SignatureResponse response = Midgard.SignModel(settings, req);
-
-                            //TODO: add admin gcmkauth to adminPublicKey
-                            SignatureEntry signatureEntry = new SignatureEntry(response.Signatures[0], response.Signatures[1], "");
-                            p.addSignature(signatureEntry);
-                            em.merge(p);
-
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
-                        }
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
                     }
-                });
+                }
+            });
 
             // Update the draft status
             updateDraftStatus(changeSet, draftRecordEntity);
@@ -270,19 +242,6 @@ public class TideAdminRealmResource {
             case CLIENT -> em.find(TideClientFullScopeStatusDraftEntity.class, changeSet.getChangeSetId());
             default -> null;
         };
-    }
-
-    private String getEntityId(Object entity) {
-        if (entity instanceof TideUserRoleMappingDraftEntity) {
-            return ((TideUserRoleMappingDraftEntity) entity).getId();
-        } else if (entity instanceof TideRoleDraftEntity) {
-            return ((TideRoleDraftEntity) entity).getId();
-        } else if (entity instanceof TideCompositeRoleMappingDraftEntity) {
-            return ((TideCompositeRoleMappingDraftEntity) entity).getId();
-        } else if (entity instanceof TideClientFullScopeStatusDraftEntity) {
-            return ((TideClientFullScopeStatusDraftEntity) entity).getId();
-        }
-        return null;
     }
 
     private String processDraftRecord(Object draftRecordEntity) throws JsonProcessingException {
@@ -1206,22 +1165,5 @@ public class TideAdminRealmResource {
                 .collect(Collectors.toList());
     }
 
-    private List<AccessProofDetailEntity> getAccessProofs(EntityManager em, String recordId) {
-        return em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                .setParameter("recordId", recordId)
-                .getResultStream()
-                .collect(Collectors.toList());
-    }
 
-    public static class SecretKeys {
-        public String activeVrk;
-        public String pendingVrk;
-        public String VZK;
-        public List<String> history = new ArrayList<>();
-
-        // Method to add a new entry to the history
-        public void addToHistory(String newEntry) {
-            history.add(newEntry);
-        }
-    }
 }
