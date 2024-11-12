@@ -12,7 +12,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.NoResultException;
-import org.keycloak.authorization.policy.evaluation.Realm;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
@@ -60,6 +59,14 @@ public final class TideAuthzProofUtil {
     private  final EntityManager em;
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
+    public TideAuthzProofUtil(KeycloakSession session, RealmModel realm) {
+         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        this.session = session;
+        this.realm = realm;
+        this.em = em;
+        objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+        objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
+    }
     public TideAuthzProofUtil(KeycloakSession session, RealmModel realm, EntityManager em) {
         this.session = session;
         this.realm = realm;
@@ -340,6 +347,28 @@ public final class TideAuthzProofUtil {
         } else {
             return jsonNode;
         }
+    }
+
+    public void updateUserContextDraft(UserModel userModel) {
+        // get all affected clients from AccessProofDraftEntity
+        // This returns the access proof in descending order by timestamp
+        UserEntity user = em.find(UserEntity.class, userModel.getId());
+
+        List<AccessProofDetailEntity> userAccessDrafts = em.createNamedQuery("getProofDetailsForUser", AccessProofDetailEntity.class)
+                .setParameter("user", user)
+                .getResultStream()
+                .toList();
+
+        userAccessDrafts.forEach(x -> {
+            ClientModel client = realm.getClientById(x.getClientId());
+            try {
+                String newUserContextDraft = updateDraftProofDetails(client, userModel, x.getProofDraft(), Collections.emptySet(), ActionType.CREATE, client.isFullScopeAllowed());
+                x.setProofDraft(newUserContextDraft);
+            } catch (JsonProcessingException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        em.flush();
     }
 
     public String updateDraftProofDetails(ClientModel clientModel, UserModel userModel, String oldProofDetails, Set<RoleModel> newRoleMappings, ActionType actionType, Boolean isFullScopeAllowed) throws JsonProcessingException {

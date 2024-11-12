@@ -17,7 +17,7 @@ import org.midgard.Midgard;
 import java.util.ArrayList;
 import java.util.List;
 
-import static org.tidecloak.TideRequests.TideRoleRequests.createRealmAdminRole;
+import static org.tidecloak.TideRequests.TideRoleRequests.createRealmAdminInitCert;
 
 public class TideAdminRealmResource {
 
@@ -99,8 +99,8 @@ public class TideAdminRealmResource {
                         session.getContext().getRealm().setDefaultSignatureAlgorithm("EdDSA");
                         logger.info("IGA has been enabled, default signature algorithm updated to EdDSA");
                     }
-                    // Auto create TideRealmAdmin here
-                    createRealmAdminRole(session);
+                    // Auto create Realm-Admin init cert here.
+                    createRealmAdminInitCert(session);
 
                 } else {
                     // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA

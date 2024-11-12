@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 @NamedQueries({
+        @NamedQuery(name="getProofDetailsForUser", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForDraft", query="SELECT a FROM AccessProofDetailEntity a WHERE a.recordId = :recordId ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForDraftByChangeSetType", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType"),
         @NamedQuery(name="getProofDetailsForUserByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user and a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),

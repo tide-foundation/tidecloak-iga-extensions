@@ -9,6 +9,7 @@ import org.keycloak.models.*;
 import org.keycloak.models.jpa.JpaRealmProvider;
 
 import org.keycloak.models.jpa.RealmAdapter;
+import org.keycloak.models.jpa.RoleAdapter;
 import org.keycloak.models.jpa.entities.*;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.RepresentationToModel;
@@ -181,6 +182,14 @@ public class TideRealmProvider extends JpaRealmProvider {
         roleEntity.setClientId(client.getId());
         roleEntity.setClientRole(true);
         em.persist(roleEntity);
+
+        // Create Draft
+        TideRoleDraftEntity clientRoleDraft = new TideRoleDraftEntity();
+        clientRoleDraft.setId(KeycloakModelUtils.generateId());
+        clientRoleDraft.setRole(roleEntity);
+        clientRoleDraft.setDraftStatus(DraftStatus.ACTIVE);
+        em.persist(clientRoleDraft);
+
         return new TideRoleAdapter(session, client.getRealm(), em, roleEntity);
     }
 

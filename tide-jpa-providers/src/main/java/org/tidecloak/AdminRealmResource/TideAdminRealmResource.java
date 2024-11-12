@@ -17,10 +17,6 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
-import org.midgard.Midgard;
-import org.midgard.models.ModelRequest;
-import org.midgard.models.SignRequestSettingsMidgard;
-import org.midgard.models.SignatureResponse;
 import org.tidecloak.interfaces.*;
 import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakDraftChangeSetRequest;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
@@ -35,8 +31,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import static org.tidecloak.jpa.utils.IGAUtils.getAccessProofs;
-import static org.tidecloak.jpa.utils.IGAUtils.getEntityId;
+import static org.tidecloak.jpa.utils.IGAUtils.*;
 
 public class TideAdminRealmResource {
 
@@ -152,17 +147,18 @@ public class TideAdminRealmResource {
             // leave as "PENDING" if still needing more signatures
             // Process the draft record entity
             String draftRecord = processDraftRecord(draftRecordEntity);
-            var idp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
             ComponentModel componentModel = realm.getComponentsStream()
                     .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
                     .findFirst()
                     .orElse(null);
 
             proofDetails.forEach(p -> {
-                var tideUser = p.getUser().getAttributes().stream().anyMatch(a -> a.getName().equalsIgnoreCase("tideUserKey"));
+                boolean tideUser = p.getUser().getAttributes().stream().anyMatch(a -> a.getName().equalsIgnoreCase("tideUserKey"));
                 // user is not a tide user or no IDP + KEYs (IDPless IGA)
                 // if has tide idp but no iga
-                if(!tideUser || componentModel == null){
+                // idpless, so no tideUser
+                // tide keyprovider but no idp
+                if(!tideUser || !isIGAEnabled(realm)){
                     SignatureEntry signatureEntry = new SignatureEntry("", "", auth.adminAuth().getUser().getId());
                     p.addSignature(signatureEntry);
                     em.merge(p);
@@ -419,7 +415,8 @@ public class TideAdminRealmResource {
 
     private List<RequestedChanges> processRoleMappings(EntityManager em) {
         List<RequestedChanges> changes = new ArrayList<>();
-        List<TideRoleDraftEntity> mappings = em.createNamedQuery("getAllRolesByRealmAndStatusNotEqualTo", TideRoleDraftEntity.class)
+        List<TideRoleDraftEntity> mappings = em.createNamedQuery("getAllRoleDraft", TideRoleDraftEntity.class)
+                .setParameter("draftStatus", DraftStatus.ACTIVE)
                 .setParameter("deleteStatus", DraftStatus.ACTIVE)
                 .setParameter("realmId", realm.getId())
                 .getResultList();

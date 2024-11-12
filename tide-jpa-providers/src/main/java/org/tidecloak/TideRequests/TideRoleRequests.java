@@ -2,13 +2,15 @@ package org.tidecloak.TideRequests;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.persistence.EntityManager;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
-import org.keycloak.models.ClientModel;
-import org.keycloak.models.KeycloakSession;
-import org.keycloak.models.RoleModel;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.RoleEntity;
 import org.midgard.Midgard;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.utils.IGAUtils;
 
 import java.util.*;
@@ -19,19 +21,26 @@ public class TideRoleRequests {
 
 
      // Creates a Realm Admin role for current realm. The role has full access to manage the current realm.
-    public static void createRealmAdminRole(KeycloakSession session) throws JsonProcessingException {
-        String realmAdminRoleName = "tide-realm-admin";
-        String realmManagementId = "realm-management";
-        String resource = "security-admin-console";
+    public static void createRealmAdminInitCert(KeycloakSession session) throws JsonProcessingException {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
-        var realmAdminRole = session.getContext().getRealm().addRole(realmAdminRoleName);
-        session.getContext().getRealm().getClientByClientId(realmManagementId).getRolesStream().forEach(realmAdminRole::addCompositeRole);
-        var finalRealmAdminRole = session.getContext().getRealm().getRole(realmAdminRoleName);
+        String resource = Constants.ADMIN_CONSOLE_CLIENT_ID;
+        RoleModel realmAdmin = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(AdminRoles.REALM_ADMIN);
+
         ArrayList<String> signModels = new ArrayList<String>();
         signModels.add("AccessTokens");
-        InitializerCertifcate initCert = createRoleInitCert(session, resource,finalRealmAdminRole, "0.0.0", "EdDSA", signModels);
+        InitializerCertifcate initCert = createRoleInitCert(session, resource, realmAdmin, "0.0.0", "EdDSA", signModels);
 
-        // store against realm role
+        RoleEntity roleEntity = em.find(RoleEntity.class, realmAdmin.getId());
+        TideRoleDraftEntity roleDraft = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                .setParameter("role", roleEntity)
+                .getSingleResult();
+
+        // TODO: update this to the proper toString method. Maybe store as bytes??
+        ObjectMapper objectMapper = new ObjectMapper();
+        String initCertString =  objectMapper.writeValueAsString(initCert);
+        roleDraft.setInitCert(initCertString);
+        em.flush();
     }
 
     public static InitializerCertifcate createRoleInitCert(KeycloakSession session, String resource, RoleModel role , String certVersion, String algorithm, ArrayList<String> signModels) throws JsonProcessingException {

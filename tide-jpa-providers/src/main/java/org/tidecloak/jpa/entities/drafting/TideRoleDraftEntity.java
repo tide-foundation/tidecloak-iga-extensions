@@ -6,6 +6,12 @@ import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.DraftStatus;
 
 @NamedQueries({
+        @NamedQuery(name="getAllRoleDraft",
+                query = "SELECT r FROM TideRoleDraftEntity r " +
+                        "WHERE (r.draftStatus != :draftStatus OR " +
+                        "(r.draftStatus = :draftStatus AND r.deleteStatus != :deleteStatus)) " +
+                        "AND r.role IN ( SELECT u from RoleEntity u where u.realmId =:realmId )"
+        ),
         @NamedQuery(name="getRoleDraftByRole", query="SELECT r FROM TideRoleDraftEntity r WHERE r.role = :role"),
         @NamedQuery(name="getRoleDraftByRoleEntityAndDeleteStatus", query="SELECT r FROM TideRoleDraftEntity r WHERE r.role = :role And r.deleteStatus = :deleteStatus"),
         @NamedQuery(name="getRoleDraftByRoleAndDeleteStatus", query="SELECT r FROM TideRoleDraftEntity r WHERE r.id = :changesetId AND r.deleteStatus = :deleteStatus"),
@@ -46,6 +52,9 @@ public class TideRoleDraftEntity {
 
     @Column(name = "INIT_CERT")
     private String initCert;
+
+    @Column(name = "INIT_CERT_SIG")
+    private String initCertSig;
 
     @Column(name = "TIMESTAMP")
     protected Long timestamp = System.currentTimeMillis();
@@ -105,6 +114,14 @@ public class TideRoleDraftEntity {
 
     public void setInitCert(String initCert) {
         this.initCert = initCert;
+    }
+
+    public String getInitCertSig() {
+        return initCertSig;
+    }
+
+    public void setInitCertSig(String initCertSig) {
+        this.initCertSig = initCertSig;
     }
 
 }
