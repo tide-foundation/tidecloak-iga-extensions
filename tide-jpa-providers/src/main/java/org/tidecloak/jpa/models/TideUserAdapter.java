@@ -113,7 +113,6 @@ public class TideUserAdapter extends UserAdapter {
             // save the record for the user role grant
             List<ClientModel> clientList = getUniqueClientList(session, realm, role, em);
 
-
             UserModel user = session.users().getUserById(realm, getEntity().getId());
             UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
             TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
@@ -124,6 +123,16 @@ public class TideUserAdapter extends UserAdapter {
                     throw new RuntimeException(e);
                 }
             });
+
+            // if role is for realm-management, create a draft for "security-admin-client"
+            if(role.isClientRole() && ((ClientModel) role.getContainer()).getClientId().equalsIgnoreCase(Constants.REALM_MANAGEMENT_CLIENT_ID)){
+                ClientModel clientModel = realm.getClientByClientId(Constants.ADMIN_CONSOLE_CLIENT_ID);
+                try {
+                    util.generateAndSaveProofDraft(clientModel, wrappedUser, Collections.emptySet(), draftUserRole.getId(),  ChangeSetType.USER_ROLE, ActionType.CREATE, false);
+                } catch (JsonProcessingException e) {
+                    throw new RuntimeException(e);
+                }
+            }
             if(role.isComposite()){
                 Set<TideRoleAdapter> wrappedRoles = roleMappings.stream().map(r -> {
                     RoleEntity roleEntity = em.getReference(RoleEntity.class, r.getId());

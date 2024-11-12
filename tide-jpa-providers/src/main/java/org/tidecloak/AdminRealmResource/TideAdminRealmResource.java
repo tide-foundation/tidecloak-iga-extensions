@@ -158,18 +158,17 @@ public class TideAdminRealmResource {
                     .findFirst()
                     .orElse(null);
 
-
-
-            MultivaluedHashMap<String, String> config = componentModel.getConfig();
-
             proofDetails.forEach(p -> {
-                boolean tideUser = p.getUser().getAttributes().stream().anyMatch(k -> k.equals("tideuserkey"));
-                if(!tideUser || (idp != null && componentModel != null)){
+                var tideUser = p.getUser().getAttributes().stream().anyMatch(a -> a.getName().equalsIgnoreCase("tideUserKey"));
+                // user is not a tide user or no IDP + KEYs (IDPless IGA)
+                // if has tide idp but no iga
+                if(!tideUser || componentModel == null){
                     SignatureEntry signatureEntry = new SignatureEntry("", "", auth.adminAuth().getUser().getId());
                     p.addSignature(signatureEntry);
                     em.merge(p);
                 } else {
                     try {
+                        MultivaluedHashMap<String, String> config = componentModel.getConfig();
                         SignatureEntry signatureEntry = IGAUtils.signDraft(config, realm, p.getProofDraft(), realm.getClientById(p.getClientId()).getClientId());
                         p.addSignature(signatureEntry);
                         em.merge(p);

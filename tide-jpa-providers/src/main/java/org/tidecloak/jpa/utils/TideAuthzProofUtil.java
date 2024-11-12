@@ -943,7 +943,12 @@ public final class TideAuthzProofUtil {
             roleModel = realm.getRoleById(((TideUserRoleMappingDraftEntity) entity).getRoleId());
             if(roleModel.isClientRole()){
                 affectedClients.add(realm.getClientById(roleModel.getContainerId()));
+
+                if(((ClientModel) roleModel.getContainer()).getClientId().equalsIgnoreCase(Constants.REALM_MANAGEMENT_CLIENT_ID)){
+                    affectedClients.add(realm.getClientByClientId(Constants.ADMIN_CONSOLE_CLIENT_ID));
+                }
             }
+
 
         } else if (changeSetType == ChangeSetType.COMPOSITE_ROLE) {
             roleModel = realm.getRoleById(((TideCompositeRoleMappingDraftEntity) entity).getChildRole().getId());
