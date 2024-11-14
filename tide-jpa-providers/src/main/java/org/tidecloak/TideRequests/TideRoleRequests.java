@@ -18,27 +18,34 @@ import java.util.*;
 
 public class TideRoleRequests {
     public static final String tideKeyProvider = "tide-vendor-key";
+    public static final String tideRealmAdminRole = "tide-realm-admin";
 
 
-     // Creates a Realm Admin role for current realm. The role has full access to manage the current realm.
+
+    // Creates a Realm Admin role for current realm. The role has full access to manage the current realm.
     public static void createRealmAdminInitCert(KeycloakSession session) throws JsonProcessingException {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        ClientModel realmManagement = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
 
         String resource = Constants.ADMIN_CONSOLE_CLIENT_ID;
         RoleModel realmAdmin = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(AdminRoles.REALM_ADMIN);
+        RoleModel tideRealmAdmin = realmManagement.addRole(tideRealmAdminRole);
+        tideRealmAdmin.addCompositeRole(realmAdmin);
+        tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
 
         ArrayList<String> signModels = new ArrayList<String>();
         signModels.add("AccessTokens");
-        InitializerCertifcate initCert = createRoleInitCert(session, resource, realmAdmin, "0.0.0", "EdDSA", signModels);
+        InitializerCertifcate initCert = createRoleInitCert(session, resource, tideRealmAdmin, "0.0.0", "EdDSA", signModels);
 
         RoleEntity roleEntity = em.find(RoleEntity.class, realmAdmin.getId());
         TideRoleDraftEntity roleDraft = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", roleEntity)
                 .getSingleResult();
 
-        // TODO: update this to the proper toString method. Maybe store as bytes??
         ObjectMapper objectMapper = new ObjectMapper();
         String initCertString =  objectMapper.writeValueAsString(initCert);
+        System.out.println("HERE");
+        System.out.println(initCertString);
         roleDraft.setInitCert(initCertString);
         em.flush();
     }
@@ -79,7 +86,6 @@ public class TideRoleRequests {
         return expandCompositeRolesToNestedJson(rootRole, visited);
     }
 
-
     private static Map<String, Object> expandCompositeRolesToNestedJson(RoleModel role, Set<RoleModel> visited) {
         if (visited.contains(role)) {
             return null; // Prevent circular references
@@ -95,7 +101,9 @@ public class TideRoleRequests {
             if (!attributes.isEmpty()) {
                 Map<String, Object> attributesMap = new HashMap<>();
                 attributes.forEach((key, values) -> {
-                    attributesMap.put(key, values.size() > 1 ? values : values.get(0));
+                    if(key.startsWith("tide")){
+                        attributesMap.put(key, values.size() > 1 ? values : values.get(0));
+                    }
                 });
                 currentRole.put("attributes", attributesMap);
             }
@@ -105,15 +113,20 @@ public class TideRoleRequests {
                     .filter(childRole -> !visited.contains(childRole))
                     .forEach(childRole -> {
                         Map<String, Object> childJson = expandCompositeRolesToNestedJson(childRole, visited);
-                        if (childJson != null) {
+                        if (childJson != null && !childJson.isEmpty()) { // Only add non-empty child roles
                             currentRole.putAll(childJson); // Add child role JSON to current role
                         }
                     });
         }
 
-        roleJson.put(role.getName(), currentRole);
+        // Only add roles with attributes or nested non-empty roles
+        if (!currentRole.isEmpty()) {
+            roleJson.put(role.getName(), currentRole);
+        }
+
         return roleJson;
     }
+
 
     public static class Pair<K, V> {
         private final K key;

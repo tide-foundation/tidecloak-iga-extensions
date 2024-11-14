@@ -261,6 +261,9 @@ public final class TideAuthzProofUtil {
     // TODO: SAVING FINAL PROOF HERE
     public void saveProofToDatabase(AccessProofDetailEntity proof) throws NoSuchAlgorithmException, JsonProcessingException {
 
+        //TODO: send InitCert + User Context draft to ORKS here
+
+
         // find if proof exists, update if it does else we create a new one for the user
         UserClientAccessProofEntity userClientAccess = em.find(UserClientAccessProofEntity.class, new UserClientAccessProofEntity.Key(proof.getUser(), proof.getClientId()));
 

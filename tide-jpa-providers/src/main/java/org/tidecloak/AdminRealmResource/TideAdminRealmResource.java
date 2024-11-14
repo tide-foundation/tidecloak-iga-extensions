@@ -130,6 +130,7 @@ public class TideAdminRealmResource {
     @Path("change-set/sign")
     public Response signChangeset(DraftChangeSetRequest changeSet) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
         Object draftRecordEntity;
         List<AccessProofDetailEntity> proofDetails;
 
@@ -153,25 +154,27 @@ public class TideAdminRealmResource {
                     .orElse(null);
 
             proofDetails.forEach(p -> {
-                boolean tideUser = p.getUser().getAttributes().stream().anyMatch(a -> a.getName().equalsIgnoreCase("tideUserKey"));
-                // user is not a tide user or no IDP + KEYs (IDPless IGA)
-                // if has tide idp but no iga
-                // idpless, so no tideUser
-                // tide keyprovider but no idp
-                if(!tideUser || !isIGAEnabled(realm)){
-                    SignatureEntry signatureEntry = new SignatureEntry("", "", auth.adminAuth().getUser().getId());
-                    p.addSignature(signatureEntry);
-                    em.merge(p);
-                } else {
-                    try {
-                        MultivaluedHashMap<String, String> config = componentModel.getConfig();
-                        SignatureEntry signatureEntry = IGAUtils.signDraft(config, realm, p.getProofDraft(), realm.getClientById(p.getClientId()).getClientId());
+                try {
+                    boolean tideUser = p.getUser().getAttributes().stream().anyMatch(a -> a.getName().equalsIgnoreCase("tideUserKey"));
+                    if (!isIGAEnabled(realm) || tideIdp == null){
+                        SignatureEntry signatureEntry = new SignatureEntry("", "", auth.adminAuth().getUser().getId());
                         p.addSignature(signatureEntry);
                         em.merge(p);
-
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
                     }
+                    else {
+                        if (!tideUser) {
+                            MultivaluedHashMap<String, String> config = componentModel.getConfig();
+                            SignatureEntry signatureEntry = IGAUtils.signInitialTideAdmin(config, realm, p.getProofDraft(), realm.getClientById(p.getClientId()).getClientId());
+                            p.addSignature(signatureEntry);
+                            em.merge(p);
+                        }
+//                        else{
+//
+//                        }
+                    }
+                }
+                catch (Exception e) {
+                    throw new RuntimeException(e);
                 }
             });
 
@@ -526,6 +529,7 @@ public class TideAdminRealmResource {
         RoleModel role = realm.getRoleById(mapping.getRoleId());
         if (role == null) return;
         //TODO: SEND THE TIDECLOAKDRAFTCHANGESET request to orks here
+
         TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
         TidecloakDraftChangeSetRequest tidecloakDraftChangeSetRequest = util.generateTidecloakDraftChangeSetRequest(em, change.getChangeSetId(), mapping, mapping.getTimestamp());
         // send TidecloakDraftChangeSetRequest to get signed by VVK

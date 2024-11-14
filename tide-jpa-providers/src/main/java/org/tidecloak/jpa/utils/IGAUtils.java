@@ -38,7 +38,8 @@ public class IGAUtils {
                 .collect(Collectors.toList());
     }
 
-    public static SignatureEntry signDraft(MultivaluedHashMap<String, String> keyProviderConfig, RealmModel realm, String dataToSign, String clientId) throws Exception {
+    // ONLY WORKS FOR NO TIDE ADMIN. WITH IGA ENABLED TO ALLOW TIDE ADMIN TO EXIST
+    public static SignatureEntry signInitialTideAdmin(MultivaluedHashMap<String, String> keyProviderConfig, RealmModel realm, String dataToSign, String clientId) throws Exception {
 
         String currentSecretKeys = keyProviderConfig.getFirst("clientSecret");
         ObjectMapper objectMapper = new ObjectMapper();
@@ -71,6 +72,8 @@ public class IGAUtils {
         return new SignatureEntry(response.Signatures[0], response.Signatures[1], "");
 
     }
+
+    // TODO: add signing method afer TIDEADMIN EXISTS
 
     public static String getEntityId(Object entity) {
         if (entity instanceof TideUserRoleMappingDraftEntity) {
