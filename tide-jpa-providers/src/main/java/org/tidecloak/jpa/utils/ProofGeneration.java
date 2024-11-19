@@ -296,7 +296,7 @@ public class ProofGeneration {
             UserSessionModel userSession = new UserSessionManager(session).createUserSession(authSession.getParentSession().getId(), realm, user, user.getUsername(),
                     clientConnection.getRemoteAddr(), "example-auth", false, null, null, UserSessionModel.SessionPersistenceState.TRANSIENT);
 
-            AuthenticationManager.setClientScopesInSession(authSession);
+            AuthenticationManager.setClientScopesInSession(session, authSession);
             ClientSessionContext clientSessionCtx = TokenManager.attachAuthenticationSession(session, userSession, authSession);
 
             return function.apply(userSession, clientSessionCtx);
