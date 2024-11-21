@@ -32,7 +32,7 @@ public class TideClientAdapter extends ClientAdapter {
     public TideClientAdapter(RealmModel realm, EntityManager em, KeycloakSession session, ClientEntity entity) {
         super(realm, em, session, entity);
         String migrationFlag = System.getenv("IS_MIGRATION");
-        this.isMigration = "true".equalsIgnoreCase(migrationFlag);
+        this.isMigration = migrationFlag != null && migrationFlag.equalsIgnoreCase("true");
     }
 
     @Override
