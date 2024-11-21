@@ -44,6 +44,9 @@ public class TideClientAdapter extends ClientAdapter {
 
     @Override
     public void setFullScopeAllowed(boolean value) {
+        if( session.getContext().getAuthenticationSession() == null) {
+            return;
+        }
         TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
         ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
         List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
