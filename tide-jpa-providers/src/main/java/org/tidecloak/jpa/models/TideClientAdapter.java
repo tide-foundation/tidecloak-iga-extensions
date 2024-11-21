@@ -28,8 +28,11 @@ import static org.tidecloak.Protocol.mapper.TideRolesProtocolMapper.getAccess;
 
 public class TideClientAdapter extends ClientAdapter {
 
+    private final boolean isMigration;
     public TideClientAdapter(RealmModel realm, EntityManager em, KeycloakSession session, ClientEntity entity) {
         super(realm, em, session, entity);
+        String migrationFlag = System.getenv("IS_MIGRATION");
+        this.isMigration = "true".equalsIgnoreCase(migrationFlag);
     }
 
     @Override
@@ -44,15 +47,19 @@ public class TideClientAdapter extends ClientAdapter {
 
     @Override
     public void setFullScopeAllowed(boolean value) {
-        if( session.getContext().getAuthenticationSession() == null) {
+        List<TideClientFullScopeStatusDraftEntity> statusDraft = em.createNamedQuery("getClientFullScopeStatus", TideClientFullScopeStatusDraftEntity.class)
+                .setParameter("client", entity)
+                .getResultList();
+
+        if(isMigration) {
+            approveFullScope(statusDraft.get(0), value);
+            super.setFullScopeAllowed(value);
             return;
         }
         TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
         ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
         List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
-        List<TideClientFullScopeStatusDraftEntity> statusDraft = em.createNamedQuery("getClientFullScopeStatus", TideClientFullScopeStatusDraftEntity.class)
-                .setParameter("client", entity)
-                .getResultList();
+
 
         // if no users and no drafts
         if (usersInRealm.isEmpty() && statusDraft.isEmpty()) {
