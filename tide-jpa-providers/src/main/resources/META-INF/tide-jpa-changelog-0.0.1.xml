@@ -10,5 +10,19 @@
             </column>
         </addColumn>
         <dropNotNullConstraint tableName="ROLE_DRAFT" columnName="DELETE_STATUS" columnDataType="VARCHAR(36)" />
+        <createTable tableName="LICENSE_HISTORY">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="PROVIDER_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="VRK" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="GVRK" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
     </changeSet>
 </databaseChangeLog>
