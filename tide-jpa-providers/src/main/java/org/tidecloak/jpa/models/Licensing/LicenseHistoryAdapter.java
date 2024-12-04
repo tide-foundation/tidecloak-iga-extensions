@@ -1,4 +1,4 @@
-package org.tidecloak.jpa.models;
+package org.tidecloak.jpa.models.Licensing;
 
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.BadRequestException;
@@ -13,7 +13,7 @@ import java.util.List;
 
 public class LicenseHistoryAdapter {
 
-    public static void GetLicenseHistory(KeycloakSession session, RealmModel realmModel){
+    public static List<LicenseHistoryEntity> GetLicenseHistory(KeycloakSession session, RealmModel realmModel){
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
         ComponentModel componentModel = session.realms().getRealm(realmModel.getId()).getComponentsStream()
@@ -29,7 +29,7 @@ public class LicenseHistoryAdapter {
         ComponentEntity keyProviderEntity = em.getReference(ComponentEntity.class, componentModel.getId());
 
 
-        List<LicenseHistoryEntity> licenseHistory = em.createNamedQuery("getLicenseHistoryForKey", LicenseHistoryEntity.class)
+        return em.createNamedQuery("getLicenseHistoryForKey", LicenseHistoryEntity.class)
                 .setParameter("componentEntity", keyProviderEntity)
                 .getResultList();
 

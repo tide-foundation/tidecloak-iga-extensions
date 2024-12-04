@@ -8,7 +8,4 @@ public class ProofData {
         this.proof = proof;
         this.proofMeta = proofMeta;
     }
-
-
-
 }
