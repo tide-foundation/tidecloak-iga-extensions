@@ -1,0 +1,38 @@
+package org.tidecloak.jpa.models;
+
+import jakarta.persistence.EntityManager;
+import jakarta.ws.rs.BadRequestException;
+import org.keycloak.component.ComponentModel;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.RealmModel;
+import org.keycloak.models.jpa.entities.ComponentEntity;
+import org.tidecloak.jpa.entities.Licensing.LicenseHistoryEntity;
+
+import java.util.List;
+
+public class LicenseHistoryAdapter {
+
+    public static void GetLicenseHistory(KeycloakSession session, RealmModel realmModel){
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        ComponentModel componentModel = session.realms().getRealm(realmModel.getId()).getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .findFirst()
+                .orElse((null));
+
+        if(componentModel == null) {
+//            logger.warn("There are no tide-vendor-key component set up for this realm, " + realm.getName());
+            throw new BadRequestException("There are no tide-vendor-key component set up for this realm, " + realmModel.getName());
+        }
+
+        ComponentEntity keyProviderEntity = em.getReference(ComponentEntity.class, componentModel.getId());
+
+
+        List<LicenseHistoryEntity> licenseHistory = em.createNamedQuery("getLicenseHistoryForKey", LicenseHistoryEntity.class)
+                .setParameter("componentEntity", keyProviderEntity)
+                .getResultList();
+
+
+    }
+}
