@@ -40,6 +40,7 @@ import org.tidecloak.jpa.models.TideClientAdapter;
 
 import static org.keycloak.admin.ui.rest.model.RoleMapper.convertToModel;
 
+// TODO: remove this file after IGA supports GROUP, otherwise use TideAuthzProofUtil !!!!!
 public class ProofGeneration {
 
     private final KeycloakSession session;
@@ -58,6 +59,7 @@ public class ProofGeneration {
         UserModel user = session.users().getUserById(realm, userId);
         updateOrAddEntity(user, client);
     }
+
     public List<UserModel> getAllGroupMembersIncludingSubgroups(RealmModel realm, GroupModel group) {
         List<UserModel> allMembers = new ArrayList<>();
         // Add current group members
@@ -94,6 +96,7 @@ public class ProofGeneration {
             });
         });
     }
+
     public void regenerateProofForClient(ClientModel client, List<UserModel> members) {
         // Generate proofs for all members
         members.forEach(member -> {

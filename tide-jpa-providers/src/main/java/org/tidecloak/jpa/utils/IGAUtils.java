@@ -22,11 +22,6 @@ import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import static org.tidecloak.AdminRealmResource.TideAdminRealmResource.constructIdToken;
-
-import java.util.ArrayList;
-import java.util.List;
-
 public class IGAUtils {
     public static boolean isIGAEnabled(RealmModel realm) {
         String isIGAEnabled = realm.getAttribute("isIGAEnabled");

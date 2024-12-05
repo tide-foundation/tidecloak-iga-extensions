@@ -22,8 +22,7 @@ public class LicenseHistoryAdapter {
                 .orElse((null));
 
         if(componentModel == null) {
-//            logger.warn("There are no tide-vendor-key component set up for this realm, " + realm.getName());
-            throw new BadRequestException("There are no tide-vendor-key component set up for this realm, " + realmModel.getName());
+            throw new BadRequestException("There is no tide-vendor-key component set up for this realm, " + realmModel.getName());
         }
 
         ComponentEntity keyProviderEntity = em.getReference(ComponentEntity.class, componentModel.getId());

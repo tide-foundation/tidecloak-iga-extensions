@@ -1,4 +1,4 @@
-package org.tidecloak.AdminRealmResource;
+package org.tidecloak.IGARealmResource;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -38,13 +38,13 @@ import java.util.stream.Collectors;
 import static org.tidecloak.TideRequests.TideRoleRequests.tideRealmAdminRole;
 import static org.tidecloak.jpa.utils.IGAUtils.*;
 
-public class TideAdminRealmResource {
+public class IGARealmResource {
 
     private final KeycloakSession session;
     private final RealmModel realm;
     private final AdminPermissionEvaluator auth;
 
-    public TideAdminRealmResource(KeycloakSession session, RealmModel realm, AdminPermissionEvaluator auth) {
+    public IGARealmResource(KeycloakSession session, RealmModel realm, AdminPermissionEvaluator auth) {
         this.session = session;
         this.realm = realm;
         this.auth = auth;
@@ -158,7 +158,7 @@ public class TideAdminRealmResource {
                     .findFirst()
                     .orElse(null);
 
-            // Check if changeset if for adding a tide realm admin.
+            // Check if changeset is for adding a tide realm admin.
             boolean isAssigningTideAdminRole;
             if(draftRecordEntity instanceof TideUserRoleMappingDraftEntity){
                 RoleModel role = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
@@ -224,7 +224,7 @@ public class TideAdminRealmResource {
             return Response.ok("Change set signed successfully").build();
         }
         catch (NumberFormatException e) {
-            throw new RuntimeException("Environemnt variables THRESHOLD_T or THRESHOLD_N is invalid: " + e.getMessage());
+            throw new RuntimeException("Environment variables THRESHOLD_T or THRESHOLD_N is invalid: " + e.getMessage());
         }
         catch (JsonProcessingException e) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Error processing JSON " + e.getMessage()).build();
