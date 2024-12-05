@@ -82,7 +82,7 @@ public class TideAdminRealmResource {
     @Path("toggle-iga")
     @Produces(MediaType.TEXT_PLAIN)
 
-    public Response toggleIGA(@FormParam("isIGAEnabled") boolean isEnabled) throws JsonProcessingException {
+    public Response toggleIGA(@FormParam("isIGAEnabled") boolean isEnabled) throws Exception {
         try{
             auth.realm().requireManageRealm();
             session.getContext().getRealm().setAttribute("isIGAEnabled", isEnabled);
