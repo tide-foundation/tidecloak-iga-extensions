@@ -23,7 +23,7 @@ public class TideRoleRequests {
 
 
     // Creates a Realm Admin role for current realm. The role has full access to manage the current realm.
-    public static void createRealmAdminInitCert(KeycloakSession session) throws JsonProcessingException {
+    public static void createRealmAdminInitCert(KeycloakSession session) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         ClientModel realmManagement = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
 
@@ -36,9 +36,13 @@ public class TideRoleRequests {
         ArrayList<String> signModels = new ArrayList<String>();
         signModels.add("AccessTokens");
 
-        InitializerCertifcate initCert = createRoleInitCert(session, resource, tideRealmAdmin, "0.0.0", "EdDSA", signModels);
+        InitializerCertifcate initCert = createRoleInitCert(session, resource, tideRealmAdmin, "1", "EdDSA", signModels);
 
-        RoleEntity roleEntity = em.find(RoleEntity.class, realmAdmin.getId());
+        if (initCert == null){
+            throw new Exception("Unable to create initCert for TideRealmAdminRole, tideThreshold needs to be set");
+        }
+
+        RoleEntity roleEntity = em.find(RoleEntity.class, tideRealmAdmin.getId());
         TideRoleDraftEntity roleDraft = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", roleEntity)
                 .getSingleResult();
@@ -60,10 +64,14 @@ public class TideRoleRequests {
         String vvkId = config.getFirst("vvkId");
         String vendor = session.getContext().getRealm().getName();
 
-        // Expand role to grab the lowest role e.g. superAdmin:read
-        Map<String, Object> groups = expandCompositeRolesAsNestedStructure(role);
+        String tideThreshold = role.getFirstAttribute("tideThreshold");
+        if (tideThreshold == null ) {
+            return null;
+        }
 
-        return Midgard.constructInitCert(vvkId, algorithm, certVersion, vendor, resource, groups,  signModels);
+        int threshold = Integer.parseInt(tideThreshold);
+
+        return Midgard.constructInitCert(vvkId, algorithm, certVersion, vendor, resource, threshold,  signModels);
 
     }
 

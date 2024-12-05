@@ -262,13 +262,10 @@ public final class TideAuthzProofUtil {
     public void saveProofToDatabase(AccessProofDetailEntity proof) throws NoSuchAlgorithmException, JsonProcessingException {
 
         //TODO: send InitCert + User Context draft to ORKS here
-
-
         // find if proof exists, update if it does else we create a new one for the user
         UserClientAccessProofEntity userClientAccess = em.find(UserClientAccessProofEntity.class, new UserClientAccessProofEntity.Key(proof.getUser(), proof.getClientId()));
 
         String accessProofSig = proof.getSignatures().get(0).getACCESS_PROOF_SIGNATURE();
-        String idProofSig = proof.getSignatures().get(0).getID_TOKEN_SIGNATURE();
 
         String proofMeta = getProofMeta(proof.getProofDraft());
 
@@ -278,7 +275,7 @@ public final class TideAuthzProofUtil {
             newAccess.setClientId(proof.getClientId());
             newAccess.setAccessProof(proof.getProofDraft());
             newAccess.setAccessProofSig(accessProofSig);
-            newAccess.setIdProofSig(idProofSig);
+            newAccess.setIdProofSig("");
             newAccess.setAccessProofMeta(proofMeta);
             em.persist(newAccess);
 
@@ -286,7 +283,7 @@ public final class TideAuthzProofUtil {
             userClientAccess.setAccessProof(proof.getProofDraft());
             userClientAccess.setAccessProofMeta(proofMeta);
             userClientAccess.setAccessProofSig(accessProofSig);
-            userClientAccess.setIdProofSig(idProofSig);
+            userClientAccess.setIdProofSig("");
             em.merge(userClientAccess);
         }
     }

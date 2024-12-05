@@ -1,13 +1,17 @@
 package org.tidecloak.jpa.utils;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.smallrye.config.SecretKeys;
 import jakarta.persistence.EntityManager;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.models.RealmModel;
 import org.midgard.Midgard;
+import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.ModelRequest;
+import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
+import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.SignatureEntry;
 import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
@@ -15,9 +19,7 @@ import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 import static org.tidecloak.AdminRealmResource.TideAdminRealmResource.constructIdToken;
@@ -39,7 +41,11 @@ public class IGAUtils {
     }
 
     // ONLY WORKS FOR NO TIDE ADMIN. WITH IGA ENABLED TO ALLOW TIDE ADMIN TO EXIST
-    public static SignatureEntry signInitialTideAdmin(MultivaluedHashMap<String, String> keyProviderConfig, RealmModel realm, String dataToSign, String clientId) throws Exception {
+    public static SignatureEntry signInitialTideAdmin(MultivaluedHashMap<String, String> keyProviderConfig,
+                                                      UserContext userContext,
+                                                      String clientId,
+                                                      InitializerCertifcate initCert,
+                                                      String[] authorizer) throws Exception {
 
         String currentSecretKeys = keyProviderConfig.getFirst("clientSecret");
         ObjectMapper objectMapper = new ObjectMapper();
@@ -60,16 +66,19 @@ public class IGAUtils {
         settings.Threshold_T = threshold;
         settings.Threshold_N = max;
 
-        ModelRequest req = ModelRequest.New("AccessTokenDraft", "1", "SinglePublicKey:1", dataToSign.getBytes());
-        Set<String> allowedKeys = Set.of("sub", "tideuserkey", "vuid");
+        UserContextSignRequest req = new UserContextSignRequest("VRK:1");
 
-        var idToken = constructIdToken(dataToSign, allowedKeys, clientId);
-        req.SetDynamicData(idToken.getBytes());
+        req.SetInitializationCertificate(initCert);
+        req.SetUserContext(userContext);
         req.SetAuthorization(
                 Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
         );
+
+        req.SetAuthorizer(HexFormat.of().parseHex(authorizer[1]));
+        req.SetAuthorizerCertificate(Base64.getDecoder().decode(authorizer[2]));
+
         SignatureResponse response = Midgard.SignModel(settings, req);
-        return new SignatureEntry(response.Signatures[0], response.Signatures[1], "");
+        return new SignatureEntry(response.Signatures[0], "", "");
 
     }
 

@@ -50,19 +50,16 @@ public class TideRolesProtocolMapper extends AbstractOIDCProtocolMapper implemen
 
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         UserModel tideUser = TideRolesUtil.wrapUserModel(userSession.getUser(), session, realm);
+        String tideUserKey = tideUser.getFirstAttribute("tideuserkey");
+        String vuid = tideUser.getFirstAttribute("vuid");
 
-        if (clientSessionCtx.getClientSession().getClient().getClientId().equalsIgnoreCase(Constants.REALM_MANAGEMENT_CLIENT_ID) || clientSessionCtx.getClientSession().getClient().getClientId().equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID)){
-            String tideUserKey = tideUser.getFirstAttribute("tideuserkey");
-            String vuid = tideUser.getFirstAttribute("vuid");
+        // 2. Set these attributes as claims in the token
+        if (tideUserKey != null) {
+            token.getOtherClaims().put("tideuserkey", tideUserKey);
+        }
 
-            // 2. Set these attributes as claims in the token
-            if (tideUserKey != null) {
-                token.getOtherClaims().put("tideuserkey", tideUserKey);
-            }
-
-            if (vuid != null) {
-                token.getOtherClaims().put("vuid", vuid);
-            }
+        if (vuid != null) {
+            token.getOtherClaims().put("vuid", vuid);
         }
 
         Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.ACTIVE);

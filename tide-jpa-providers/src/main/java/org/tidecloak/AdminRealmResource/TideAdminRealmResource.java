@@ -15,8 +15,12 @@ import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.models.utils.RoleUtils;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
+import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.interfaces.*;
 import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakDraftChangeSetRequest;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
@@ -31,6 +35,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import static org.tidecloak.TideRequests.TideRoleRequests.tideRealmAdminRole;
 import static org.tidecloak.jpa.utils.IGAUtils.*;
 
 public class TideAdminRealmResource {
@@ -131,11 +136,11 @@ public class TideAdminRealmResource {
     public Response signChangeset(DraftChangeSetRequest changeSet) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
-        Object draftRecordEntity;
-        List<AccessProofDetailEntity> proofDetails;
 
         // Fetch the draft record entity and proof details based on the change set type
-        draftRecordEntity = fetchDraftRecordEntity(em, changeSet);
+        Object draftRecordEntity= fetchDraftRecordEntity(em, changeSet);
+        List<AccessProofDetailEntity> proofDetails;
+
         if (draftRecordEntity == null) {
             return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
         }
@@ -153,6 +158,23 @@ public class TideAdminRealmResource {
                     .findFirst()
                     .orElse(null);
 
+            // Check if changeset if for adding a tide realm admin.
+            boolean isAssigningTideAdminRole;
+            if(draftRecordEntity instanceof TideUserRoleMappingDraftEntity){
+                RoleModel role = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
+                isAssigningTideAdminRole = ((TideUserRoleMappingDraftEntity) draftRecordEntity).getRoleId().equals(role.getId());
+            } else {
+                isAssigningTideAdminRole = false;
+            }
+
+            String realmManagementId = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getId();
+            MultivaluedHashMap<String, String> config = componentModel.getConfig();
+            String[] authorizer = config.getFirst("realmAuthorizer").split("\\.");
+
+            if (authorizer.length != 3){
+                throw new Exception("Deserialization of authorizer failed, invalid length.");
+            }
+
             proofDetails.forEach(p -> {
                 try {
                     boolean tideUser = p.getUser().getAttributes().stream().anyMatch(a -> a.getName().equalsIgnoreCase("tideUserKey"));
@@ -162,11 +184,25 @@ public class TideAdminRealmResource {
                         em.merge(p);
                     }
                     else {
-                        if (!tideUser) {
-                            MultivaluedHashMap<String, String> config = componentModel.getConfig();
-                            SignatureEntry signatureEntry = IGAUtils.signInitialTideAdmin(config, realm, p.getProofDraft(), realm.getClientById(p.getClientId()).getClientId());
+                        //TODO: better way to check this
+                        // SIGN INITIAL TIDE ADMIN, this only runs on the first user with usercontext draft for realm-management.
+                        // Check if proof is for the REALM-MANAGEMENT CLIENT and changeset request is for adding the tide admin role. Maybe check if authorizer is still single VRK
+                        if (authorizer[0].equalsIgnoreCase("firstAdmin") && isAssigningTideAdminRole) {
+                            System.out.println("SIGNING FOR FIRSTADMIN!!!");
+                            RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
+                            RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
+                            TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                                    .setParameter("role", role).getSingleResult();
+
+                            InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
+                            UserContext userContext = new UserContext( p.getProofDraft());
+                            userContext.setInitCertHash(cert.hash());
+                            p.setProofDraft(userContext.ToString());
+
+                            SignatureEntry signatureEntry = IGAUtils.signInitialTideAdmin(config, userContext, realm.getClientById(p.getClientId()).getClientId(), cert, authorizer);
+                            System.out.println(signatureEntry.getACCESS_PROOF_SIGNATURE());
                             p.addSignature(signatureEntry);
-                            em.merge(p);
+                            em.flush();
                         }
 //                        else{
 //

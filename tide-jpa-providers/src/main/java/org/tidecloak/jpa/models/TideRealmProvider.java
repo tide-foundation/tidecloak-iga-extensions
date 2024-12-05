@@ -72,10 +72,8 @@ public class TideRealmProvider extends JpaRealmProvider {
     @Override
     public ClientModel addClient(RealmModel realm, String id, String clientId) {
         ClientModel clientModel = super.addClient(realm, id, clientId);
-        if (clientId.equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID) || clientId.equalsIgnoreCase(Constants.REALM_MANAGEMENT_CLIENT_ID) ){
-            createAndAddProtocolMapper(clientModel, "tideuserkey", "tideUserKey", "Tide User Key");
-            createAndAddProtocolMapper(clientModel, "vuid", "vuid", "Tide vuid");
-        }
+        createAndAddProtocolMapper(clientModel, "tideuserkey", "tideUserKey", "Tide User Key");
+        createAndAddProtocolMapper(clientModel, "vuid", "vuid", "Tide vuid");
         createAndAddRolesMapper(clientModel, "", "Tide IGA Role Mapper");
         ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
         return new TideClientAdapter(realm, em, session, clientEntity);
