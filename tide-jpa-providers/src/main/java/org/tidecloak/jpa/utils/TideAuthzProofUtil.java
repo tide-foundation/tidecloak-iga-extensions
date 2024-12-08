@@ -33,7 +33,7 @@ import org.tidecloak.interfaces.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftChangeSetRequest;
 import org.tidecloak.interfaces.DraftStatus;
-import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakDraftChangeSetRequest;
+import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakUserContextRequest;
 import org.tidecloak.jpa.entities.AccessProofDetailDependencyEntity;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
@@ -60,7 +60,7 @@ public final class TideAuthzProofUtil {
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
     public TideAuthzProofUtil(KeycloakSession session, RealmModel realm) {
-         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         this.session = session;
         this.realm = realm;
         this.em = em;
@@ -184,8 +184,8 @@ public final class TideAuthzProofUtil {
         accessToken.audience(aud.length == 0 ? null : aud);
         // Convert the access token back to a JsonNode
         proofDraftNode = objectMapper.valueToTree(accessToken);
-            // Clean the proof draft
-        String proofDraft = cleanProofDraft(proofDraftNode);
+        // Clean the proof draft
+        String proofDraft = objectMapper.writeValueAsString(cleanProofDraft(proofDraftNode));
         // Save the access proof detail
         saveAccessProofDetail(clientModel, user, recordId, type, proofDraft);
 
@@ -242,19 +242,18 @@ public final class TideAuthzProofUtil {
         return Base64.getEncoder().encodeToString(changeBytes);
     }
 
-    public <T> TidecloakDraftChangeSetRequest generateTidecloakDraftChangeSetRequest(EntityManager em, String recordId, T mapping, long timestamp) throws JsonProcessingException {
+    public <T> TidecloakUserContextRequest generateTidecloakDraftChangeSetRequest(EntityManager em, String recordId, T mapping, long timestamp) throws JsonProcessingException {
 
         // This returns the access proof in descending order by timestamp
         List<String> userAccessDrafts = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                 .setParameter("recordId", recordId)
                 .getResultStream().map(AccessProofDetailEntity::getProofDraft)
                 .toList();
-
         JsonNode mappingObject = objectMapper.valueToTree(mapping);
         JsonNode sortedMapping = sortJsonNode(mappingObject);
         String draftRecord = objectMapper.writeValueAsString(sortedMapping);
 
-        return new TidecloakDraftChangeSetRequest(draftRecord, timestamp, userAccessDrafts);
+        return new TidecloakUserContextRequest(draftRecord, timestamp, userAccessDrafts);
 
     };
 
@@ -400,7 +399,7 @@ public final class TideAuthzProofUtil {
         // Set the audience in the access token based on the filtered keys
         accessToken.audience(aud.length == 0 ? null : aud);
         JsonNode finalToken = objectMapper.valueToTree(accessToken);
-        return cleanProofDraft(finalToken);
+        return  objectMapper.writeValueAsString(cleanProofDraft(finalToken));
 
 
     }
@@ -465,13 +464,13 @@ public final class TideAuthzProofUtil {
         JsonNode currentProof = objectMapper.readTree(proof);
         AccessToken token = objectMapper.convertValue(currentProof, AccessToken.class);
         token.audience(null);
-         return objectMapper.writeValueAsString(sortJsonNode(objectMapper.valueToTree(token)));
+        return objectMapper.writeValueAsString(sortJsonNode(objectMapper.valueToTree(token)));
     }
 
     public String removeAccessFromToken(String proof, AccessDetails accessDetails) throws JsonProcessingException {
         JsonNode currentProof = objectMapper.readTree(proof);
         JsonNode removedAccess = removeAccessFromJsonNode(currentProof, accessDetails);
-        return cleanProofDraft(removedAccess);
+        return  objectMapper.writeValueAsString(cleanProofDraft(removedAccess));
     }
 
     public static JsonNode removeAccessFromJsonNode(JsonNode originalNode, AccessDetails accessDetails) {
@@ -613,14 +612,14 @@ public final class TideAuthzProofUtil {
         }
     }
 
-    public static UserClientAccessProofEntity getUserClientAccessProof(KeycloakSession session, UserModel userModel) {
+    public static UserClientAccessProofEntity getUserClientAccessProof(KeycloakSession session, String clientId, UserModel userModel) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
 
         try {
             return em.createNamedQuery("getAccessProofByUserIdAndClientId", UserClientAccessProofEntity.class)
                     .setParameter("user", user)
-                    .setParameter("clientId", session.getContext().getClient().getId())
+                    .setParameter("clientId", clientId)
                     .getSingleResult();
         } catch (NoResultException e) {
             return null;
@@ -1061,34 +1060,29 @@ public final class TideAuthzProofUtil {
         }
     }
 
-    private String cleanProofDraft (JsonNode token) {
-        try{
-            ObjectNode object = (ObjectNode) token;
+    private JsonNode cleanProofDraft (JsonNode token) {
+        ObjectNode object = (ObjectNode) token;
 
-            // Remove what we don't need
-            object.remove("exp");
-            object.remove("iat");
-            object.remove("jti");
-            object.remove("sid");
-            object.remove("auth_time");
-            object.remove("session_state");
-            object.remove("session_state");
-            object.remove("given_name");
-            object.remove("family_name");
-            object.remove("email_verified");
-            object.remove("email_verified");
-            object.remove("email");
-            object.remove("name");
-            // Removing ACR for now. This changes by the type of authenticate taken. Explicit login is 1 and "remembered" session is 0.
-            object.remove("acr");
+        // Remove what we don't need
+        object.remove("exp");
+        object.remove("iat");
+        object.remove("jti");
+        object.remove("sid");
+        object.remove("auth_time");
+        object.remove("session_state");
+        object.remove("session_state");
+        object.remove("given_name");
+        object.remove("family_name");
+        object.remove("email_verified");
+        object.remove("email_verified");
+        object.remove("email");
+        object.remove("name");
+        // Removing ACR for now. This changes by the type of authenticate taken. Explicit login is 1 and "remembered" session is 0.
+        object.remove("acr");
 
-            JsonNode sortedJson = sortJsonNode(object);
+        JsonNode sortedJson = sortJsonNode(object);
 
-            return objectMapper.writeValueAsString(sortedJson);
-        }
-        catch (JsonProcessingException e) {
-            throw new RuntimeException("Failed to process token", e);
-        }
+        return sortedJson;
     }
     private static void mergeRealmAccess(AccessToken token, AccessToken.Access realmAccess) {
         if (realmAccess != null && realmAccess.getRoles() != null && !realmAccess.getRoles().isEmpty()) {
@@ -1177,6 +1171,40 @@ public final class TideAuthzProofUtil {
         access.addRole(role.getName());
     }
 
+    public static JsonNode getDifferences(JsonNode left, JsonNode right) {
+        JsonNode sortedLeft = sortJsonNode(left);
+        JsonNode sortedRight = sortJsonNode(right);
+        if (sortedLeft == null || sortedRight == null) {
+            return right; // If left is null, return the right node as the "difference."
+        }
 
+        ObjectMapper mapper = new ObjectMapper();
+
+        if (sortedLeft.equals(sortedRight)) {
+            return mapper.createObjectNode(); // Return an empty node if both are identical.
+        }
+
+        if (sortedLeft.isObject() && sortedRight.isObject()) {
+            ObjectNode differences = mapper.createObjectNode();
+            Iterator<String> fieldNames = sortedRight.fieldNames();
+
+            while (fieldNames.hasNext()) {
+                String fieldName = fieldNames.next();
+                JsonNode leftValue = sortedLeft.get(fieldName);
+                JsonNode rightValue = sortedRight.get(fieldName);
+
+                // Recursively find differences in nested structures
+                if (leftValue != null) {
+                    JsonNode childDiff = getDifferences(leftValue, rightValue);
+                    if (!childDiff.isEmpty()) {
+                        differences.set(fieldName, childDiff);
+                    }
+                } else {
+                    differences.set(fieldName, rightValue); // New field in right.
+                }
+            }
+            return differences;
+        }
+        return sortedRight;
+    }
 }
-

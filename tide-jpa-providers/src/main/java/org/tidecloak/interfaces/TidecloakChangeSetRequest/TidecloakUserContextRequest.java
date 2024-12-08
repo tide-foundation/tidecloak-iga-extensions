@@ -1,11 +1,10 @@
 package org.tidecloak.interfaces.TidecloakChangeSetRequest;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import org.tidecloak.interfaces.*;
 
 import java.util.List;
 
-public class TidecloakDraftChangeSetRequest {
+public class TidecloakUserContextRequest {
 
     @JsonProperty("TidecloakDraftRecord")
     protected  String tidecloakDraftRecord;
@@ -16,7 +15,7 @@ public class TidecloakDraftChangeSetRequest {
     @JsonProperty("DraftChangeSetDetails")
     protected List<String> draftChangeSetDetails;
 
-    public TidecloakDraftChangeSetRequest(String TidecloakDraftRecord, long timestamp, List<String> draftChangeSetDetails){
+    public TidecloakUserContextRequest(String TidecloakDraftRecord, long timestamp, List<String> draftChangeSetDetails){
         this.tidecloakDraftRecord = TidecloakDraftRecord;
         this.timestamp = timestamp;
         this.draftChangeSetDetails = draftChangeSetDetails;

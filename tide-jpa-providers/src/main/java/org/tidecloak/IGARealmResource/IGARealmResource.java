@@ -15,22 +15,26 @@ import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.cache.CacheRealmProvider;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
-import org.keycloak.models.utils.RoleUtils;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
+import org.midgard.Midgard;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.interfaces.*;
-import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakDraftChangeSetRequest;
+import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakDraftChangeSetDetails;
+import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakUserContextRequest;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.SignatureEntry;
+import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.jpa.models.TideClientAdapter;
 import org.tidecloak.jpa.utils.IGAUtils;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
+import java.net.URI;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -175,6 +179,8 @@ public class IGARealmResource {
                 throw new Exception("Deserialization of authorizer failed, invalid length.");
             }
 
+            List<TidecloakDraftChangeSetDetails> changeSetRequests = new ArrayList<>();
+
             proofDetails.forEach(p -> {
                 try {
                     boolean tideUser = p.getUser().getAttributes().stream().anyMatch(a -> a.getName().equalsIgnoreCase("tideUserKey"));
@@ -204,15 +210,65 @@ public class IGARealmResource {
                             p.addSignature(signatureEntry);
                             em.flush();
                         }
-//                        else{
-//
-//                        }
+                        else{
+                            // instead of looping through each proof, we send all proofs
+                            //String extraQuery = "state=" + request.getState().getEncoded();
+                            UserClientAccessProofEntity currentUserContext = TideAuthzProofUtil.getUserClientAccessProof(session, p.getClientId(), session.users().getUserById(realm, p.getUser().getId()));
+                            ObjectMapper objectMapper = new ObjectMapper();
+                            JsonNode currentUserContextJson = objectMapper.valueToTree(currentUserContext);
+                            JsonNode draftUserContext = objectMapper.valueToTree(p.getProofDraft());
+
+                            JsonNode keywords = TideAuthzProofUtil.getDifferences(currentUserContextJson, draftUserContext);
+                            TidecloakDraftChangeSetDetails changeSetRequest = new TidecloakDraftChangeSetDetails(p.getUser().getFirstName(), p.getProofDraft(), objectMapper.writeValueAsString(keywords));
+                            changeSetRequests.add(changeSetRequest);
+
+                        }
                     }
                 }
                 catch (Exception e) {
                     throw new RuntimeException(e);
                 }
             });
+            ObjectMapper objectMapper = new ObjectMapper();
+            if (!authorizer[0].equalsIgnoreCase("firstAdmin") && isIGAEnabled(realm) && tideIdp != null) {
+                String changeRequestString = objectMapper.writeValueAsString(changeSetRequests);
+
+                UserSessionModel userSession = session.sessions().getUserSession(realm, auth.adminAuth().getToken().getSessionId());
+
+                URI redirectURI = new URI(userSession.getNote("redirectUri") );
+                String port = redirectURI.getPort() == -1 ? "" : ":" + redirectURI.getPort();
+                String voucherURL = redirectURI.getScheme() + "://" + redirectURI.getHost() + port + "/realms/" +
+                session.getContext().getRealm().getName() + "/tidevouchers/fromAuthSession?sessionId=" + userSession.getNote("parentSessionId") +
+                "&tabId=" + userSession.getNote("tabId") +
+                "&clientId=" + session.getContext().getClient().getId();
+
+                URI uri = Midgard.CreateURL(
+                        auth.adminAuth().getToken().getSessionId(),
+                        userSession.getNote("redirectUri"),
+                        tideIdp.getConfig().get("loginURLSig"),
+                        tideIdp.getConfig().get("homeORKurl"),
+                        config.getFirst("clientId"),
+                        config.getFirst("gVRK"),
+                        tideIdp.getConfig().get("gVRKSig"),
+                        realm.isRegistrationAllowed(),
+                        Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
+                        tideIdp.getConfig().get("LogoURL"),
+                        tideIdp.getConfig().get("ImageURL"),
+                        "approvalPopup",
+                        tideIdp.getConfig().get("settingsSig"),
+                        voucherURL,
+                        ""
+                );
+
+                Map<String, String> response = new HashMap<>();
+                response.put("message", "Opening Enclave to request approval.");
+                response.put("uri", String.valueOf(uri));
+                response.put("changeSetRequests", changeRequestString);
+                response.put("requiresApprovalPopup", "true");
+
+                return buildResponse(200, objectMapper.writeValueAsString(response));
+
+            }
 
             // Update the draft status
             updateDraftStatus(changeSet, draftRecordEntity);
@@ -221,7 +277,20 @@ public class IGARealmResource {
             em.persist(draftRecordEntity);
             em.flush();
 
-            return Response.ok("Change set signed successfully").build();
+            Map<String, String> response = new HashMap<>();
+            response.put("message", "Change set signed successfully.");
+            response.put("uri", "");
+            response.put("changeSetRequests", "");
+            response.put("requiresApprovalPopup", "false");
+
+            var test = "test." + authorizer[1] + "." + authorizer[2];
+            config.putSingle("realmAuthorizer", test);
+            componentModel.setConfig(config);
+            realm.updateComponent(componentModel);
+            CacheRealmProvider cacheRealmProvider = session.getProvider(CacheRealmProvider.class);
+            cacheRealmProvider.clear();
+
+            return buildResponse(200, objectMapper.writeValueAsString(response));
         }
         catch (NumberFormatException e) {
             throw new RuntimeException("Environment variables THRESHOLD_T or THRESHOLD_N is invalid: " + e.getMessage());
@@ -567,7 +636,7 @@ public class IGARealmResource {
         //TODO: SEND THE TIDECLOAKDRAFTCHANGESET request to orks here
 
         TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-        TidecloakDraftChangeSetRequest tidecloakDraftChangeSetRequest = util.generateTidecloakDraftChangeSetRequest(em, change.getChangeSetId(), mapping, mapping.getTimestamp());
+        TidecloakUserContextRequest tidecloakUserContextRequest = util.generateTidecloakDraftChangeSetRequest(em, change.getChangeSetId(), mapping, mapping.getTimestamp());
         // send TidecloakDraftChangeSetRequest to get signed by VVK
         // get the proofs back in the order it was send (desc order by timestamp) and store it in the database HERE!
 
@@ -591,7 +660,7 @@ public class IGARealmResource {
     private void processCompositeRoleMapping(DraftChangeSetRequest change, TideCompositeRoleMappingDraftEntity mapping, EntityManager em, ActionType action) throws NoSuchAlgorithmException, JsonProcessingException {
         //TODO: SEND THE TIDECLOAKDRAFTCHANGESET request to orks here
         TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-        TidecloakDraftChangeSetRequest tidecloakDraftChangeSetRequest = util.generateTidecloakDraftChangeSetRequest(em, change.getChangeSetId(), mapping, mapping.getTimestamp());
+        TidecloakUserContextRequest tidecloakUserContextRequest = util.generateTidecloakDraftChangeSetRequest(em, change.getChangeSetId(), mapping, mapping.getTimestamp());
         // send TidecloakDraftChangeSetRequest to get signed by VVK
         // get the proofs back in the order it was send (desc order by timestamp) and store it in the database HERE!
 
@@ -617,7 +686,7 @@ public class IGARealmResource {
     private void processRole(DraftChangeSetRequest change, TideRoleDraftEntity mapping, EntityManager em, ActionType action) throws NoSuchAlgorithmException, JsonProcessingException {
         //TODO: SEND THE TIDECLOAKDRAFTCHANGESET request to orks here
         TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-        TidecloakDraftChangeSetRequest tidecloakDraftChangeSetRequest = util.generateTidecloakDraftChangeSetRequest(em, change.getChangeSetId(), mapping, mapping.getTimestamp());
+        TidecloakUserContextRequest tidecloakUserContextRequest = util.generateTidecloakDraftChangeSetRequest(em, change.getChangeSetId(), mapping, mapping.getTimestamp());
         // send TidecloakDraftChangeSetRequest to get signed by VVK
         // get the proofs back in the order it was send (desc order by timestamp) and store it in the database HERE!
 
@@ -638,7 +707,7 @@ public class IGARealmResource {
     private void processUser(DraftChangeSetRequest change, TideUserDraftEntity mapping, EntityManager em, ActionType action) throws NoSuchAlgorithmException, JsonProcessingException {
         //TODO: SEND THE TIDECLOAKDRAFTCHANGESET request to orks here
         TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-        TidecloakDraftChangeSetRequest tidecloakDraftChangeSetRequest = util.generateTidecloakDraftChangeSetRequest(em, change.getChangeSetId(), mapping, mapping.getTimestamp());
+        TidecloakUserContextRequest tidecloakUserContextRequest = util.generateTidecloakDraftChangeSetRequest(em, change.getChangeSetId(), mapping, mapping.getTimestamp());
         // send TidecloakDraftChangeSetRequest to get signed by VVK
         // get the proofs back in the order it was send (desc order by timestamp) and store it in the database HERE!
 
@@ -658,7 +727,7 @@ public class IGARealmResource {
     private void processClient(DraftChangeSetRequest change, TideClientFullScopeStatusDraftEntity mapping, EntityManager em, ActionType action) throws NoSuchAlgorithmException, JsonProcessingException {
         //TODO: SEND THE TIDECLOAKDRAFTCHANGESET request to orks here
         TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-        TidecloakDraftChangeSetRequest tidecloakDraftChangeSetRequest = util.generateTidecloakDraftChangeSetRequest(em, change.getChangeSetId(), mapping, mapping.getTimestamp());
+        TidecloakUserContextRequest tidecloakUserContextRequest = util.generateTidecloakDraftChangeSetRequest(em, change.getChangeSetId(), mapping, mapping.getTimestamp());
         // send TidecloakDraftChangeSetRequest to get signed by VVK
         // get the proofs back in the order it was send (desc order by timestamp) and store it in the database HERE!
 
@@ -1199,6 +1268,14 @@ public class IGARealmResource {
                 .getResultStream()
                 .map(AccessProofDetailEntity::getProofDraft)
                 .collect(Collectors.toList());
+    }
+
+    private Response buildResponse(int status, String message) {
+        return Response.status(status)
+                .header("Access-Control-Allow-Origin", "*")
+                .entity(message)
+                .type(MediaType.TEXT_PLAIN)
+                .build();
     }
 
 
