@@ -73,7 +73,7 @@ public class IGAUtils {
         req.SetAuthorizerCertificate(Base64.getDecoder().decode(authorizer[2]));
 
         SignatureResponse response = Midgard.SignModel(settings, req);
-        return new SignatureEntry(response.Signatures[0], "", "");
+        return new SignatureEntry(response.Signatures[1], "", "");
 
     }
 

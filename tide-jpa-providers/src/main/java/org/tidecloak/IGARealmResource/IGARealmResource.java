@@ -20,6 +20,7 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
+import org.midgard.Serialization.JsonSorter;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.interfaces.*;
@@ -194,19 +195,16 @@ public class IGARealmResource {
                         // SIGN INITIAL TIDE ADMIN, this only runs on the first user with usercontext draft for realm-management.
                         // Check if proof is for the REALM-MANAGEMENT CLIENT and changeset request is for adding the tide admin role. Maybe check if authorizer is still single VRK
                         if (authorizer[0].equalsIgnoreCase("firstAdmin") && isAssigningTideAdminRole) {
-                            System.out.println("SIGNING FOR FIRSTADMIN!!!");
                             RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
                             RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
                             TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                                     .setParameter("role", role).getSingleResult();
 
                             InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
-                            UserContext userContext = new UserContext( p.getProofDraft());
+                            UserContext userContext = new UserContext(p.getProofDraft());
                             userContext.setInitCertHash(cert.hash());
                             p.setProofDraft(userContext.ToString());
-
                             SignatureEntry signatureEntry = IGAUtils.signInitialTideAdmin(config, userContext, realm.getClientById(p.getClientId()).getClientId(), cert, authorizer);
-                            System.out.println(signatureEntry.getACCESS_PROOF_SIGNATURE());
                             p.addSignature(signatureEntry);
                             em.flush();
                         }
@@ -232,31 +230,44 @@ public class IGARealmResource {
             ObjectMapper objectMapper = new ObjectMapper();
             if (!authorizer[0].equalsIgnoreCase("firstAdmin") && isIGAEnabled(realm) && tideIdp != null) {
                 String changeRequestString = objectMapper.writeValueAsString(changeSetRequests);
+                String redirectUrl = "";
+                String redirectUrlSig = "";
+                if(changeSet.getType().equals(ChangeSetType.USER_ROLE)){
+                    redirectUrl = tideIdp.getConfig().get("changeSetUsersEndpoint");
+                    redirectUrlSig = tideIdp.getConfig().get("changeSetUsersURLSig");
+                }else if (changeSet.getType().equals(ChangeSetType.COMPOSITE_ROLE) || changeSet.getType().equals(ChangeSetType.ROLE)){
+                    redirectUrl = tideIdp.getConfig().get("changeSetRolesEndpoint");
+                    redirectUrlSig = tideIdp.getConfig().get("changeSetRolesURLSig");
+                }else if (changeSet.getType().equals(ChangeSetType.CLIENT)){
+                    redirectUrl = tideIdp.getConfig().get("changeSetClientsEndpoint");
+                    redirectUrlSig = tideIdp.getConfig().get("changeSetClientsURLSig");
+                }
+                URI redirectURI = new URI(redirectUrl);
 
-                UserSessionModel userSession = session.sessions().getUserSession(realm, auth.adminAuth().getToken().getSessionId());
-
-                URI redirectURI = new URI(userSession.getNote("redirectUri") );
-                String port = redirectURI.getPort() == -1 ? "" : ":" + redirectURI.getPort();
-                String voucherURL = redirectURI.getScheme() + "://" + redirectURI.getHost() + port + "/realms/" +
-                session.getContext().getRealm().getName() + "/tidevouchers/fromAuthSession?sessionId=" + userSession.getNote("parentSessionId") +
-                "&tabId=" + userSession.getNote("tabId") +
-                "&clientId=" + session.getContext().getClient().getId();
+//                UserSessionModel userSession = session.sessions().getUserSession(realm, auth.adminAuth().getToken().getSessionId());
+//
+//                URI redirectURI = new URI(userSession.getNote("redirectUri") );
+//                String port = redirectURI.getPort() == -1 ? "" : ":" + redirectURI.getPort();
+//                String voucherURL = redirectURI.getScheme() + "://" + redirectURI.getHost() + port + "/realms/" +
+//                session.getContext().getRealm().getName() + "/tidevouchers/fromAuthSession?sessionId=" + userSession.getNote("parentSessionId") +
+//                "&tabId=" + userSession.getNote("tabId") +
+//                "&clientId=" + session.getContext().getClient().getId();
 
                 URI uri = Midgard.CreateURL(
                         auth.adminAuth().getToken().getSessionId(),
-                        userSession.getNote("redirectUri"),
-                        tideIdp.getConfig().get("loginURLSig"),
+                        redirectURI.toString(),//userSession.getNote("redirectUri"),
+                        redirectUrlSig,
                         tideIdp.getConfig().get("homeORKurl"),
                         config.getFirst("clientId"),
                         config.getFirst("gVRK"),
-                        tideIdp.getConfig().get("gVRKSig"),
+                        config.getFirst("gVRKCertificate"),
                         realm.isRegistrationAllowed(),
                         Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
                         tideIdp.getConfig().get("LogoURL"),
                         tideIdp.getConfig().get("ImageURL"),
-                        "approvalPopup",
+                        "approvalEnclave",
                         tideIdp.getConfig().get("settingsSig"),
-                        voucherURL,
+                        "test",//voucherURL,
                         ""
                 );
 
@@ -334,7 +345,7 @@ public class IGARealmResource {
         filteredNode.put("aud", client);
 
         // Return the filtered and sorted JsonNode as a string
-        return objectMapper.writeValueAsString(TideAuthzProofUtil.sortJsonNode(filteredNode));
+        return objectMapper.writeValueAsString(JsonSorter.parseAndSortArrays(filteredNode));
     }
 
     private Object fetchDraftRecordEntity(EntityManager em, DraftChangeSetRequest changeSet) {
@@ -351,7 +362,7 @@ public class IGARealmResource {
         ObjectMapper objectMapper = new ObjectMapper();
         objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
         JsonNode tempNode = objectMapper.valueToTree(draftRecordEntity);
-        JsonNode sortedTemp = TideAuthzProofUtil.sortJsonNode(tempNode);
+        JsonNode sortedTemp = JsonSorter.parseAndSortArrays(tempNode);
         return objectMapper.writeValueAsString(sortedTemp);
     }
 

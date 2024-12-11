@@ -116,22 +116,31 @@ public class TideUserAdapter extends UserAdapter {
             UserModel user = session.users().getUserById(realm, getEntity().getId());
             UserModel wrappedUser = TideRolesUtil.wrapUserModel(user, session, realm);
             TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-            clientList.forEach(client -> {
-                try {
-                    util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUserRole.getId(), ChangeSetType.USER_ROLE, ActionType.CREATE, client.isFullScopeAllowed());
-                } catch (JsonProcessingException e) {
-                    throw new RuntimeException(e);
-                }
-            });
+            if (role.isClientRole()
+                    && ((ClientModel) role.getContainer()).getClientId().equalsIgnoreCase(Constants.REALM_MANAGEMENT_CLIENT_ID)) {
 
-            // if role is for realm-management, create a draft for "security-admin-client"
-            if(role.isClientRole() && ((ClientModel) role.getContainer()).getClientId().equalsIgnoreCase(Constants.REALM_MANAGEMENT_CLIENT_ID)){
-                ClientModel clientModel = realm.getClientByClientId(Constants.ADMIN_CONSOLE_CLIENT_ID);
-                try {
-                    util.generateAndSaveProofDraft(clientModel, wrappedUser, Collections.emptySet(), draftUserRole.getId(),  ChangeSetType.USER_ROLE, ActionType.CREATE, false);
-                } catch (JsonProcessingException e) {
-                    throw new RuntimeException(e);
-                }
+                clientList.forEach(client -> {
+                    boolean isRealmManagementClient = client.getClientId().equalsIgnoreCase(Constants.REALM_MANAGEMENT_CLIENT_ID);
+                    Set<RoleModel> rolesToUse = isRealmManagementClient ? roleMappings : Collections.emptySet();
+                    boolean fullScopeAllowed = isRealmManagementClient && client.isFullScopeAllowed();
+
+                    try {
+                        util.generateAndSaveProofDraft(client, wrappedUser, rolesToUse, draftUserRole.getId(),
+                                ChangeSetType.USER_ROLE, ActionType.CREATE, fullScopeAllowed);
+                    } catch (JsonProcessingException e) {
+                        throw new RuntimeException("Error processing client: " + client.getClientId(), e);
+                    }
+                });
+
+            } else {
+                clientList.forEach(client -> {
+                    try {
+                        util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUserRole.getId(),
+                                ChangeSetType.USER_ROLE, ActionType.CREATE, client.isFullScopeAllowed());
+                    } catch (JsonProcessingException e) {
+                        throw new RuntimeException("Error processing client: " + client.getClientId(), e);
+                    }
+                });
             }
             if(role.isComposite()){
                 Set<TideRoleAdapter> wrappedRoles = roleMappings.stream().map(r -> {
@@ -192,6 +201,7 @@ public class TideUserAdapter extends UserAdapter {
             em.flush();
         }
     }
+
 
     @Override
     public void deleteRoleMapping(RoleModel roleModel) {

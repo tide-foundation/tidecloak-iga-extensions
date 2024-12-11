@@ -41,6 +41,7 @@ import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.jpa.models.TideClientAdapter;
 import org.tidecloak.jpa.models.TideRoleAdapter;
 import org.tidecloak.jpa.models.TideUserAdapter;
+import org.midgard.Serialization.JsonSorter;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -231,7 +232,7 @@ public final class TideAuthzProofUtil {
 
         JsonNode tempNode = objectMapper.valueToTree(temp);
         // Sort draft record
-        var sortedTemp = sortJsonNode(tempNode);
+        var sortedTemp = JsonSorter.parseAndSortArrays(tempNode);
         String draftRecord = objectMapper.writeValueAsString(sortedTemp);
         String change = proofDraft.concat(draftRecord);
 
@@ -250,7 +251,8 @@ public final class TideAuthzProofUtil {
                 .getResultStream().map(AccessProofDetailEntity::getProofDraft)
                 .toList();
         JsonNode mappingObject = objectMapper.valueToTree(mapping);
-        JsonNode sortedMapping = sortJsonNode(mappingObject);
+        JsonNode sortedMapping = JsonSorter.parseAndSortArrays(mappingObject);
+
         String draftRecord = objectMapper.writeValueAsString(sortedMapping);
 
         return new TidecloakUserContextRequest(draftRecord, timestamp, userAccessDrafts);
@@ -464,7 +466,7 @@ public final class TideAuthzProofUtil {
         JsonNode currentProof = objectMapper.readTree(proof);
         AccessToken token = objectMapper.convertValue(currentProof, AccessToken.class);
         token.audience(null);
-        return objectMapper.writeValueAsString(sortJsonNode(objectMapper.valueToTree(token)));
+        return objectMapper.writeValueAsString(JsonSorter.parseAndSortArrays(objectMapper.valueToTree(token)));
     }
 
     public String removeAccessFromToken(String proof, AccessDetails accessDetails) throws JsonProcessingException {
@@ -522,6 +524,7 @@ public final class TideAuthzProofUtil {
         TideAuthzProofUtil tideAuthzProofUtil = new TideAuthzProofUtil(session, realm, em);
 
         for (ClientModel client : affectedClients) {
+            System.out.println(client.getName());
             // Get all draft access proof details for this client.
             List<AccessProofDetailEntity> proofDetails = getProofDetailsByChangeSetType(em, client, entity, changeSetType);
             for (AccessProofDetailEntity proofDetail : proofDetails) {
@@ -533,6 +536,8 @@ public final class TideAuthzProofUtil {
                 //TODO: NEED TO ENSURE ITS COMMITED HERE
                 // Check if this draft access proof is for this draft change request
                 if (Objects.equals(proofDetail.getRecordId(), change.getChangeSetId())) {
+                    System.out.println(proofDetail.getProofDraft());
+
                     // If this draft change request is a user role grant, we need to check if it is granting a composite role to the user.
                     if(change.getType() == ChangeSetType.USER_ROLE) {
                         TideUserRoleMappingDraftEntity record = em.find(TideUserRoleMappingDraftEntity.class, proofDetail.getRecordId());
@@ -1060,7 +1065,7 @@ public final class TideAuthzProofUtil {
         }
     }
 
-    private JsonNode cleanProofDraft (JsonNode token) {
+    private JsonNode cleanProofDraft (JsonNode token) throws JsonProcessingException {
         ObjectNode object = (ObjectNode) token;
 
         // Remove what we don't need
@@ -1070,17 +1075,17 @@ public final class TideAuthzProofUtil {
         object.remove("sid");
         object.remove("auth_time");
         object.remove("session_state");
-        object.remove("session_state");
         object.remove("given_name");
         object.remove("family_name");
         object.remove("email_verified");
         object.remove("email_verified");
         object.remove("email");
         object.remove("name");
+        object.remove("typ");
+
         // Removing ACR for now. This changes by the type of authenticate taken. Explicit login is 1 and "remembered" session is 0.
         object.remove("acr");
-
-        JsonNode sortedJson = sortJsonNode(object);
+        JsonNode sortedJson = JsonSorter.parseAndSortArrays(object.toString());
 
         return sortedJson;
     }
@@ -1171,9 +1176,9 @@ public final class TideAuthzProofUtil {
         access.addRole(role.getName());
     }
 
-    public static JsonNode getDifferences(JsonNode left, JsonNode right) {
-        JsonNode sortedLeft = sortJsonNode(left);
-        JsonNode sortedRight = sortJsonNode(right);
+    public static JsonNode getDifferences(JsonNode left, JsonNode right) throws JsonProcessingException {
+        JsonNode sortedLeft = JsonSorter.parseAndSortArrays(left);
+        JsonNode sortedRight = JsonSorter.parseAndSortArrays(right);
         if (sortedLeft == null || sortedRight == null) {
             return right; // If left is null, return the right node as the "difference."
         }
