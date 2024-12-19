@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.smallrye.config.SecretKeys;
 import jakarta.persistence.EntityManager;
 import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.midgard.Midgard;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
@@ -12,7 +13,13 @@ import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
 import org.midgard.models.UserContext.UserContext;
+import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.interfaces.DraftChangeSetRequest;
+import org.tidecloak.interfaces.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.AuthorizerEntity;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.SignatureEntry;
 import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
@@ -21,6 +28,9 @@ import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 
 import java.util.*;
 import java.util.stream.Collectors;
+
+import static org.tidecloak.interfaces.ChangeSetType.*;
+import static org.tidecloak.jpa.models.ChangesetRequestAdapter.getChangeSetStatus;
 
 public class IGAUtils {
     public static boolean isIGAEnabled(RealmModel realm) {
@@ -36,11 +46,11 @@ public class IGAUtils {
     }
 
     // ONLY WORKS FOR NO TIDE ADMIN. WITH IGA ENABLED TO ALLOW TIDE ADMIN TO EXIST
-    public static SignatureEntry signInitialTideAdmin(MultivaluedHashMap<String, String> keyProviderConfig,
-                                                      UserContext userContext,
-                                                      String clientId,
+    public static List<String>  signInitialTideAdmin(MultivaluedHashMap<String, String> keyProviderConfig,
+                                                      UserContext[] userContexts,
                                                       InitializerCertifcate initCert,
-                                                      String[] authorizer) throws Exception {
+                                                      AuthorizerEntity authorizer,
+                                                      ChangesetRequestEntity changesetRequestEntity ) throws Exception {
 
         String currentSecretKeys = keyProviderConfig.getFirst("clientSecret");
         ObjectMapper objectMapper = new ObjectMapper();
@@ -63,17 +73,22 @@ public class IGAUtils {
 
         UserContextSignRequest req = new UserContextSignRequest("VRK:1");
 
+        req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
         req.SetInitializationCertificate(initCert);
-        req.SetUserContext(userContext);
+        req.SetUserContexts(userContexts);
         req.SetAuthorization(
                 Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
         );
 
-        req.SetAuthorizer(HexFormat.of().parseHex(authorizer[1]));
-        req.SetAuthorizerCertificate(Base64.getDecoder().decode(authorizer[2]));
+        req.SetAuthorizer(HexFormat.of().parseHex(authorizer.getAuthorizer()));
+        req.SetAuthorizerCertificate(Base64.getDecoder().decode(authorizer.getAuthorizerCertificate()));
 
         SignatureResponse response = Midgard.SignModel(settings, req);
-        return new SignatureEntry(response.Signatures[1], "", "");
+        List<String> signatures = new ArrayList<>();
+        for ( int i = 1; i <= userContexts.length; i++){
+            signatures.add(response.Signatures[i]);
+        }
+        return signatures;
 
     }
 
@@ -102,6 +117,76 @@ public class IGAUtils {
         // Method to add a new entry to the history
         public void addToHistory(String newEntry) {
             history.add(newEntry);
+        }
+    }
+
+    public static Object fetchDraftRecordEntity(EntityManager em, ChangeSetType type, String changeSetId) {
+        return switch (type) {
+            case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, changeSetId);
+            case ROLE -> em.find(TideRoleDraftEntity.class, changeSetId);
+            case COMPOSITE_ROLE -> em.find(TideCompositeRoleMappingDraftEntity.class, changeSetId);
+            case CLIENT -> em.find(TideClientFullScopeStatusDraftEntity.class, changeSetId);
+            default -> null;
+        };
+    }
+
+    public static void updateDraftStatus(ChangeSetType changeSetType, ActionType changeSetAction, Object draftRecordEntity) throws Exception {
+        switch (changeSetType) {
+            case USER_ROLE:
+                if(changeSetAction == ActionType.CREATE) {
+                    ((TideUserRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                } else if (changeSetAction == ActionType.DELETE){
+                    ((TideUserRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(DraftStatus.APPROVED);
+                }
+                break;
+            case ROLE:
+                ((TideRoleDraftEntity) draftRecordEntity).setDeleteStatus(DraftStatus.APPROVED);
+                break;
+            case COMPOSITE_ROLE:
+                if(changeSetAction == ActionType.CREATE){
+                    ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                } else if (changeSetAction == ActionType.DELETE){
+                    ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(DraftStatus.APPROVED);
+                }
+                break;
+            case CLIENT:
+                if (changeSetAction == ActionType.CREATE) {
+                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeEnabled(DraftStatus.APPROVED);
+                } else if (changeSetAction == ActionType.DELETE) {
+                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeDisabled(DraftStatus.APPROVED);
+                }
+                break;
+        }
+    }
+
+    public static void updateDraftStatus(KeycloakSession session, ChangeSetType changeSetType, String changeSetID, ActionType changeSetAction, Object draftRecordEntity) throws Exception {
+        DraftStatus draftStatus = getChangeSetStatus(session, changeSetID);
+
+        switch (changeSetType) {
+            case USER_ROLE:
+                if(changeSetAction == ActionType.CREATE) {
+                    ((TideUserRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
+                } else if (changeSetAction == ActionType.DELETE){
+                    ((TideUserRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(draftStatus);
+                }
+                break;
+            case ROLE:
+                ((TideRoleDraftEntity) draftRecordEntity).setDeleteStatus(draftStatus);
+                break;
+            case COMPOSITE_ROLE:
+                if(changeSetAction == ActionType.CREATE){
+                    ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
+                } else if (changeSetAction == ActionType.DELETE){
+                    ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(draftStatus);
+                }
+                break;
+            case CLIENT:
+                if (changeSetAction == ActionType.CREATE) {
+                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeEnabled(draftStatus);
+                } else if (changeSetAction == ActionType.DELETE) {
+                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeDisabled(draftStatus);
+                }
+                break;
         }
     }
 }

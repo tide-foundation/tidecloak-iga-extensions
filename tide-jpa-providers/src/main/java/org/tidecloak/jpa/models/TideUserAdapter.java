@@ -127,7 +127,7 @@ public class TideUserAdapter extends UserAdapter {
                     try {
                         util.generateAndSaveProofDraft(client, wrappedUser, rolesToUse, draftUserRole.getId(),
                                 ChangeSetType.USER_ROLE, ActionType.CREATE, fullScopeAllowed);
-                    } catch (JsonProcessingException e) {
+                    } catch (Exception e) {
                         throw new RuntimeException("Error processing client: " + client.getClientId(), e);
                     }
                 });
@@ -137,7 +137,7 @@ public class TideUserAdapter extends UserAdapter {
                     try {
                         util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUserRole.getId(),
                                 ChangeSetType.USER_ROLE, ActionType.CREATE, client.isFullScopeAllowed());
-                    } catch (JsonProcessingException e) {
+                    } catch (Exception e) {
                         throw new RuntimeException("Error processing client: " + client.getClientId(), e);
                     }
                 });
@@ -193,7 +193,7 @@ public class TideUserAdapter extends UserAdapter {
                             util.generateAndSaveProofDraft(childRoleClient, wrappedUser, roleSet, compositeRoleMappingStatus.get(0).getChildRole().getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE, childRoleClient.isFullScopeAllowed());
                         }
 
-                    } catch (JsonProcessingException e) {
+                    } catch (Exception e) {
                         throw new RuntimeException(e);
                     }
                 }
@@ -333,7 +333,7 @@ public class TideUserAdapter extends UserAdapter {
             String draftId = activeDraftEntities == null || activeDraftEntities.isEmpty() ? role.getId() : activeDraftEntities.get(0).getId();
             util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftId,
                     ChangeSetType.USER_ROLE, ActionType.DELETE, client.isFullScopeAllowed());
-        } catch (JsonProcessingException e) {
+        } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }

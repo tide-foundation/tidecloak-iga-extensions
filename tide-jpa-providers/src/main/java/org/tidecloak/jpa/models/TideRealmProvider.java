@@ -134,7 +134,7 @@ public class TideRealmProvider extends JpaRealmProvider {
 
                     try {
                         util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, newDeletionRequest.getId(), ChangeSetType.ROLE, ActionType.DELETE, client.isFullScopeAllowed());
-                    } catch (JsonProcessingException e) {
+                    } catch (Exception e) {
                         throw new RuntimeException(e);
                     }
                 });

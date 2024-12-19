@@ -82,7 +82,7 @@ public class TideClientAdapter extends ClientAdapter {
                 handleFullScopeDisabled(clientFullScopeStatuses, util, usersInRealm, client);
             }
 
-        } catch (NoSuchAlgorithmException | JsonProcessingException e) {
+        } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
@@ -101,7 +101,7 @@ public class TideClientAdapter extends ClientAdapter {
         em.persist(draft);
         em.flush();
     }
-    private void handleFullScopeEnabled(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client) throws NoSuchAlgorithmException, JsonProcessingException {
+    private void handleFullScopeEnabled(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client) throws Exception {
         if (clientFullScopeStatuses.getFullScopeEnabled() == DraftStatus.APPROVED) {
             approveFullScope(clientFullScopeStatuses, true);
         }
@@ -119,7 +119,7 @@ public class TideClientAdapter extends ClientAdapter {
             startDraftApproval(clientFullScopeStatuses, util, usersInRealm, client, true);
         }
     }
-    private void handleFullScopeDisabled(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client) throws NoSuchAlgorithmException, JsonProcessingException {
+    private void handleFullScopeDisabled(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client) throws Exception {
         if (clientFullScopeStatuses.getFullScopeDisabled() == DraftStatus.APPROVED) {
             approveFullScope(clientFullScopeStatuses, false);
         }
@@ -151,7 +151,7 @@ public class TideClientAdapter extends ClientAdapter {
         em.flush();
 
     }
-    private void startDraftApproval(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, boolean enable) throws NoSuchAlgorithmException, JsonProcessingException {
+    private void startDraftApproval(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, boolean enable) throws Exception {
         if (enable) {
             createProofDraftsForUsers(util, usersInRealm, client, clientFullScopeStatuses.getId(), clientFullScopeStatuses);
         } else {
@@ -176,12 +176,12 @@ public class TideClientAdapter extends ClientAdapter {
                 Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.ACTIVE);
                 Set<RoleModel> roles = getAccess(activeRoles, client, client.getClientScopes(true).values().stream(), true);
                 util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, roles, statusId, ChangeSetType.CLIENT, ActionType.CREATE, true);
-            } catch (JsonProcessingException e) {
+            } catch (Exception e) {
                 throw new RuntimeException(e);
             }
         });
     }
-    private void regenerateAccessProofForUsers(TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, String statusId, TideClientFullScopeStatusDraftEntity draft) throws NoSuchAlgorithmException, JsonProcessingException {
+    private void regenerateAccessProofForUsers(TideAuthzProofUtil util, List<UserModel> usersInRealm, ClientModel client, String statusId, TideClientFullScopeStatusDraftEntity draft) throws Exception {
         List<UserModel> usersInClient = new ArrayList<>();
         client.getRolesStream().forEach(role -> session.users().getRoleMembersStream(realm, role).forEach(user -> {
             UserEntity userEntity = em.find(UserEntity.class, user.getId());
@@ -229,7 +229,7 @@ public class TideClientAdapter extends ClientAdapter {
                     return true;
                 }).collect(Collectors.toSet());
                 util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, activeRoles, statusId, ChangeSetType.CLIENT, ActionType.DELETE, true);
-            } catch (JsonProcessingException e) {
+            } catch (Exception e) {
                 throw new RuntimeException(e);
             }
         });

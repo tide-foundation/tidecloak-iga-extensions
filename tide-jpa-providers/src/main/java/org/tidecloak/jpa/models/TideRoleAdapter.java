@@ -81,7 +81,7 @@ public class TideRoleAdapter extends RoleAdapter {
             super.removeCompositeRole(role);
             try {
                 util.checkAndUpdateProofRecords(draftChangeSetRequest, draft, ChangeSetType.COMPOSITE_ROLE, em);
-            } catch (NoSuchAlgorithmException | JsonProcessingException e) {
+            } catch (Exception e) {
                 throw new RuntimeException(e);
             }
 
@@ -164,7 +164,7 @@ public class TideRoleAdapter extends RoleAdapter {
 
                     try {
                         util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, compositeRoleEntity.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.DELETE, client.isFullScopeAllowed());
-                    } catch (JsonProcessingException e) {
+                    } catch (Exception e) {
                         throw new RuntimeException(e);
                     }
                 }));
@@ -344,9 +344,7 @@ public class TideRoleAdapter extends RoleAdapter {
                 draftChangeSetRequest.setActionType(ActionType.CREATE);
                 try {
                     util.checkAndUpdateProofRecords(draftChangeSetRequest, draft, ChangeSetType.COMPOSITE_ROLE, em);
-                } catch (NoSuchAlgorithmException e) {
-                    throw new RuntimeException(e);
-                } catch (JsonProcessingException e) {
+                } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
 
@@ -374,7 +372,7 @@ public class TideRoleAdapter extends RoleAdapter {
                         roleMappings.add(compositeRole);// ensure the parent role is in there too
                         try {
                             util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draft.getId(), ChangeSetType.COMPOSITE_ROLE, ActionType.CREATE, client.isFullScopeAllowed());
-                        } catch (JsonProcessingException e) {
+                        } catch (Exception e) {
                             throw new RuntimeException(e);
                         }
                     };

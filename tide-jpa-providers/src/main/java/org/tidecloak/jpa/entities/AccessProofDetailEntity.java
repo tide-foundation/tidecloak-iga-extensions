@@ -67,10 +67,8 @@ public class AccessProofDetailEntity {
     @Column(name = "CREATED_TIMESTAMP")
     protected Long createdTimestamp = System.currentTimeMillis();
 
-    @ElementCollection
-    @CollectionTable(name = "DRAFT_SIGNATURES", joinColumns = @JoinColumn(name = "PROOF_ID"))
-    @Column(name = "SIGNATURES")
-    protected List<SignatureEntry> signatures = new ArrayList<>();
+    @Column(name = "FINAL_SIGNATURE")
+    protected String signature;
 
     public String getId() {
         return id;
@@ -128,14 +126,12 @@ public class AccessProofDetailEntity {
         createdTimestamp = timestamp;
     }
 
-    public List<SignatureEntry> getSignatures() {
-        return signatures;
+    public String getSignature() {
+        return signature;
     }
-    public void addSignature(SignatureEntry signatures) {
-        this.signatures.add(signatures);
-    }
-    public void setSignatures(List<SignatureEntry> signatures) {
-        this.signatures = signatures;
+
+    public void setSignature(String signature) {
+        this.signature = signature;
     }
 
 

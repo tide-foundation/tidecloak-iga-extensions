@@ -1,0 +1,65 @@
+package org.tidecloak.jpa.models;
+
+import jakarta.persistence.EntityManager;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.Constants;
+import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.RoleModel;
+import org.keycloak.models.UserModel;
+import org.keycloak.models.jpa.entities.RoleEntity;
+import org.midgard.models.AdminAuthorization;
+import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+import org.midgard.models.UserContext.UserContext;
+import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
+import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
+import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
+import org.tidecloak.jpa.utils.IGAUtils;
+
+import static org.tidecloak.TideRequests.TideRoleRequests.tideRealmAdminRole;
+import static org.tidecloak.jpa.utils.IGAUtils.updateDraftStatus;
+
+public class ChangesetRequestAdapter {
+
+    public static void saveAdminAuthorizaton(KeycloakSession session, String changeSetType, String changeSetRequestID, String changeSetActionType, UserModel adminUser, String adminTideAuthMsg, String adminTideBlindSig, String adminSessionApprovalSig) throws Exception {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeSetRequestID);
+        if(changesetRequestEntity == null){
+            throw new Exception("No change set request found with this record id, " + changeSetRequestID);
+        }
+
+        UserClientAccessProofEntity userClientAccessProofEntity = em.find(UserClientAccessProofEntity.class, adminUser.getId());
+        UserContext adminContext = new UserContext(userClientAccessProofEntity.getAccessProof());
+
+        AdminAuthorization adminAuthorization = new AdminAuthorization(adminContext.ToString(), userClientAccessProofEntity.getAccessProofSig(), adminTideAuthMsg, adminTideBlindSig, adminSessionApprovalSig);
+        changesetRequestEntity.addAdminAuthorization(adminAuthorization.ToString());
+
+        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
+        updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), draftRecordEntity);
+    }
+
+    public static DraftStatus getChangeSetStatus(KeycloakSession session, String changeSetId) throws Exception {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        RoleModel tideRole = session.clients().getClientByClientId(session.getContext().getRealm(), Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
+
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeSetId);
+        if(changesetRequestEntity == null){
+            throw new Exception("No change set request found with this record id, " + changeSetId);
+        }
+
+        int authorizationCount = changesetRequestEntity.getAdminAuthorizations().size();
+
+        // TODO: lmao fix this
+        if(authorizationCount < 1){
+           return DraftStatus.DRAFT;
+        }else if ( authorizationCount == Integer.parseInt(tideRole.getFirstAttribute("tideThreshold"))) {
+            return DraftStatus.APPROVED;
+        } else {
+            return DraftStatus.PENDING;
+        }
+    }
+}
