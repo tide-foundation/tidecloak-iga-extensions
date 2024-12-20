@@ -2,11 +2,9 @@ package org.tidecloak.jpa.models;
 
 import jakarta.persistence.EntityManager;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
-import org.keycloak.models.Constants;
-import org.keycloak.models.KeycloakSession;
-import org.keycloak.models.RoleModel;
-import org.keycloak.models.UserModel;
+import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.RoleEntity;
+import org.keycloak.models.jpa.entities.UserEntity;
 import org.midgard.models.AdminAuthorization;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
@@ -17,6 +15,8 @@ import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.utils.IGAUtils;
+
+import java.util.List;
 
 import static org.tidecloak.TideRequests.TideRoleRequests.tideRealmAdminRole;
 import static org.tidecloak.jpa.utils.IGAUtils.updateDraftStatus;
@@ -30,11 +30,18 @@ public class ChangesetRequestAdapter {
         if(changesetRequestEntity == null){
             throw new Exception("No change set request found with this record id, " + changeSetRequestID);
         }
+        UserEntity adminEntity = em.find(UserEntity.class, adminUser.getId());
+        ClientModel client = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
+        List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserIdAndClientId", UserClientAccessProofEntity.class)
+                .setParameter("user", adminEntity)
+                .setParameter("clientId", client.getId()).getResultList();
 
-        UserClientAccessProofEntity userClientAccessProofEntity = em.find(UserClientAccessProofEntity.class, adminUser.getId());
-        UserContext adminContext = new UserContext(userClientAccessProofEntity.getAccessProof());
+        if ( userClientAccessProofEntity == null ){
+            throw new Exception("This admin user does not have any realm management roles, " + adminUser.getId());
+        }
 
-        AdminAuthorization adminAuthorization = new AdminAuthorization(adminContext.ToString(), userClientAccessProofEntity.getAccessProofSig(), adminTideAuthMsg, adminTideBlindSig, adminSessionApprovalSig);
+        UserContext adminContext = new UserContext(userClientAccessProofEntity.get(0).getAccessProof());
+        AdminAuthorization adminAuthorization = new AdminAuthorization(adminContext.ToString(), userClientAccessProofEntity.get(0).getAccessProofSig(), adminTideAuthMsg, adminTideBlindSig, adminSessionApprovalSig);
         changesetRequestEntity.addAdminAuthorization(adminAuthorization.ToString());
 
         Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);

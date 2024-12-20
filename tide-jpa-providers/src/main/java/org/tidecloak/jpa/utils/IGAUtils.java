@@ -84,8 +84,9 @@ public class IGAUtils {
         req.SetAuthorizerCertificate(Base64.getDecoder().decode(authorizer.getAuthorizerCertificate()));
 
         SignatureResponse response = Midgard.SignModel(settings, req);
+
         List<String> signatures = new ArrayList<>();
-        for ( int i = 1; i <= userContexts.length; i++){
+        for ( int i = 0; i <= userContexts.length; i++){
             signatures.add(response.Signatures[i]);
         }
         return signatures;

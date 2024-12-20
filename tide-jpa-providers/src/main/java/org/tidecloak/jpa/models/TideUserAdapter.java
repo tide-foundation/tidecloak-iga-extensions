@@ -135,6 +135,9 @@ public class TideUserAdapter extends UserAdapter {
             } else {
                 clientList.forEach(client -> {
                     try {
+                        if (client.getClientId().equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID) || client.getClientId().equalsIgnoreCase(Constants.ADMIN_CLI_CLIENT_ID)){
+                            return;
+                        }
                         util.generateAndSaveProofDraft(client, wrappedUser, roleMappings, draftUserRole.getId(),
                                 ChangeSetType.USER_ROLE, ActionType.CREATE, client.isFullScopeAllowed());
                     } catch (Exception e) {
