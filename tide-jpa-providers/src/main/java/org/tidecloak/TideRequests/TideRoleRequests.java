@@ -34,7 +34,7 @@ public class TideRoleRequests {
         tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
 
         ArrayList<String> signModels = new ArrayList<String>();
-        signModels.add("AccessTokens");
+        signModels.add("UserContext:1");
 
         InitializerCertifcate initCert = createRoleInitCert(session, resource, tideRealmAdmin, "1", "EdDSA", signModels);
 

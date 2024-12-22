@@ -20,8 +20,9 @@ public class ChangesetRequestEntity {
     @Column(name = "DRAFT_REQUEST")
     private String draftRequest;
 
+    //TODO: RENAME TO EXPIRY!!!
     @Column(name = "TIMESTAMP")
-    protected Long timestamp = System.currentTimeMillis();
+    protected Long timestamp = System.currentTimeMillis() / 1000;
 
     public String getChangesetRequestId() {
         return changesetRequestId;

@@ -255,13 +255,12 @@ public class IGARealmResource {
                         ""
                 );
 
-                String expiryToSeconds = String.valueOf(changesetRequestEntity.getTimestamp() * 1000);
                 Map<String, String> response = new HashMap<>();
                 response.put("message", "Opening Enclave to request approval.");
                 response.put("uri", String.valueOf(uri));
                 response.put("changeSetRequests", changesetRequestEntity.getDraftRequest());
                 response.put("requiresApprovalPopup", "true");
-                response.put("expiry", expiryToSeconds);
+                response.put("expiry", String.valueOf(changesetRequestEntity.getTimestamp()));
 
                 return buildResponse(200, objectMapper.writeValueAsString(response));
             }
@@ -553,9 +552,11 @@ public class IGARealmResource {
 
                     InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
 
-                    UserContextSignRequest req = new UserContextSignRequest("VRK:1");
+                    UserContextSignRequest req = new UserContextSignRequest("Admin:1");
+
                     req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
                     req.SetUserContexts(userContexts.toArray(new UserContext[0]));
+                    req.SetCustomExpiry(changesetRequestEntity.getTimestamp());
                     AdminAuthorizerBuilder authorizerBuilder = new AdminAuthorizerBuilder();
                     authorizerBuilder.AddInitCert(cert);
                     authorizerBuilder.AddInitCertSignature(tideRoleEntity.getInitCertSig());
