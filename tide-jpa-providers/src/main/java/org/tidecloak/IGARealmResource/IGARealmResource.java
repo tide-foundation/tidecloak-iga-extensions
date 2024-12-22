@@ -260,7 +260,7 @@ public class IGARealmResource {
                 response.put("uri", String.valueOf(uri));
                 response.put("changeSetRequests", changesetRequestEntity.getDraftRequest());
                 response.put("requiresApprovalPopup", "true");
-                response.put("expiry", String.valueOf(changesetRequestEntity.getTimestamp()));
+                response.put("expiry", String.valueOf(changesetRequestEntity.getTimestamp() + 2628000)); // month expiry
 
                 return buildResponse(200, objectMapper.writeValueAsString(response));
             }
@@ -556,7 +556,7 @@ public class IGARealmResource {
 
                     req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
                     req.SetUserContexts(userContexts.toArray(new UserContext[0]));
-                    req.SetCustomExpiry(changesetRequestEntity.getTimestamp());
+                    req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000); // expiry in 1 month
                     AdminAuthorizerBuilder authorizerBuilder = new AdminAuthorizerBuilder();
                     authorizerBuilder.AddInitCert(cert);
                     authorizerBuilder.AddInitCertSignature(tideRoleEntity.getInitCertSig());
