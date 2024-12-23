@@ -60,7 +60,6 @@ public class ChangesetRequestAdapter {
 
         int authorizationCount = changesetRequestEntity.getAdminAuthorizations().size();
 
-        // TODO: lmao fix this
         if(authorizationCount < 1){
            return DraftStatus.DRAFT;
         }else if ( authorizationCount == Integer.parseInt(tideRole.getFirstAttribute("tideThreshold"))) {
@@ -68,5 +67,10 @@ public class ChangesetRequestAdapter {
         } else {
             return DraftStatus.PENDING;
         }
+    }
+
+    public static ChangesetRequestEntity getChangesetRequestEntity(KeycloakSession session, String changeSetId){
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        return em.find(ChangesetRequestEntity.class, changeSetId);
     }
 }

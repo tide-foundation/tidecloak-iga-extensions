@@ -42,6 +42,7 @@ import java.util.stream.Collectors;
 
 import static org.tidecloak.TideRequests.TideRoleRequests.tideRealmAdminRole;
 import static org.tidecloak.jpa.models.ChangesetRequestAdapter.getChangeSetStatus;
+import static org.tidecloak.jpa.models.ChangesetRequestAdapter.getChangesetRequestEntity;
 import static org.tidecloak.jpa.utils.IGAUtils.*;
 
 public class IGARealmResource {
@@ -493,7 +494,6 @@ public class IGARealmResource {
 
     // TODO: implement request to vvk ork to be signed, this retreives infomoration from ADMIN UI when the "COMMIT" button is clicked to processes all "user draft changeset details" and update any affected drafts
     // Need to retrieve the final proofs back for the commited draft record and store it in the database
-    //
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/commit")
@@ -588,7 +588,7 @@ public class IGARealmResource {
                     SignatureResponse response = Midgard.SignModel(settings, req);
 
                     for ( int i = 0; i < userContexts.size(); i++){
-                        proofDetails.get(0).setSignature(response.Signatures[i]);
+                        proofDetails.get(i).setSignature(response.Signatures[i]);
                     }
                 }
             }
@@ -610,6 +610,8 @@ public class IGARealmResource {
                 }
             }
 
+            ChangesetRequestEntity changesetRequestEntity = getChangesetRequestEntity(session, change.getChangeSetId());
+            em.remove(changesetRequestEntity);
             em.flush(); // Persist changes to the database
             // Return success message after approving the change sets
             return Response.ok("Change sets approved").build();

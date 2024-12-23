@@ -74,7 +74,7 @@ public class TideAdminRealmResource {
 
             ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSetType, changeSetId, actionType, auth.adminAuth().getUser(), vendorData.AuthToken, vendorData.blindSig, authorizerApproval);
 
-            return buildResponse(200, "Successfully added admin authorization toe changeSetRequest with id " + changeSetId);
+            return buildResponse(200, "Successfully added admin authorization to changeSetRequest with id " + changeSetId);
 
         } catch (Exception e) {
             logger.error("Error adding authorization to change set request with ID: " + changeSetId +"." + Arrays.toString(e.getStackTrace()));
