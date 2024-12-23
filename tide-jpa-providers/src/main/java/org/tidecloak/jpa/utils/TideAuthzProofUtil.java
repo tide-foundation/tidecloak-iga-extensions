@@ -323,7 +323,6 @@ public final class TideAuthzProofUtil {
     // TODO: SAVING FINAL PROOF HERE
     // TODO: support iga enabled but with no tideIDP!
     public void saveProofToDatabase(AccessProofDetailEntity proof) throws Exception {
-        String accessProofSig = "";
 
         ComponentModel componentModel = realm.getComponentsStream()
                 .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
@@ -336,26 +335,7 @@ public final class TideAuthzProofUtil {
         List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
                 .setParameter("ID", componentModel.getId()).getResultList();
 
-        boolean isAssigningTideAdminRole;
-        if(proof.getChangesetType().equals(ChangeSetType.USER_ROLE)){
-            RoleModel role = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
-            TideUserRoleMappingDraftEntity roleMapping = em.find(TideUserRoleMappingDraftEntity.class, proof.getRecordId());
-            if(roleMapping == null){
-                throw new Exception("Invalid request, no user role mapping draft entity found for this record id "+ proof.getRecordId());
-            }
-            isAssigningTideAdminRole = roleMapping.getRoleId().equals(role.getId());
-        } else {
-            isAssigningTideAdminRole = false;
-        }
-        if(isAssigningTideAdminRole){
-            if (realmAuthorizers.isEmpty()){
-                throw new Exception("Authorizer not found for this realm.");
-            }
-            if(realmAuthorizers.size() == 1 && realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")){
-                accessProofSig = proof.getSignature();
-            }
-        }
-
+        String accessProofSig = proof.getSignature();
         //TODO: send InitCert + User Context draft to ORKS here
         // find if proof exists, update if it does else we create a new one for the user
         UserClientAccessProofEntity userClientAccess = em.find(UserClientAccessProofEntity.class, new UserClientAccessProofEntity.Key(proof.getUser(), proof.getClientId()));

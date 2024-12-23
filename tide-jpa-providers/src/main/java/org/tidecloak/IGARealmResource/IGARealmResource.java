@@ -588,7 +588,7 @@ public class IGARealmResource {
                     SignatureResponse response = Midgard.SignModel(settings, req);
 
                     for ( int i = 0; i < userContexts.size(); i++){
-                        proofDetails.get(0).setSignature(response.Signatures[i + 1]);
+                        proofDetails.get(0).setSignature(response.Signatures[i]);
                     }
                 }
             }
