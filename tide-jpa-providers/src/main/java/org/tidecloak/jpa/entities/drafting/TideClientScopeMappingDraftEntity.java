@@ -2,9 +2,8 @@ package org.tidecloak.jpa.entities.drafting;
 
 
 import jakarta.persistence.*;
-import org.keycloak.models.jpa.entities.ClientScopeClientMappingEntity;
-import org.tidecloak.interfaces.ActionType;
-import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.enums.ActionType;
+import org.tidecloak.enums.DraftStatus;
 
 @NamedQueries({
         @NamedQuery(name="tideClientScopeClientMappingIdsByClient", query="select m.clientScopeId from TideClientScopeMappingDraftEntity m where m.clientId = :clientId AND m.clientScopeId = :clientScopeId AND draftStatus = :draftStatus"),

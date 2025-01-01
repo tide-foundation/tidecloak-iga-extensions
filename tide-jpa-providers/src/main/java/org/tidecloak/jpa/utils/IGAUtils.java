@@ -1,26 +1,22 @@
 package org.tidecloak.jpa.utils;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.smallrye.config.SecretKeys;
 import jakarta.persistence.EntityManager;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.midgard.Midgard;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
-import org.midgard.models.ModelRequest;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
 import org.midgard.models.UserContext.UserContext;
-import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.enums.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
-import org.tidecloak.interfaces.DraftChangeSetRequest;
-import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
-import org.tidecloak.jpa.entities.SignatureEntry;
 import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
@@ -29,7 +25,6 @@ import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import static org.tidecloak.interfaces.ChangeSetType.*;
 import static org.tidecloak.jpa.models.ChangesetRequestAdapter.getChangeSetStatus;
 
 public class IGAUtils {

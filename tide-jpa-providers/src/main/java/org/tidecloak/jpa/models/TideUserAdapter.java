@@ -1,6 +1,5 @@
 package org.tidecloak.jpa.models;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
 import org.keycloak.Config;
@@ -16,9 +15,9 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
-import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.enums.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
-import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserGroupMembershipEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
@@ -235,6 +234,20 @@ public class TideUserAdapter extends UserAdapter {
         markForDeletion(activeDraftEntities);
         generateProofDrafts(role, activeDraftEntities);
         em.flush();
+    }
+
+    public static List<TideUserRoleMappingDraftEntity> getActiveDraftEntities(EntityManager em, UserEntity user, RoleModel role) {
+        return em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
+                .setParameter("user", user)
+                .setParameter("roleId", role.getId())
+                .setParameter("draftStatus", DraftStatus.ACTIVE)
+                .getResultList();
+    }
+    public static List<TideUserRoleMappingDraftEntity> getDraftEntities(EntityManager em, UserEntity user, RoleModel role) {
+        return em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class)
+                .setParameter("user", user)
+                .setParameter("roleId", role.getId())
+                .getResultList();
     }
 
     private List<TideUserRoleMappingDraftEntity> getActiveDraftEntities(RoleModel role) {

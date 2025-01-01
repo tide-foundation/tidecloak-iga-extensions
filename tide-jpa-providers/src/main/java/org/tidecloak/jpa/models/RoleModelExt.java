@@ -1,9 +1,7 @@
 package org.tidecloak.jpa.models;
 
-import org.keycloak.admin.ui.rest.model.ClientRole;
 import org.keycloak.models.RoleModel;
-import org.keycloak.models.jpa.entities.RoleEntity;
-import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.enums.DraftStatus;
 
 public class RoleModelExt {
     private RoleModel role;

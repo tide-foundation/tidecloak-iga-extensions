@@ -1,6 +1,5 @@
 package org.tidecloak.jpa.models;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
 import org.keycloak.models.*;
@@ -10,16 +9,15 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
-import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.enums.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftChangeSetRequest;
-import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
-import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -295,14 +293,6 @@ public class TideRoleAdapter extends RoleAdapter {
             super.addCompositeRole(roleModel);
             return;
         }
-        // don't care about realm roles
-//        if(!getEntity().isClientRole() || !roleModel.isClientRole()){
-//            super.addCompositeRole(roleModel);
-//            RoleModel role = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
-//            RoleEntity entity = toRoleEntity(role);
-//            persistDraft(entity);
-//            return;
-//        }
 
         RoleModel childRole = TideRolesUtil.wrapRoleModel(roleModel, session, realm);
         RoleEntity childEntity = toRoleEntity(childRole);

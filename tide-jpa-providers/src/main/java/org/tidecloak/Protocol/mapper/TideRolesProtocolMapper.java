@@ -11,11 +11,9 @@ import org.keycloak.protocol.oidc.mappers.OIDCAccessTokenMapper;
 import org.keycloak.protocol.oidc.mappers.OIDCAttributeMapperHelper;
 import org.keycloak.provider.ProviderConfigProperty;
 import org.keycloak.representations.AccessToken;
-import org.tidecloak.interfaces.ActionType;
-import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.models.TideClientAdapter;
 import org.tidecloak.jpa.utils.IGAUtils;
-import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
 import java.util.*;

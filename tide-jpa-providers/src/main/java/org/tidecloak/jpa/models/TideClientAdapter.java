@@ -1,28 +1,23 @@
 package org.tidecloak.jpa.models;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.persistence.EntityManager;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.ClientAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
-import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.enums.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.interfaces.DraftChangeSetRequest;
-import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
-import org.tidecloak.jpa.utils.IGAUtils;
-import org.tidecloak.jpa.utils.ProofGeneration;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
-import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import static org.tidecloak.Protocol.mapper.TideRolesProtocolMapper.getAccess;
 

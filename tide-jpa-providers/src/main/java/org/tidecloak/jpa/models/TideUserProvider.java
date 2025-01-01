@@ -8,8 +8,8 @@ import org.keycloak.models.jpa.JpaUserProvider;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 
-import org.tidecloak.interfaces.ActionType;
-import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.enums.ActionType;
+import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.drafting.TideUserDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 

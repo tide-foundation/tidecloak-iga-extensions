@@ -4,11 +4,8 @@ package org.tidecloak.jpa.entities.drafting;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.UserEntity;
-import org.keycloak.models.jpa.entities.UserGroupMembershipEntity;
-import org.tidecloak.interfaces.ActionType;
-import org.tidecloak.interfaces.DraftStatus;
-
-import java.io.Serializable;
+import org.tidecloak.enums.ActionType;
+import org.tidecloak.enums.DraftStatus;
 
 @Table(name="USER_GROUP_MEMBERSHIP_DRAFT")
 @Entity

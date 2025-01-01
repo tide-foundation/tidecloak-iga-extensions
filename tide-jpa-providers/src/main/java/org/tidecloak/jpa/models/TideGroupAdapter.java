@@ -6,8 +6,8 @@ import org.keycloak.models.*;
 import org.keycloak.models.jpa.GroupAdapter;
 import org.keycloak.models.jpa.entities.GroupEntity;
 import org.keycloak.models.utils.RoleUtils;
-import org.tidecloak.interfaces.ActionType;
-import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.enums.ActionType;
+import org.tidecloak.enums.DraftStatus;
 
 import java.util.Objects;
 import java.util.stream.Stream;

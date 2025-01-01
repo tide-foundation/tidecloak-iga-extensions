@@ -2,8 +2,9 @@ package org.tidecloak.jpa.entities.drafting;
 
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.RoleEntity;
-import org.tidecloak.interfaces.ActionType;
-import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.enums.DraftStatus;
+import org.tidecloak.enums.ActionType;
+
 
 @NamedQueries({
         @NamedQuery(name="getAllRoleDraft",

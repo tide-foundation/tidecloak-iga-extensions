@@ -5,9 +5,6 @@ import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.interfaces.ChangeSetType;
 
-import java.util.ArrayList;
-import java.util.List;
-
 @NamedQueries({
         @NamedQuery(name="getProofDetailsForUser", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForDraft", query="SELECT a FROM AccessProofDetailEntity a WHERE a.recordId = :recordId ORDER BY a.createdTimestamp DESC"),

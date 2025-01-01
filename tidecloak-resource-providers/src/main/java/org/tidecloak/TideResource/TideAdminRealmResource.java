@@ -2,7 +2,6 @@ package org.tidecloak.TideResource;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -14,14 +13,7 @@ import org.keycloak.services.ErrorPage;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.VendorData;
-import org.tidecloak.interfaces.ChangeSetType;
-import org.tidecloak.interfaces.DraftChangeSetRequest;
-import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.jpa.models.ChangesetRequestAdapter;
-import org.tidecloak.jpa.utils.IGAUtils;
 
 import java.util.ArrayList;
 import java.util.Arrays;

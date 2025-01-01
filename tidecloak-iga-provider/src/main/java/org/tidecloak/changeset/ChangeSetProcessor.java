@@ -1,0 +1,499 @@
+package org.tidecloak.changeset;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.persistence.EntityManager;
+import org.keycloak.common.ClientConnection;
+import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.ClientEntity;
+import org.keycloak.models.jpa.entities.RoleEntity;
+import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.models.utils.RoleUtils;
+import org.keycloak.services.Urls;
+import org.keycloak.services.managers.AuthenticationManager;
+import org.keycloak.services.managers.AuthenticationSessionManager;
+import org.keycloak.services.managers.UserSessionManager;
+import org.keycloak.sessions.RootAuthenticationSessionModel;
+import org.midgard.Serialization.JsonSorter;
+import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+import org.midgard.models.RequestExtensions.UserContextSignRequest;
+import org.midgard.models.UserContext.UserContext;
+import org.tidecloak.changeset.models.ChangeSetRequest;
+import org.keycloak.representations.AccessToken;
+import org.tidecloak.enums.WorkflowType;
+import org.tidecloak.enums.models.WorkflowParams;
+import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.enums.DraftStatus;
+import org.tidecloak.interfaces.DraftChangeSetRequest;
+import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
+import org.tidecloak.jpa.entities.drafting.*;
+import org.tidecloak.jpa.utils.AccessDetails;
+import org.tidecloak.jpa.utils.IGAUtils;
+import org.tidecloak.jpa.utils.TideAuthzProofUtil;
+import org.tidecloak.jpa.utils.TideRolesUtil;
+import org.tidecloak.jpa.models.TideClientAdapter;
+import org.tidecloak.jpa.models.TideRoleAdapter;
+import org.keycloak.protocol.oidc.TokenManager;
+import org.keycloak.protocol.oidc.OIDCLoginProtocol;
+import org.keycloak.sessions.AuthenticationSessionModel;
+import org.tidecloak.enums.ActionType;
+
+
+import java.net.URI;
+import java.util.*;
+import java.util.function.BiFunction;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static org.tidecloak.TideRequests.TideRoleRequests.tideRealmAdminRole;
+
+public interface ChangeSetProcessor<T> {
+
+    /**
+     * Executes a workflow (e.g., request , approval or commit) for a given change set.
+     *
+     * @param session   The KeycloakSession for the current context.
+     * @param change    The change set request containing details of the change.
+     * @param mapping   The entity instance being processed.
+     * @param em        The EntityManager for database interactions.
+     * @param workflow  The type of workflow to execute (e.g., APPROVAL, COMMIT).
+     * @param params    Additional parameters specific to the workflow.
+     */
+    default void executeWorkflow(KeycloakSession session, ChangeSetRequest change, T mapping, EntityManager em, WorkflowType workflow, WorkflowParams params){
+        switch (workflow) {
+            case APPROVAL:
+                approve(session, change, mapping, em, params.getDraftStatus(), params.isDelete());
+                break;
+            case COMMIT:
+                commit(session, change, mapping, em, params.getDraftStatus(), params.isDelete());
+                break;
+            case REQUEST:
+                request(session, change, mapping, em, params.getActionType());
+            default:
+                throw new IllegalArgumentException("Unsupported workflow: " + workflow);
+        }
+    }
+
+
+    default void request(KeycloakSession session, ChangeSetRequest change, T mapping, EntityManager em, ActionType action){
+        // Handle action types (CREATE, UPDATE, DELETE)
+        switch (action) {
+            case CREATE:
+                handleCreateRequest(session, mapping, em);
+                break;
+            case DELETE:
+                handleDeleteRequest(session, mapping, em);
+                break;
+            default:
+                throw new IllegalArgumentException("Unsupported action: " + action);
+        }
+    }
+
+
+    default void approve(KeycloakSession session, ChangeSetRequest change, T mapping, EntityManager em, DraftStatus status, boolean isDelete){
+        throw new UnsupportedOperationException("Approve not implemented");
+
+    };
+
+    default void commit(KeycloakSession session, ChangeSetRequest change, T mapping, EntityManager em, DraftStatus status, boolean isDelete){
+        throw new UnsupportedOperationException("Commit not implemented");
+
+    };
+
+    default void handleUserContextUpdates(
+            AccessProofDetailEntity proofDetail,
+            DraftChangeSetRequest change,
+            Set<RoleModel> uniqRoles,
+            ActionType actionType,
+            ClientModel client,
+            TideAuthzProofUtil tideAuthzProofUtil,
+            UserModel wrappedUser,
+            EntityManager em
+    ) {
+        throw new UnsupportedOperationException("User Context update not implemented");
+
+    };
+
+
+    /**
+     * Generates and saves user context draft for the given user and client models.
+     *
+     * @param session           KeycloakSession object for authentication and context.
+     * @param em                EntityManager for database operations.
+     * @param realm             RealmModel representing the current realm.
+     * @param clientModel       ClientModel representing the client.
+     * @param userModel         UserModel representing the user.
+     * @param newRoleMappings   New role mappings for the user.
+     * @param recordId          Record ID for the change set.
+     * @param type              ChangeSetType representing the type of the change set.
+     * @param actionType        ActionType representing the action to be performed.
+     * @param isFullScopeAllowed Boolean flag indicating whether full scope is allowed.
+     * @throws Exception Throws exception for any errors during processing.
+     */
+    default void generateAndSaveUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm,
+                                           ClientModel clientModel, UserModel userModel,
+                                           Set<RoleModel> newRoleMappings, String recordId,
+                                           ChangeSetType type, ActionType actionType,
+                                           Boolean isFullScopeAllowed) throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+
+        AccessToken proof = generateAccessToken(session, realm, clientModel, userModel, "openid");
+        AccessDetails accessDetails = null;
+        UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
+
+        var roleSet = newRoleMappings.stream()
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+
+        if (roleSet != null && !roleSet.isEmpty()) {
+            Set<TideRoleAdapter> wrappedRoles = roleSet.stream()
+                    .map(role -> {
+                        RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
+                        return new TideRoleAdapter(session, realm, em, roleEntity);
+                    }).collect(Collectors.toSet());
+
+            Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.ACTIVE);
+            ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
+            ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
+            Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream(), isFullScopeAllowed);
+            accessDetails = sortAccessRoles(requestedAccess);
+
+            setTokenClaims(proof, accessDetails, actionType);
+        }
+
+        JsonNode proofDraftNode = objectMapper.valueToTree(proof);
+        if (actionType == ActionType.DELETE && accessDetails != null) {
+            proofDraftNode = removeAccessFromJsonNode(proofDraftNode, accessDetails);
+        }
+
+        AccessToken accessToken = objectMapper.convertValue(proofDraftNode, AccessToken.class);
+
+        Set<String> clientKeys = accessToken.getResourceAccess().keySet();
+        String[] audience = clientKeys.stream()
+                .filter(key -> !Objects.equals(key, clientModel.getName()))
+                .toArray(String[]::new);
+        accessToken.audience(audience.length == 0 ? null : audience);
+
+        proofDraftNode = objectMapper.valueToTree(accessToken);
+        String proofDraft = objectMapper.writeValueAsString(cleanProofDraft(proofDraftNode));
+        saveAccessProofDetail(session, em, realm, clientModel, user, recordId, type, proofDraft);
+    }
+
+    void handleCreateRequest ( KeycloakSession session, T mapping, EntityManager em);
+    void handleDeleteRequest ( KeycloakSession session, T mapping, EntityManager em);
+
+
+    void updateAffectedChangeRequests(
+            ChangeSetRequest change,
+            T entity,
+            ChangeSetType changeSetType,
+            EntityManager em,
+            KeycloakSession session,
+            RealmModel realm
+    );
+
+    // Helper methods
+    private AccessToken generateAccessToken(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam){
+        session.getContext().setClient(client);
+        return sessionAware(session, realm, client, user, scopeParam, (userSession, clientSessionCtx) -> {
+            TokenManager tokenManager = new TokenManager();
+            return tokenManager.responseBuilder(realm, client, null, session, userSession, clientSessionCtx)
+                    .generateAccessToken().getAccessToken();
+        });
+
+    }
+    private<R> R sessionAware(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, BiFunction<UserSessionModel, ClientSessionContext,R> function) {
+        AuthenticationSessionModel authSession = null;
+        AuthenticationSessionManager authSessionManager = new AuthenticationSessionManager(session);
+        URI uri = session.getContext().getUri().getBaseUri();
+        ClientConnection clientConnection = session.getContext().getConnection();
+
+        try {
+            RootAuthenticationSessionModel rootAuthSession = authSessionManager.createAuthenticationSession(realm, false);
+            authSession = rootAuthSession.createAuthenticationSession(client);
+
+            authSession.setAuthenticatedUser(user);
+            authSession.setProtocol(OIDCLoginProtocol.LOGIN_PROTOCOL);
+            authSession.setClientNote(OIDCLoginProtocol.ISSUER, Urls.realmIssuer(uri, realm.getName()));
+            authSession.setClientNote(OIDCLoginProtocol.SCOPE_PARAM, scopeParam);
+
+            UserSessionModel userSession = new UserSessionManager(session).createUserSession(authSession.getParentSession().getId(), realm, user, user.getUsername(),
+                    clientConnection.getRemoteAddr(), "example-auth", false, null, null, UserSessionModel.SessionPersistenceState.TRANSIENT);
+
+            AuthenticationManager.setClientScopesInSession(session, authSession);
+            ClientSessionContext clientSessionCtx = TokenManager.attachAuthenticationSession(session, userSession, authSession);
+
+            return function.apply(userSession, clientSessionCtx);
+
+        } finally {
+            if (authSession != null) {
+                authSessionManager.removeAuthenticationSession(realm, authSession, false);
+            }
+        }
+    }
+
+    private void saveAccessProofDetail(KeycloakSession session, EntityManager em, RealmModel realm, ClientModel clientModel, UserEntity user, String recordId, ChangeSetType type, String proofDraft) throws Exception {
+        AccessProofDetailEntity newDetail = new AccessProofDetailEntity();
+        newDetail.setId(KeycloakModelUtils.generateId());
+        newDetail.setClientId(clientModel.getId());
+        newDetail.setUser(user);
+        newDetail.setRecordId(recordId);
+        newDetail.setProofDraft(proofDraft);
+        newDetail.setChangesetType(type);
+        em.persist(newDetail);
+
+        List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, recordId);
+        RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
+
+
+
+        boolean isAssigningTideAdminRole;
+        if(type.equals(ChangeSetType.USER_ROLE)){
+            TideUserRoleMappingDraftEntity roleMapping = em.find(TideUserRoleMappingDraftEntity.class, recordId);
+            if(roleMapping == null){
+                throw new Exception("Invalid request, no user role mapping draft entity found for this record id "+ recordId);
+            }
+            isAssigningTideAdminRole = roleMapping.getRoleId().equals(tideRole.getId());
+        } else {
+            isAssigningTideAdminRole = false;
+        }
+
+        List<UserContext> userContexts = new ArrayList<>();
+        UserContextSignRequest req = new UserContextSignRequest("VRK:1");
+
+        proofDetails.forEach(p -> {
+            UserContext userContext = new UserContext(p.getProofDraft());
+            if (isAssigningTideAdminRole) {
+                try {
+                    RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
+                    TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                            .setParameter("role", role).getSingleResult();
+
+                    InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
+                    userContext.setInitCertHash(cert.hash());
+                    p.setProofDraft(userContext.ToString());
+                    em.flush();
+                    req.SetInitializationCertificate(cert);
+
+                } catch (JsonProcessingException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+            userContexts.add(userContext);
+        });
+        req.SetUserContexts(userContexts.toArray(new UserContext[0]));
+        String draft = Base64.getEncoder().encodeToString(req.GetDraft());
+
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, recordId);
+        if (changesetRequestEntity == null){
+            ChangesetRequestEntity entity = new ChangesetRequestEntity();
+            entity.setChangesetRequestId(recordId);
+            entity.setAdminAuthorizations(new ArrayList<>());
+            entity.setDraftRequest(draft);
+            em.persist(entity);
+            em.flush();
+        } else {
+            changesetRequestEntity.setDraftRequest(draft);
+            em.flush();
+        }
+
+
+    }
+
+    private JsonNode cleanProofDraft (JsonNode token) throws JsonProcessingException {
+        ObjectNode object = (ObjectNode) token;
+
+        // Remove what we don't need
+        object.remove("exp");
+        object.remove("iat");
+        object.remove("jti");
+        object.remove("sid");
+        object.remove("auth_time");
+        object.remove("session_state");
+        object.remove("given_name");
+        object.remove("family_name");
+        object.remove("email_verified");
+        object.remove("email_verified");
+        object.remove("email");
+        object.remove("name");
+        object.remove("typ");
+
+        // Removing ACR for now. This changes by the type of authenticate taken. Explicit login is 1 and "remembered" session is 0.
+        object.remove("acr");
+        JsonNode sortedJson = JsonSorter.parseAndSortArrays(object.toString());
+
+        return sortedJson;
+    }
+
+    /**
+     * @return filtered set of roles based on Client settings. If client is full scoped returns back everything else remove out of scope roles.
+     */
+    private static Set<RoleModel> filterClientRoles(Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes, Boolean isFullScopeAllowed) {
+        if (!isFullScopeAllowed) {
+
+            // 1 - Client roles of this client itself
+            Stream<RoleModel> scopeMappings = client.getRolesStream();
+
+            // 2 - Role mappings of client itself + default client scopes + optional client scopes requested by scope parameter (if applyScopeParam is true)
+            Stream<RoleModel> clientScopesMappings;
+            clientScopesMappings = clientScopes.flatMap(ScopeContainerModel::getScopeMappingsStream);
+
+            scopeMappings = Stream.concat(scopeMappings, clientScopesMappings);
+
+            // 3 - Expand scope mappings
+            scopeMappings = RoleUtils.expandCompositeRolesStream(scopeMappings);
+
+            // Intersection of expanded user roles and expanded scopeMappings
+            roleModels.retainAll(scopeMappings.collect(Collectors.toSet()));
+
+        }
+        return roleModels;
+    }
+
+
+    private static AccessDetails sortAccessRoles(Set<RoleModel> roles){
+        AccessToken.Access realmAccess = new AccessToken.Access();
+        Map<String, AccessToken.Access> clientAccesses = new HashMap<>();
+
+        // Organize roles into realm and client accesses
+        for (RoleModel role : roles) {
+            if (role.getContainer() instanceof RealmModel) {
+                realmAccess.addRole(role.getName());
+            } else if (role.getContainer() instanceof ClientModel client) {
+                clientAccesses.computeIfAbsent(client.getClientId(), k -> new AccessToken.Access())
+                        .addRole(role.getName());
+            }
+        }
+        return new AccessDetails(realmAccess, clientAccesses);
+    }
+
+    private static void setTokenClaims(AccessToken token, AccessDetails accessRoles, ActionType actionType) {
+
+        if (actionType == ActionType.DELETE){
+            // Handle deletion of realm and client roles
+            removeRealmAccess(token, accessRoles.getRealmAccess());
+            removeClientAccesses(token, accessRoles.getClientAccesses());
+        }else{
+            // Add or update realm access in the token
+            mergeRealmAccess(token, accessRoles.getRealmAccess());
+            // Add or update client accesses in the token
+            mergeClientAccesses(token, accessRoles.getClientAccesses());
+        }
+    }
+
+    private static void removeRealmAccess(AccessToken token, AccessToken.Access realmAccess) {
+        if (token.getRealmAccess() != null && realmAccess != null && realmAccess.getRoles() != null) {
+            token.getRealmAccess().getRoles().removeAll(realmAccess.getRoles());
+        }
+    }
+
+    private static void removeClientAccesses(AccessToken token, Map<String, AccessToken.Access> clientAccesses) {
+        if (token.getResourceAccess() != null && clientAccesses != null) {
+            clientAccesses.forEach((clientKey, access) -> {
+                if (access != null && access.getRoles() != null) {
+                    AccessToken.Access tokenClientAccess = token.getResourceAccess().get(clientKey);
+                    if (tokenClientAccess != null) {
+                        tokenClientAccess.getRoles().removeAll(access.getRoles());
+                    }
+                }
+            });
+        }
+    }
+    private static void mergeRealmAccess(AccessToken token, AccessToken.Access realmAccess) {
+        if (realmAccess != null && realmAccess.getRoles() != null && !realmAccess.getRoles().isEmpty()) {
+            if (token.getRealmAccess() == null) {
+                token.setRealmAccess(new AccessToken.Access());
+            }
+            realmAccess.getRoles().forEach(role -> token.getRealmAccess().addRole(role));
+        }
+    }
+
+    private static void mergeClientAccesses(AccessToken token, Map<String, AccessToken.Access> clientAccesses) {
+        if (clientAccesses != null && !clientAccesses.isEmpty()) {
+            // Ensure the resource access map is modifiable
+            Map<String, AccessToken.Access> resourceAccess = token.getResourceAccess();
+            if (resourceAccess == null || resourceAccess.isEmpty()) {
+                resourceAccess = new HashMap<>();
+                token.setResourceAccess(resourceAccess);
+            }
+
+            Map<String, AccessToken.Access> finalResourceAccess = resourceAccess;
+            clientAccesses.forEach((clientKey, access) -> {
+                AccessToken.Access tokenClientAccess = finalResourceAccess.computeIfAbsent(clientKey, k -> new AccessToken.Access());
+                if (access.getRoles() != null) {
+                    access.getRoles().forEach(tokenClientAccess::addRole);
+                }
+            });
+        }
+    }
+    private static JsonNode removeAccessFromJsonNode(JsonNode originalNode, AccessDetails accessDetails) {
+        if (!(originalNode instanceof ObjectNode)) {
+            throw new IllegalArgumentException("Expected an ObjectNode for originalNode.");
+        }
+
+        ObjectNode modifiedNode = ((ObjectNode) originalNode).deepCopy();
+
+        // Handle realm access removal
+        AccessToken.Access realmAccess = accessDetails.getRealmAccess();
+        ObjectNode realmAccessNode = (ObjectNode) modifiedNode.get("realm_access");
+        if (realmAccessNode != null && realmAccessNode.has("roles")) {
+            removeRolesFromArrayNode(realmAccessNode, "roles", realmAccess.getRoles());
+
+            // Check if realm_access node is now empty and remove it
+            if (!realmAccessNode.has("roles") || !realmAccessNode.get("roles").elements().hasNext()) {
+                modifiedNode.remove("realm_access");
+            }
+        }
+
+        // Handle client accesses removal
+        ObjectNode resourceAccessNode = (ObjectNode) modifiedNode.get("resource_access");
+        if (resourceAccessNode != null) {
+            // Iterate over each client access to remove roles and potentially the client object
+            accessDetails.getClientAccesses().forEach((clientId, access) -> {
+                ObjectNode clientNode = (ObjectNode) resourceAccessNode.get(clientId);
+                if (clientNode != null && clientNode.has("roles")) {
+                    removeRolesFromArrayNode(clientNode, "roles", access.getRoles());
+
+                    // Check if the client node is now empty and remove it from the resource access
+                    if (!clientNode.has("roles") || !clientNode.get("roles").elements().hasNext()) {
+                        resourceAccessNode.remove(clientId); // Remove the client node if it's empty
+                    }
+                }
+            });
+
+            // Check if resource_access node is now empty and remove it
+            if (!resourceAccessNode.fieldNames().hasNext()) {
+                modifiedNode.remove("resource_access");
+            }
+        }
+
+        return modifiedNode;
+    }
+    private static void removeRolesFromArrayNode(ObjectNode parentNode, String key, Set<String> rolesToRemove) {
+        if (parentNode == null || !parentNode.has(key) || rolesToRemove == null || rolesToRemove.isEmpty()) {
+            return; // Nothing to remove if input is empty or null or key does not exist
+        }
+
+        ArrayNode arrayNode = (ArrayNode) parentNode.get(key);
+        ArrayNode resultNode = arrayNode.deepCopy().arrayNode();
+
+        // Filter out roles to remove
+        arrayNode.forEach(jsonNode -> {
+            if (!rolesToRemove.contains(jsonNode.asText())) {
+                resultNode.add(jsonNode);
+            }
+        });
+
+        // Update the parentNode
+        if (!resultNode.isEmpty()) {
+            parentNode.set(key, resultNode);
+        } else {
+            parentNode.remove(key); // Remove the key entirely if no roles are left
+        }
+    }
+}

@@ -1,6 +1,7 @@
 package org.tidecloak.interfaces;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.tidecloak.enums.ActionType;
 
 
 public class DraftChangeSetRequest {

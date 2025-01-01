@@ -1,4 +1,4 @@
-package org.tidecloak.interfaces;
+package org.tidecloak.enums;
 
 // Enum for Draft status
 public enum DraftStatus {

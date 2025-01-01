@@ -1,6 +1,5 @@
 package org.tidecloak.jpa.models;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import org.keycloak.admin.ui.rest.model.ClientRole;
@@ -9,15 +8,13 @@ import org.keycloak.models.*;
 import org.keycloak.models.jpa.JpaRealmProvider;
 
 import org.keycloak.models.jpa.RealmAdapter;
-import org.keycloak.models.jpa.RoleAdapter;
 import org.keycloak.models.jpa.entities.*;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.RepresentationToModel;
-import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.representations.idm.ProtocolMapperRepresentation;
-import org.tidecloak.interfaces.ActionType;
+import org.tidecloak.enums.ActionType;
 import org.tidecloak.interfaces.ChangeSetType;
-import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.utils.ProofGeneration;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
