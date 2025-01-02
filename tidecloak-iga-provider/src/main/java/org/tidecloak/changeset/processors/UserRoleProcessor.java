@@ -103,10 +103,19 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
     @Override
     public void updateAffectedChangeRequests(KeycloakSession session, ChangeSetRequest change, TideUserRoleMappingDraftEntity entity, EntityManager em, List<ClientModel> affectedClients) {
+        RealmModel realm = session.getContext().getRealm();
         for (ClientModel client: affectedClients){
             List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, client, entity);
 
-            
+            RoleEntity roleEntity = em.find(RoleEntity.class, entity.getRoleId());
+
+            Set<RoleModel> roleSet = new HashSet<>();
+            ActionType actionType = entity.getAction();
+            roleSet.add(TideEntityUtils.toTideRoleAdapter(roleEntity, session, realm));
+
+            var uniqRoles = roleSet.stream().distinct().filter(Objects::nonNull).collect(Collectors.toSet());
+
+
         }
 
     }

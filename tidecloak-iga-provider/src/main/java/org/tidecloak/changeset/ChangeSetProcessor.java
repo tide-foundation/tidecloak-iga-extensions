@@ -26,6 +26,8 @@ import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.changeset.models.ChangeSetRequest;
 import org.keycloak.representations.AccessToken;
+import org.tidecloak.changeset.utils.TideEntityUtils;
+import org.tidecloak.changeset.utils.UserContextUtils;
 import org.tidecloak.enums.WorkflowType;
 import org.tidecloak.enums.models.WorkflowParams;
 import org.tidecloak.interfaces.ChangeSetType;
@@ -34,6 +36,7 @@ import org.tidecloak.interfaces.DraftChangeSetRequest;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
+import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.jpa.utils.AccessDetails;
 import org.tidecloak.jpa.utils.IGAUtils;
@@ -54,6 +57,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.tidecloak.TideRequests.TideRoleRequests.tideRealmAdminRole;
+import static org.tidecloak.changeset.utils.UserContextUtils.getUserContextDrafts;
 
 public interface ChangeSetProcessor<T> {
 
@@ -67,7 +71,7 @@ public interface ChangeSetProcessor<T> {
      * @param workflow  The type of workflow to execute (e.g. REQUEST, APPROVAL, COMMIT).
      * @param params    Additional parameters specific to the workflow.
      */
-    default void executeWorkflow(KeycloakSession session, ChangeSetRequest change, T mapping, EntityManager em, WorkflowType workflow, WorkflowParams params){
+    default void executeWorkflow(KeycloakSession session, ChangeSetRequest change, T mapping, EntityManager em, WorkflowType workflow, WorkflowParams params) throws Exception {
         switch (workflow) {
             case APPROVAL:
                 approve(session, change, mapping, em, params.getDraftStatus(), params.isDelete());
@@ -140,7 +144,18 @@ public interface ChangeSetProcessor<T> {
      */
     default void update(KeycloakSession session, ChangeSetRequest change, T entity, EntityManager em) throws Exception {
         List<ClientModel> affectedClients = getAffectedClients(session, entity, em);
-        updateAffectedChangeRequests(session, change, entity, em, affectedClients);
+        for (ClientModel client : affectedClients) {
+            List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, client, change.getChangeSetId())
+                    .stream()
+                    .filter(proof -> !Objects.equals(proof.getRecordId(), change.getChangeSetId()))
+                    .toList();
+
+            for(AccessProofDetailEntity userContextDraft : userContextDrafts) {
+                
+            }
+
+        }
+
     }
 
     /**
@@ -149,15 +164,31 @@ public interface ChangeSetProcessor<T> {
      *
      * @param session   The Keycloak session for the current context.
      * @param change    The change set request containing details of the change.
-     * @param mapping   The entity being processed.
+     * @param entity   The entity being processed.
      * @param em        The EntityManager for database interactions.
      * @param status    The status to be applied to the entity during commit (e.g., ACTIVE, DELETED).
      * @param isDelete  Indicates whether the commit is for a deletion request.
      * @throws UnsupportedOperationException If the method is not implemented in the specific processor.
      */
-    default void commit(KeycloakSession session, ChangeSetRequest change, T mapping, EntityManager em, DraftStatus status, boolean isDelete){
-        throw new UnsupportedOperationException("Commit not implemented");
+    default void commit(KeycloakSession session, ChangeSetRequest change, T entity, EntityManager em, DraftStatus status, boolean isDelete) throws Exception {
 
+        List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, change.getChangeSetId());
+
+        if(userContextDrafts.isEmpty()){
+            throw  new Exception("No user context drafts found for this change set id, " + change.getChangeSetId());
+        }
+        userContextDrafts.forEach(userContextDraft -> {
+            try {
+                commitUserContextToDatabase(session, userContextDraft, em);
+                em.remove(userContextDrafts); // this user context draft is commited, so now we
+                em.flush();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        // Execute the UPDATE workflow to process and update affected user contexts
+        update(session, change, entity, em);
     };
 
     /**
@@ -316,7 +347,44 @@ public interface ChangeSetProcessor<T> {
 
     RoleModel getRoleRequestFromEntity(KeycloakSession session, T entity);
 
+
     // Helper methods
+    private void commitUserContextToDatabase(KeycloakSession session, AccessProofDetailEntity userContext, EntityManager em) throws Exception {
+        RealmModel realm = session.getContext().getRealm();
+        ComponentModel componentModel = realm.getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .findFirst()
+                .orElse(null);
+
+        if(componentModel == null) {
+            throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+        }
+
+        String accessProofSig = userContext.getSignature();
+        UserClientAccessProofEntity userClientAccess = em.find(UserClientAccessProofEntity.class, new UserClientAccessProofEntity.Key(userContext.getUser(), userContext.getClientId()));
+        if(accessProofSig == null || accessProofSig.isEmpty()){
+            throw new Exception("Could not find authorization signature for this user context. Request denied.");
+        }
+
+        if (userClientAccess == null){
+            UserClientAccessProofEntity newAccess = new UserClientAccessProofEntity();
+            newAccess.setUser(userContext.getUser());
+            newAccess.setClientId(userContext.getClientId());
+            newAccess.setAccessProof(userContext.getProofDraft());
+            newAccess.setAccessProofSig(accessProofSig);
+            newAccess.setIdProofSig("");
+            newAccess.setAccessProofMeta("");
+            em.persist(newAccess);
+
+        } else{
+            userClientAccess.setAccessProof(userContext.getProofDraft());
+            userClientAccess.setAccessProofMeta("");
+            userClientAccess.setAccessProofSig(accessProofSig);
+            userClientAccess.setIdProofSig("");
+            em.merge(userClientAccess);
+        }
+    }
+
     private AccessToken generateAccessToken(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam){
         session.getContext().setClient(client);
         return sessionAware(session, realm, client, user, scopeParam, (userSession, clientSessionCtx) -> {
@@ -366,7 +434,7 @@ public interface ChangeSetProcessor<T> {
         newDetail.setChangesetType(type);
         em.persist(newDetail);
 
-        List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, recordId);
+        List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, recordId);
         RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
 
 
