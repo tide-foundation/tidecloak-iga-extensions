@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import org.keycloak.common.ClientConnection;
+import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
@@ -30,6 +32,7 @@ import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.interfaces.DraftChangeSetRequest;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.jpa.utils.AccessDetails;
@@ -61,7 +64,7 @@ public interface ChangeSetProcessor<T> {
      * @param change    The change set request containing details of the change.
      * @param mapping   The entity instance being processed.
      * @param em        The EntityManager for database interactions.
-     * @param workflow  The type of workflow to execute (e.g., APPROVAL, COMMIT).
+     * @param workflow  The type of workflow to execute (e.g. REQUEST, APPROVAL, COMMIT).
      * @param params    Additional parameters specific to the workflow.
      */
     default void executeWorkflow(KeycloakSession session, ChangeSetRequest change, T mapping, EntityManager em, WorkflowType workflow, WorkflowParams params){
@@ -80,8 +83,20 @@ public interface ChangeSetProcessor<T> {
     }
 
 
+    /**
+     * Processes a change request based on the specified action type.
+     * This method determines the action to perform (e.g., CREATE or DELETE) and delegates
+     * the specific logic to helper methods `handleCreateRequest` and `handleDeleteRequest`.
+     *
+     * @param session   The Keycloak session for the current context.
+     * @param change    The change set request containing details of the change.
+     * @param mapping   The entity being processed.
+     * @param em        The EntityManager for database interactions.
+     * @param action    The type of action to be performed (e.g., CREATE, DELETE).
+     * @throws IllegalArgumentException If the action type is not supported.
+     */
     default void request(KeycloakSession session, ChangeSetRequest change, T mapping, EntityManager em, ActionType action){
-        // Handle action types (CREATE, UPDATE, DELETE)
+        // Handle action types (CREATE, DELETE)
         switch (action) {
             case CREATE:
                 handleCreateRequest(session, mapping, em);
@@ -94,31 +109,56 @@ public interface ChangeSetProcessor<T> {
         }
     }
 
-
+    /**
+     * Approves a change request by updating the draft status and applying specific business logic.
+     * This method should be overridden by specific processors to define approval behavior.
+     *
+     * @param session   The Keycloak session for the current context.
+     * @param change    The change set request containing details of the change.
+     * @param mapping   The entity being processed.
+     * @param em        The EntityManager for database interactions.
+     * @param status    The new status to be applied to the draft (e.g., ACTIVE, APPROVED).
+     * @param isDelete  Indicates whether the approval is for a deletion request.
+     * @throws UnsupportedOperationException If the method is not implemented in the specific processor.
+     */
     default void approve(KeycloakSession session, ChangeSetRequest change, T mapping, EntityManager em, DraftStatus status, boolean isDelete){
         throw new UnsupportedOperationException("Approve not implemented");
 
     };
 
+    /**
+     * Updates all affected user context drafts triggered by a change request commit.
+     * This method performs the following steps:
+     * - Retrieves a list of affected clients based on the entity.
+     * - Updates any related user contexts for these clients.
+     *
+     * @param session   The Keycloak session for the current context.
+     * @param change    The change set request containing details of the change.
+     * @param entity    The entity being processed.
+     * @param em        The EntityManager for database interactions.
+     * @throws Exception If an error occurs during the update process.
+     */
+    default void update(KeycloakSession session, ChangeSetRequest change, T entity, EntityManager em) throws Exception {
+        List<ClientModel> affectedClients = getAffectedClients(session, entity, em);
+        updateAffectedChangeRequests(session, change, entity, em, affectedClients);
+    }
+
+    /**
+     * Commits a change request by finalizing the draft and applying changes to the database.
+     * This method should be overridden by specific processors to define commit behavior.
+     *
+     * @param session   The Keycloak session for the current context.
+     * @param change    The change set request containing details of the change.
+     * @param mapping   The entity being processed.
+     * @param em        The EntityManager for database interactions.
+     * @param status    The status to be applied to the entity during commit (e.g., ACTIVE, DELETED).
+     * @param isDelete  Indicates whether the commit is for a deletion request.
+     * @throws UnsupportedOperationException If the method is not implemented in the specific processor.
+     */
     default void commit(KeycloakSession session, ChangeSetRequest change, T mapping, EntityManager em, DraftStatus status, boolean isDelete){
         throw new UnsupportedOperationException("Commit not implemented");
 
     };
-
-    default void handleUserContextUpdates(
-            AccessProofDetailEntity proofDetail,
-            DraftChangeSetRequest change,
-            Set<RoleModel> uniqRoles,
-            ActionType actionType,
-            ClientModel client,
-            TideAuthzProofUtil tideAuthzProofUtil,
-            UserModel wrappedUser,
-            EntityManager em
-    ) {
-        throw new UnsupportedOperationException("User Context update not implemented");
-
-    };
-
 
     /**
      * Generates and saves user context draft for the given user and client models.
@@ -184,18 +224,97 @@ public interface ChangeSetProcessor<T> {
         saveAccessProofDetail(session, em, realm, clientModel, user, recordId, type, proofDraft);
     }
 
-    void handleCreateRequest ( KeycloakSession session, T mapping, EntityManager em);
-    void handleDeleteRequest ( KeycloakSession session, T mapping, EntityManager em);
+    /**
+     * Retrieves a list of affected clients for the given entity.
+     * This includes:
+     * - Clients with full scope enabled or draft scope.
+     * - Clients associated with the role of the entity.
+     * - Additional clients based on composite roles and component logic.
+     *
+     * @param session The Keycloak session for the current context.
+     * @param entity  The entity being processed (e.g., user role, composite role, etc.).
+     * @param em      The EntityManager for database interactions.
+     * @return A list of unique ClientModel instances that are affected by the changeSetRequest.
+     * @throws Exception If an authorizer is not found or other processing errors occur.
+     */
+    default List<ClientModel> getAffectedClients(KeycloakSession session, T entity, EntityManager em) throws Exception {
+        RealmModel realm = session.getContext().getRealm();
+        Set<ClientModel> affectedClients = new HashSet<>();
 
+        // Add clients with full scope or draft scope
+        realm.getClientsStream()
+                .map(client -> new TideClientAdapter(realm, em, session, em.getReference(ClientEntity.class, client.getId())))
+                .filter(clientModel -> {
+                    ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
+                    List<TideClientFullScopeStatusDraftEntity> scopeDrafts = em.createNamedQuery("getClientFullScopeStatusByFullScopeEnabledStatus", TideClientFullScopeStatusDraftEntity.class)
+                            .setParameter("client", clientEntity)
+                            .setParameter("fullScopeEnabled", DraftStatus.DRAFT)
+                            .getResultList();
+                    return clientModel.isFullScopeAllowed() || (scopeDrafts != null && !scopeDrafts.isEmpty());
+                })
+                .forEach(affectedClients::add);
 
+        // Add clients based on role-specific logic
+        RoleModel role = getRoleRequestFromEntity(session, entity);
+        if (role != null) {
+            if (role.isClientRole()) {
+                ClientModel client = realm.getClientById(role.getContainerId());
+                if (client != null) {
+                    affectedClients.add(client);
+                }
+            }
+
+            if (role.isComposite()) {
+                RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
+                Set<TideRoleAdapter> wrappedRoles = Set.of(new TideRoleAdapter(session, realm, em, roleEntity));
+                Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.ACTIVE);
+
+                activeRoles.stream()
+                        .filter(r -> r.getContainer() instanceof ClientModel)
+                        .map(r -> (ClientModel) r.getContainer())
+                        .forEach(affectedClients::add);
+            }
+        }
+
+        // Component logic for admin authorizations
+        ComponentModel componentModel = realm.getComponentsStream()
+                .filter(component -> "tide-vendor-key".equals(component.getProviderId()))
+                .findFirst()
+                .orElse(null);
+
+        if (componentModel != null) {
+            MultivaluedHashMap<String, String> config = componentModel.getConfig();
+            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
+                    .setParameter("ID", componentModel.getId())
+                    .getResultList();
+
+            if (realmAuthorizers.isEmpty()) {
+                throw new Exception("Authorizer not found for this realm.");
+            }
+
+            // Remove specific clients if no "firstAdmin" authorizer exists
+            if (realmAuthorizers.stream().noneMatch(authorizer -> "firstAdmin".equalsIgnoreCase(authorizer.getType()))) {
+                affectedClients.removeIf(client ->
+                        Constants.ADMIN_CONSOLE_CLIENT_ID.equals(client.getClientId()) ||
+                                Constants.ADMIN_CLI_CLIENT_ID.equals(client.getClientId())
+                );
+            }
+        }
+
+        return new ArrayList<>(affectedClients);
+    }
+
+    void handleCreateRequest (KeycloakSession session, T entity, EntityManager em);
+    void handleDeleteRequest (KeycloakSession session, T entity, EntityManager em);
     void updateAffectedChangeRequests(
+            KeycloakSession session,
             ChangeSetRequest change,
             T entity,
-            ChangeSetType changeSetType,
             EntityManager em,
-            KeycloakSession session,
-            RealmModel realm
+            List<ClientModel> affectedClients
     );
+
+    RoleModel getRoleRequestFromEntity(KeycloakSession session, T entity);
 
     // Helper methods
     private AccessToken generateAccessToken(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam){

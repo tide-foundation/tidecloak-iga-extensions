@@ -149,7 +149,7 @@ public class TideEntityUtils {
         return new TideUserAdapter(session, realm, em, userEntity);
     }
 
-    public static RoleModel toTideRoleAdapter(RoleEntity roleEntity, KeycloakSession session, RealmModel realm){
+    public static TideRoleAdapter toTideRoleAdapter(RoleEntity roleEntity, KeycloakSession session, RealmModel realm){
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         return new TideRoleAdapter(session, realm, em, roleEntity);
 

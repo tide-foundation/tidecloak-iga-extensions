@@ -1,19 +1,28 @@
 package org.tidecloak.changeset.processors;
 
 import jakarta.persistence.EntityManager;
+import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
+import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.changeset.ChangeSetProcessor;
 import org.tidecloak.changeset.models.ChangeSetRequest;
 import org.tidecloak.changeset.utils.ClientUtils;
 import org.tidecloak.changeset.utils.TideEntityUtils;
 import org.tidecloak.interfaces.ChangeSetType;
 import org.tidecloak.enums.DraftStatus;
+import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.AuthorizerEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
+import org.tidecloak.jpa.models.TideClientAdapter;
 import org.tidecloak.jpa.models.TideRoleAdapter;
 import org.tidecloak.jpa.models.TideUserAdapter;
 import org.tidecloak.enums.ActionType;
+import org.tidecloak.jpa.utils.TideRolesUtil;
 
 
 import java.util.*;
@@ -42,12 +51,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             System.err.println("Error processing USER_ROLE: " + e.getMessage());
             throw new RuntimeException("Failed to process USER_ROLE mapping", e);
         }
-    }
-
-
-    @Override
-    public void updateAffectedChangeRequests(ChangeSetRequest change, TideUserRoleMappingDraftEntity entity, ChangeSetType changeSetType, EntityManager em, KeycloakSession session, RealmModel realm) {
-
     }
 
     @Override
@@ -96,6 +99,21 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 throw new RuntimeException(e);
             }
         });
+    }
+
+    @Override
+    public void updateAffectedChangeRequests(KeycloakSession session, ChangeSetRequest change, TideUserRoleMappingDraftEntity entity, EntityManager em, List<ClientModel> affectedClients) {
+        for (ClientModel client: affectedClients){
+            List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, client, entity);
+
+            
+        }
+
+    }
+
+    @Override
+    public RoleModel getRoleRequestFromEntity(KeycloakSession session, TideUserRoleMappingDraftEntity entity) {
+        return session.getContext().getRealm().getRoleById(entity.getRoleId());
     }
 
     // Helper Methods
@@ -212,6 +230,14 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         } catch (Exception e) {
             throw new RuntimeException("Error processing composite role mapping for childRole: " + childRole.getName(), e);
         }
+    }
+
+    private List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, ClientModel client, TideUserRoleMappingDraftEntity entity) {
+        UserEntity user = entity.getUser();
+        return em.createNamedQuery("getProofDetailsForUserByClient", AccessProofDetailEntity.class)
+                .setParameter("user", user)
+                .setParameter("clientId", client.getId())
+                .getResultList();
     }
 
 }

@@ -83,8 +83,13 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
     }
 
     @Override
-    public void updateAffectedChangeRequests(ChangeSetRequest change, TideCompositeRoleMappingDraftEntity entity, ChangeSetType changeSetType, EntityManager em, KeycloakSession session, RealmModel realm) {
+    public void updateAffectedChangeRequests(KeycloakSession session, ChangeSetRequest change, TideCompositeRoleMappingDraftEntity entity, EntityManager em, List<ClientModel> affectedClients) {
 
+    }
+
+    @Override
+    public RoleModel getRoleRequestFromEntity(KeycloakSession session, TideCompositeRoleMappingDraftEntity entity) {
+        return session.getContext().getRealm().getRoleById(entity.getChildRole().getId());
     }
 
     private void processExistingRequest(KeycloakSession session, EntityManager em, RealmModel realm, TideCompositeRoleMappingDraftEntity compositeRoleEntity, ActionType action) {
