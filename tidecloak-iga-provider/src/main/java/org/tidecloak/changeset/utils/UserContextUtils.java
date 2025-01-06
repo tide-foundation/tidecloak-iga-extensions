@@ -1,12 +1,24 @@
 package org.tidecloak.changeset.utils;
 
 import jakarta.persistence.EntityManager;
-import org.keycloak.models.ClientModel;
-import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.models.*;
+import org.keycloak.protocol.ProtocolMapper;
+import org.keycloak.protocol.ProtocolMapperUtils;
+import org.keycloak.protocol.oidc.TokenManager;
+import org.keycloak.protocol.oidc.mappers.OIDCAccessTokenMapper;
+import org.keycloak.representations.AccessToken;
+import org.tidecloak.enums.ActionType;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
-import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.BiConsumer;
+import java.util.function.BinaryOperator;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.stream.Collector;
 import java.util.stream.Collectors;
 
 public class UserContextUtils {
@@ -23,4 +35,6 @@ public class UserContextUtils {
                 .setParameter("clientId", client.getId())
                 .getResultList();
     }
+
+
 }

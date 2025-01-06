@@ -125,6 +125,54 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         return session.getContext().getRealm().getRoleById(entity.getRoleId());
     }
 
+    @Override
+    public ChangeSetRequest getChangeSetRequestFromEntity(KeycloakSession session, TideUserRoleMappingDraftEntity entity){
+        ChangeSetRequest changeSetRequest = new ChangeSetRequest();
+        changeSetRequest.setChangeSetId(entity.getId());
+        changeSetRequest.setType(ChangeSetType.USER_ROLE);
+        changeSetRequest.setActionType(entity.getAction());
+        return changeSetRequest;
+    }
+
+    @Override
+    public void handleUserContextUpdate(KeycloakSession session, ChangeSetRequest currentChangeRequest, AccessProofDetailEntity userContextDraft, Set<RoleModel> roles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
+        RealmModel realm = session.getContext().getRealm();
+        TideUserRoleMappingDraftEntity userRoleChangeRequest = em.find(TideUserRoleMappingDraftEntity.class, userContextDraft.getRecordId());
+        ChangeSetRequest affectedChangeRequest = getChangeSetRequestFromEntity(session, userRoleChangeRequest);
+        if (userRoleChangeRequest == null || (userRoleChangeRequest.getDraftStatus() == DraftStatus.ACTIVE && userRoleChangeRequest.getDeleteStatus() == null)){
+            return;
+        }
+        RoleModel role = realm.getRoleById(userRoleChangeRequest.getRoleId());
+
+        if(currentChangeRequest.getType() == ChangeSetType.CLIENT){
+            if (currentChangeRequest.getActionType() == ActionType.DELETE) {
+                boolean hasCommitedRole = user.getRoleMappingsStreamByStatusAndAction(DraftStatus.ACTIVE, ActionType.CREATE).anyMatch(x -> x.isClientRole() && Objects.equals(x.getContainer().getId(), client.getId()));
+                if (hasCommitedRole){
+                    if ( role.isClientRole() && Objects.equals(role.getContainer().getId(), client.getId())){
+                        em.remove(userContextDraft);
+                        em.flush();
+                        return;
+                    }
+                }
+            }
+            if(userRoleChangeRequest.getDraftStatus() == DraftStatus.ACTIVE && userRoleChangeRequest.getDeleteStatus() != null){
+                userRoleChangeRequest.setDeleteStatus(DraftStatus.DRAFT);
+            } else if ( userRoleChangeRequest.getDraftStatus() == DraftStatus.APPROVED){
+                userRoleChangeRequest.setDraftStatus(DraftStatus.DRAFT);
+                userRoleChangeRequest.setDeleteStatus(null);
+            }
+            roles.add(role);
+            // remove and re-add
+            em.remove(userContextDraft);
+            generateAndSaveUserContextDraft(session, em, realm, client, user, roles, affectedChangeRequest.getChangeSetId(), affectedChangeRequest.getType(), affectedChangeRequest.getActionType(), client.isFullScopeAllowed());
+            em.flush();
+        }
+
+    }
+}
+
+
+
     // Helper Methods
     private boolean isRealmManagementClient(RoleModel role) {
         return ((ClientModel) role.getContainer()).getClientId().equalsIgnoreCase(Constants.REALM_MANAGEMENT_CLIENT_ID);
@@ -248,5 +296,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 .setParameter("clientId", client.getId())
                 .getResultList();
     }
+
 
 }

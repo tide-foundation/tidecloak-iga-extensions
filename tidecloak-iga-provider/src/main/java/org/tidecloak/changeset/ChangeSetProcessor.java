@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.LockModeType;
+import liquibase.change.Change;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
@@ -38,6 +40,7 @@ import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.*;
+import org.tidecloak.jpa.models.TideUserAdapter;
 import org.tidecloak.jpa.utils.AccessDetails;
 import org.tidecloak.jpa.utils.IGAUtils;
 import org.tidecloak.jpa.utils.TideAuthzProofUtil;
@@ -144,6 +147,7 @@ public interface ChangeSetProcessor<T> {
      */
     default void update(KeycloakSession session, ChangeSetRequest change, T entity, EntityManager em) throws Exception {
         List<ClientModel> affectedClients = getAffectedClients(session, entity, em);
+        RealmModel realm = session.getContext().getRealm();
         for (ClientModel client : affectedClients) {
             List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, client, change.getChangeSetId())
                     .stream()
@@ -151,11 +155,16 @@ public interface ChangeSetProcessor<T> {
                     .toList();
 
             for(AccessProofDetailEntity userContextDraft : userContextDrafts) {
-                
+                em.lock(userContextDraft, LockModeType.PESSIMISTIC_WRITE);
+                UserEntity userEntity = userContextDraft.getUser();
+                TideUserAdapter user = TideEntityUtils.toTideUserAdapter(userEntity, session, realm);
+
+                Set<RoleModel> roleSet = new HashSet<>();
+                roleSet.add(getRoleRequestFromEntity(session, entity));
+                var uniqRoles = roleSet.stream().distinct().filter(Objects::nonNull).collect(Collectors.toSet());
+                handleUserContextUpdate(session, change, userContextDraft, uniqRoles, client, user, em);
             }
-
         }
-
     }
 
     /**
@@ -346,6 +355,9 @@ public interface ChangeSetProcessor<T> {
     );
 
     RoleModel getRoleRequestFromEntity(KeycloakSession session, T entity);
+    ChangeSetRequest getChangeSetRequestFromEntity(KeycloakSession session, T Entity);
+
+    void handleUserContextUpdate(KeycloakSession session, ChangeSetRequest changeSetRequest, AccessProofDetailEntity userContextDraft, Set<RoleModel> uniqRoles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception;
 
 
     // Helper methods
