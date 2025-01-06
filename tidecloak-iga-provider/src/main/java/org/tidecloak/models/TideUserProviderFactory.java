@@ -1,4 +1,4 @@
-package org.tidecloak.jpa.models;
+package org.tidecloak.models;
 
 import jakarta.persistence.EntityManager;
 import org.keycloak.Config;

@@ -25,7 +25,7 @@ import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.enums.ActionType;
-import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.enums.ChangeSetType;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.interfaces.*;
 import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakUserContextRequest;

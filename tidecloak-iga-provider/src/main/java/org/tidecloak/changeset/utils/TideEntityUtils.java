@@ -9,7 +9,7 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.models.TideGroupAdapter;
 import org.tidecloak.jpa.models.TideRoleAdapter;
-import org.tidecloak.jpa.models.TideUserAdapter;
+import org.tidecloak.models.TideUserAdapter;
 
 import java.util.ArrayDeque;
 import java.util.Deque;

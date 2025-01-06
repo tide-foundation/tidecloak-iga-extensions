@@ -1,28 +1,23 @@
 package org.tidecloak.changeset.processors;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
-import org.keycloak.common.util.MultivaluedHashMap;
-import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
-import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.representations.AccessToken;
 import org.tidecloak.changeset.ChangeSetProcessor;
 import org.tidecloak.changeset.models.ChangeSetRequest;
 import org.tidecloak.changeset.utils.ClientUtils;
 import org.tidecloak.changeset.utils.TideEntityUtils;
-import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.enums.ChangeSetType;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
-import org.tidecloak.jpa.entities.AuthorizerEntity;
-import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
-import org.tidecloak.jpa.models.TideClientAdapter;
 import org.tidecloak.jpa.models.TideRoleAdapter;
-import org.tidecloak.jpa.models.TideUserAdapter;
+import org.tidecloak.models.TideUserAdapter;
 import org.tidecloak.enums.ActionType;
-import org.tidecloak.jpa.utils.TideRolesUtil;
 
 
 import java.util.*;
@@ -92,32 +87,13 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
         clientList.forEach(client -> {
             try {
-                String draftId = activeDraftEntities == null || activeDraftEntities.isEmpty() ? mapping.getRoleId() : activeDraftEntities.getFirst().getId();
+                String draftId = activeDraftEntities == null || activeDraftEntities.isEmpty() ? mapping.getRoleId() : activeDraftEntities.get(0).getId();
                 this.generateAndSaveUserContextDraft(session, em, realm, client, wrappedUser, roleMappings, draftId,
                         ChangeSetType.USER_ROLE, ActionType.DELETE, client.isFullScopeAllowed());
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
         });
-    }
-
-    @Override
-    public void updateAffectedChangeRequests(KeycloakSession session, ChangeSetRequest change, TideUserRoleMappingDraftEntity entity, EntityManager em, List<ClientModel> affectedClients) {
-        RealmModel realm = session.getContext().getRealm();
-        for (ClientModel client: affectedClients){
-            List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, client, entity);
-
-            RoleEntity roleEntity = em.find(RoleEntity.class, entity.getRoleId());
-
-            Set<RoleModel> roleSet = new HashSet<>();
-            ActionType actionType = entity.getAction();
-            roleSet.add(TideEntityUtils.toTideRoleAdapter(roleEntity, session, realm));
-
-            var uniqRoles = roleSet.stream().distinct().filter(Objects::nonNull).collect(Collectors.toSet());
-
-
-        }
-
     }
 
     @Override
@@ -135,42 +111,28 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     @Override
-    public void handleUserContextUpdate(KeycloakSession session, ChangeSetRequest currentChangeRequest, AccessProofDetailEntity userContextDraft, Set<RoleModel> roles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
+    public void updateAffectedUserContextDrafts(KeycloakSession session, ChangeSetRequest currentChangeRequest, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> roles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
         RealmModel realm = session.getContext().getRealm();
-        TideUserRoleMappingDraftEntity userRoleChangeRequest = em.find(TideUserRoleMappingDraftEntity.class, userContextDraft.getRecordId());
-        ChangeSetRequest affectedChangeRequest = getChangeSetRequestFromEntity(session, userRoleChangeRequest);
-        if (userRoleChangeRequest == null || (userRoleChangeRequest.getDraftStatus() == DraftStatus.ACTIVE && userRoleChangeRequest.getDeleteStatus() == null)){
+        TideUserRoleMappingDraftEntity affectedUserRoleEntity = em.find(TideUserRoleMappingDraftEntity.class, affectedUserContextDraft.getRecordId());
+        if (affectedUserRoleEntity == null || (affectedUserRoleEntity.getDraftStatus() == DraftStatus.ACTIVE && affectedUserRoleEntity.getDeleteStatus() == null)){
             return;
         }
-        RoleModel role = realm.getRoleById(userRoleChangeRequest.getRoleId());
 
-        if(currentChangeRequest.getType() == ChangeSetType.CLIENT){
-            if (currentChangeRequest.getActionType() == ActionType.DELETE) {
-                boolean hasCommitedRole = user.getRoleMappingsStreamByStatusAndAction(DraftStatus.ACTIVE, ActionType.CREATE).anyMatch(x -> x.isClientRole() && Objects.equals(x.getContainer().getId(), client.getId()));
-                if (hasCommitedRole){
-                    if ( role.isClientRole() && Objects.equals(role.getContainer().getId(), client.getId())){
-                        em.remove(userContextDraft);
-                        em.flush();
-                        return;
-                    }
-                }
-            }
-            if(userRoleChangeRequest.getDraftStatus() == DraftStatus.ACTIVE && userRoleChangeRequest.getDeleteStatus() != null){
-                userRoleChangeRequest.setDeleteStatus(DraftStatus.DRAFT);
-            } else if ( userRoleChangeRequest.getDraftStatus() == DraftStatus.APPROVED){
-                userRoleChangeRequest.setDraftStatus(DraftStatus.DRAFT);
-                userRoleChangeRequest.setDeleteStatus(null);
-            }
-            roles.add(role);
-            // remove and re-add
-            em.remove(userContextDraft);
-            generateAndSaveUserContextDraft(session, em, realm, client, user, roles, affectedChangeRequest.getChangeSetId(), affectedChangeRequest.getType(), affectedChangeRequest.getActionType(), client.isFullScopeAllowed());
-            em.flush();
+        ChangeSetRequest affectedChangeRequest = getChangeSetRequestFromEntity(session, affectedUserRoleEntity);
+        RoleModel role = realm.getRoleById(affectedUserRoleEntity.getRoleId());
+
+        if(affectedChangeRequest.getActionType() == ActionType.DELETE) {
+            affectedUserRoleEntity.setDeleteStatus(DraftStatus.DRAFT);
+        }else if (affectedChangeRequest.getActionType() == ActionType.CREATE) {
+            affectedUserRoleEntity.setDraftStatus(DraftStatus.DRAFT);
         }
 
+        Set<RoleModel> roleToAddOrDelete = new HashSet<>();
+        roleToAddOrDelete.add(role);
+        AccessToken proof = this.generateUserContextDraft(session, realm, client, user, "openid", affectedChangeRequest.getActionType(), roleToAddOrDelete);
+        affectedUserContextDraft.setProofDraft(objectMapper.writeValueAsString(proof));
     }
-}
-
 
 
     // Helper Methods
@@ -278,7 +240,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                         childRoleClient,
                         userModel,
                         roleSet,
-                        compositeRoleMappingStatus.getFirst().getChildRole().getId(),
+                        compositeRoleMappingStatus.get(0).getChildRole().getId(),
                         ChangeSetType.COMPOSITE_ROLE,
                         ActionType.CREATE,
                         childRoleClient.isFullScopeAllowed()

@@ -1,17 +1,20 @@
 package org.tidecloak.changeset.processors;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.representations.AccessToken;
 import org.tidecloak.changeset.ChangeSetProcessor;
 import org.tidecloak.changeset.models.ChangeSetRequest;
 import org.tidecloak.enums.ActionType;
 import org.tidecloak.enums.DraftStatus;
-import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.enums.ChangeSetType;
+import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
-import org.tidecloak.jpa.models.TideUserAdapter;
+import org.tidecloak.models.TideUserAdapter;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 
 import java.util.*;
@@ -83,14 +86,48 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
     }
 
     @Override
-    public void updateAffectedChangeRequests(KeycloakSession session, ChangeSetRequest change, TideCompositeRoleMappingDraftEntity entity, EntityManager em, List<ClientModel> affectedClients) {
+    public void updateAffectedUserContextDrafts(KeycloakSession session, ChangeSetRequest currentChangeRequest, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> roles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
 
+        RealmModel realm = session.getContext().getRealm();
+        TideCompositeRoleMappingDraftEntity affectedCompositeRoleEntity = em.find(TideCompositeRoleMappingDraftEntity.class, affectedUserContextDraft.getRecordId());
+        if (affectedCompositeRoleEntity == null || (affectedCompositeRoleEntity.getDraftStatus() == DraftStatus.ACTIVE && affectedCompositeRoleEntity.getDeleteStatus() == null)){
+            return;
+        }
+        ChangeSetRequest affectedChangeRequest = getChangeSetRequestFromEntity(session, affectedCompositeRoleEntity);
+
+        RoleModel childRole = realm.getRoleById(affectedCompositeRoleEntity.getChildRole().getId());
+        RoleModel compositeRole = realm.getRoleById(affectedCompositeRoleEntity.getComposite().getId());
+
+        if ( affectedChangeRequest.getActionType() == ActionType.DELETE){
+            affectedCompositeRoleEntity.setDeleteStatus(DraftStatus.DRAFT);
+        } else if (affectedChangeRequest.getActionType() == ActionType.CREATE) {
+            affectedCompositeRoleEntity.setDraftStatus(DraftStatus.DRAFT);
+        }
+
+        Set<RoleModel> roleToAddOrDelete = new HashSet<>();
+        roleToAddOrDelete.add(childRole);
+        roleToAddOrDelete.add(compositeRole);
+
+        AccessToken proof = this.generateUserContextDraft(session, realm, client, user, "openid", affectedChangeRequest.getActionType(), roleToAddOrDelete);
+        affectedUserContextDraft.setProofDraft(objectMapper.writeValueAsString(proof));
     }
+
 
     @Override
     public RoleModel getRoleRequestFromEntity(KeycloakSession session, TideCompositeRoleMappingDraftEntity entity) {
         return session.getContext().getRealm().getRoleById(entity.getChildRole().getId());
     }
+
+    @Override
+    public ChangeSetRequest getChangeSetRequestFromEntity(KeycloakSession session, TideCompositeRoleMappingDraftEntity entity) {
+        ChangeSetRequest changeSetRequest = new ChangeSetRequest();
+        changeSetRequest.setChangeSetId(entity.getId());
+        changeSetRequest.setType(ChangeSetType.COMPOSITE_ROLE);
+        changeSetRequest.setActionType(entity.getAction());
+        return changeSetRequest;
+    }
+
 
     private void processExistingRequest(KeycloakSession session, EntityManager em, RealmModel realm, TideCompositeRoleMappingDraftEntity compositeRoleEntity, ActionType action) {
         RoleEntity parentEntity = compositeRoleEntity.getComposite();

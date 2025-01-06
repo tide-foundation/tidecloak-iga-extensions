@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
-import liquibase.change.Change;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
@@ -29,21 +28,18 @@ import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.changeset.models.ChangeSetRequest;
 import org.keycloak.representations.AccessToken;
 import org.tidecloak.changeset.utils.TideEntityUtils;
-import org.tidecloak.changeset.utils.UserContextUtils;
 import org.tidecloak.enums.WorkflowType;
 import org.tidecloak.enums.models.WorkflowParams;
-import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.enums.ChangeSetType;
 import org.tidecloak.enums.DraftStatus;
-import org.tidecloak.interfaces.DraftChangeSetRequest;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.*;
-import org.tidecloak.jpa.models.TideUserAdapter;
+import org.tidecloak.jpa.models.ChangesetRequestAdapter;
+import org.tidecloak.models.TideUserAdapter;
 import org.tidecloak.jpa.utils.AccessDetails;
-import org.tidecloak.jpa.utils.IGAUtils;
-import org.tidecloak.jpa.utils.TideAuthzProofUtil;
 import org.tidecloak.jpa.utils.TideRolesUtil;
 import org.tidecloak.jpa.models.TideClientAdapter;
 import org.tidecloak.jpa.models.TideRoleAdapter;
@@ -68,22 +64,23 @@ public interface ChangeSetProcessor<T> {
      * Executes a workflow (e.g., request , approval or commit) for a given change set.
      *
      * @param session   The KeycloakSession for the current context.
-     * @param change    The change set request containing details of the change.
-     * @param mapping   The entity instance being processed.
+     * @param entity   The entity instance being processed.
      * @param em        The EntityManager for database interactions.
      * @param workflow  The type of workflow to execute (e.g. REQUEST, APPROVAL, COMMIT).
      * @param params    Additional parameters specific to the workflow.
      */
-    default void executeWorkflow(KeycloakSession session, ChangeSetRequest change, T mapping, EntityManager em, WorkflowType workflow, WorkflowParams params) throws Exception {
+    default void executeWorkflow(KeycloakSession session, T entity, EntityManager em, WorkflowType workflow, WorkflowParams params) throws Exception {
+        ChangeSetRequest change = getChangeSetRequestFromEntity(session, entity);
+
         switch (workflow) {
             case APPROVAL:
-                approve(session, change, mapping, em, params.getDraftStatus(), params.isDelete());
+                approve(session, change, entity, em, params.getDraftStatus(), params.isDelete());
                 break;
             case COMMIT:
-                commit(session, change, mapping, em, params.getDraftStatus(), params.isDelete());
+                commit(session, change, entity, em, params.getDraftStatus(), params.isDelete());
                 break;
             case REQUEST:
-                request(session, change, mapping, em, params.getActionType());
+                request(session, change, entity, em, params.getActionType());
             default:
                 throw new IllegalArgumentException("Unsupported workflow: " + workflow);
         }
@@ -149,6 +146,7 @@ public interface ChangeSetProcessor<T> {
         List<ClientModel> affectedClients = getAffectedClients(session, entity, em);
         RealmModel realm = session.getContext().getRealm();
         for (ClientModel client : affectedClients) {
+
             List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, client, change.getChangeSetId())
                     .stream()
                     .filter(proof -> !Objects.equals(proof.getRecordId(), change.getChangeSetId()))
@@ -162,8 +160,35 @@ public interface ChangeSetProcessor<T> {
                 Set<RoleModel> roleSet = new HashSet<>();
                 roleSet.add(getRoleRequestFromEntity(session, entity));
                 var uniqRoles = roleSet.stream().distinct().filter(Objects::nonNull).collect(Collectors.toSet());
-                handleUserContextUpdate(session, change, userContextDraft, uniqRoles, client, user, em);
+                updateAffectedUserContextDrafts(session, change, userContextDraft, uniqRoles, client, user, em);
+                ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, userContextDraft.getRecordId());
+                if (changesetRequestEntity != null){
+                    changesetRequestEntity.setAdminAuthorizations(List.of()); // empty sigs!
+                }
             }
+
+            // Group proofDetails by changeRequestId
+            Map<String, List<AccessProofDetailEntity>> groupedProofDetails = userContextDrafts.stream()
+                    .collect(Collectors.groupingBy(AccessProofDetailEntity::getRecordId));
+
+            // Process each group
+            groupedProofDetails.forEach((changeRequestId, details) -> {
+                try {
+                    // Create a list of UserContext for the current changeRequestId
+                    List<UserContext> userContexts = details.stream()
+                            .map(p -> new UserContext(p.getProofDraft()))
+                            .collect(Collectors.toList());
+
+                    // Create UserContextSignRequest
+                    UserContextSignRequest updatedReq = new UserContextSignRequest("Admin:1");
+                    updatedReq.SetUserContexts(userContexts.toArray(new UserContext[0]));
+
+                    ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeRequestId);
+                    changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(updatedReq.GetDraft()));
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
         }
     }
 
@@ -208,7 +233,7 @@ public interface ChangeSetProcessor<T> {
      * @param realm             RealmModel representing the current realm.
      * @param clientModel       ClientModel representing the client.
      * @param userModel         UserModel representing the user.
-     * @param newRoleMappings   New role mappings for the user.
+     * @param rolesToAddOrRemove   New role mappings for the user.
      * @param recordId          Record ID for the change set.
      * @param type              ChangeSetType representing the type of the change set.
      * @param actionType        ActionType representing the action to be performed.
@@ -217,16 +242,16 @@ public interface ChangeSetProcessor<T> {
      */
     default void generateAndSaveUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm,
                                            ClientModel clientModel, UserModel userModel,
-                                           Set<RoleModel> newRoleMappings, String recordId,
+                                           Set<RoleModel> rolesToAddOrRemove, String recordId,
                                            ChangeSetType type, ActionType actionType,
                                            Boolean isFullScopeAllowed) throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();
 
-        AccessToken proof = generateAccessToken(session, realm, clientModel, userModel, "openid");
+        AccessToken proof = this.generateUserContextDraft(session, realm, clientModel, userModel, "openid", actionType, rolesToAddOrRemove);
         AccessDetails accessDetails = null;
         UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
 
-        var roleSet = newRoleMappings.stream()
+        var roleSet = rolesToAddOrRemove.stream()
                 .filter(Objects::nonNull)
                 .collect(Collectors.toSet());
 
@@ -344,20 +369,23 @@ public interface ChangeSetProcessor<T> {
         return new ArrayList<>(affectedClients);
     }
 
+    default AccessToken generateUserContextDraft(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, ActionType actionType, Set<RoleModel> rolesToAddOrRemove){
+        session.getContext().setClient(client);
+        return sessionAware(session, realm, client, user, scopeParam, (userSession, clientSessionCtx) -> {
+            TokenManager tokenManager = new TokenManager();
+            return tokenManager.responseBuilder(realm, client, null, session, userSession, clientSessionCtx)
+                    .generateUserContext(actionType, rolesToAddOrRemove).getAccessToken();
+        });
+
+    }
+
     void handleCreateRequest (KeycloakSession session, T entity, EntityManager em);
     void handleDeleteRequest (KeycloakSession session, T entity, EntityManager em);
-    void updateAffectedChangeRequests(
-            KeycloakSession session,
-            ChangeSetRequest change,
-            T entity,
-            EntityManager em,
-            List<ClientModel> affectedClients
-    );
+    void updateAffectedUserContextDrafts(KeycloakSession session, ChangeSetRequest changeSetRequest, AccessProofDetailEntity userContextDraft, Set<RoleModel> uniqRoles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception;
 
     RoleModel getRoleRequestFromEntity(KeycloakSession session, T entity);
     ChangeSetRequest getChangeSetRequestFromEntity(KeycloakSession session, T Entity);
 
-    void handleUserContextUpdate(KeycloakSession session, ChangeSetRequest changeSetRequest, AccessProofDetailEntity userContextDraft, Set<RoleModel> uniqRoles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception;
 
 
     // Helper methods
@@ -397,15 +425,8 @@ public interface ChangeSetProcessor<T> {
         }
     }
 
-    private AccessToken generateAccessToken(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam){
-        session.getContext().setClient(client);
-        return sessionAware(session, realm, client, user, scopeParam, (userSession, clientSessionCtx) -> {
-            TokenManager tokenManager = new TokenManager();
-            return tokenManager.responseBuilder(realm, client, null, session, userSession, clientSessionCtx)
-                    .generateAccessToken().getAccessToken();
-        });
 
-    }
+
     private<R> R sessionAware(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, BiFunction<UserSessionModel, ClientSessionContext,R> function) {
         AuthenticationSessionModel authSession = null;
         AuthenticationSessionManager authSessionManager = new AuthenticationSessionManager(session);

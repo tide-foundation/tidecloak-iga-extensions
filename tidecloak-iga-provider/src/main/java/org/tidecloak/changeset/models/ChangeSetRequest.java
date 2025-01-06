@@ -2,7 +2,7 @@ package org.tidecloak.changeset.models;
 import org.tidecloak.enums.ActionType;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.enums.ChangeSetType;
 
 public class ChangeSetRequest {
 

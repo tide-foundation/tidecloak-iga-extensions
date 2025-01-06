@@ -2,6 +2,7 @@ package org.tidecloak.interfaces;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.tidecloak.enums.ActionType;
+import org.tidecloak.enums.ChangeSetType;
 import org.tidecloak.enums.DraftStatus;
 
 import java.util.List;

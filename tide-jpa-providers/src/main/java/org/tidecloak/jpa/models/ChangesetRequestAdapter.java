@@ -7,7 +7,7 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.midgard.models.AdminAuthorization;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.enums.ActionType;
-import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.enums.ChangeSetType;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
