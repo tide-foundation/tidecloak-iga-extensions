@@ -34,7 +34,7 @@ import org.keycloak.sessions.RootAuthenticationSessionModel;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
-import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.enums.ChangeSetType;
 import org.tidecloak.interfaces.DraftChangeSetRequest;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakUserContextRequest;
@@ -43,9 +43,9 @@ import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.jpa.models.ChangesetRequestAdapter;
 import org.tidecloak.jpa.models.TideClientAdapter;
 import org.tidecloak.jpa.models.TideRoleAdapter;
-import org.tidecloak.jpa.models.TideUserAdapter;
 import org.midgard.Serialization.JsonSorter;
 import org.tidecloak.enums.ActionType;
+import org.tidecloak.jpa.models.TideUserAdapter;
 
 
 import java.net.URI;

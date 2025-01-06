@@ -10,7 +10,7 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.enums.ActionType;
-import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.enums.ChangeSetType;
 import org.tidecloak.interfaces.DraftChangeSetRequest;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
