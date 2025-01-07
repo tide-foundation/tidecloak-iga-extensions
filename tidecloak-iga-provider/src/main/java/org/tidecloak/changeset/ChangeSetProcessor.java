@@ -1,5 +1,8 @@
 package org.tidecloak.changeset;
 
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.PropertyAccessor;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,12 +40,12 @@ import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.*;
-import org.tidecloak.jpa.models.ChangesetRequestAdapter;
+import org.tidecloak.models.ChangesetRequestAdapter;
 import org.tidecloak.models.TideUserAdapter;
-import org.tidecloak.jpa.utils.AccessDetails;
-import org.tidecloak.jpa.utils.TideRolesUtil;
-import org.tidecloak.jpa.models.TideClientAdapter;
-import org.tidecloak.jpa.models.TideRoleAdapter;
+import org.tidecloak.utils.AccessDetails;
+import org.tidecloak.utils.TideRolesUtil;
+import org.tidecloak.models.TideClientAdapter;
+import org.tidecloak.models.TideRoleAdapter;
 import org.keycloak.protocol.oidc.TokenManager;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.sessions.AuthenticationSessionModel;
@@ -81,6 +84,7 @@ public interface ChangeSetProcessor<T> {
                 break;
             case REQUEST:
                 request(session, change, entity, em, params.getActionType());
+                break;
             default:
                 throw new IllegalArgumentException("Unsupported workflow: " + workflow);
         }
@@ -246,45 +250,48 @@ public interface ChangeSetProcessor<T> {
                                            ChangeSetType type, ActionType actionType,
                                            Boolean isFullScopeAllowed) throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();
+        objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+        objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
 
-        AccessToken proof = this.generateUserContextDraft(session, realm, clientModel, userModel, "openid", actionType, rolesToAddOrRemove);
-        AccessDetails accessDetails = null;
-        UserEntity user = TideRolesUtil.toUserEntity(userModel, em);
 
-        var roleSet = rolesToAddOrRemove.stream()
-                .filter(Objects::nonNull)
-                .collect(Collectors.toSet());
+        AccessToken userContextDraft = this.generateUserContextDraft(session, realm, clientModel, userModel, "openid", actionType, rolesToAddOrRemove);
+//        AccessDetails accessDetails = null;
+        UserEntity user = TideEntityUtils.toUserEntity(userModel, em);
 
-        if (roleSet != null && !roleSet.isEmpty()) {
-            Set<TideRoleAdapter> wrappedRoles = roleSet.stream()
-                    .map(role -> {
-                        RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
-                        return new TideRoleAdapter(session, realm, em, roleEntity);
-                    }).collect(Collectors.toSet());
+//        var roleSet = rolesToAddOrRemove.stream()
+//                .filter(Objects::nonNull)
+//                .collect(Collectors.toSet());
+//
+//        if (roleSet != null && !roleSet.isEmpty()) {
+//            Set<TideRoleAdapter> wrappedRoles = roleSet.stream()
+//                    .map(role -> {
+//                        RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
+//                        return new TideRoleAdapter(session, realm, em, roleEntity);
+//                    }).collect(Collectors.toSet());
+//
+//            Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.ACTIVE);
+//            ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
+//            ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
+//            Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream(), isFullScopeAllowed);
+//            accessDetails = sortAccessRoles(requestedAccess);
+//
+//            setTokenClaims(proof, accessDetails, actionType);
+//        }
 
-            Set<RoleModel> activeRoles = TideRolesUtil.expandCompositeRoles(wrappedRoles, DraftStatus.ACTIVE);
-            ClientEntity clientEntity = em.find(ClientEntity.class, clientModel.getId());
-            ClientModel wrappedClient = new TideClientAdapter(realm, em, session, clientEntity);
-            Set<RoleModel> requestedAccess = filterClientRoles(activeRoles, wrappedClient, clientModel.getClientScopes(false).values().stream(), isFullScopeAllowed);
-            accessDetails = sortAccessRoles(requestedAccess);
+//        JsonNode proofDraftNode = objectMapper.valueToTree(proof);
+//        if (actionType == ActionType.DELETE && accessDetails != null) {
+//            proofDraftNode = removeAccessFromJsonNode(proofDraftNode, accessDetails);
+//        }
 
-            setTokenClaims(proof, accessDetails, actionType);
-        }
+//        AccessToken accessToken = objectMapper.convertValue(proofDraftNode, AccessToken.class);
 
-        JsonNode proofDraftNode = objectMapper.valueToTree(proof);
-        if (actionType == ActionType.DELETE && accessDetails != null) {
-            proofDraftNode = removeAccessFromJsonNode(proofDraftNode, accessDetails);
-        }
+//        Set<String> clientKeys = accessToken.getResourceAccess().keySet();
+//        String[] audience = clientKeys.stream()
+//                .filter(key -> !Objects.equals(key, clientModel.getName()))
+//                .toArray(String[]::new);
+//        accessToken.audience(audience.length == 0 ? null : audience);
 
-        AccessToken accessToken = objectMapper.convertValue(proofDraftNode, AccessToken.class);
-
-        Set<String> clientKeys = accessToken.getResourceAccess().keySet();
-        String[] audience = clientKeys.stream()
-                .filter(key -> !Objects.equals(key, clientModel.getName()))
-                .toArray(String[]::new);
-        accessToken.audience(audience.length == 0 ? null : audience);
-
-        proofDraftNode = objectMapper.valueToTree(accessToken);
+        JsonNode proofDraftNode = objectMapper.valueToTree(userContextDraft);
         String proofDraft = objectMapper.writeValueAsString(cleanProofDraft(proofDraftNode));
         saveAccessProofDetail(session, em, realm, clientModel, user, recordId, type, proofDraft);
     }
@@ -371,11 +378,26 @@ public interface ChangeSetProcessor<T> {
 
     default AccessToken generateUserContextDraft(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, ActionType actionType, Set<RoleModel> rolesToAddOrRemove){
         session.getContext().setClient(client);
-        return sessionAware(session, realm, client, user, scopeParam, (userSession, clientSessionCtx) -> {
+        AccessToken token = sessionAware(session, realm, client, user, scopeParam, (userSession, clientSessionCtx) -> {
             TokenManager tokenManager = new TokenManager();
             return tokenManager.responseBuilder(realm, client, null, session, userSession, clientSessionCtx)
                     .generateUserContext(actionType, rolesToAddOrRemove).getAccessToken();
         });
+
+
+        String tideUserKey = user.getFirstAttribute("tideUserKey");
+        String vuid = user.getFirstAttribute("vuid");
+
+        // 2. Set these attributes as claims in the token
+        if (tideUserKey != null) {
+            token.getOtherClaims().put("tideuserkey", tideUserKey);
+        }
+
+        if (vuid != null) {
+            token.getOtherClaims().put("vuid", vuid);
+        }
+
+        return token;
 
     }
 

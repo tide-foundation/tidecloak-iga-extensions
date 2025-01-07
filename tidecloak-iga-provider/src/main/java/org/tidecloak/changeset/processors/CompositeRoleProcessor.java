@@ -15,7 +15,7 @@ import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.models.TideUserAdapter;
-import org.tidecloak.jpa.utils.TideRolesUtil;
+import org.tidecloak.utils.TideRolesUtil;
 
 import java.util.*;
 

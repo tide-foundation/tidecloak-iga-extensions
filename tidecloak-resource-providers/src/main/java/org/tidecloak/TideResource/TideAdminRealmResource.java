@@ -13,7 +13,7 @@ import org.keycloak.services.ErrorPage;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.VendorData;
-import org.tidecloak.jpa.models.ChangesetRequestAdapter;
+import org.tidecloak.models.ChangesetRequestAdapter;
 
 import java.util.ArrayList;
 import java.util.Arrays;

@@ -1,5 +1,8 @@
 package org.tidecloak.changeset.processors;
 
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.PropertyAccessor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import org.keycloak.models.*;
@@ -15,7 +18,7 @@ import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
-import org.tidecloak.jpa.models.TideRoleAdapter;
+import org.tidecloak.models.TideRoleAdapter;
 import org.tidecloak.models.TideUserAdapter;
 import org.tidecloak.enums.ActionType;
 
@@ -113,6 +116,9 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     @Override
     public void updateAffectedUserContextDrafts(KeycloakSession session, ChangeSetRequest currentChangeRequest, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> roles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();
+        objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+        objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
+
         RealmModel realm = session.getContext().getRealm();
         TideUserRoleMappingDraftEntity affectedUserRoleEntity = em.find(TideUserRoleMappingDraftEntity.class, affectedUserContextDraft.getRecordId());
         if (affectedUserRoleEntity == null || (affectedUserRoleEntity.getDraftStatus() == DraftStatus.ACTIVE && affectedUserRoleEntity.getDeleteStatus() == null)){
@@ -142,6 +148,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
     private void processRealmManagementRoleAssignment(KeycloakSession session, EntityManager em, RealmModel realm, List<ClientModel> clientList,
                                                       Set<RoleModel> roleMappings, TideUserRoleMappingDraftEntity mapping, UserModel userModel) {
+        System.out.println("HELLO SASHA!!");
         clientList.forEach(client -> {
             try {
                 boolean isRealmManagementClient = client.getClientId().equalsIgnoreCase(Constants.REALM_MANAGEMENT_CLIENT_ID);
@@ -158,6 +165,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
     private void processRoles(KeycloakSession session, EntityManager em, RealmModel realm, List<ClientModel> clientList,
                                                   Set<RoleModel> roleMappings, TideUserRoleMappingDraftEntity mapping, UserModel userModel) {
+        System.out.println("TEST");
         clientList.forEach(client -> {
             try {
                 if (isAdminClient(client)) {

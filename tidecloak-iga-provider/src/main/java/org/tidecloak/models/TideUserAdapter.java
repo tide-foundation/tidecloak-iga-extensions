@@ -19,14 +19,14 @@ import org.tidecloak.changeset.utils.RoleUtils;
 import org.tidecloak.enums.ChangeSetType;
 import org.tidecloak.enums.WorkflowType;
 import org.tidecloak.enums.models.WorkflowParams;
-import org.tidecloak.jpa.models.TideClientAdapter;
-import org.tidecloak.jpa.utils.TideRolesUtil;
+import org.tidecloak.models.TideClientAdapter;
+import org.tidecloak.utils.TideRolesUtil;
 import org.tidecloak.enums.ActionType;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserGroupMembershipEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
-import org.tidecloak.jpa.utils.ProofGeneration;
+import org.tidecloak.utils.ProofGeneration;
 
 import java.util.*;
 import java.util.stream.Collectors;

@@ -8,9 +8,9 @@ import org.keycloak.models.RoleModel;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.tidecloak.enums.DraftStatus;
-import org.tidecloak.jpa.models.TideClientAdapter;
-import org.tidecloak.jpa.models.TideRoleAdapter;
-import org.tidecloak.jpa.utils.TideRolesUtil;
+import org.tidecloak.models.TideClientAdapter;
+import org.tidecloak.models.TideRoleAdapter;
+import org.tidecloak.utils.TideRolesUtil;
 
 import java.util.HashSet;
 import java.util.List;

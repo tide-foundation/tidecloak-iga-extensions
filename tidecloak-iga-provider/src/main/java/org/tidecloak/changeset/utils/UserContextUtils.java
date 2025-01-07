@@ -4,7 +4,7 @@ import jakarta.persistence.EntityManager;
 import org.keycloak.models.*;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
-import org.tidecloak.jpa.models.TideRoleAdapter;
+import org.tidecloak.models.TideRoleAdapter;
 import org.tidecloak.models.TideUserAdapter;
 
 import java.util.List;

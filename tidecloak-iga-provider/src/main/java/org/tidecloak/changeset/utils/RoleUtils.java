@@ -7,7 +7,7 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.enums.ActionType;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
-import org.tidecloak.jpa.utils.TideRolesUtil;
+import org.tidecloak.utils.TideRolesUtil;
 
 import java.util.Arrays;
 import java.util.Objects;
