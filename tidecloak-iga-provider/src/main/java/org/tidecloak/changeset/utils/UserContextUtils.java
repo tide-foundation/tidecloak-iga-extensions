@@ -1,11 +1,14 @@
 package org.tidecloak.changeset.utils;
 
 import jakarta.persistence.EntityManager;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.models.TideRoleAdapter;
 import org.tidecloak.models.TideUserAdapter;
+import org.tidecloak.utils.UserContextUtilBase;
 
 import java.util.List;
 import java.util.Set;
@@ -13,7 +16,7 @@ import java.util.stream.Collectors;
 
 import static org.tidecloak.changeset.utils.TideEntityUtils.*;
 
-public class UserContextUtils {
+public class UserContextUtils extends UserContextUtilBase {
 
     public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, String recordId) {
         return em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
@@ -28,13 +31,15 @@ public class UserContextUtils {
                 .getResultList();
     }
 
-    public static Set<RoleModel> getDeepUserRoleMappings(UserModel user, KeycloakSession session, RealmModel realm, DraftStatus draftStatus) {
-        Set<RoleModel> roleMappings;
-        if (user instanceof TideUserAdapter) {
-            roleMappings = ((TideUserAdapter)user).getRoleMappingsStreamByStatus(draftStatus).map((x) -> wrapRoleModel(x, session, realm)).collect(Collectors.toSet());
-        } else {
-            roleMappings = user.getRoleMappingsStream().collect(Collectors.toSet());;
-        }
+    @Override
+    public  Set<RoleModel> getDeepUserRoleMappings(UserModel user, KeycloakSession session, RealmModel realm, DraftStatus draftStatus) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        UserEntity userEntity = TideEntityUtils.toUserEntity(user, em);
+        TideUserAdapter tideUser = TideEntityUtils.toTideUserAdapter( userEntity, session, realm);
+
+        Set<RoleModel> roleMappings = tideUser.getRoleMappingsStreamByStatus(draftStatus).map((x) -> wrapRoleModel(x, session, realm)).collect(Collectors.toSet());
+
         user.getGroupsStream().forEach((group) -> {
             addGroupRoles(wrapGroupModel(group, session, realm), roleMappings, draftStatus);
         });
