@@ -33,4 +33,22 @@ public class UserContextUtilBase {
             return null;
         }
     }
+
+    public static UserContextUtilBase getUserContextUtil() {
+        try {
+            // Attempt to load the real implementation dynamically
+            return (UserContextUtilBase) Class.forName("org.tidecloak.changeset.utils.UserContextUtils")
+                    .getDeclaredConstructor()
+                    .newInstance();
+        } catch (ClassNotFoundException e) {
+            // Log that the real implementation was not found
+            System.out.println("Real implementation not found. Using base implementation.");
+        } catch (Exception e) {
+            // Handle any other exceptions during instantiation
+            System.err.println("Error instantiating UserContextUtils: " + e.getMessage());
+        }
+
+        // Fallback to base class implementation
+        return new UserContextUtilBase();
+    }
 }

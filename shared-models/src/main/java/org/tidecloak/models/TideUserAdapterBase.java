@@ -31,4 +31,21 @@ public abstract class TideUserAdapterBase extends UserAdapter {
         return em.getReference(UserEntity.class, model.getId());
     }
 
+    public static TideUserAdapterBase getTideUserAdapter(KeycloakSession session, RealmModel realm, EntityManager em, UserEntity user) {
+        try {
+            // Dynamically load and instantiate TideUserAdapter if available
+            return (TideUserAdapterBase) Class.forName("org.tidecloak.models.TideUserAdapter")
+                    .getDeclaredConstructor(KeycloakSession.class, RealmModel.class, EntityManager.class, UserEntity.class)
+                    .newInstance(session, realm, em, user);
+        } catch (ClassNotFoundException e) {
+            System.out.println("TideUserAdapter not found. Using TideUserAdapterBase.");
+        } catch (Exception e) {
+            System.err.println("Error instantiating TideUserAdapter: " + e.getMessage());
+        }
+
+        // Fallback to a basic anonymous implementation of TideUserAdapterBase
+        return new TideUserAdapterBase(session, realm, em, user) {
+        };
+    }
+
 }
