@@ -1,14 +1,16 @@
 package org.tidecloak.changeset.utils;
 
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.NoResultException;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.tidecloak.UserContextUtilBase;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.models.TideRoleAdapter;
 import org.tidecloak.models.TideUserAdapter;
-import org.tidecloak.utils.UserContextUtilBase;
 
 import java.util.*;
 import java.util.stream.Collectors;

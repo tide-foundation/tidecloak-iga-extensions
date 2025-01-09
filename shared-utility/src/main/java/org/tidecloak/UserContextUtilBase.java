@@ -1,4 +1,4 @@
-package org.tidecloak.utils;
+package org.tidecloak;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.NoResultException;
@@ -11,10 +11,7 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 
-import java.util.HashSet;
 import java.util.Set;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 public class UserContextUtilBase {
 
