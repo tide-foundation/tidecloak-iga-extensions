@@ -11,14 +11,21 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 
+import java.util.HashSet;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class UserContextUtilBase {
 
     public Set<RoleModel> getDeepUserRoleMappings(UserModel user, KeycloakSession session, RealmModel realm, DraftStatus draftStatus) {
-        // Default implementation (can be overridden by subclasses)
         return Set.of(); // Return empty set as default
     }
+
+    public Set<RoleModel> expandActiveCompositeRoles(KeycloakSession session, Set<RoleModel> roles){
+        return Set.of();
+    };
+
 
     public static UserClientAccessProofEntity getUserContext(KeycloakSession session, String clientId, UserModel userModel) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
@@ -49,6 +56,12 @@ public class UserContextUtilBase {
         }
 
         // Fallback to base class implementation
-        return new UserContextUtilBase();
+        return new UserContextUtilBase() {
+            @Override
+            public Set<RoleModel> expandActiveCompositeRoles(KeycloakSession session, Set<RoleModel> roles) {
+                return Set.of();
+            }
+        };
     }
+
 }

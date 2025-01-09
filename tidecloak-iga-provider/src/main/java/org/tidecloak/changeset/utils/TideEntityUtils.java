@@ -154,6 +154,12 @@ public class TideEntityUtils {
         return new TideRoleAdapter(session, realm, em, roleEntity);
 
     }
+    public static TideRoleAdapter toTideRoleAdapter(RoleModel roleModel, KeycloakSession session, RealmModel realm){
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        RoleEntity roleEntity = em.getReference(RoleEntity.class, roleModel.getId());
+        return new TideRoleAdapter(session, realm, em, roleEntity);
+
+    }
 
     public static GroupEntity toGroupEntity(GroupModel model, EntityManager em) {
         if (model instanceof TideGroupAdapter) {
