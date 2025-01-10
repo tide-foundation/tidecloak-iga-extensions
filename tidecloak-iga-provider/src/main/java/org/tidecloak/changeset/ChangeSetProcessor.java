@@ -91,7 +91,6 @@ public interface ChangeSetProcessor<T> {
         }
     }
 
-
     /**
      * Processes a change request based on the specified action type.
      * This method determines the action to perform (e.g., CREATE or DELETE) and delegates
@@ -240,30 +239,56 @@ public interface ChangeSetProcessor<T> {
     }
 
     /**
-     * Generates and saves user context draft for the given user and client models.
+     * Generates and saves a transformed user context draft for the given user and client models.
+     * This method applies entity-specific transformations to the user context.
      *
-     * @param session           KeycloakSession object for authentication and context.
-     * @param em                EntityManager for database operations.
-     * @param realm             RealmModel representing the current realm.
-     * @param clientModel       ClientModel representing the client.
-     * @param userModel         UserModel representing the user.
-     * @param rolesToAddOrRemove   New role mappings for the user.
-     * @param recordId          Record ID for the change set.
-     * @param type              ChangeSetType representing the type of the change set.
-     * @param actionType        ActionType representing the action to be performed.
-     * @param isFullScopeAllowed Boolean flag indicating whether full scope is allowed.
-     * @throws Exception Throws exception for any errors during processing.
+     * @param session   KeycloakSession object for authentication and context.
+     * @param em        EntityManager for database operations.
+     * @param realm     RealmModel representing the current realm.
+     * @param clientModel ClientModel representing the client.
+     * @param userModel UserModel representing the user.
+     * @param recordId  Record ID for the change set.
+     * @param type      ChangeSetType representing the type of the change set.
+     * @param entity    The entity that triggers the transformation.
+     * @throws Exception If any error occurs during the generation or saving of the user context draft.
      */
-    default void generateAndSaveUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm,
-                                           ClientModel clientModel, UserModel userModel,
-                                           Set<RoleModel> rolesToAddOrRemove, String recordId,
-                                           ChangeSetType type, ActionType actionType,
-                                           Boolean isFullScopeAllowed) throws Exception {
+    default void generateAndSaveTransformedUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm,
+                                                            ClientModel clientModel, UserModel userModel, String recordId,
+                                                            ChangeSetType type, T entity) throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();
         objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
         objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
 
-        String userContextDraft = this.generateUserContextDraft(session, realm, clientModel, userModel, "openid", actionType, rolesToAddOrRemove);
+        // Generate a transformed user context using entity-specific logic
+        String userContextDraft = this.generateTransformedUserContext(session, realm, clientModel, userModel, "openid", entity);
+        UserEntity user = TideEntityUtils.toUserEntity(userModel, em);
+
+        saveUserContextDraft(session, em, realm, clientModel, user, recordId, type, userContextDraft);
+    }
+
+
+    /**
+     * Generates and saves a default user context draft for the given user and client models.
+     * This method generates a user context in its raw form without any transformations.
+     *
+     * @param session   KeycloakSession object for authentication and context.
+     * @param em        EntityManager for database operations.
+     * @param realm     RealmModel representing the current realm.
+     * @param clientModel ClientModel representing the client.
+     * @param userModel UserModel representing the user.
+     * @param recordId  Record ID for the change set.
+     * @param type      ChangeSetType representing the type of the change set.
+     * @throws Exception If any error occurs during the generation or saving of the user context draft.
+     */
+    default void generateAndSaveDefaultUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm,
+                                                        ClientModel clientModel, UserModel userModel, String recordId,
+                                                        ChangeSetType type) throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+        objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+        objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
+
+        // Generate a raw user context without applying entity-specific transformations
+        String userContextDraft = this.generateDefaultUserContext(session, realm, clientModel, userModel);
         UserEntity user = TideEntityUtils.toUserEntity(userModel, em);
 
         saveUserContextDraft(session, em, realm, clientModel, user, recordId, type, userContextDraft);
@@ -349,44 +374,190 @@ public interface ChangeSetProcessor<T> {
         return new ArrayList<>(affectedClients);
     }
 
-    default String generateUserContextDraft(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, ActionType actionType, Set<RoleModel> rolesToAddOrRemove) throws JsonProcessingException {
+    /**
+     * Transforms the generated access token with specific processor logic to a user context for the change request.
+     *
+     * @param token              The initial access token to be transformed.
+     * @param session            The Keycloak session for context.
+     * @return The transformed access token.
+     */
+    default AccessToken transformToUserContext(
+            AccessToken token,
+            KeycloakSession session,
+            T entity
+
+    ) {
+        return token;
+    }
+
+    /**
+     * Generates a user context draft for a specific entity.
+     * This method includes claims specific to the user, such as tideUserKey and vuid, and transforms the token
+     * using a processor appropriate for the entity type.
+     *
+     * @param session    The Keycloak session for the current context.
+     * @param realm      The realm associated with the operation.
+     * @param client     The client model for which the context draft is being generated.
+     * @param user       The user model for whom the draft is being generated.
+     * @param scopeParam The scope parameter for the access token.
+     * @param entity     The entity for which the user context is being generated.
+     * @return A serialized JSON string of the user context draft.
+     * @throws JsonProcessingException If an error occurs during JSON serialization.
+     */
+    default String generateTransformedUserContext(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, T entity) throws JsonProcessingException {
         ObjectMapper objectMapper = new ObjectMapper();
         objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
         objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
+        ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
 
         session.getContext().setClient(client);
         AccessToken token = sessionAware(session, realm, client, user, scopeParam, (userSession, clientSessionCtx) -> {
             TokenManager tokenManager = new TokenManager();
             return tokenManager.responseBuilder(realm, client, null, session, userSession, clientSessionCtx)
-                    .generateUserContext(actionType, rolesToAddOrRemove).getAccessToken();
+                    .generateAccessToken().getAccessToken();
         });
-
 
         String tideUserKey = user.getFirstAttribute("tideUserKey");
         String vuid = user.getFirstAttribute("vuid");
 
-        // 2. Set these attributes as claims in the token
         if (tideUserKey != null) {
             token.getOtherClaims().put("tideuserkey", tideUserKey);
         }
-
         if (vuid != null) {
             token.getOtherClaims().put("vuid", vuid);
         }
 
+        ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);
+        AccessToken userContext = processorFactory.getProcessor(changeSetRequest.getType()).transformToUserContext(token, session, entity);
+        JsonNode draftNode = objectMapper.valueToTree(userContext);
+        return objectMapper.writeValueAsString(cleanProofDraft(draftNode));
+    }
+
+    /**
+     * Generates a default user context for a given user and client.
+     * This method creates a raw, untransformed AccessToken that includes user-specific claims (e.g., "tideUserKey" and "vuid").
+     * The resulting token is serialized into JSON format and represents the base context without entity-specific transformations.
+     *
+     * @param session The Keycloak session for the current context, providing access to session-related operations.
+     * @param realm   The realm associated with the operation, defining the domain of users and clients.
+     * @param client  The client model for which the default user context is being generated.
+     * @param user    The user model for whom the default user context is being generated.
+     * @return A serialized JSON string of the default (raw) user context, ready to be saved or transformed further.
+     * @throws JsonProcessingException If an error occurs during the serialization of the user context to JSON.
+     */
+    default String generateDefaultUserContext(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user) throws JsonProcessingException {
+        ObjectMapper objectMapper = new ObjectMapper();
+        objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+        objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
+        session.getContext().setClient(client);
+
+        AccessToken token = sessionAware(session, realm, client, user, "openid", (userSession, clientSessionCtx) -> {
+            TokenManager tokenManager = new TokenManager();
+            return tokenManager.responseBuilder(realm, client, null, session, userSession, clientSessionCtx)
+                    .generateAccessToken().getAccessToken();
+        });
+
+        String tideUserKey = user.getFirstAttribute("tideUserKey");
+        String vuid = user.getFirstAttribute("vuid");
+
+        // Add claims to the token
+        if (tideUserKey != null) {
+            token.getOtherClaims().put("tideuserkey", tideUserKey);
+        }
+        if (vuid != null) {
+            token.getOtherClaims().put("vuid", vuid);
+        }
 
         JsonNode draftNode = objectMapper.valueToTree(token);
         return objectMapper.writeValueAsString(cleanProofDraft(draftNode));
     }
 
+    /**
+     * Saves a user context draft to the database.
+     * This method creates a draft entity and persists it along with additional metadata, such as the record ID and proof draft.
+     *
+     * @param session    The Keycloak session for the current context.
+     * @param em         The EntityManager for database interactions.
+     * @param realm      The realm associated with the operation.
+     * @param clientModel The client model for which the draft is being saved.
+     * @param user       The user entity associated with the draft.
+     * @param recordId   The record ID of the change set.
+     * @param type       The type of the change set.
+     * @param proofDraft The serialized proof draft as a JSON string.
+     * @throws Exception If an error occurs during the save operation.
+     */
+    private void saveUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm, ClientModel clientModel, UserEntity user, String recordId, ChangeSetType type, String proofDraft) throws Exception {
+        AccessProofDetailEntity newDetail = new AccessProofDetailEntity();
+        newDetail.setId(KeycloakModelUtils.generateId());
+        newDetail.setClientId(clientModel.getId());
+        newDetail.setUser(user);
+        newDetail.setRecordId(recordId);
+        newDetail.setProofDraft(proofDraft);
+        newDetail.setChangesetType(type);
+        em.persist(newDetail);
+
+        List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, recordId);
+        RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
+
+        boolean isAssigningTideAdminRole;
+        if (type.equals(ChangeSetType.USER_ROLE)) {
+            TideUserRoleMappingDraftEntity roleMapping = em.find(TideUserRoleMappingDraftEntity.class, recordId);
+            if (roleMapping == null) {
+                throw new Exception("Invalid request, no user role mapping draft entity found for this record ID: " + recordId);
+            }
+            isAssigningTideAdminRole = roleMapping.getRoleId().equals(tideRole.getId());
+        } else {
+            isAssigningTideAdminRole = false;
+        }
+
+        List<UserContext> userContexts = new ArrayList<>();
+        UserContextSignRequest req = new UserContextSignRequest("VRK:1");
+
+        proofDetails.forEach(p -> {
+            UserContext userContext = new UserContext(p.getProofDraft());
+            if (isAssigningTideAdminRole) {
+                try {
+                    RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
+                    TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                            .setParameter("role", role).getSingleResult();
+
+                    InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
+                    userContext.setInitCertHash(cert.hash());
+                    p.setProofDraft(userContext.ToString());
+                    em.flush();
+                    req.SetInitializationCertificate(cert);
+
+                } catch (JsonProcessingException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+            userContexts.add(userContext);
+        });
+        req.SetUserContexts(userContexts.toArray(new UserContext[0]));
+        String draft = Base64.getEncoder().encodeToString(req.GetDraft());
+
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, recordId);
+        if (changesetRequestEntity == null) {
+            ChangesetRequestEntity entity = new ChangesetRequestEntity();
+            entity.setChangesetRequestId(recordId);
+            entity.setAdminAuthorizations(new ArrayList<>());
+            entity.setDraftRequest(draft);
+            em.persist(entity);
+            em.flush();
+        } else {
+            changesetRequestEntity.setDraftRequest(draft);
+            em.flush();
+        }
+    }
+
+
     void handleCreateRequest (KeycloakSession session, T entity, EntityManager em) throws Exception;
     void handleDeleteRequest (KeycloakSession session, T entity, EntityManager em);
     void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity userContextDraft, Set<RoleModel> uniqRoles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception;
-
     RoleModel getRoleRequestFromEntity(KeycloakSession session, T entity);
 
-
     // Helper methods
+
     private void commitUserContextToDatabase(KeycloakSession session, AccessProofDetailEntity userContext, EntityManager em) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         ComponentModel componentModel = realm.getComponentsStream()
@@ -451,74 +622,6 @@ public interface ChangeSetProcessor<T> {
                 authSessionManager.removeAuthenticationSession(realm, authSession, false);
             }
         }
-    }
-
-    private void saveUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm, ClientModel clientModel, UserEntity user, String recordId, ChangeSetType type, String proofDraft) throws Exception {
-        AccessProofDetailEntity newDetail = new AccessProofDetailEntity();
-        newDetail.setId(KeycloakModelUtils.generateId());
-        newDetail.setClientId(clientModel.getId());
-        newDetail.setUser(user);
-        newDetail.setRecordId(recordId);
-        newDetail.setProofDraft(proofDraft);
-        newDetail.setChangesetType(type);
-        em.persist(newDetail);
-
-        List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, recordId);
-        RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
-
-
-
-        boolean isAssigningTideAdminRole;
-        if(type.equals(ChangeSetType.USER_ROLE)){
-            TideUserRoleMappingDraftEntity roleMapping = em.find(TideUserRoleMappingDraftEntity.class, recordId);
-            if(roleMapping == null){
-                throw new Exception("Invalid request, no user role mapping draft entity found for this record id "+ recordId);
-            }
-            isAssigningTideAdminRole = roleMapping.getRoleId().equals(tideRole.getId());
-        } else {
-            isAssigningTideAdminRole = false;
-        }
-
-        List<UserContext> userContexts = new ArrayList<>();
-        UserContextSignRequest req = new UserContextSignRequest("VRK:1");
-
-        proofDetails.forEach(p -> {
-            UserContext userContext = new UserContext(p.getProofDraft());
-            if (isAssigningTideAdminRole) {
-                try {
-                    RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
-                    TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                            .setParameter("role", role).getSingleResult();
-
-                    InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
-                    userContext.setInitCertHash(cert.hash());
-                    p.setProofDraft(userContext.ToString());
-                    em.flush();
-                    req.SetInitializationCertificate(cert);
-
-                } catch (JsonProcessingException e) {
-                    throw new RuntimeException(e);
-                }
-            }
-            userContexts.add(userContext);
-        });
-        req.SetUserContexts(userContexts.toArray(new UserContext[0]));
-        String draft = Base64.getEncoder().encodeToString(req.GetDraft());
-
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, recordId);
-        if (changesetRequestEntity == null){
-            ChangesetRequestEntity entity = new ChangesetRequestEntity();
-            entity.setChangesetRequestId(recordId);
-            entity.setAdminAuthorizations(new ArrayList<>());
-            entity.setDraftRequest(draft);
-            em.persist(entity);
-            em.flush();
-        } else {
-            changesetRequestEntity.setDraftRequest(draft);
-            em.flush();
-        }
-
-
     }
 
     private JsonNode cleanProofDraft (JsonNode token) throws JsonProcessingException {

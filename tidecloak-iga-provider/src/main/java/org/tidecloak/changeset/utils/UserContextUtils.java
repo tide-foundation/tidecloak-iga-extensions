@@ -5,10 +5,14 @@ import jakarta.persistence.NoResultException;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.representations.AccessToken;
 import org.tidecloak.UserContextUtilBase;
+import org.tidecloak.changeset.ChangeSetProcessor;
+import org.tidecloak.enums.ChangeSetType;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
+import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.models.TideRoleAdapter;
 import org.tidecloak.models.TideUserAdapter;
 
@@ -60,6 +64,62 @@ public class UserContextUtils extends UserContextUtilBase {
                 .flatMap(roleModel -> UserContextUtils.expandCompositeRolesStream(TideEntityUtils.toTideRoleAdapter(roleModel, session, realm), visited, DraftStatus.ACTIVE))
                 .collect(Collectors.toSet());
     }
+
+    public static void addRoleToAccessToken(AccessToken token, RoleModel role) {
+        AccessToken.Access access = null;
+
+        if (role.getContainer() instanceof RealmModel) {
+            // Handle realm-level roles
+            access = token.getRealmAccess();
+            if (access == null) {
+                access = new AccessToken.Access();
+                token.setRealmAccess(access);
+            }
+
+            // Check for duplicates first
+            if (access.getRoles() != null && access.getRoles().contains(role.getName())) {
+                return; // Role already exists, skip adding
+            }
+
+            // Add the role if it's not already present
+            access.addRole(role.getName());
+        } else if (role.getContainer() instanceof ClientModel client) {
+
+            // Handle client-level roles
+            access = token.getResourceAccess(client.getClientId());
+
+            if (access == null) {
+                access = token.addAccess(client.getClientId());
+                if (client.isSurrogateAuthRequired()) {
+                    access.verifyCaller(true);
+                }
+            } else if (access.getRoles() != null && access.getRoles().contains(role.getName())) {
+                return; // Role already exists, skip adding
+            }
+
+            // Add the role if it's not already present
+            access.addRole(role.getName());
+        }
+    }
+
+    public static void removeRoleFromAccessToken(AccessToken token, RoleModel role) {
+        if (role.getContainer() instanceof RealmModel) {
+            // Handle realm-level roles
+            AccessToken.Access realmAccess = token.getRealmAccess();
+            if (realmAccess != null && realmAccess.getRoles().contains(role.getName())) {
+                realmAccess.getRoles().remove(role.getName());
+            }
+        } else if (role.getContainer() instanceof ClientModel) {
+            // Handle client-level roles
+            ClientModel client = (ClientModel) role.getContainer();
+            AccessToken.Access clientAccess = token.getResourceAccess(client.getClientId());
+            if (clientAccess != null && clientAccess.getRoles().contains(role.getName())) {
+                clientAccess.getRoles().remove(role.getName());
+            }
+        }
+    }
+
+
 
 
 
