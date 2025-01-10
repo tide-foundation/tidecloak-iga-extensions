@@ -6,6 +6,7 @@ import org.keycloak.models.jpa.ClientAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
+import org.tidecloak.changeset.models.ChangeSetRequest;
 import org.tidecloak.enums.ActionType;
 import org.tidecloak.enums.ChangeSetType;
 import org.tidecloak.interfaces.DraftChangeSetRequest;
@@ -20,6 +21,7 @@ import org.tidecloak.utils.TideRolesUtil;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import static org.tidecloak.changeset.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.mapper.TideRolesProtocolMapper.getAccess;
 
 public class TideClientAdapter extends ClientAdapter {
@@ -194,12 +196,8 @@ public class TideClientAdapter extends ClientAdapter {
         if(usersInClient.isEmpty()){
             super.setFullScopeAllowed(false);
             approveFullScope(draft, false);
-            DraftChangeSetRequest draftChangeSetRequest = new DraftChangeSetRequest();
-            draftChangeSetRequest.setType(ChangeSetType.CLIENT);
-            draftChangeSetRequest.setActionType(ActionType.DELETE);
-            draftChangeSetRequest.setChangeSetId(draft.getId());
-
-            util.checkAndUpdateProofRecords(draftChangeSetRequest, draft, ChangeSetType.CLIENT, em);
+            ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, draft);
+            util.checkAndUpdateProofRecords(changeSetRequest, draft, ChangeSetType.CLIENT, em);
             return;
         }
 

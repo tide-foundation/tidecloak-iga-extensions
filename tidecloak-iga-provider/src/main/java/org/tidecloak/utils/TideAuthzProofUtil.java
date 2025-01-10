@@ -34,8 +34,8 @@ import org.keycloak.sessions.RootAuthenticationSessionModel;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
+import org.tidecloak.changeset.models.ChangeSetRequest;
 import org.tidecloak.enums.ChangeSetType;
-import org.tidecloak.interfaces.DraftChangeSetRequest;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakUserContextRequest;
 import org.tidecloak.jpa.entities.*;
@@ -592,7 +592,7 @@ public final class TideAuthzProofUtil {
         return modifiedNode;
     }
 
-    public void checkAndUpdateProofRecords(DraftChangeSetRequest change, Object entity, ChangeSetType changeSetType, EntityManager em) throws Exception {
+    public void checkAndUpdateProofRecords(ChangeSetRequest change, Object entity, ChangeSetType changeSetType, EntityManager em) throws Exception {
         List<ClientModel> affectedClients = getAffectedClients(entity, changeSetType, em);
         TideAuthzProofUtil tideAuthzProofUtil = new TideAuthzProofUtil(session, realm, em);
 
@@ -710,7 +710,7 @@ public final class TideAuthzProofUtil {
 
 
 
-    private void handleRoleDraft(TideRoleDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSetRequest change, Set<RoleModel> roles, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws JsonProcessingException, NoSuchAlgorithmException {
+    private void handleRoleDraft(TideRoleDraftEntity draftEntity, AccessProofDetailEntity proofDetail, ChangeSetRequest change, Set<RoleModel> roles, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws JsonProcessingException, NoSuchAlgorithmException {
         if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() == null)) {
             return;
         }
@@ -777,7 +777,7 @@ public final class TideAuthzProofUtil {
         proofDetail.setProofDraft(updatedProof);
     }
 
-    private void handleClientDraft(TideClientFullScopeStatusDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSetRequest change, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws Exception {
+    private void handleClientDraft(TideClientFullScopeStatusDraftEntity draftEntity, AccessProofDetailEntity proofDetail, ChangeSetRequest change, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws Exception {
         if (draftEntity == null || (draftEntity.getFullScopeEnabled() == DraftStatus.ACTIVE && draftEntity.getFullScopeDisabled() == DraftStatus.NULL)
                 || (draftEntity.getFullScopeDisabled() == DraftStatus.ACTIVE && draftEntity.getFullScopeEnabled() == DraftStatus.NULL)) {
             return;
@@ -915,7 +915,7 @@ public final class TideAuthzProofUtil {
         return Collections.emptyList();
     }
 
-    private void handleUserRoleMappingDraft(TideUserRoleMappingDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSetRequest change, Set<RoleModel> roles, ActionType actionType, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws Exception {
+    private void handleUserRoleMappingDraft(TideUserRoleMappingDraftEntity draftEntity, AccessProofDetailEntity proofDetail, ChangeSetRequest change, Set<RoleModel> roles, ActionType actionType, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws Exception {
         if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() == null)) {
             return;
         }
@@ -974,7 +974,7 @@ public final class TideAuthzProofUtil {
 
     }
 
-    private void handleCompositeRoleMappingDraft(TideCompositeRoleMappingDraftEntity draftEntity, AccessProofDetailEntity proofDetail, DraftChangeSetRequest change, Set<RoleModel> roles, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws Exception {
+    private void handleCompositeRoleMappingDraft(TideCompositeRoleMappingDraftEntity draftEntity, AccessProofDetailEntity proofDetail, ChangeSetRequest change, Set<RoleModel> roles, ClientModel client, TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser, EntityManager em) throws Exception {
         if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() == null)) {
             return;
         }
@@ -1319,7 +1319,7 @@ public final class TideAuthzProofUtil {
         return sortedRight;
     }
 
-    private void handleUserContextUpdates(ChangeSetType changeSetType, AccessProofDetailEntity proofDetail, DraftChangeSetRequest change,
+    private void handleUserContextUpdates(ChangeSetType changeSetType, AccessProofDetailEntity proofDetail, ChangeSetRequest change,
                                           Set<RoleModel> uniqRoles, ActionType actionType, ClientModel client,
                                           TideAuthzProofUtil tideAuthzProofUtil, UserModel wrappedUser,
                                           EntityManager em) throws Exception {

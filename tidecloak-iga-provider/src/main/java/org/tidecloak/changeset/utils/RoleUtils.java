@@ -17,15 +17,12 @@ import static org.tidecloak.changeset.utils.TideEntityUtils.toRoleEntity;
 
 public class RoleUtils {
 
-    public static Boolean commitDefaultRolesOnInitiation(KeycloakSession session, RealmModel realm, RoleModel parent, RoleModel child, EntityManager em) {
+    public static Boolean commitDefaultRolesOnInitiation(KeycloakSession session, RealmModel realm, RoleEntity parentEntity, RoleModel child, EntityManager em) {
         // Wrap parent and child roles
-        RoleModel parentRole = TideRolesUtil.wrapRoleModel(parent, session, realm);
-        RoleEntity parentEntity = toRoleEntity(parentRole, em);
-        RoleModel childRole = TideRolesUtil.wrapRoleModel(child, session, realm);
-        RoleEntity childEntity = toRoleEntity(childRole, em);
+        RoleEntity childEntity = toRoleEntity(child, em);
 
         // Role names
-        String parentName = parent.getName();
+        String parentName = parentEntity.getName();
         String childName = child.getName();
 
         // Check and persist draft if required
@@ -43,7 +40,9 @@ public class RoleUtils {
                 (isManageAccount(parentName) && isManageAccountLinks(childName)) ||
                 (isManageConsent(parentName) && isViewConsent(childName)) ||
                 (isViewClients(parentName) && (isQueryClients(childName) || isQueryGroups(childName))) ||
-                (isDefaultRole(parentName, realm) && isDefaultAccountRole(childName));
+                (isDefaultRole(parentName, realm) && isDefaultAccountRole(childName)) ||
+                (isDefaultRole(parentName, realm) && isOfflineAccessRole(childName)) ||
+                (isDefaultRole(parentName, realm) && isDefaultAuthzRoles(childName));
     }
 
     private static boolean shouldApproveDefaultRole(String parentName, String childName) {
@@ -58,6 +57,11 @@ public class RoleUtils {
     private static boolean isInAllRealmRoles(String childName) {
         return Arrays.asList(AdminRoles.ALL_REALM_ROLES).contains(childName);
     }
+
+    private static boolean isDefaultAuthzRoles(String childName) {
+        return Arrays.asList(Constants.AUTHZ_DEFAULT_AUTHORIZATION_ROLES).contains(childName);
+    }
+
 
     private static boolean isCreateRealm(String childName) {
         return Objects.equals(childName, AdminRoles.CREATE_REALM);
@@ -113,6 +117,9 @@ public class RoleUtils {
 
     private static boolean isDefaultAccountRole(String childName) {
         return Arrays.asList(AccountRoles.DEFAULT).contains(childName);
+    }
+    private static boolean isOfflineAccessRole(String childName) {
+        return Objects.equals(childName, Constants.OFFLINE_ACCESS_ROLE);
     }
 
     private static void persistDraft(RoleEntity parentEntity, RoleEntity childEntity, EntityManager em) {

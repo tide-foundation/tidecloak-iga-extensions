@@ -7,6 +7,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
+import org.tidecloak.Constants;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.models.TideClientAdapter;
 import org.tidecloak.models.TideRoleAdapter;
@@ -19,6 +20,8 @@ import java.util.stream.Collectors;
 
 public class ClientUtils {
     public static List<ClientModel> getUniqueClientList(KeycloakSession session, RealmModel realm, RoleModel role, EntityManager em) {
+
+
         List<ClientModel> clientList = session.clients().getClientsStream(realm)
                 .map(client -> new TideClientAdapter(realm, em, session, em.find(ClientEntity.class, client.getId())))
                 .filter(TideClientAdapter::isFullScopeAllowed)
@@ -40,6 +43,14 @@ public class ClientUtils {
                 clientList.add((ClientModel) activeCompRole.getContainer());
             }
         });
+
+        // TODO: remove this temp method once we create empty userContexts on client creation for all users in a realm
+        if (!role.getName().equalsIgnoreCase(Constants.TIDE_REALM_ADMIN)) {
+            clientList.removeIf(r ->
+                    r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.ADMIN_CONSOLE_CLIENT_ID) ||
+                            r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.ADMIN_CLI_CLIENT_ID)
+            );
+        }
 
         return clientList.stream().distinct().collect(Collectors.toList());
     }

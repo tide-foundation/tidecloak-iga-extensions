@@ -37,7 +37,7 @@ import static org.keycloak.utils.StreamsUtil.closing;
 import static org.tidecloak.changeset.utils.TideEntityUtils.wrapRoleModel;
 
 
-public class TideUserAdapter extends TideUserAdapterBase {
+public class TideUserAdapter extends UserAdapter {
     private final KeycloakSession session;
     private final RealmModel realm;
     private final ChangeSetProcessor<TideUserRoleMappingDraftEntity> processor;
@@ -51,12 +51,6 @@ public class TideUserAdapter extends TideUserAdapterBase {
         ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
         this.processor = changeSetProcessorFactory.getProcessor(ChangeSetType.USER_ROLE);
 
-    }
-
-    @Override
-    public UserModel wrapUserModel(UserModel userModel, KeycloakSession session, RealmModel realm){
-
-        return TideEntityUtils.wrapUserModel(userModel, session, realm);
     }
 
     @Override

@@ -27,7 +27,7 @@ public class UserContextUtils extends UserContextUtilBase {
                 .collect(Collectors.toList());
     }
 
-    public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, ClientModel client, String recordId) {
+    public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, ClientModel client) {
         return em.createNamedQuery("getProofDetailsByClient", AccessProofDetailEntity.class)
                 .setParameter("clientId", client.getId())
                 .getResultList();
