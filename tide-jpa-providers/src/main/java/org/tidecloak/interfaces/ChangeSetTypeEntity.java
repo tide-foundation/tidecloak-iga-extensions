@@ -9,9 +9,9 @@ public enum ChangeSetTypeEntity {
     USER_ROLE(ChangeSetType.USER_ROLE, "USER_ROLE_MAPPING_DRAFT", TideUserRoleMappingDraftEntity.class),
 //    GROUP(ChangeSetType.GROUP, "KEYCLOAK_GROUP_DRAFT", TideGroupDraftEntity.class),
 //    USER_GROUP_MEMBERSHIP(ChangeSetType.USER_GROUP_MEMBERSHIP, "USER_GROUP_MEMBERSHIP_DRAFT", TideUserGroupMembershipEntity.class),
-    COMPOSITE_ROLE(ChangeSetType.COMPOSITE_ROLE, "COMPOSITE_ROLE_MAPPING_DRAFT", TideCompositeRoleMappingDraftEntity.class);
+    COMPOSITE_ROLE(ChangeSetType.COMPOSITE_ROLE, "COMPOSITE_ROLE_MAPPING_DRAFT", TideCompositeRoleMappingDraftEntity.class),
 //    GROUP_ROLE(ChangeSetType.GROUP_ROLE, "GROUP_ROLE_MAPPING_DRAFT", TideGroupDraftEntity.class),
-//    CLIENT(ChangeSetType.CLIENT, "CLIENT_FULL_SCOPE_STATUS_DRAFT", TideClientFullScopeStatusDraftEntity.class);
+    CLIENT_FULLSCOPE(ChangeSetType.CLIENT_FULLSCOPE, "CLIENT_FULL_SCOPE_STATUS_DRAFT", TideClientFullScopeStatusDraftEntity.class);
 
     private final ChangeSetType baseType; // Reference to the first enum
     private final String tableName;

@@ -1,10 +1,7 @@
 package org.tidecloak.IGARealmResource;
 
-import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.NoResultException;
@@ -19,7 +16,6 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
-import org.midgard.Serialization.JsonSorter;
 import org.midgard.models.*;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
@@ -30,7 +26,6 @@ import org.tidecloak.enums.ActionType;
 import org.tidecloak.enums.ChangeSetType;
 import org.tidecloak.enums.DraftStatus;
 import org.tidecloak.enums.WorkflowType;
-import org.tidecloak.enums.models.WorkflowParams;
 import org.tidecloak.interfaces.*;
 import org.tidecloak.interfaces.TidecloakChangeSetRequest.TidecloakUserContextRequest;
 import org.tidecloak.jpa.entities.*;
@@ -224,7 +219,7 @@ public class IGARealmResource {
                 }else if (changeSet.getType().equals(ChangeSetType.COMPOSITE_ROLE) || changeSet.getType().equals(ChangeSetType.ROLE)){
                     redirectUrl = tideIdp.getConfig().get("changeSetRolesEndpoint");
                     redirectUrlSig = tideIdp.getConfig().get("changeSetRolesURLSig");
-                }else if (changeSet.getType().equals(ChangeSetType.CLIENT)){
+                }else if (changeSet.getType().equals(ChangeSetType.CLIENT_FULLSCOPE)){
                     redirectUrl = tideIdp.getConfig().get("changeSetClientsEndpoint");
                     redirectUrlSig = tideIdp.getConfig().get("changeSetClientsURLSig");
                 }
@@ -340,7 +335,7 @@ public class IGARealmResource {
                     .getResultList();
 
 
-            RequestedChanges requestChange = new RequestedChanges("",ChangeSetType.CLIENT, RequestType.CLIENT, client.getClientId(), realm.getName(), c.getAction(), c.getId(), new ArrayList<>(), DraftStatus.DRAFT, DraftStatus.NULL);
+            RequestedChanges requestChange = new RequestedChanges("",ChangeSetType.CLIENT_FULLSCOPE, RequestType.CLIENT, client.getClientId(), realm.getName(), c.getAction(), c.getId(), new ArrayList<>(), DraftStatus.DRAFT, DraftStatus.NULL);
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
                 requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), c.getClient().getClientId(), p.getProofDraft()));
@@ -550,7 +545,7 @@ public class IGARealmResource {
             }
 
             ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
-            processorFactory.getProcessor(type).executeWorkflow(session, mapping, em, WorkflowType.COMMIT, null);
+            processorFactory.getProcessor(type).executeWorkflow(session, mapping, em, WorkflowType.COMMIT, null, null);
 
             if (type.equals(ChangeSetType.USER_ROLE) && realmAuthorizers != null){
                 RoleModel role = realm.getRoleById(((TideUserRoleMappingDraftEntity) mapping).getRoleId());
@@ -580,7 +575,7 @@ public class IGARealmResource {
             case COMPOSITE_ROLE -> getCompositeRoleMappings(em, change, action);
             case ROLE -> getRoleMappings(em, change, action);
             case USER -> getUserMappings(em, change, action);
-            case CLIENT -> getClientMappings(em, change, action);
+            case CLIENT_FULLSCOPE -> getClientMappings(em, change, action);
         };
     }
 
@@ -737,7 +732,7 @@ public class IGARealmResource {
             client.setFullScopeAllowed(false);
         }
 
-        util.checkAndUpdateProofRecords(change, mapping, ChangeSetType.CLIENT, em);
+        util.checkAndUpdateProofRecords(change, mapping, ChangeSetType.CLIENT_FULLSCOPE, em);
     }
 
     private void commitDraft(Object mapping, EntityManager em) {
@@ -885,7 +880,7 @@ public class IGARealmResource {
 //                    TideUserDraftEntity draftEntity = em.find(TideUserDraftEntity.class, proofDetail.getRecordId());
 //                    handleUserDraft(draftEntity, proofDetail, client, tideAuthzProofUtil, wrappedUser);
 //                }
-//                else if (proofDetail.getChangesetType() == ChangeSetType.CLIENT) {
+//                else if (proofDetail.getChangesetType() == ChangeSetType.CLIENT_FULLSCOPE) {
 //                    TideClientFullScopeStatusDraftEntity draftEntity = em.find(TideClientFullScopeStatusDraftEntity.class, proofDetail.getRecordId());
 //                    handleClientDraft(draftEntity, proofDetail, change, client, tideAuthzProofUtil, wrappedUser, em);
 //                }
@@ -895,7 +890,7 @@ public class IGARealmResource {
 
 
 //    private List<ClientModel> getAffectedClients(Object entity, ChangeSetType changeSetType, EntityManager em) {
-//        if (changeSetType == ChangeSetType.CLIENT) {
+//        if (changeSetType == ChangeSetType.CLIENT_FULLSCOPE) {
 //            List<ClientModel> client = new ArrayList<>();
 //            ClientEntity clientEntity = ((TideClientFullScopeStatusDraftEntity) entity).getClient();
 //            client.add(realm.getClientById(clientEntity.getId()));
@@ -945,7 +940,7 @@ public class IGARealmResource {
 //                    .setParameter("clientId", client.getId())
 //                    .getResultList();
 //        }
-//        else if (changeSetType == ChangeSetType.CLIENT) {
+//        else if (changeSetType == ChangeSetType.CLIENT_FULLSCOPE) {
 //            if (((TideClientFullScopeStatusDraftEntity) entity).getAction() == ActionType.CREATE) {
 //                String clientId = ((TideClientFullScopeStatusDraftEntity) entity).getClient().getId();
 //
@@ -1030,7 +1025,7 @@ public class IGARealmResource {
 //            return;
 //        }
 //        if (change.getActionType() == ActionType.DELETE) {
-//            if (change.getType() == ChangeSetType.CLIENT) {
+//            if (change.getType() == ChangeSetType.CLIENT_FULLSCOPE) {
 //                boolean hasCommittedRole = ((TideUserAdapter) wrappedUser).getRoleMappingsStreamByStatusAndAction(DraftStatus.ACTIVE, ActionType.CREATE)
 //                        .anyMatch(x -> x.isClientRole() && Objects.equals(x.getContainer().getId(), client.getId()));
 //
@@ -1096,7 +1091,7 @@ public class IGARealmResource {
 //        }
 //
 //        if (change.getActionType() == ActionType.DELETE) {
-//            if (change.getType() == ChangeSetType.CLIENT) {
+//            if (change.getType() == ChangeSetType.CLIENT_FULLSCOPE) {
 //                String proof = proofDetail.getProofDraft();
 //                TideCompositeRoleMappingDraftEntity compositeRoleMappingDraft = em.find(TideCompositeRoleMappingDraftEntity.class, proofDetail.getRecordId());
 //                if (compositeRoleMappingDraft != null) {
@@ -1154,7 +1149,7 @@ public class IGARealmResource {
 //        }
 //
 //        if (change.getActionType() == ActionType.DELETE) {
-//            if (change.getType() == ChangeSetType.CLIENT) {
+//            if (change.getType() == ChangeSetType.CLIENT_FULLSCOPE) {
 //                String proof = proofDetail.getProofDraft();
 //                TideCompositeRoleMappingDraftEntity compositeRoleMappingDraft = em.find(TideCompositeRoleMappingDraftEntity.class, proofDetail.getRecordId());
 //                if (compositeRoleMappingDraft != null) {

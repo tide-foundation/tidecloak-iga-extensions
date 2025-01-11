@@ -121,7 +121,7 @@ public class IGAUtils {
             case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, changeSetId);
             case ROLE -> em.find(TideRoleDraftEntity.class, changeSetId);
             case COMPOSITE_ROLE -> em.find(TideCompositeRoleMappingDraftEntity.class, changeSetId);
-            case CLIENT -> em.find(TideClientFullScopeStatusDraftEntity.class, changeSetId);
+            case CLIENT_FULLSCOPE -> em.find(TideClientFullScopeStatusDraftEntity.class, changeSetId);
             default -> null;
         };
     }
@@ -145,7 +145,7 @@ public class IGAUtils {
                     ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(DraftStatus.APPROVED);
                 }
                 break;
-            case CLIENT:
+            case CLIENT_FULLSCOPE:
                 if (changeSetAction == ActionType.CREATE) {
                     ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeEnabled(DraftStatus.APPROVED);
                 } else if (changeSetAction == ActionType.DELETE) {
@@ -176,7 +176,7 @@ public class IGAUtils {
                     ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(draftStatus);
                 }
                 break;
-            case CLIENT:
+            case CLIENT_FULLSCOPE:
                 if (changeSetAction == ActionType.CREATE) {
                     ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeEnabled(draftStatus);
                 } else if (changeSetAction == ActionType.DELETE) {

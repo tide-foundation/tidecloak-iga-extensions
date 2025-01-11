@@ -716,7 +716,7 @@ public final class TideAuthzProofUtil {
         }
 
         if (change.getActionType() == ActionType.DELETE) {
-            if (change.getType() == ChangeSetType.CLIENT) {
+            if (change.getType() == ChangeSetType.CLIENT_FULLSCOPE) {
                 TideCompositeRoleMappingDraftEntity compositeRoleMappingDraft = em.find(TideCompositeRoleMappingDraftEntity.class, proofDetail.getRecordId());
                 if (compositeRoleMappingDraft != null) {
                     RoleModel childRole = realm.getRoleById(compositeRoleMappingDraft.getChildRole().getId());
@@ -835,7 +835,7 @@ public final class TideAuthzProofUtil {
                     .setParameter("clientId", client.getId())
                     .getResultList();
         }
-        else if (changeSetType == ChangeSetType.CLIENT) {
+        else if (changeSetType == ChangeSetType.CLIENT_FULLSCOPE) {
             if (((TideClientFullScopeStatusDraftEntity) entity).getAction() == ActionType.CREATE) {
                 String clientId = ((TideClientFullScopeStatusDraftEntity) entity).getClient().getId();
 
@@ -919,7 +919,7 @@ public final class TideAuthzProofUtil {
         if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() == null)) {
             return;
         }
-        if (change.getType() == ChangeSetType.CLIENT) {
+        if (change.getType() == ChangeSetType.CLIENT_FULLSCOPE) {
             if (change.getActionType() == ActionType.DELETE) {
                 boolean hasCommittedRole = ((TideUserAdapter) wrappedUser).getRoleMappingsStreamByStatusAndAction(DraftStatus.ACTIVE, ActionType.CREATE)
                         .anyMatch(x -> x.isClientRole() && Objects.equals(x.getContainer().getId(), client.getId()));
@@ -978,7 +978,7 @@ public final class TideAuthzProofUtil {
         if (draftEntity == null || (draftEntity.getDraftStatus() == DraftStatus.ACTIVE && draftEntity.getDeleteStatus() == null)) {
             return;
         }
-        if (change.getType() == ChangeSetType.CLIENT) {
+        if (change.getType() == ChangeSetType.CLIENT_FULLSCOPE) {
             if (change.getActionType() == ActionType.DELETE) {
                 TideCompositeRoleMappingDraftEntity compositeRoleMappingDraft = em.find(TideCompositeRoleMappingDraftEntity.class, proofDetail.getRecordId());
                 if (compositeRoleMappingDraft != null) {
@@ -1028,7 +1028,7 @@ public final class TideAuthzProofUtil {
 
     private List<ClientModel> getAffectedClients(Object entity, ChangeSetType changeSetType, EntityManager em) throws Exception {
 
-        if (changeSetType == ChangeSetType.CLIENT) {
+        if (changeSetType == ChangeSetType.CLIENT_FULLSCOPE) {
             List<ClientModel> client = new ArrayList<>();
             ClientEntity clientEntity = ((TideClientFullScopeStatusDraftEntity) entity).getClient();
             client.add(realm.getClientById(clientEntity.getId()));
@@ -1341,7 +1341,7 @@ public final class TideAuthzProofUtil {
                 TideUserDraftEntity userDraft = em.find(TideUserDraftEntity.class, proofDetail.getRecordId());
                 handleUserDraft(userDraft, proofDetail, client, tideAuthzProofUtil, wrappedUser);
                 break;
-            case CLIENT:
+            case CLIENT_FULLSCOPE:
                 TideClientFullScopeStatusDraftEntity clientDraft = em.find(TideClientFullScopeStatusDraftEntity.class, proofDetail.getRecordId());
                 handleClientDraft(clientDraft, proofDetail, change, client, tideAuthzProofUtil, wrappedUser, em);
                 break;

@@ -31,7 +31,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
     protected static final Logger logger = Logger.getLogger(UserRoleProcessor.class);
 
     @Override
-    public void request(KeycloakSession session, ChangeSetRequest change, TideCompositeRoleMappingDraftEntity entity, EntityManager em, ActionType action) {
+    public void request(KeycloakSession session, TideCompositeRoleMappingDraftEntity entity, EntityManager em, ActionType action, Runnable callback) {
         try {
             // Log the start of the request with detailed context
             logger.info(String.format(
@@ -44,11 +44,11 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
             switch (action) {
                 case CREATE:
                     logger.info(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
-                    handleCreateRequest(session, entity, em);
+                    handleCreateRequest(session, entity, em, callback);
                     break;
                 case DELETE:
                     logger.info(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
-                    handleDeleteRequest(session, entity, em);
+                    handleDeleteRequest(session, entity, em, callback);
                     break;
                 default:
                     logger.warn(String.format("Unsupported action type: %s for Mapping ID: %s in workflow: REQUEST", action, entity.getId()));
@@ -104,7 +104,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
     }
 
     @Override
-    public void handleCreateRequest(KeycloakSession session, TideCompositeRoleMappingDraftEntity entity, EntityManager em) throws Exception {
+    public void handleCreateRequest(KeycloakSession session, TideCompositeRoleMappingDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         RoleEntity parentEntity = entity.getComposite();
         RoleEntity childEntity = entity.getChildRole();
@@ -161,23 +161,21 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
     }
 
     @Override
-    public void handleDeleteRequest(KeycloakSession session, TideCompositeRoleMappingDraftEntity mapping, EntityManager em) {
+    public void handleDeleteRequest(KeycloakSession session, TideCompositeRoleMappingDraftEntity mapping, EntityManager em, Runnable callback) {
         mapping.setDeleteStatus(DraftStatus.DRAFT);
         mapping.setTimestamp(System.currentTimeMillis());
         processExistingRequest(session, em, session.getContext().getRealm(), mapping, ActionType.DELETE );
     }
 
     @Override
-    public AccessToken transformToUserContext(AccessToken token, KeycloakSession session, TideCompositeRoleMappingDraftEntity entity){
-        Map<String, AccessToken.Access> allAccess = token.getResourceAccess();
-
+    public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideCompositeRoleMappingDraftEntity entity, UserModel user ){
         RealmModel realm = session.getContext().getRealm();
         RoleModel childRole = realm.getRoleById(entity.getChildRole().getId());
         RoleModel compositeRole = realm.getRoleById(entity.getComposite().getId());
         Set<RoleModel> roleToAddOrDelete = new HashSet<>();
         roleToAddOrDelete.add(childRole);
         roleToAddOrDelete.add(compositeRole);
-
+        UserContextUtils userContextUtils = new UserContextUtils();
 
         ChangeSetRequest change = getChangeSetRequestFromEntity(session, entity);
         roleToAddOrDelete.forEach(r -> {
@@ -187,7 +185,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
                 removeRoleFromAccessToken(token, r);
             }
         });
-
+        userContextUtils.normalizeAccessToken(token);
         return token;
     }
 

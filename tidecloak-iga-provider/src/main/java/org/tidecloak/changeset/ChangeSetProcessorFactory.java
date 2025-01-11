@@ -24,6 +24,7 @@ public class ChangeSetProcessorFactory {
 //            case USER -> UserProcessor::new; // Supplier for UserProcessor
             case COMPOSITE_ROLE -> CompositeRoleProcessor::new;
             case USER_ROLE -> UserRoleProcessor::new;
+            case CLIENT_FULLSCOPE -> ClientFullScopeProcessor::new;
             default -> throw new IllegalArgumentException("No processor defined for type: " + type);
         };
     }

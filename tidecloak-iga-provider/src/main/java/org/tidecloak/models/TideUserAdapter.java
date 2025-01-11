@@ -121,7 +121,7 @@ public class TideUserAdapter extends UserAdapter {
                 em.persist(draftUserRole);
 
                 WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE);
-                processor.executeWorkflow(session, draftUserRole, em, WorkflowType.REQUEST, params);
+                processor.executeWorkflow(session, draftUserRole, em, WorkflowType.REQUEST, params, null);
             }
 
         } catch(Exception e){
@@ -158,7 +158,7 @@ public class TideUserAdapter extends UserAdapter {
             }
 
             WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE);
-            processor.executeWorkflow(session, committedEntity, em, WorkflowType.REQUEST, params);
+            processor.executeWorkflow(session, committedEntity, em, WorkflowType.REQUEST, params, null);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

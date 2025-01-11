@@ -73,7 +73,7 @@ public interface ChangeSetProcessor<T> {
      * @param workflow  The type of workflow to execute (e.g. REQUEST, APPROVAL, COMMIT).
      * @param params    Additional parameters specific to the workflow.
      */
-    default void executeWorkflow(KeycloakSession session, T entity, EntityManager em, WorkflowType workflow, WorkflowParams params) throws Exception {
+    default void executeWorkflow(KeycloakSession session, T entity, EntityManager em, WorkflowType workflow, WorkflowParams params, Runnable callback) throws Exception {
         ChangeSetRequest change = getChangeSetRequestFromEntity(session, entity);
 
         switch (workflow) {
@@ -84,7 +84,7 @@ public interface ChangeSetProcessor<T> {
                 commit(session, change, entity, em, null);
                 break;
             case REQUEST:
-                request(session, change, entity, em, params.getActionType());
+                request(session, entity, em, params.getActionType(), callback);
                 break;
             default:
                 throw new IllegalArgumentException("Unsupported workflow: " + workflow);
@@ -97,20 +97,19 @@ public interface ChangeSetProcessor<T> {
      * the specific logic to helper methods `handleCreateRequest` and `handleDeleteRequest`.
      *
      * @param session   The Keycloak session for the current context.
-     * @param change    The change set request containing details of the change.
      * @param mapping   The entity being processed.
      * @param em        The EntityManager for database interactions.
      * @param action    The type of action to be performed (e.g., CREATE, DELETE).
      * @throws IllegalArgumentException If the action type is not supported.
      */
-    default void request(KeycloakSession session, ChangeSetRequest change, T mapping, EntityManager em, ActionType action) throws Exception {
+    default void request(KeycloakSession session, T mapping, EntityManager em, ActionType action, Runnable callback) throws Exception {
         // Handle action types (CREATE, DELETE)
         switch (action) {
             case CREATE:
-                handleCreateRequest(session, mapping, em);
+                handleCreateRequest(session, mapping, em, callback);
                 break;
             case DELETE:
-                handleDeleteRequest(session, mapping, em);
+                handleDeleteRequest(session, mapping, em, callback);
                 break;
             default:
                 throw new IllegalArgumentException("Unsupported action: " + action);
@@ -381,10 +380,11 @@ public interface ChangeSetProcessor<T> {
      * @param session            The Keycloak session for context.
      * @return The transformed access token.
      */
-    default AccessToken transformToUserContext(
+    default AccessToken transformUserContext(
             AccessToken token,
             KeycloakSession session,
-            T entity
+            T entity,
+            UserModel user
 
     ) {
         return token;
@@ -428,7 +428,7 @@ public interface ChangeSetProcessor<T> {
         }
 
         ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);
-        AccessToken userContext = processorFactory.getProcessor(changeSetRequest.getType()).transformToUserContext(token, session, entity);
+        AccessToken userContext = processorFactory.getProcessor(changeSetRequest.getType()).transformUserContext(token, session, entity, user);
         JsonNode draftNode = objectMapper.valueToTree(userContext);
         return objectMapper.writeValueAsString(cleanProofDraft(draftNode));
     }
@@ -551,8 +551,8 @@ public interface ChangeSetProcessor<T> {
     }
 
 
-    void handleCreateRequest (KeycloakSession session, T entity, EntityManager em) throws Exception;
-    void handleDeleteRequest (KeycloakSession session, T entity, EntityManager em);
+    void handleCreateRequest (KeycloakSession session, T entity, EntityManager em, Runnable callback) throws Exception;
+    void handleDeleteRequest (KeycloakSession session, T entity, EntityManager em, Runnable callback) throws Exception;
     void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity userContextDraft, Set<RoleModel> uniqRoles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception;
     RoleModel getRoleRequestFromEntity(KeycloakSession session, T entity);
 

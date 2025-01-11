@@ -8,5 +8,5 @@ public enum ChangeSetType {
     USER_GROUP_MEMBERSHIP,
     COMPOSITE_ROLE,
     GROUP_ROLE,
-    CLIENT;
+    CLIENT_FULLSCOPE;
 }

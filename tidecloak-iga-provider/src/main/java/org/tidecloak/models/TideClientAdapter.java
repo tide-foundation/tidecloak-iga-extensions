@@ -6,15 +6,16 @@ import org.keycloak.models.jpa.ClientAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
+import org.tidecloak.changeset.ChangeSetProcessorFactory;
 import org.tidecloak.changeset.models.ChangeSetRequest;
 import org.tidecloak.enums.ActionType;
 import org.tidecloak.enums.ChangeSetType;
-import org.tidecloak.interfaces.DraftChangeSetRequest;
 import org.tidecloak.enums.DraftStatus;
+import org.tidecloak.enums.WorkflowType;
+import org.tidecloak.enums.models.WorkflowParams;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
-import org.tidecloak.mapper.TideRolesProtocolMapper;
 import org.tidecloak.utils.TideAuthzProofUtil;
 import org.tidecloak.utils.TideRolesUtil;
 
@@ -27,6 +28,8 @@ import static org.tidecloak.mapper.TideRolesProtocolMapper.getAccess;
 public class TideClientAdapter extends ClientAdapter {
 
     private final boolean isMigration;
+    private final ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+
     public TideClientAdapter(RealmModel realm, EntityManager em, KeycloakSession session, ClientEntity entity) {
         super(realm, em, session, entity);
         String migrationFlag = System.getenv("IS_MIGRATION");
@@ -45,44 +48,49 @@ public class TideClientAdapter extends ClientAdapter {
 
     @Override
     public void setFullScopeAllowed(boolean value) {
-        List<TideClientFullScopeStatusDraftEntity> statusDraft = em.createNamedQuery("getClientFullScopeStatus", TideClientFullScopeStatusDraftEntity.class)
-                .setParameter("client", entity)
-                .getResultList();
+        try {
+            TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
+            ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
+            List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
+            List<TideClientFullScopeStatusDraftEntity> statusDraft = em.createNamedQuery("getClientFullScopeStatus", TideClientFullScopeStatusDraftEntity.class)
+                    .setParameter("client", entity)
+                    .getResultList();
 
-        if(isMigration) {
-            approveFullScope(statusDraft.get(0), value);
-            super.setFullScopeAllowed(value);
-            return;
-        }
-        TideAuthzProofUtil util = new TideAuthzProofUtil(session, realm, em);
-        ClientModel client = session.clients().getClientByClientId(realm, entity.getClientId());
-        List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
-
-
-        // if no users and no drafts
-        if (usersInRealm.isEmpty() && statusDraft.isEmpty()) {
-            createFullScopeStatusDraft(value);
-            super.setFullScopeAllowed(value);
-            return;
-        }
-
-        // if theres users and no drafts
-        else if (!usersInRealm.isEmpty() && statusDraft.isEmpty()) {
-            createFullScopeStatusDraft(false); // New clients defaults to restricted scope if there are users in the realm.
-            return;
-        }
-        TideClientFullScopeStatusDraftEntity clientFullScopeStatuses = statusDraft.get(0);
-        try{
-            if (value) {
-                handleFullScopeEnabled(clientFullScopeStatuses, util, usersInRealm, client);
-
-            } else {
-                handleFullScopeDisabled(clientFullScopeStatuses, util, usersInRealm, client);
+            // if no users and no drafts
+            if (usersInRealm.isEmpty() && statusDraft.isEmpty()) {
+                createFullScopeStatusDraft(value);
+                super.setFullScopeAllowed(value);
+                return;
             }
 
+            if(isMigration) {
+                approveFullScope(statusDraft.get(0), value);
+                super.setFullScopeAllowed(value);
+                return;
+            }
+
+            // if theres users and no drafts
+            else if (!usersInRealm.isEmpty() && statusDraft.isEmpty()) {
+                createFullScopeStatusDraft(false); // New clients defaults to restricted scope if there are users in the realm.
+                return;
+            }
+
+            Runnable callback = () -> {
+                try {
+                    super.setFullScopeAllowed(value);
+                } catch (Exception e) {
+                    throw new RuntimeException("Error during FULL_SCOPE callback", e);
+                }
+            };
+
+            TideClientFullScopeStatusDraftEntity clientFullScopeStatuses = statusDraft.get(0);
+            ActionType actionType = value ? ActionType.CREATE : ActionType.DELETE;
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, value, actionType);
+            changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT_FULLSCOPE).executeWorkflow(session, clientFullScopeStatuses, em, WorkflowType.REQUEST, params, callback);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+
     }
     private void createFullScopeStatusDraft(boolean value) {
         TideClientFullScopeStatusDraftEntity draft = new TideClientFullScopeStatusDraftEntity();
@@ -173,7 +181,7 @@ public class TideClientAdapter extends ClientAdapter {
                 UserModel tideUser = TideRolesUtil.wrapUserModel(user, session, realm);
                 Set<RoleModel> activeRoles = TideRolesUtil.getDeepUserRoleMappings(tideUser, session, realm, em, DraftStatus.ACTIVE);
                 Set<RoleModel> roles = getAccess(activeRoles, client, client.getClientScopes(true).values().stream(), true);
-                util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, roles, statusId, ChangeSetType.CLIENT, ActionType.CREATE, true);
+                util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, roles, statusId, ChangeSetType.CLIENT_FULLSCOPE, ActionType.CREATE, true);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
@@ -197,7 +205,7 @@ public class TideClientAdapter extends ClientAdapter {
             super.setFullScopeAllowed(false);
             approveFullScope(draft, false);
             ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, draft);
-            util.checkAndUpdateProofRecords(changeSetRequest, draft, ChangeSetType.CLIENT, em);
+            util.checkAndUpdateProofRecords(changeSetRequest, draft, ChangeSetType.CLIENT_FULLSCOPE, em);
             return;
         }
 
@@ -222,7 +230,7 @@ public class TideClientAdapter extends ClientAdapter {
                     }
                     return true;
                 }).collect(Collectors.toSet());
-                util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, activeRoles, statusId, ChangeSetType.CLIENT, ActionType.DELETE, true);
+                util.generateAndSaveProofDraft(realm.getClientById(entity.getId()), tideUser, activeRoles, statusId, ChangeSetType.CLIENT_FULLSCOPE, ActionType.DELETE, true);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }

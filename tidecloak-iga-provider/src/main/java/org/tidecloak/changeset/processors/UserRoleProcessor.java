@@ -62,7 +62,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     @Override
-    public void request(KeycloakSession session, ChangeSetRequest change, TideUserRoleMappingDraftEntity entity, EntityManager em, ActionType action) {
+    public void request(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em, ActionType action, Runnable callback) {
         try {
             // Log the start of the request with detailed context
             logger.info(String.format(
@@ -75,11 +75,11 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             switch (action) {
                 case CREATE:
                     logger.info(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
-                    handleCreateRequest(session, entity, em);
+                    handleCreateRequest(session, entity, em, callback);
                     break;
                 case DELETE:
                     logger.info(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
-                    handleDeleteRequest(session, entity, em);
+                    handleDeleteRequest(session, entity, em, callback);
                     break;
                 default:
                     logger.warn(String.format("Unsupported action type: %s for Mapping ID: %s in workflow: REQUEST", action, entity.getId()));
@@ -107,7 +107,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
 
     @Override
-    public void handleCreateRequest(KeycloakSession session, TideUserRoleMappingDraftEntity mapping, EntityManager em) {
+    public void handleCreateRequest(KeycloakSession session, TideUserRoleMappingDraftEntity mapping, EntityManager em, Runnable callback) {
         RealmModel realm = session.getContext().getRealm();
         RoleModel role = realm.getRoleById(mapping.getRoleId());
         UserModel userModel = TideEntityUtils.toTideUserAdapter(mapping.getUser(), session, realm);
@@ -125,7 +125,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     @Override
-    public void handleDeleteRequest(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em) {
+    public void handleDeleteRequest(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em, Runnable callback) {
         RealmModel realm = session.getContext().getRealm();
         RoleEntity roleEntity = em.find(RoleEntity.class, entity.getRoleId());
         RoleModel tideRoleModel = TideEntityUtils.toTideRoleAdapter(roleEntity, session, realm);
@@ -179,7 +179,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     @Override
-    public AccessToken transformToUserContext(AccessToken token, KeycloakSession session, TideUserRoleMappingDraftEntity entity){
+    public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideUserRoleMappingDraftEntity entity, UserModel user){
         RealmModel realm = session.getContext().getRealm();
         RoleModel role = realm.getRoleById(entity.getRoleId());
 
@@ -196,7 +196,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 removeRoleFromAccessToken(token, r);
             }
         });
-
+        userContextUtils.normalizeAccessToken(token);
         return token;
     }
 

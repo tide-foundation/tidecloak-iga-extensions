@@ -5,6 +5,7 @@ import jakarta.persistence.NoResultException;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.models.utils.RoleUtils;
 import org.keycloak.representations.AccessToken;
 import org.tidecloak.UserContextUtilBase;
 import org.tidecloak.changeset.ChangeSetProcessor;
@@ -23,19 +24,6 @@ import java.util.stream.Stream;
 import static org.tidecloak.changeset.utils.TideEntityUtils.*;
 
 public class UserContextUtils extends UserContextUtilBase {
-
-    public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, String recordId) {
-        return em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                .setParameter("recordId", recordId)
-                .getResultStream()
-                .collect(Collectors.toList());
-    }
-
-    public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, ClientModel client) {
-        return em.createNamedQuery("getProofDetailsByClient", AccessProofDetailEntity.class)
-                .setParameter("clientId", client.getId())
-                .getResultList();
-    }
 
     @Override
     public  Set<RoleModel> getDeepUserRoleMappings(UserModel user, KeycloakSession session, RealmModel realm, DraftStatus draftStatus) {
@@ -63,6 +51,45 @@ public class UserContextUtils extends UserContextUtilBase {
         return roles.stream()
                 .flatMap(roleModel -> UserContextUtils.expandCompositeRolesStream(TideEntityUtils.toTideRoleAdapter(roleModel, session, realm), visited, DraftStatus.ACTIVE))
                 .collect(Collectors.toSet());
+    }
+
+
+    public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, String recordId) {
+        return em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                .setParameter("recordId", recordId)
+                .getResultStream()
+                .collect(Collectors.toList());
+    }
+
+    public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, ClientModel client) {
+        return em.createNamedQuery("getProofDetailsByClient", AccessProofDetailEntity.class)
+                .setParameter("clientId", client.getId())
+                .getResultList();
+    }
+
+
+    public static Set<RoleModel> getAccess(Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes, boolean isFullScopeAllowed) {
+        if (isFullScopeAllowed) {
+            return roleModels;
+        } else {
+
+            // 1 - Client roles of this client itself
+            Stream<RoleModel> scopeMappings = client.getRolesStream();
+
+            // 2 - Role mappings of client itself + default client scopes + optional client scopes requested by scope parameter (if applyScopeParam is true)
+            Stream<RoleModel> clientScopesMappings;
+            clientScopesMappings = clientScopes.flatMap(ScopeContainerModel::getScopeMappingsStream);
+
+            scopeMappings = Stream.concat(scopeMappings, clientScopesMappings);
+
+            // 3 - Expand scope mappings
+            scopeMappings = RoleUtils.expandCompositeRolesStream(scopeMappings);
+
+            // Intersection of expanded user roles and expanded scopeMappings
+            roleModels.retainAll(scopeMappings.collect(Collectors.toSet()));
+
+            return roleModels;
+        }
     }
 
     public static void addRoleToAccessToken(AccessToken token, RoleModel role) {
@@ -119,7 +146,48 @@ public class UserContextUtils extends UserContextUtilBase {
         }
     }
 
+    public void normalizeAccessToken(AccessToken token){
+        updateTokenAudience(token);
+        cleanAccessToken(token);
+    }
 
+    private void updateTokenAudience(AccessToken token) {
+        // Create a set to hold the updated audience
+        Set<String> audience = new HashSet<>();
+
+        // Add clients from resource access that still have roles
+        Map<String, AccessToken.Access> resourceAccess = token.getResourceAccess();
+        if (resourceAccess != null) {
+            resourceAccess.forEach((clientId, access) -> {
+                if (access != null && access.getRoles() != null && !access.getRoles().isEmpty()) {
+                    audience.add(clientId); // Include only clients with roles
+                }
+            });
+        }
+
+        // Update the token audience
+        token.audience(audience.toArray(new String[0]));
+    }
+
+    private static void cleanAccessToken(AccessToken token) {
+        // Clean up realm access if roles are empty or null
+        if (token.getRealmAccess() != null &&
+                (token.getRealmAccess().getRoles() == null || token.getRealmAccess().getRoles().isEmpty())) {
+            token.setRealmAccess(null);
+        }
+
+        // Clean up resource access
+        if (token.getResourceAccess() != null) {
+            Map<String, AccessToken.Access> resourceAccess = token.getResourceAccess();
+            resourceAccess.entrySet().removeIf(entry ->
+                    entry.getValue().getRoles() == null || entry.getValue().getRoles().isEmpty()
+            );
+            // If no resource access remains, remove the map entirely
+            if (resourceAccess.isEmpty()) {
+                token.setResourceAccess(null);
+            }
+        }
+    }
 
 
 
