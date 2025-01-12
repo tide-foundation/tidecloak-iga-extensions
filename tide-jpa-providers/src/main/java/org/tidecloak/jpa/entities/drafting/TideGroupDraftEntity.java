@@ -3,8 +3,8 @@ package org.tidecloak.jpa.entities.drafting;
 
 import jakarta.persistence.*;
 import org.hibernate.annotations.Nationalized;
-import org.tidecloak.enums.ActionType;
-import org.tidecloak.enums.DraftStatus;
+import org.tidecloak.shared.enums.ActionType;
+import org.tidecloak.shared.enums.DraftStatus;
 
 @NamedQueries({
         @NamedQuery(name="getGroupByStatus", query="select m from TideGroupDraftEntity m where m.group = :group and m.draftStatus = :draftStatus"),

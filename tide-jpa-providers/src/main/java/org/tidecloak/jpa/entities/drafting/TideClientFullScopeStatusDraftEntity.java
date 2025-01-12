@@ -3,8 +3,8 @@ package org.tidecloak.jpa.entities.drafting;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
-import org.tidecloak.enums.DraftStatus;
-import org.tidecloak.enums.ActionType;
+import org.tidecloak.shared.enums.DraftStatus;
+import org.tidecloak.shared.enums.ActionType;
 
 
 @NamedQueries({

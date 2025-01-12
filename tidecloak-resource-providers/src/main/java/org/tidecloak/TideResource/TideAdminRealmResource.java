@@ -13,13 +13,13 @@ import org.keycloak.services.ErrorPage;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.VendorData;
-import org.tidecloak.models.ChangesetRequestAdapter;
+import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import static org.tidecloak.TideRequests.TideRoleRequests.createRealmAdminInitCert;
+import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRealmAdminInitCert;
 
 public class TideAdminRealmResource {
 

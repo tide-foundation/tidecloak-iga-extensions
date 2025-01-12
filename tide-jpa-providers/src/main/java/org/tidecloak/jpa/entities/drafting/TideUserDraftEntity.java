@@ -4,8 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import org.keycloak.models.jpa.entities.UserEntity;
 
 import jakarta.persistence.*;
-import org.tidecloak.enums.ActionType;
-import org.tidecloak.enums.DraftStatus;
+import org.tidecloak.shared.enums.ActionType;
+import org.tidecloak.shared.enums.DraftStatus;
 
 
 @NamedQueries({

@@ -3,7 +3,7 @@ package org.tidecloak.jpa.entities;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.UserEntity;
-import org.tidecloak.enums.ChangeSetType;
+import org.tidecloak.shared.enums.ChangeSetType;
 
 @NamedQueries({
         @NamedQuery(name="getProofDetailsForUser", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user ORDER BY a.createdTimestamp DESC"),
