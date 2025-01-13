@@ -143,9 +143,10 @@ public class TideAdminRealmResource {
                         session.getContext().getRealm().setDefaultSignatureAlgorithm("EdDSA");
                         logger.info("IGA has been enabled, default signature algorithm updated to EdDSA");
                     }
-                    // Auto create Realm-Admin init cert here.
-                    createRealmAdminInitCert(session);
-
+                    ClientModel realmManagement = realm.getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
+                    if(session.roles().getClientRole(realmManagement, org.tidecloak.shared.Constants.TIDE_REALM_ADMIN) == null){
+                        createRealmAdminInitCert(session);
+                    }
                 } else {
                     // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA
                     // TODO: Fix error: Uncaught server error: java.lang.RuntimeException: org.keycloak.crypto.SignatureException:
