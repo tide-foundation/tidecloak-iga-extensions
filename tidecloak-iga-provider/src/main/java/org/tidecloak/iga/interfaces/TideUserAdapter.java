@@ -11,6 +11,7 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 
+import org.tidecloak.iga.changesetprocessors.utils.ClientUtils;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.WorkflowType;
@@ -101,6 +102,23 @@ public class TideUserAdapter extends UserAdapter {
 
             // Add draft request
             if (entity == null || entity.isEmpty()) {
+
+                if(role.getContainer() instanceof  RealmModel) {
+                    // if realm role, check if theres any affected clients. If no affected clients then dont need to create draft.
+                    List<ClientModel> affectedClients = ClientUtils.getUniqueClientList(session, realm, roleModel);
+                    if(affectedClients.isEmpty()){
+                        TideUserRoleMappingDraftEntity draftUserRole = new TideUserRoleMappingDraftEntity();
+                        draftUserRole.setId(KeycloakModelUtils.generateId());
+                        draftUserRole.setRoleId(role.getId());
+                        draftUserRole.setUser(this.getEntity());
+                        draftUserRole.setAction(ActionType.CREATE);
+                        draftUserRole.setDraftStatus(DraftStatus.ACTIVE);
+                        em.persist(draftUserRole);
+                        return;
+                    }
+                }
+
+
                 // Create a draft record for new user role mapping
                 TideUserRoleMappingDraftEntity draftUserRole = new TideUserRoleMappingDraftEntity();
                 draftUserRole.setId(KeycloakModelUtils.generateId());
