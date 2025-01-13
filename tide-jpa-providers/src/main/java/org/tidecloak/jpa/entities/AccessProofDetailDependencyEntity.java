@@ -2,7 +2,7 @@ package org.tidecloak.jpa.entities;
 
 
 import jakarta.persistence.*;
-import org.tidecloak.interfaces.ChangeSetType;
+import org.tidecloak.shared.enums.ChangeSetType;
 
 import java.io.Serializable;
 

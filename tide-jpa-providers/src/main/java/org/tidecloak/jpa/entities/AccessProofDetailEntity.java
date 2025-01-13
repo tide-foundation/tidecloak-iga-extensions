@@ -3,12 +3,10 @@ package org.tidecloak.jpa.entities;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.UserEntity;
-import org.tidecloak.interfaces.ChangeSetType;
-
-import java.util.ArrayList;
-import java.util.List;
+import org.tidecloak.shared.enums.ChangeSetType;
 
 @NamedQueries({
+        @NamedQuery(name="getProofDetailsForUser", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForDraft", query="SELECT a FROM AccessProofDetailEntity a WHERE a.recordId = :recordId ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForDraftByChangeSetType", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType"),
         @NamedQuery(name="getProofDetailsForUserByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user and a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),
@@ -66,10 +64,8 @@ public class AccessProofDetailEntity {
     @Column(name = "CREATED_TIMESTAMP")
     protected Long createdTimestamp = System.currentTimeMillis();
 
-    @ElementCollection
-    @CollectionTable(name = "DRAFT_SIGNATURES", joinColumns = @JoinColumn(name = "PROOF_ID"))
-    @Column(name = "SIGNATURES")
-    protected List<SignatureEntry> signatures = new ArrayList<>();
+    @Column(name = "FINAL_SIGNATURE")
+    protected String signature;
 
     public String getId() {
         return id;
@@ -127,14 +123,12 @@ public class AccessProofDetailEntity {
         createdTimestamp = timestamp;
     }
 
-    public List<SignatureEntry> getSignatures() {
-        return signatures;
+    public String getSignature() {
+        return signature;
     }
-    public void addSignature(SignatureEntry signatures) {
-        this.signatures.add(signatures);
-    }
-    public void setSignatures(List<SignatureEntry> signatures) {
-        this.signatures = signatures;
+
+    public void setSignature(String signature) {
+        this.signature = signature;
     }
 
 

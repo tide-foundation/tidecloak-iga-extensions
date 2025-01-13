@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <changeSet id="25.0.6-07112024" author="tidecloak">
+        <dropTable tableName="DRAFT_SIGNATURES"/>
+        <addColumn tableName="ACCESS_PROOF_DETAIL">
+            <column name="FINAL_SIGNATURE" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <dropNotNullConstraint tableName="ROLE_DRAFT" columnName="DELETE_STATUS" columnDataType="VARCHAR(36)" />
+
+        <!-- Add Columns to ROLE_DRAFT -->
+        <addColumn tableName="ROLE_DRAFT">
+            <column name="INIT_CERT" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="INIT_CERT_SIG" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <dropNotNullConstraint tableName="ROLE_DRAFT" columnName="DELETE_STATUS" columnDataType="VARCHAR(36)" />
+
+        <!-- LICENSE_HISTORY Table -->
+        <createTable tableName="LICENSE_HISTORY">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="PROVIDER_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="VRK" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="GVRK" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="VVK_ID" type="VARCHAR(256)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="CUSTOMER_ID" type="VARCHAR(256)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="VENDOR_ID" type="VARCHAR(256)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="PAYER_PUB" type="VARCHAR(512)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="EXPIRY" type="BIGINT">
+                <constraints nullable="true"/>
+            </column>
+        </createTable>
+
+        <!-- AUTHORIZER Table -->
+        <createTable tableName="AUTHORIZER">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false" />
+            </column>
+            <column name="PROVIDER_ID" type="VARCHAR(36)">
+                <constraints nullable="false" />
+            </column>
+            <column name="TYPE" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="AUTHORIZER" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="AUTHORIZER_CERTIFICATE" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+
+        <!-- AUTHORIZER_SIGNATURES Table -->
+        <createTable tableName="AUTHORIZER_SIGNATURES">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false" />
+            </column>
+            <column name="PROOF_ID" type="VARCHAR(36)">
+                <constraints nullable="false" />
+            </column>
+            <column name="AUTHORIZER_ID" type="VARCHAR(36)">
+                <constraints nullable="false" />
+            </column>
+            <column name="AUTHORIZER_SIGNATURE" type="VARCHAR(255)">
+                <constraints nullable="false" />
+            </column>
+        </createTable>
+
+        <!-- CHANGESET_REQUEST Table -->
+        <createTable tableName="CHANGESET_REQUEST">
+            <column name="CHANGESET_REQUEST_ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false" />
+            </column>
+            <column name="DRAFT_REQUEST" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="TIMESTAMP" type="BIGINT"/>
+        </createTable>
+
+        <createTable tableName="ADMIN_AUTHORIZATIONS">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ADMIN_AUTHORIZATION" type="text">
+                <constraints nullable="false" />
+            </column>
+        </createTable>
+
+        <addForeignKeyConstraint
+                baseTableName="ADMIN_AUTHORIZATIONS"
+                baseColumnNames="ID"
+                referencedTableName="CHANGESET_REQUEST"
+                referencedColumnNames="CHANGESET_REQUEST_ID"
+                constraintName="fk_my_entity_strings_entity_id" />
+    </changeSet>
+</databaseChangeLog>

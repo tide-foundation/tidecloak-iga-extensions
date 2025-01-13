@@ -8,20 +8,28 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
-import org.keycloak.models.IdentityProviderModel;
-import org.keycloak.models.KeycloakSession;
-import org.keycloak.models.RealmModel;
+import org.keycloak.models.*;
+import org.keycloak.services.ErrorPage;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
+import org.midgard.models.VendorData;
+import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+
+import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRealmAdminInitCert;
 
 public class TideAdminRealmResource {
 
     private final KeycloakSession session;
     private final RealmModel realm;
     private final AdminPermissionEvaluator auth;
+    public static final String tideRealmAdminRole = "tide-realm-admin";
+    protected static final String tideVendorKeyId = "tide-vendor-key";
+
+
 
     protected static final Logger logger = Logger.getLogger(TideAdminRealmResource.class);
     public TideAdminRealmResource(KeycloakSession session, RealmModel realm, AdminPermissionEvaluator auth) {
@@ -29,6 +37,44 @@ public class TideAdminRealmResource {
         this.realm = realm;
         this.auth = auth;
     }
+
+    @POST
+    @Path("add-authorization")
+    @Produces(MediaType.TEXT_PLAIN)
+    public Response AddAuthorization(@FormParam("changeSetId") String changeSetId, @FormParam("actionType") String actionType, @FormParam("changeSetType") String changeSetType, @FormParam("authorizerApproval") String authorizerApproval, @FormParam("authorizerAuthentication") String authorizerAuthentication ) throws Exception {
+        try {
+            RoleModel role = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
+            auth.adminAuth().getUser().hasRole(role);
+
+            ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
+                    .filter(x -> tideVendorKeyId.equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
+
+            if(componentModel == null) {
+                logger.warn("There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
+                return ErrorPage.error(session, null, Response.Status.BAD_REQUEST, "There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
+            }
+            MultivaluedHashMap<String, String> tideVendorKeyConfig = componentModel.getConfig();
+            ObjectMapper objectMapper = new ObjectMapper();
+            String currentSecretKeys = tideVendorKeyConfig.getFirst("clientSecret");
+
+            SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
+            String vrk = secretKeys.activeVrk;
+
+            VendorData vendorData = Midgard.DecryptVendorData(authorizerAuthentication, vrk);
+
+            ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSetType, changeSetId, actionType, auth.adminAuth().getUser(), vendorData.AuthToken, vendorData.blindSig, authorizerApproval);
+
+            return buildResponse(200, "Successfully added admin authorization to changeSetRequest with id " + changeSetId);
+
+        } catch (Exception e) {
+            logger.error("Error adding authorization to change set request with ID: " + changeSetId +"." + Arrays.toString(e.getStackTrace()));
+            return  buildResponse(500, "Error adding authorization to change set request with ID: " + changeSetId +" ." + e.getMessage());
+        }
+    }
+
+
     @POST
     @Path("new-voucher")
     @Produces(MediaType.TEXT_PLAIN)
@@ -80,7 +126,7 @@ public class TideAdminRealmResource {
     @Path("toggle-iga")
     @Produces(MediaType.TEXT_PLAIN)
 
-    public Response toggleIGA(@FormParam("isIGAEnabled") boolean isEnabled) {
+    public Response toggleIGA(@FormParam("isIGAEnabled") boolean isEnabled) throws Exception {
         try{
             auth.realm().requireManageRealm();
             session.getContext().getRealm().setAttribute("isIGAEnabled", isEnabled);
@@ -97,6 +143,9 @@ public class TideAdminRealmResource {
                         session.getContext().getRealm().setDefaultSignatureAlgorithm("EdDSA");
                         logger.info("IGA has been enabled, default signature algorithm updated to EdDSA");
                     }
+                    // Auto create Realm-Admin init cert here.
+                    createRealmAdminInitCert(session);
+
                 } else {
                     // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA
                     // TODO: Fix error: Uncaught server error: java.lang.RuntimeException: org.keycloak.crypto.SignatureException:
