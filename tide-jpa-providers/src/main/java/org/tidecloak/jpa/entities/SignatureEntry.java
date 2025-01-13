@@ -1,53 +1,79 @@
 package org.tidecloak.jpa.entities;
-import jakarta.persistence.Column;
-import jakarta.persistence.Embeddable;
-import java.io.Serializable;
 
-@Embeddable
+import jakarta.persistence.*;
+import org.keycloak.models.utils.KeycloakModelUtils;
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
+
+@Entity
+@Table(name = "SIGNATURE_ENTRY")
 public class SignatureEntry implements Serializable {
 
-    @Column(name = "ACCESS_PROOF_SIGNATURE")
-    private String ACCESS_PROOF_SIGNATURE;
+    @Id
+    @Column(name = "ID", length = 36)
+    @Access(AccessType.PROPERTY)
+    protected String id = KeycloakModelUtils.generateId();
 
-    @Column(name = "ADMIN_PUBLIC_KEY")
-    private String ADMIN_PUBLIC_KEY; //
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "AUTHORIZER_ID", referencedColumnName = "ID")
+    private AuthorizerEntity authorizerEntity;
 
-    @Column(name = "ID_TOKEN_SIGNATURE")
-    private  String ID_TOKEN_SIGNATURE;
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "CHANGESET_REQUEST_ID", referencedColumnName = "CHANGESET_REQUEST_ID")
+    private ChangesetRequestEntity changesetRequest;
 
-    // Constructors
-    public SignatureEntry() {
+    @ElementCollection
+    @CollectionTable(
+            name = "SIGNATURE_ENTRY_SIGNATURES",
+            joinColumns = @JoinColumn(name = "SIGNATURE_ENTRY_ID")
+    )
+    @Column(name = "AUTHORIZE_SIGNATURE", nullable = false)
+    private List<String> authorizerSignatures = new ArrayList<>();
+
+    // Default constructor
+    public SignatureEntry() {}
+
+    // Constructor with fields
+    public SignatureEntry(AuthorizerEntity authorizerEntity, List<String> authorizerSignatures) {
+        this.authorizerEntity = authorizerEntity;
+        this.authorizerSignatures = authorizerSignatures;
     }
 
-    public SignatureEntry(String accessProofsignature, String idTokenSignature, String adminPublicKey ) {
-        this.ACCESS_PROOF_SIGNATURE = accessProofsignature;
-        this.ID_TOKEN_SIGNATURE = idTokenSignature;
-        this.ADMIN_PUBLIC_KEY = adminPublicKey;
-
+    // Getters and Setters
+    public String getId() {
+        return id;
     }
 
-    // Getters and setters
-    public String getACCESS_PROOF_SIGNATURE() {
-        return ACCESS_PROOF_SIGNATURE;
+    public void setId(String id) {
+        this.id = id;
     }
 
-    public void setACCESS_PROOF_SIGNATURE(String signature) {
-        this.ACCESS_PROOF_SIGNATURE = signature;
+    public AuthorizerEntity getAuthorizerEntity() {
+        return authorizerEntity;
     }
 
-    public String getID_TOKEN_SIGNATURE() {
-        return ID_TOKEN_SIGNATURE;
+    public void setAuthorizerEntity(AuthorizerEntity authorizerEntity) {
+        this.authorizerEntity = authorizerEntity;
     }
 
-    public void setID_TOKEN_SIGNATURE(String signature) {
-        this.ID_TOKEN_SIGNATURE = signature;
+    public ChangesetRequestEntity getChangesetRequest() {
+        return changesetRequest;
     }
 
-    public String getADMIN_PUBLIC_KEY() {
-        return ADMIN_PUBLIC_KEY;
+    public void setChangesetRequest(ChangesetRequestEntity changesetRequest) {
+        this.changesetRequest = changesetRequest;
     }
 
-    public void setADMIN_PUBLIC_KEY(String adminPublicKey) {
-        this.ADMIN_PUBLIC_KEY = adminPublicKey;
+    public List<String> getAuthorizerSignatures() {
+        return authorizerSignatures;
+    }
+
+    public void setAuthorizerSignatures(List<String> authorizerSignatures) {
+        this.authorizerSignatures = authorizerSignatures;
+    }
+
+    public void addAuthorizerSignature(String authorizerSignature) {
+        this.authorizerSignatures.add(authorizerSignature);
     }
 }

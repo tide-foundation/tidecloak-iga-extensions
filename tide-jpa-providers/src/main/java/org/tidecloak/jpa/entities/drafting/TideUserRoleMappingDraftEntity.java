@@ -3,10 +3,8 @@ package org.tidecloak.jpa.entities.drafting;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.UserEntity;
-import org.tidecloak.interfaces.ActionType;
-import org.tidecloak.interfaces.DraftStatus;
-
-import java.io.Serializable;
+import org.tidecloak.shared.enums.ActionType;
+import org.tidecloak.shared.enums.DraftStatus;
 
 @NamedQueries({
         @NamedQuery(name="getUserRoleMappingsByStatusAndRealmAndRecordId", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.id = :changesetId AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),

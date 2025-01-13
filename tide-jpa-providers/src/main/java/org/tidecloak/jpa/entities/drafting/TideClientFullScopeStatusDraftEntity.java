@@ -1,13 +1,10 @@
 package org.tidecloak.jpa.entities.drafting;
 
-import com.fasterxml.jackson.annotation.JsonIdentityInfo;
 import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.annotation.ObjectIdGenerators;
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
-import org.tidecloak.interfaces.ActionType;
-import org.tidecloak.interfaces.DraftStatus;
+import org.tidecloak.shared.enums.DraftStatus;
+import org.tidecloak.shared.enums.ActionType;
 
 
 @NamedQueries({
