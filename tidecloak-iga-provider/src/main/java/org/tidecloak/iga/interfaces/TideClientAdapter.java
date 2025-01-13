@@ -17,10 +17,13 @@ import java.util.*;
 
 public class TideClientAdapter extends ClientAdapter {
 
+    private final boolean isMigration;
     private final ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
 
     public TideClientAdapter(RealmModel realm, EntityManager em, KeycloakSession session, ClientEntity entity) {
         super(realm, em, session, entity);
+        String migrationFlag = System.getenv("IS_MIGRATION");
+        this.isMigration = migrationFlag != null && migrationFlag.equalsIgnoreCase("true");
     }
 
     @Override
@@ -44,6 +47,19 @@ public class TideClientAdapter extends ClientAdapter {
             // if no users and no drafts
             if (usersInRealm.isEmpty() && statusDraft.isEmpty()) {
                 createFullScopeStatusDraft(value);
+                super.setFullScopeAllowed(value);
+                return;
+            }
+
+            if(isMigration) {
+                if(value){
+                    statusDraft.get(0).setFullScopeDisabled(DraftStatus.NULL);
+                    statusDraft.get(0).setFullScopeEnabled(DraftStatus.ACTIVE);
+                } else {
+                    statusDraft.get(0).setFullScopeEnabled(DraftStatus.NULL);
+                    statusDraft.get(0).setFullScopeDisabled(DraftStatus.ACTIVE);
+                }
+                em.flush();
                 super.setFullScopeAllowed(value);
                 return;
             }
