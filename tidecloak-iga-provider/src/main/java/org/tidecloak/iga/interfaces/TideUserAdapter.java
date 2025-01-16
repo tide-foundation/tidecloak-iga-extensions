@@ -82,7 +82,6 @@ public class TideUserAdapter extends UserAdapter {
 
     @Override
     public void grantRole(RoleModel roleModel) {
-
         try {
             RoleModel role = wrapRoleModel(roleModel, session, realm);
             super.grantRole(role);
@@ -106,7 +105,7 @@ public class TideUserAdapter extends UserAdapter {
                 if(role.getContainer() instanceof  RealmModel) {
                     // if realm role, check if theres any affected clients. If no affected clients then dont need to create draft.
                     List<ClientModel> affectedClients = ClientUtils.getUniqueClientList(session, realm, roleModel);
-                    if(affectedClients.isEmpty()){
+                    if(affectedClients.isEmpty() || role.equals(realm.getDefaultRole())){
                         TideUserRoleMappingDraftEntity draftUserRole = new TideUserRoleMappingDraftEntity();
                         draftUserRole.setId(KeycloakModelUtils.generateId());
                         draftUserRole.setRoleId(role.getId());
@@ -117,7 +116,6 @@ public class TideUserAdapter extends UserAdapter {
                         return;
                     }
                 }
-
 
                 // Create a draft record for new user role mapping
                 TideUserRoleMappingDraftEntity draftUserRole = new TideUserRoleMappingDraftEntity();

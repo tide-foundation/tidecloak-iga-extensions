@@ -38,8 +38,6 @@ public class TideUserProvider extends JpaUserProvider {
         draftUser.setAction(ActionType.CREATE);
         em.persist(draftUser);
 
-        // Add draft record for user groups. DEFAULT ROLES ARE COMMITED BY DEFAULT FOR NOW
-        // TODO: have a step here that goes and gets it signed by VVK automatically and save final proof to DB
         RoleModel defaultRole =  realm.getDefaultRole();
         var draftDefaultRoleUserRole = new TideUserRoleMappingDraftEntity();
         draftDefaultRoleUserRole.setId(KeycloakModelUtils.generateId());

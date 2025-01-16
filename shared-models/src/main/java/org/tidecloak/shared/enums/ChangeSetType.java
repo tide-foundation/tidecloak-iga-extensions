@@ -1,6 +1,8 @@
 package org.tidecloak.shared.enums;
 
 public enum ChangeSetType {
+    DEFAULT_ROLES,
+    CLIENT,
     ROLE,
     USER,
     USER_ROLE,

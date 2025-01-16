@@ -29,8 +29,6 @@ public class TideAdminRealmResource {
     public static final String tideRealmAdminRole = "tide-realm-admin";
     protected static final String tideVendorKeyId = "tide-vendor-key";
 
-
-
     protected static final Logger logger = Logger.getLogger(TideAdminRealmResource.class);
     public TideAdminRealmResource(KeycloakSession session, RealmModel realm, AdminPermissionEvaluator auth) {
         this.session = session;

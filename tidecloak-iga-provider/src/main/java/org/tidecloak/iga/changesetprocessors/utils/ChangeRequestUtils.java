@@ -1,19 +1,26 @@
 package org.tidecloak.iga.changesetprocessors.utils;
 
+import jakarta.persistence.EntityManager;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
+import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
-import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
+
+import java.util.List;
 
 public class ChangeRequestUtils {
 
     public static ChangeSetRequest getChangeSetRequestFromEntity(KeycloakSession session, Object entity) {
         ChangeSetRequest changeSetRequest = new ChangeSetRequest();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
         if (entity instanceof TideUserRoleMappingDraftEntity userRoleEntity) {
             ActionType actionType = userRoleEntity.getDeleteStatus() != null ? ActionType.DELETE : ActionType.CREATE;
@@ -31,7 +38,14 @@ public class ChangeRequestUtils {
             changeSetRequest.setChangeSetId(roleEntity.getId());
             changeSetRequest.setType(ChangeSetType.ROLE);
             changeSetRequest.setActionType(actionType);
-        } else if (entity instanceof TideClientFullScopeStatusDraftEntity draftEntity) {
+        } else if (entity instanceof TideClientDraftEntity draftEntity) {
+            if(draftEntity.getDraftStatus().equals(DraftStatus.DRAFT)){
+                changeSetRequest.setChangeSetId(draftEntity.getId());
+                changeSetRequest.setType(ChangeSetType.CLIENT);
+                changeSetRequest.setActionType(ActionType.CREATE);
+                return changeSetRequest;
+            }
+
             boolean isFullScopeEnabledActive = draftEntity.getFullScopeEnabled() != null
                     && draftEntity.getFullScopeEnabled().equals(DraftStatus.ACTIVE);
             boolean isFullScopeDisabledActive = draftEntity.getFullScopeDisabled() != null

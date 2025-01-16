@@ -7,7 +7,9 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 
@@ -34,6 +36,21 @@ public class UserContextUtilBase {
                     .setParameter("clientId", clientId)
                     .getSingleResult();
         } catch (NoResultException e) {
+            // get the default usercontext for the lcient
+            return null;
+        }
+    }
+
+    public static TideClientDraftEntity getDefaultUserContext(KeycloakSession session, String clientId) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        ClientEntity client = em.getReference(ClientEntity.class, clientId);
+
+        try {
+            return em.createNamedQuery("getClientFullScopeStatus", TideClientDraftEntity.class)
+                    .setParameter("client", client)
+                    .getSingleResult();
+        } catch (NoResultException e) {
+            // get the default usercontext for the lcient
             return null;
         }
     }

@@ -14,7 +14,7 @@ import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.iga.interfaces.TideUserAdapter;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
-import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.iga.interfaces.TideClientAdapter;
 
@@ -23,11 +23,11 @@ import java.util.*;
 import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.addRoleToAccessToken;
 
-public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientFullScopeStatusDraftEntity> {
+public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDraftEntity> {
     protected static final Logger logger = Logger.getLogger(ClientFullScopeProcessor.class);
 
     @Override
-    public void commit(KeycloakSession session, ChangeSetRequest change, TideClientFullScopeStatusDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {
+    public void commit(KeycloakSession session, ChangeSetRequest change, TideClientDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {
         logger.info(String.format(
                 "Starting workflow: COMMIT. Processor: %s, Action: %s, Entity ID: %s",
                 this.getClass().getSimpleName(),
@@ -57,7 +57,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientFu
     }
 
     @Override
-    public void request(KeycloakSession session, TideClientFullScopeStatusDraftEntity entity, EntityManager em, ActionType action, Runnable callback) {
+    public void request(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, ActionType action, Runnable callback) {
         try {
             // Log the start of the request with detailed context
             logger.info(String.format(
@@ -111,7 +111,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientFu
     }
 
     @Override
-    public void handleCreateRequest(KeycloakSession session, TideClientFullScopeStatusDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
+    public void handleCreateRequest(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         ClientModel client = realm.getClientByClientId(entity.getClient().getClientId());
         if (entity.getFullScopeEnabled() == DraftStatus.APPROVED) {
@@ -159,7 +159,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientFu
     }
 
     @Override
-    public void handleDeleteRequest(KeycloakSession session, TideClientFullScopeStatusDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
+    public void handleDeleteRequest(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         ClientModel client = realm.getClientByClientId(entity.getClient().getClientId());
         if (entity.getFullScopeDisabled() == DraftStatus.APPROVED) {
@@ -194,7 +194,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientFu
                 }
                 approveFullScope(entity, false);
                 ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);
-                ChangeSetProcessor.super.updateAffectedUserContexts(session, changeSetRequest, entity, em);
+                ChangeSetProcessor.super.updateAffectedUserContexts(session, realm, changeSetRequest, entity, em);
                 return;
             }
 
@@ -223,7 +223,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientFu
     @Override
     public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> uniqRoles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
         RealmModel realm = session.getContext().getRealm();
-        TideClientFullScopeStatusDraftEntity affectedClientFullScopeEntity = em.find(TideClientFullScopeStatusDraftEntity.class, affectedUserContextDraft.getRecordId());
+        TideClientDraftEntity affectedClientFullScopeEntity = em.find(TideClientDraftEntity.class, affectedUserContextDraft.getRecordId());
         if (affectedClientFullScopeEntity == null ||
                 isValidStatusPair(affectedClientFullScopeEntity.getFullScopeDisabled(), affectedClientFullScopeEntity.getFullScopeEnabled()) ||
                 isValidStatusPair(affectedClientFullScopeEntity.getFullScopeEnabled(), affectedClientFullScopeEntity.getFullScopeDisabled())) {
@@ -243,12 +243,12 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientFu
     }
 
     @Override
-    public RoleModel getRoleRequestFromEntity(KeycloakSession session, TideClientFullScopeStatusDraftEntity entity) {
+    public RoleModel getRoleRequestFromEntity(KeycloakSession session, RealmModel realm, TideClientDraftEntity entity) {
         return null;
     }
 
     @Override
-    public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideClientFullScopeStatusDraftEntity entity, UserModel user) {
+    public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideClientDraftEntity entity, UserModel user) {
         RealmModel realm = session.getContext().getRealm();
         ClientModel client = realm.getClientByClientId(entity.getClient().getClientId());
 
@@ -294,7 +294,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientFu
         return token;
     }
 
-    private void commitCallback(RealmModel realm, ChangeSetRequest change, TideClientFullScopeStatusDraftEntity entity, ClientModel client){
+    private void commitCallback(RealmModel realm, ChangeSetRequest change, TideClientDraftEntity entity, ClientModel client){
         if (change.getActionType() == ActionType.CREATE) {
             if(entity.getFullScopeEnabled() != DraftStatus.APPROVED){
                 throw new RuntimeException("Draft record has not been approved by all admins.");
@@ -312,7 +312,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientFu
         }
     }
 
-    private void approveFullScope(TideClientFullScopeStatusDraftEntity clientFullScopeStatuses, boolean isEnabled) {
+    private void approveFullScope(TideClientDraftEntity clientFullScopeStatuses, boolean isEnabled) {
         if (isEnabled) {
             clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.NULL);
             clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.ACTIVE);

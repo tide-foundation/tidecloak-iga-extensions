@@ -147,8 +147,8 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
     }
 
     @Override
-    public RoleModel getRoleRequestFromEntity(KeycloakSession session, TideRoleDraftEntity entity) {
-        return session.getContext().getRealm().getRoleById(entity.getRole().getId());
+    public RoleModel getRoleRequestFromEntity(KeycloakSession session,  RealmModel realm,TideRoleDraftEntity entity) {
+        return realm.getRoleById(entity.getRole().getId());
     }
 
     @Override

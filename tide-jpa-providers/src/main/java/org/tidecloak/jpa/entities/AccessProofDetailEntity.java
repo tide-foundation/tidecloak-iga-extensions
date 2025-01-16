@@ -8,6 +8,9 @@ import org.tidecloak.shared.enums.ChangeSetType;
 @NamedQueries({
         @NamedQuery(name="getProofDetailsForUser", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForDraft", query="SELECT a FROM AccessProofDetailEntity a WHERE a.recordId = :recordId ORDER BY a.createdTimestamp DESC"),
+        @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndRealm", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.realmId = :realmId"),
+        @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndIdAndRealm", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.recordId = :recordId and a.realmId = :realmId"),
+        @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndId", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.recordId = :recordId"),
         @NamedQuery(name="getProofDetailsForDraftByChangeSetType", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType"),
         @NamedQuery(name="getProofDetailsForUserByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user and a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForUserByClientAndRecordId", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user and a.clientId = :clientId and a.recordId = :recordId ORDER BY a.createdTimestamp DESC"),
@@ -58,6 +61,9 @@ public class AccessProofDetailEntity {
     @Column(name = "CLIENT_ID")
     protected String clientId;
 
+    @Column(name = "REALM_ID")
+    protected String realmId;
+
     @Column(name = "PROOF_DRAFT")
     protected String proofDraft;
 
@@ -89,6 +95,14 @@ public class AccessProofDetailEntity {
 
     public void setClientId(String clientId) {
         this.clientId = clientId;
+    }
+
+    public String getRealmId() {
+        return realmId;
+    }
+
+    public void setRealmId(String realmId) {
+        this.realmId = realmId;
     }
 
     public String getRecordId() {

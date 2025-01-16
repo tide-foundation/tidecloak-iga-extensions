@@ -1,27 +1,30 @@
 package org.tidecloak.iga.interfaces.models;
 
+import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
+import org.tidecloak.iga.changesetprocessors.processors.*;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.jpa.entities.drafting.*;
 
-public enum ChangeSetTypeEntity {
-    ROLE(ChangeSetType.ROLE, "ROLE_ENTITY_DRAFT", TideRoleDraftEntity.class),
-//    USER(ChangeSetType.USER, "USER_ENTITY_DRAFT", TideUserDraftEntity.class),
-    USER_ROLE(ChangeSetType.USER_ROLE, "USER_ROLE_MAPPING_DRAFT", TideUserRoleMappingDraftEntity.class),
-//    GROUP(ChangeSetType.GROUP, "KEYCLOAK_GROUP_DRAFT", TideGroupDraftEntity.class),
-//    USER_GROUP_MEMBERSHIP(ChangeSetType.USER_GROUP_MEMBERSHIP, "USER_GROUP_MEMBERSHIP_DRAFT", TideUserGroupMembershipEntity.class),
-    COMPOSITE_ROLE(ChangeSetType.COMPOSITE_ROLE, "COMPOSITE_ROLE_MAPPING_DRAFT", TideCompositeRoleMappingDraftEntity.class),
-//    GROUP_ROLE(ChangeSetType.GROUP_ROLE, "GROUP_ROLE_MAPPING_DRAFT", TideGroupDraftEntity.class),
-    CLIENT_FULLSCOPE(ChangeSetType.CLIENT_FULLSCOPE, "CLIENT_FULL_SCOPE_STATUS_DRAFT", TideClientFullScopeStatusDraftEntity.class);
+import java.util.function.Supplier;
 
-    private final ChangeSetType baseType; // Reference to the first enum
+public enum ChangeSetTypeEntity {
+    DEFAULT_ROLES(ChangeSetType.DEFAULT_ROLES, "COMPOSITE_ROLE_MAPPING_DRAFT", TideCompositeRoleMappingDraftEntity.class, CompositeRoleProcessor::new),
+    CLIENT(ChangeSetType.CLIENT, "CLIENT_DRAFT", TideClientDraftEntity.class, ClientProcessor::new),
+    ROLE(ChangeSetType.ROLE, "ROLE_ENTITY_DRAFT", TideRoleDraftEntity.class, RoleProcessor::new),
+    USER_ROLE(ChangeSetType.USER_ROLE, "USER_ROLE_MAPPING_DRAFT", TideUserRoleMappingDraftEntity.class, UserRoleProcessor::new),
+    COMPOSITE_ROLE(ChangeSetType.COMPOSITE_ROLE, "COMPOSITE_ROLE_MAPPING_DRAFT", TideCompositeRoleMappingDraftEntity.class, CompositeRoleProcessor::new),
+    CLIENT_FULLSCOPE(ChangeSetType.CLIENT_FULLSCOPE, "CLIENT_FULLSCOPE_DRAFT", TideClientDraftEntity.class, ClientFullScopeProcessor::new);
+
+    private final ChangeSetType baseType;
     private final String tableName;
     private final Class<?> entityClass;
+    private final Supplier<? extends ChangeSetProcessor<?>> processorSupplier;
 
-    // Constructor
-    ChangeSetTypeEntity(ChangeSetType baseType, String tableName, Class<?> entityClass) {
+    ChangeSetTypeEntity(ChangeSetType baseType, String tableName, Class<?> entityClass, Supplier<? extends ChangeSetProcessor<?>> processorSupplier) {
         this.baseType = baseType;
         this.tableName = tableName;
         this.entityClass = entityClass;
+        this.processorSupplier = processorSupplier;
     }
 
     public ChangeSetType getBaseType() {
@@ -34,5 +37,18 @@ public enum ChangeSetTypeEntity {
 
     public Class<?> getEntityClass() {
         return entityClass;
+    }
+
+    public Supplier<? extends ChangeSetProcessor<?>> getProcessorSupplier() {
+        return processorSupplier;
+    }
+
+    public static ChangeSetTypeEntity fromBaseType(ChangeSetType baseType) {
+        for (ChangeSetTypeEntity entity : values()) {
+            if (entity.baseType == baseType) {
+                return entity;
+            }
+        }
+        throw new IllegalArgumentException("No ChangeSetTypeEntity defined for base type: " + baseType);
     }
 }

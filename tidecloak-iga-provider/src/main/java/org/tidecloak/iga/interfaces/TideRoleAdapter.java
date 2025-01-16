@@ -12,6 +12,7 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
+import org.tidecloak.shared.Constants;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
@@ -74,7 +75,7 @@ public class TideRoleAdapter extends RoleAdapter {
                 deleteCompositeRoleMapping(getEntity(), roleEntity);
                 deleteProofRecords(committedEntity.getId());
                 super.removeCompositeRole(role);
-                changeSetProcessorFactory.getProcessor(changesetRequest.getType()).updateAffectedUserContexts(session, changesetRequest, committedEntity, em);
+                changeSetProcessorFactory.getProcessor(changesetRequest.getType()).updateAffectedUserContexts(session, realm, changesetRequest, committedEntity, em);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
@@ -95,21 +96,22 @@ public class TideRoleAdapter extends RoleAdapter {
     public void addCompositeRole(RoleModel roleModel) {
         try {
             super.addCompositeRole(roleModel);
-            boolean isDefaultRoleCommit = commitDefaultRolesOnInitiation(session, realm, getEntity(), roleModel, em);
-            String adminRealmName = Config.getAdminRealm();
-            String realmName = roleModel.isClientRole() ? ((ClientModel) roleModel.getContainer()).getRealm().getName() : ((RealmModel) roleModel.getContainer()).getName();
-            boolean isDefaultAdminRole = realmName.equalsIgnoreCase(adminRealmName) && AdminRoles.ALL_ROLES.contains(roleModel.getName());
-
-            if (isDefaultRoleCommit || isDefaultAdminRole) {
-                return;
-            }
-
             RoleModel childRole = TideEntityUtils.wrapRoleModel(roleModel, session, realm);
             RoleEntity childEntity = toRoleEntity(childRole);
             TideCompositeRoleMappingDraftEntity draft = new TideCompositeRoleMappingDraftEntity();
             draft.setId(KeycloakModelUtils.generateId());
             draft.setComposite(getEntity());
             draft.setChildRole(childEntity);
+            draft.setDraftStatus(DraftStatus.DRAFT);
+            draft.setAction(ActionType.CREATE);
+            em.persist(draft);
+
+            if (realm.getRoleById(getEntity().getId()).getName().equalsIgnoreCase(Constants.TIDE_REALM_ADMIN)) {
+                draft.setDraftStatus(DraftStatus.ACTIVE);
+                draft.setAction(ActionType.CREATE);
+                em.persist(draft);
+                return;
+            }
             draft.setDraftStatus(DraftStatus.DRAFT);
             draft.setAction(ActionType.CREATE);
             em.persist(draft);
