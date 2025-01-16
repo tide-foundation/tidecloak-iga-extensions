@@ -12,8 +12,6 @@ import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
-import org.keycloak.models.jpa.entities.ClientEntity;
-import org.keycloak.models.jpa.entities.RealmEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
@@ -400,24 +398,6 @@ public class IGARealmResource {
                 .setParameter("deleteStatus", DraftStatus.ACTIVE)
                 .setParameter("realmId", realm.getId())
                 .getResultList();
-
-        if ( mappings.isEmpty()) {
-            RealmEntity realmEntity = em.find(RealmEntity.class, session.getContext().getRealm().getId());
-            RealmDefaultUserContextEntity defaultUserContext = em.createNamedQuery("getRealmDefaultUserContextByRealm", RealmDefaultUserContextEntity.class)
-                    .setParameter("realm", realmEntity)
-                    .setLockMode(LockModeType.PESSIMISTIC_WRITE)
-                    .getSingleResult();
-
-            AccessProofDetailEntity proof = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndRealm", AccessProofDetailEntity.class)
-                .setParameter("changesetType", ChangeSetType.DEFAULT_ROLES)
-                .setParameter("realmId", session.getContext().getRealm().getId())
-                .setLockMode(LockModeType.PESSIMISTIC_WRITE)
-                .getSingleResult();
-
-            RequestedChanges requestChange = new CompositeRoleChangeRequest("", session.getContext().getRealm().getDefaultRole().getName(), "Default User Context require approval for realm", ChangeSetType.DEFAULT_ROLES, RequestType.ROLE, "", realm.getName(), ActionType.CREATE, proof.getRecordId(), new ArrayList<>(), defaultUserContext.getDraftStatus(), null);
-            requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context For All Users", proof.getId(), "", proof.getProofDraft()));
-            return  List.of(requestChange);
-        }
 
         for (TideCompositeRoleMappingDraftEntity m : mappings) {
             if (m.getComposite() == null) {

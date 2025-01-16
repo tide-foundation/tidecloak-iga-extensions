@@ -17,7 +17,6 @@ import org.keycloak.services.Urls;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
-import org.tidecloak.jpa.entities.drafting.RealmDefaultUserContextEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
