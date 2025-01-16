@@ -18,7 +18,6 @@
         <dependency>
             <groupId>org.keycloak</groupId>
             <artifactId>keycloak-model-jpa</artifactId>
-            <version>26.0.6</version>
             <version>${version.keycloak}</version>
         </dependency>
     </dependencies>
