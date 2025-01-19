@@ -58,7 +58,7 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
     }
 
     @Override
-    public void request(KeycloakSession session, TideRoleDraftEntity entity, EntityManager em, ActionType action, Runnable callback) {
+    public void request(KeycloakSession session, TideRoleDraftEntity entity, EntityManager em, ActionType action, Runnable callback, ChangeSetType changeSetType) {
         try {
             // Log the start of the request with detailed context
             logger.info(String.format(
@@ -67,7 +67,7 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
                     action,
                     entity.getId()
             ));
-
+            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getId(), changeSetType);
             switch (action) {
                 case CREATE:
                     logger.info(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
@@ -152,7 +152,7 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
     }
 
     @Override
-    public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideRoleDraftEntity entity, UserModel user){
+    public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideRoleDraftEntity entity, UserModel user, ClientModel clientModel){
         RealmModel realm = session.getContext().getRealm();
         RoleModel role = realm.getRoleById(entity.getRole().getId());
 
@@ -169,7 +169,7 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
                 removeRoleFromAccessToken(token, r);
             }
         });
-        userContextUtils.normalizeAccessToken(token);
+        userContextUtils.normalizeAccessToken(token, clientModel.isFullScopeAllowed());
         return token;
     }
 

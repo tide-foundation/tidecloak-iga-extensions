@@ -113,6 +113,7 @@ public class TideUserAdapter extends UserAdapter {
                         draftUserRole.setAction(ActionType.CREATE);
                         draftUserRole.setDraftStatus(DraftStatus.ACTIVE);
                         em.persist(draftUserRole);
+                        em.flush();
                         return;
                     }
                 }
@@ -125,8 +126,9 @@ public class TideUserAdapter extends UserAdapter {
                 draftUserRole.setAction(ActionType.CREATE);
                 draftUserRole.setDraftStatus(DraftStatus.DRAFT);
                 em.persist(draftUserRole);
+                em.flush();
 
-                WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE);
+                WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.USER_ROLE);
                 processor.executeWorkflow(session, draftUserRole, em, WorkflowType.REQUEST, params, null);
             }
 
@@ -163,7 +165,7 @@ public class TideUserAdapter extends UserAdapter {
                 return;
             }
 
-            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE);
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.USER_ROLE);
             processor.executeWorkflow(session, committedEntity, em, WorkflowType.REQUEST, params, null);
         } catch (Exception e) {
             throw new RuntimeException(e);

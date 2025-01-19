@@ -41,7 +41,6 @@ public class IGAUtils {
                 .collect(Collectors.toList());
     }
 
-    // ONLY WORKS FOR NO TIDE ADMIN. WITH IGA ENABLED TO ALLOW TIDE ADMIN TO EXIST
     public static List<String>  signInitialTideAdmin(MultivaluedHashMap<String, String> keyProviderConfig,
                                                       UserContext[] userContexts,
                                                       InitializerCertifcate initCert,

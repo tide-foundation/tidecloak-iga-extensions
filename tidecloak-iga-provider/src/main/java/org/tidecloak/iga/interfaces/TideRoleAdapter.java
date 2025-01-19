@@ -14,6 +14,7 @@ import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.shared.Constants;
 import org.tidecloak.shared.enums.ActionType;
+import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -82,9 +83,8 @@ public class TideRoleAdapter extends RoleAdapter {
 
         }else{
             try {
-            ChangeSetRequest changesetRequest = getChangeSetRequestFromEntity(session, committedEntity);
-            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE);
-            changeSetProcessorFactory.getProcessor(changesetRequest.getType()).executeWorkflow(session, committedEntity, em, WorkflowType.REQUEST, params, null);
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.COMPOSITE_ROLE);
+            changeSetProcessorFactory.getProcessor(ChangeSetType.COMPOSITE_ROLE).executeWorkflow(session, committedEntity, em, WorkflowType.REQUEST, params, null);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
@@ -116,9 +116,8 @@ public class TideRoleAdapter extends RoleAdapter {
             draft.setAction(ActionType.CREATE);
             em.persist(draft);
 
-            ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, draft);
-            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE);
-            changeSetProcessorFactory.getProcessor(changeSetRequest.getType()).executeWorkflow(session, draft, em, WorkflowType.REQUEST, params, null);
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.COMPOSITE_ROLE);
+            changeSetProcessorFactory.getProcessor(ChangeSetType.COMPOSITE_ROLE).executeWorkflow(session, draft, em, WorkflowType.REQUEST, params, null);
             em.flush();
         } catch (Exception e) {
             throw new RuntimeException(e);

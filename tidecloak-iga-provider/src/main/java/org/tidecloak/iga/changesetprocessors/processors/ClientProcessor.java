@@ -65,7 +65,7 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
     }
 
     @Override
-    public void request(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, ActionType action, Runnable callback) {
+    public void request(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, ActionType action, Runnable callback, ChangeSetType changeSetType) {
         try {
             // Log the start of the request with detailed context
             logger.info(String.format(
@@ -74,7 +74,7 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
                     action,
                     entity.getId()
             ));
-
+            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getId(), changeSetType);
             switch (action) {
                 case CREATE:
                     logger.info(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
@@ -111,27 +111,8 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
     public void handleCreateRequest(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
         RealmModel realm = session.realms().getRealm(entity.getClient().getRealmId());
         ClientModel client = realm.getClientById(entity.getClient().getId());
-
-        Set<RoleModel> roleToAddOrDelete = UserContextUtils.getAllAccess(session, Set.of(realm.getDefaultRole()), client, client.getClientScopes(true).values().stream(), client.isFullScopeAllowed());
-
-        AccessToken accessToken = new AccessToken();
-        accessToken.issuer(Urls.realmIssuer(session.getContext().getUri().getBaseUri(), realm.getName()));
-
-        if(!client.isFullScopeAllowed()){
-            roleToAddOrDelete.forEach( r -> {
-                UserContextUtils.addRoleToAccessToken(accessToken, r);
-            });
-
-        }else{
-            roleToAddOrDelete.forEach( r -> {
-                UserContextUtils.removeRoleFromAccessToken(accessToken, r);
-            });
-            accessToken.issuedFor(client.getName());
-        }
-        UserContextUtils.updateTokenAudience(accessToken);
-        UserContextUtils.cleanAccessToken(accessToken);
-        String defaultUserContext = ChangeSetProcessor.super.cleanAccessToken(accessToken, null);
-        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, client, null, entity.getId(), ChangeSetType.CLIENT, defaultUserContext);
+        String defaultFullScopeUserContext = generateRealmDefaultUserContext(session, realm, client, em);
+        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, client, null, entity.getId(), ChangeSetType.CLIENT, defaultFullScopeUserContext);
     }
 
     @Override
@@ -171,29 +152,14 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
     private String generateRealmDefaultUserContext(KeycloakSession session, RealmModel realm, ClientModel client, EntityManager em) throws Exception {
         List<String> clients = List.of(Constants.ADMIN_CLI_CLIENT_ID, Constants.ADMIN_CONSOLE_CLIENT_ID, Constants.ACCOUNT_CONSOLE_CLIENT_ID);
         String id = KeycloakModelUtils.generateId();
-        UserModel dummyUser;
-        if( !Boolean.parseBoolean(client.getRealm().getAttribute("isIGAEnabled"))){
-            dummyUser = session.users().addUser(realm, id, id, true, false);
-        } else {
-            UserEntity userEntity = new UserEntity();
-            userEntity.setId(id);
-            userEntity.setCreatedTimestamp(System.currentTimeMillis());
-            userEntity.setUsername(id);
-            userEntity.setRealmId(realm.getId());
-            em.persist(userEntity);
-            em.flush();
-            dummyUser = new TideUserAdapter(session, realm, em, userEntity);
-            dummyUser.grantRole(realm.getDefaultRole());
-        }
-
-        AccessToken accessToken = this.generateAccessToken(session, realm, client, dummyUser);
-
+        UserModel dummyUser = session.users().addUser(realm, id, id, true, false);
+        AccessToken accessToken = ChangeSetProcessor.super.generateAccessToken(session, realm, client, dummyUser);
         if(clients.contains(client.getClientId())){
             accessToken.subject(null);
             session.users().removeUser(realm, dummyUser);
-            return this.cleanAccessToken(accessToken, List.of("preferred_username"));
+            return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username", "scope"), client.isFullScopeAllowed());
         } else {
-            Set<RoleModel> rolesToAdd = getAllAccess(session, Set.of(realm.getDefaultRole()), client, client.getClientScopes(true).values().stream(), client.isFullScopeAllowed());
+            Set<RoleModel> rolesToAdd = getAllAccess(session, Set.of(realm.getDefaultRole()), client, client.getClientScopes(true).values().stream(), client.isFullScopeAllowed(), null);
             rolesToAdd.forEach(r -> {
                 if ( realm.getName().equalsIgnoreCase(Config.getAdminRealm())){
                     addRoleToAccessTokenMasterRealm(accessToken, r, realm, em);
@@ -202,9 +168,9 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
                     addRoleToAccessToken(accessToken, r);
                 }
             });
+        }
             accessToken.subject(null);
             session.users().removeUser(realm, dummyUser);
-            return this.cleanAccessToken(accessToken, List.of("preferred_username"));
-        }
+            return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username", "scope"), client.isFullScopeAllowed());
     }
 }

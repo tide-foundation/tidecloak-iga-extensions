@@ -57,7 +57,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
     }
 
     @Override
-    public void request(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, ActionType action, Runnable callback) {
+    public void request(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, ActionType action, Runnable callback, ChangeSetType changeSetType) {
         try {
             // Log the start of the request with detailed context
             logger.info(String.format(
@@ -69,7 +69,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
             RealmModel realm = session.realms().getRealm(entity.getClient().getRealmId());
             String igaAttribute = realm.getAttribute("isIGAEnabled");
             boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
-
+            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getId(), changeSetType);
             switch (action) {
                 case CREATE:
                     logger.info(String.format("Initiating CREATE (enable) action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
@@ -248,7 +248,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
     }
 
     @Override
-    public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideClientDraftEntity entity, UserModel user) {
+    public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideClientDraftEntity entity, UserModel user, ClientModel clientModel) {
         RealmModel realm = session.getContext().getRealm();
         ClientModel client = realm.getClientByClientId(entity.getClient().getClientId());
 
@@ -289,7 +289,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
         });
 
         // Update token audience
-        userContextUtils.normalizeAccessToken(token);
+        userContextUtils.normalizeAccessToken(token, client.isFullScopeAllowed());
 
         return token;
     }

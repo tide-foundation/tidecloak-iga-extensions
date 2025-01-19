@@ -44,7 +44,7 @@ public class TideClientAdapter extends ClientAdapter {
                     .setParameter("client", entity)
                     .getResultList();
 
-            if(isMigration || !statusDraft.get(0).getDraftStatus().equals(DraftStatus.ACTIVE)) {
+            if(isMigration || realm.getName().equalsIgnoreCase(Config.getAdminRealm())) {
                 if(value){
                     statusDraft.get(0).setFullScopeDisabled(DraftStatus.NULL);
                     statusDraft.get(0).setFullScopeEnabled(DraftStatus.ACTIVE);
@@ -67,29 +67,13 @@ public class TideClientAdapter extends ClientAdapter {
 
             TideClientDraftEntity clientFullScopeStatuses = statusDraft.get(0);
             ActionType actionType = value ? ActionType.CREATE : ActionType.DELETE;
-            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, value, actionType);
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, value, actionType, ChangeSetType.CLIENT_FULLSCOPE);
             changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT_FULLSCOPE).executeWorkflow(session, clientFullScopeStatuses, em, WorkflowType.REQUEST, params, callback);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
 
     }
-    private void createFullScopeStatusDraft(boolean value) {
-        TideClientDraftEntity draft = new TideClientDraftEntity();
-        draft.setId(KeycloakModelUtils.generateId());
-        draft.setClient(entity);
-        if (value) {
-            draft.setFullScopeEnabled(DraftStatus.ACTIVE);
-            draft.setFullScopeDisabled(DraftStatus.NULL);
-        } else {
-            draft.setFullScopeDisabled(DraftStatus.ACTIVE);
-            draft.setFullScopeEnabled(DraftStatus.NULL);
-        }
-        draft.setAction(ActionType.CREATE);
-        em.persist(draft);
-        em.flush();
-    }
-
 
     @Override
     public ProtocolMapperModel addProtocolMapper(ProtocolMapperModel model) {

@@ -323,7 +323,14 @@ public class IGARealmResource {
             RequestedChanges requestChange = new RequestedChanges("",ChangeSetType.CLIENT_FULLSCOPE, RequestType.CLIENT, client.getClientId(), realm.getName(), c.getAction(), c.getId(), new ArrayList<>(), DraftStatus.DRAFT, DraftStatus.NULL);
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
-                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), c.getClient().getClientId(), p.getProofDraft()));
+
+                if(p.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES) || p.getChangesetType().equals(ChangeSetType.CLIENT)) {
+                    requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context for all USERS", p.getId(), c.getClient().getClientId(), p.getProofDraft()));
+
+                }else {
+                    requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), c.getClient().getClientId(), p.getProofDraft()));
+
+                }
             });
 
             if(c.getFullScopeEnabled() != DraftStatus.ACTIVE && c.getFullScopeEnabled() != DraftStatus.NULL) {
@@ -565,8 +572,6 @@ public class IGARealmResource {
                 }
             }
 
-            ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, change.getChangeSetId());
-            em.remove(changesetRequestEntity);
             em.flush(); // Persist changes to the database
             // Return success message after approving the change sets
             return Response.ok("Change sets approved").build();

@@ -5,6 +5,7 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -39,7 +40,9 @@ public class ChangeRequestUtils {
             changeSetRequest.setType(ChangeSetType.ROLE);
             changeSetRequest.setActionType(actionType);
         } else if (entity instanceof TideClientDraftEntity draftEntity) {
-            if(draftEntity.getDraftStatus().equals(DraftStatus.DRAFT)){
+            ChangeSetType changeSetType = getChangeSetType(em, draftEntity.getId());
+
+            if(changeSetType.equals(ChangeSetType.CLIENT)){
                 changeSetRequest.setChangeSetId(draftEntity.getId());
                 changeSetRequest.setType(ChangeSetType.CLIENT);
                 changeSetRequest.setActionType(ActionType.CREATE);
@@ -76,5 +79,14 @@ public class ChangeRequestUtils {
         }
 
         return changeSetRequest;
+    }
+
+    private static ChangeSetType getChangeSetType(EntityManager em, String recordId){
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, recordId);
+        if(changesetRequestEntity == null) {
+            throw new RuntimeException("No changeSet found with id: " + recordId);
+        }
+        return changesetRequestEntity.getChangesetType();
+
     }
 }

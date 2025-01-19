@@ -112,7 +112,7 @@ public class UserContextUtils extends UserContextUtilBase {
                 .collect(Collectors.toSet());
     }
 
-    public static Set<RoleModel> getAllAccess(KeycloakSession session, Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes, boolean isFullScopeAllowed) {
+    public static Set<RoleModel> getAllAccess(KeycloakSession session, Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes, boolean isFullScopeAllowed, RoleModel roleToInclude) {
         RealmModel realm = session.getContext().getRealm();
 
         Set<RoleModel> visited = new HashSet<>();
@@ -120,6 +120,10 @@ public class UserContextUtils extends UserContextUtilBase {
         Set<RoleModel> expanded = roleModels.stream()
                 .flatMap(roleModel -> UserContextUtils.expandCompositeRolesStream(TideEntityUtils.toTideRoleAdapter(roleModel, session, realm), visited, DraftStatus.ACTIVE))
                 .collect(Collectors.toSet());
+
+        if ( roleToInclude != null) {
+            expanded.add(roleToInclude);
+        }
 
         if (isFullScopeAllowed) {
             return expanded;
@@ -279,12 +283,16 @@ public class UserContextUtils extends UserContextUtilBase {
         }
     }
 
-    public void normalizeAccessToken(AccessToken token){
-        updateTokenAudience(token);
+    public void normalizeAccessToken(AccessToken token, boolean isFullscope){
+        updateTokenAudience(token, isFullscope);
         cleanAccessToken(token);
     }
 
-    public static void updateTokenAudience(AccessToken token) {
+    public static void updateTokenAudience(AccessToken token, boolean isFullscope) {
+        if(!isFullscope){
+            token.audience(null);
+            return;
+        }
         // Create a set to hold the updated audience
         Set<String> audience = new HashSet<>();
 

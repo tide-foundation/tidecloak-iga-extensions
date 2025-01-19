@@ -69,7 +69,7 @@ public class TideRealmProvider extends JpaRealmProvider {
             if(client.getRealm().getName().equalsIgnoreCase(Config.getAdminRealm())) {
                 return client;
             }
-            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE);
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.CLIENT);
             changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT).executeWorkflow(session, clientDraftEntity, em, WorkflowType.REQUEST, params, null);
             return client;
         } catch (Exception e) {
@@ -121,7 +121,7 @@ public class TideRealmProvider extends JpaRealmProvider {
             newDeletionRequest.setRole(roleEntity);
             newDeletionRequest.setDeleteStatus(DraftStatus.DRAFT);
             em.persist(newDeletionRequest);
-            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE);
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.ROLE);
             changeSetProcessorFactory.getProcessor(ChangeSetType.ROLE).executeWorkflow(session, newDeletionRequest, em, WorkflowType.REQUEST, params, null);
             em.flush();
             // Can we return a better message here ?

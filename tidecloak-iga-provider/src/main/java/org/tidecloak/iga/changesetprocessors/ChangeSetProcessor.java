@@ -77,17 +77,15 @@ public interface ChangeSetProcessor<T> {
      * @param params    Additional parameters specific to the workflow.
      */
     default void executeWorkflow(KeycloakSession session, T entity, EntityManager em, WorkflowType workflow, WorkflowParams params, Runnable callback) throws Exception {
-        ChangeSetRequest change = getChangeSetRequestFromEntity(session, entity);
-
         switch (workflow) {
             case APPROVAL:
-                approve(session, change, entity, em, params.getDraftStatus(), params.isDelete());
+                approve(session, getChangeSetRequestFromEntity(session, entity), entity, em, params.getDraftStatus(), params.isDelete());
                 break;
             case COMMIT:
-                commit(session, change, entity, em, null);
+                commit(session, getChangeSetRequestFromEntity(session, entity), entity, em, null);
                 break;
             case REQUEST:
-                request(session, entity, em, params.getActionType(), callback);
+                request(session, entity, em, params.getActionType(), callback, params.getChangeSetType());
                 break;
             default:
                 throw new IllegalArgumentException("Unsupported workflow: " + workflow);
@@ -105,7 +103,7 @@ public interface ChangeSetProcessor<T> {
      * @param action    The type of action to be performed (e.g., CREATE, DELETE).
      * @throws IllegalArgumentException If the action type is not supported.
      */
-    default void request(KeycloakSession session, T mapping, EntityManager em, ActionType action, Runnable callback) throws Exception {
+    default void request(KeycloakSession session, T mapping, EntityManager em, ActionType action, Runnable callback, ChangeSetType changeSetType) throws Exception {
         // Handle action types (CREATE, DELETE)
         switch (action) {
             case CREATE:
@@ -149,6 +147,9 @@ public interface ChangeSetProcessor<T> {
      * @throws Exception If an error occurs during the update process.
      */
     default void updateAffectedUserContexts(KeycloakSession session, RealmModel realm, ChangeSetRequest change, T entity, EntityManager em) throws Exception {
+        if(change.getType().equals(ChangeSetType.CLIENT)){
+            return;
+        }
         List<ClientModel> affectedClients = getAffectedClients(session, realm, entity, em);
         ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
 
@@ -161,6 +162,10 @@ public interface ChangeSetProcessor<T> {
 
             for(AccessProofDetailEntity userContextDraft : userContextDrafts) {
                 em.lock(userContextDraft, LockModeType.PESSIMISTIC_WRITE);
+
+                if(change.getType().equals(ChangeSetType.USER_ROLE) &&  (userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT) || userContextDraft.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES))) {
+                    return;
+                }
 
                 UserEntity userEntity = userContextDraft.getUser();
                 TideUserAdapter user = TideEntityUtils.toTideUserAdapter(userEntity, session, realm);
@@ -233,8 +238,12 @@ public interface ChangeSetProcessor<T> {
         // Execute the commit callback if provided
         if (commitCallback != null) {
             commitCallback.run();
-            em.flush();
         }
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, change.getChangeSetId());
+        if (changesetRequestEntity != null) {
+            em.remove(changesetRequestEntity);
+        }
+        em.flush();
 
         // Update affected user contexts
         updateAffectedUserContexts(session, session.getContext().getRealm(), change, entity, em);
@@ -387,7 +396,8 @@ public interface ChangeSetProcessor<T> {
             AccessToken token,
             KeycloakSession session,
             T entity,
-            UserModel user
+            UserModel user,
+            ClientModel clientModel
 
     ) {
         return token;
@@ -425,8 +435,8 @@ public interface ChangeSetProcessor<T> {
         }
 
         ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);
-        AccessToken userContext = processorFactory.getProcessor(changeSetRequest.getType()).transformUserContext(token, session, entity, user);
-        return this.cleanAccessToken(userContext, null);
+        AccessToken userContext = processorFactory.getProcessor(changeSetRequest.getType()).transformUserContext(token, session, entity, user, client);
+        return this.cleanAccessToken(userContext, null, client.isFullScopeAllowed());
     }
 
     /**
@@ -458,7 +468,7 @@ public interface ChangeSetProcessor<T> {
             token.getOtherClaims().put("vuid", vuid);
         }
 
-        return this.cleanAccessToken(token, null);
+        return this.cleanAccessToken(token, null, client.isFullScopeAllowed());
     }
 
     default AccessToken generateAccessToken(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user){
@@ -472,12 +482,12 @@ public interface ChangeSetProcessor<T> {
         return token;
     }
 
-    default String cleanAccessToken(AccessToken token, List<String> extraKeysToRemove) throws JsonProcessingException {
+    default String cleanAccessToken(AccessToken token, List<String> extraKeysToRemove, boolean isFullscope) throws JsonProcessingException {
         UserContextUtils userContextUtils = new UserContextUtils();
         ObjectMapper objectMapper = new ObjectMapper();
         objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
         objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
-        userContextUtils.normalizeAccessToken(token);
+        userContextUtils.normalizeAccessToken(token, isFullscope);
         JsonNode draftNode = objectMapper.valueToTree(token);
         return objectMapper.writeValueAsString(cleanProofDraft(draftNode, extraKeysToRemove));
 
@@ -562,10 +572,23 @@ public interface ChangeSetProcessor<T> {
             entity.setChangesetRequestId(recordId);
             entity.setAdminAuthorizations(new ArrayList<>());
             entity.setDraftRequest(draft);
+            entity.setChangesetType(type);
             em.persist(entity);
             em.flush();
         } else {
             changesetRequestEntity.setDraftRequest(draft);
+            em.flush();
+        }
+    }
+
+    default void createChangeRequestEntity(EntityManager em, String recordId, ChangeSetType changeSetType) {
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, recordId);
+        if (changesetRequestEntity == null) {
+            ChangesetRequestEntity entity = new ChangesetRequestEntity();
+            entity.setChangesetRequestId(recordId);
+            entity.setAdminAuthorizations(new ArrayList<>());
+            entity.setChangesetType(changeSetType);
+            em.persist(entity);
             em.flush();
         }
     }
