@@ -227,17 +227,40 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
     private void processRealmManagementRoleAssignment(KeycloakSession session, EntityManager em, RealmModel realm, List<ClientModel> clientList,
                                                        TideUserRoleMappingDraftEntity entity, UserModel userModel) {
+        Set<UserModel> adminUsers = new HashSet<>();
+        adminUsers.add(userModel);
+        ClientModel realmManagementClient = realm.getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
+        RoleEntity roleEntity = em.find(RoleEntity.class, entity.getRoleId());
+        RoleModel role = realmManagementClient.getRole(roleEntity.getName());
+        if(role != null && role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
+            Set<UserModel> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
+                    .setParameter("draftStatus", DraftStatus.ACTIVE)
+                    .setParameter("roleId", entity.getRoleId())
+                    .getResultList().stream()
+                    .map(t -> session.users().getUserById(realm, t.getUser().getId()))
+                    .collect(Collectors.toSet());
+
+            adminUsers.addAll(users);
+        }
         clientList.forEach(client -> {
             try {
+
                 boolean isRealmManagementClient = client.getClientId().equalsIgnoreCase(Constants.REALM_MANAGEMENT_CLIENT_ID);
-                if (isRealmManagementClient) {
-                    ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, userModel, entity.getId(),
-                            ChangeSetType.USER_ROLE, entity);
-                } else {
-                    // Create empty user contexts for ADMIN-CLI and SECURITY-ADMIN-CONSOLE
-                    ChangeSetProcessor.super.generateAndSaveDefaultUserContextDraft(session, em, realm, client, userModel, entity.getId(),
-                            ChangeSetType.USER_ROLE);
-                }
+                adminUsers.forEach(u -> {
+                    try {
+                        if (isRealmManagementClient) {
+                            ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, u, entity.getId(),
+                                    ChangeSetType.USER_ROLE, entity);
+                        } else {
+                            // Create empty user contexts for ADMIN-CLI and SECURITY-ADMIN-CONSOLE
+                            ChangeSetProcessor.super.generateAndSaveDefaultUserContextDraft(session, em, realm, client, u, entity.getId(),
+                                    ChangeSetType.USER_ROLE);
+                        }
+
+                    }catch (Exception e) {
+                        throw new RuntimeException("Error processing client: " + client.getClientId(), e);
+                    }
+                });
             } catch (Exception e) {
                 throw new RuntimeException("Error processing client: " + client.getClientId(), e);
             }

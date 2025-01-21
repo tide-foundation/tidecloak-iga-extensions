@@ -62,6 +62,7 @@ import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static org.tidecloak.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
 import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.*;
 
@@ -547,17 +548,48 @@ public interface ChangeSetProcessor<T> {
             UserContext userContext = new UserContext(p.getProofDraft());
             if (isAssigningTideAdminRole) {
                 try {
-                    RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
-                    TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                            .setParameter("role", role).getSingleResult();
+                    ComponentModel componentModel = realm.getComponentsStream()
+                            .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                            .findFirst()
+                            .orElse(null);
 
-                    InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
-                    userContext.setInitCertHash(cert.hash());
+                    if(componentModel == null) {
+                        throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+                    }
+                    List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
+                            .setParameter("ID", componentModel.getId()).getResultList();
+                    if (realmAuthorizers.isEmpty()){
+                        throw new Exception("Authorizer not found for this realm.");
+                    }
+                    byte[] certHash = new byte[0];
+                    InitializerCertifcate cert = null;
+                    if(realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")){
+                        RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
+
+                        TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                                .setParameter("role", role).getSingleResult();
+                        cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
+                        certHash = cert.hash();
+                    } else if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
+                        RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, recordId);
+                        if(roleInitCert == null) {
+                            throw new Exception("Role Init Cert draft not found for changeSet, " + recordId);
+                        }
+                        cert = InitializerCertifcate.FromString(roleInitCert.getInitCert());
+                        certHash = cert.hash();
+                    }
+
+                    if(cert == null) {
+                        throw new Exception("No Init Cert draft not found for realm, " + realm.getName());
+                    }
+
+                    userContext.setThreshold(cert.getPayload().getThreshold());
+                    userContext.setInitCertHash(certHash);
                     p.setProofDraft(userContext.ToString());
                     em.flush();
                     req.SetInitializationCertificate(cert);
 
-                } catch (JsonProcessingException e) {
+                } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
             }

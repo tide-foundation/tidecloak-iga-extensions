@@ -38,6 +38,8 @@ import java.net.URI;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import static org.tidecloak.iga.TideRequests.TideRoleRequests.*;
+
 public class IGARealmResource {
 
     private final KeycloakSession session;
@@ -161,12 +163,12 @@ public class IGARealmResource {
             List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
                     .setParameter("ID", componentModel.getId()).getResultList();
 
-            boolean isAssigningTideAdminRole;
+            boolean isAssigningTideRealmAdminRole;
             if(draftRecordEntity instanceof TideUserRoleMappingDraftEntity){
-                RoleModel role = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-                isAssigningTideAdminRole = ((TideUserRoleMappingDraftEntity) draftRecordEntity).getRoleId().equals(role.getId()) && realmAuthorizers.size() == 1;
+                RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+                isAssigningTideRealmAdminRole = ((TideUserRoleMappingDraftEntity) draftRecordEntity).getRoleId().equals(tideRole.getId());
             } else {
-                isAssigningTideAdminRole = false;
+                isAssigningTideRealmAdminRole = false;
             }
 
             if (realmAuthorizers.isEmpty()){
@@ -188,12 +190,8 @@ public class IGARealmResource {
             if (changesetRequestEntity == null){
                 throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
             }
-            if (IGAUtils.isIGAEnabled(realm) && tideIdp != null){
-                if (isAssigningTideAdminRole) {
-                    if (!realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")){
-                        throw new Exception("Invalid realm authorizer type for initial tide admin role assignment. Found " + realmAuthorizers.get(0).getType());
-                    }
-
+            if (IGAUtils.isIGAEnabled(realm) && tideIdp != null) {
+                if (isAssigningTideRealmAdminRole &&  realmAuthorizers.size() == 1 && realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")) {
                     List<String> signatures = IGAUtils.signInitialTideAdmin(config, userContexts.toArray(new UserContext[0]), cert, realmAuthorizers.get(0), changesetRequestEntity);
                     tideRoleEntity.setInitCertSig(signatures.get(0));
                     for(int i = 0; i < userContexts.size(); i++){
@@ -495,8 +493,8 @@ public class IGARealmResource {
                     throw new Exception("Authorizer not found for this realm.");
                 }
 
-
                 if ( !realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")) {
+
                     // Fetch the draft record entity and proof details based on the change set type
                     Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, change.getType(), change.getChangeSetId());
                     List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, IGAUtils.getEntityId(draftRecordEntity));;
@@ -532,6 +530,7 @@ public class IGARealmResource {
                     changesetRequestEntity.getAdminAuthorizations().forEach(auth -> {
                         authorizerBuilder.AddAdminAuthorization(AdminAuthorization.FromString(auth));
                     });
+
                     int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
                     int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
 
@@ -553,11 +552,26 @@ public class IGARealmResource {
                     settings.Threshold_N = max;
 
                     authorizerBuilder.AddAuthorizationToSignRequest(req);
-                    SignatureResponse response = Midgard.SignModel(settings, req);
 
-                    for ( int i = 0; i < userContexts.size(); i++){
-                        proofDetails.get(i).setSignature(response.Signatures[i]);
+                    if(isTideRealmRoleAssignment(mapping)) {
+                        RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, change.getChangeSetId());
+                        if(roleInitCert == null) {
+                            throw new Exception("Role Init Cert draft not found for changeSet, " + change.getChangeSetId());
+                        }
+                        req.SetInitializationCertificate(InitializerCertifcate.FromString(roleInitCert.getInitCert()));
+                        SignatureResponse response = Midgard.SignModel(settings, req);
+                        for ( int i = 0; i < userContexts.size(); i++){
+                            proofDetails.get(i).setSignature(response.Signatures[i + 1]);
+                        }
+                        commitRoleInitCert(session, change.getChangeSetId(), response.Signatures[0]);
+                    } else {
+                        SignatureResponse response = Midgard.SignModel(settings, req);
+
+                        for ( int i = 0; i < userContexts.size(); i++){
+                            proofDetails.get(i).setSignature(response.Signatures[i]);
+                        }
                     }
+
                 }
             }
 
@@ -568,7 +582,6 @@ public class IGARealmResource {
                 RoleModel role = realm.getRoleById(((TideUserRoleMappingDraftEntity) mapping).getRoleId());
                 if (role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
                     realmAuthorizers.get(0).setType("multiAdmin");
-
                 }
             }
 
@@ -660,5 +673,12 @@ public class IGARealmResource {
                 .build();
     }
 
+    private boolean isTideRealmRoleAssignment(Object mapping){
+        if ( mapping instanceof  TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
+            RoleModel roleModel = realm.getRoleById(tideUserRoleMappingDraftEntity.getRoleId());
+            return roleModel.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        }
+        return false;
+    }
 
 }
