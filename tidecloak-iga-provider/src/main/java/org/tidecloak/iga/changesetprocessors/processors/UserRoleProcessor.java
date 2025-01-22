@@ -175,7 +175,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             affectedUserRoleEntity.setDraftStatus(DraftStatus.DRAFT);
         }
 
-        String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, user, "openid", affectedUserRoleEntity);
+        String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, user, "openId", affectedUserRoleEntity);
         affectedUserContextDraft.setProofDraft(userContextDraft);
     }
 
@@ -244,19 +244,19 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         }
         clientList.forEach(client -> {
             try {
-
                 boolean isRealmManagementClient = client.getClientId().equalsIgnoreCase(Constants.REALM_MANAGEMENT_CLIENT_ID);
+                boolean isAdminClient = client.getClientId().equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID) || client.getClientId().equalsIgnoreCase(Constants.ADMIN_CLI_CLIENT_ID);
                 adminUsers.forEach(u -> {
                     try {
                         if (isRealmManagementClient) {
                             ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, u, entity.getId(),
                                     ChangeSetType.USER_ROLE, entity);
-                        } else {
+                        }
+                        else if (isAdminClient){
                             // Create empty user contexts for ADMIN-CLI and SECURITY-ADMIN-CONSOLE
                             ChangeSetProcessor.super.generateAndSaveDefaultUserContextDraft(session, em, realm, client, u, entity.getId(),
                                     ChangeSetType.USER_ROLE);
                         }
-
                     }catch (Exception e) {
                         throw new RuntimeException("Error processing client: " + client.getClientId(), e);
                     }
