@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <changeSet id="26.0.6-13012025" author="tidecloak">
+        <renameTable oldTableName="CLIENT_FULL_SCOPE_STATUS_DRAFT" newTableName="CLIENT_DRAFT"/>
+        <addColumn tableName="CLIENT_DRAFT">
+            <column name="DEFAULT_USER_CONTEXT" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="DEFAULT_USER_CONTEXT_SIG" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="DRAFT_STATUS" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <dropNotNullConstraint tableName="ACCESS_PROOF_DETAIL" columnName="USER_ID"/>
+        <dropNotNullConstraint tableName="ACCESS_PROOF_DETAIL" columnName="CLIENT_ID"/>
+        <addColumn tableName="ACCESS_PROOF_DETAIL">
+            <column name="REALM_ID" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <addColumn tableName="CHANGESET_REQUEST">
+            <column name="CHANGE_SET_TYPE" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+        <createTable tableName="ROLE_INITIALIZER_CERTIFICATE">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="CHANGESET_REQUEST_ID" type="VARCHAR(36)">
+                <constraints  nullable="false" />
+            </column>
+            <column name="INIT_CERT" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="INIT_CERT_SIG" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="TIMESTAMP" type="BIGINT"/>
+        </createTable>
+    </changeSet>
+</databaseChangeLog>

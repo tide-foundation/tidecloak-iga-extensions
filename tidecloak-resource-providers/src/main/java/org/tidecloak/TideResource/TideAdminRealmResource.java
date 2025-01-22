@@ -5,11 +5,22 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriBuilder;
+import org.eclipse.microprofile.openapi.annotations.parameters.Parameter;
 import org.jboss.logging.Logger;
+import org.keycloak.authentication.actiontoken.execactions.ExecuteActionsActionToken;
 import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.common.util.Time;
 import org.keycloak.component.ComponentModel;
+import org.keycloak.email.EmailException;
+import org.keycloak.email.EmailTemplateProvider;
+import org.keycloak.events.admin.OperationType;
 import org.keycloak.models.*;
+import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.services.ErrorPage;
+import org.keycloak.services.ErrorResponse;
+import org.keycloak.services.ServicesLogger;
+import org.keycloak.services.resources.LoginActionsService;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.VendorData;
@@ -28,8 +39,6 @@ public class TideAdminRealmResource {
     private final AdminPermissionEvaluator auth;
     public static final String tideRealmAdminRole = "tide-realm-admin";
     protected static final String tideVendorKeyId = "tide-vendor-key";
-
-
 
     protected static final Logger logger = Logger.getLogger(TideAdminRealmResource.class);
     public TideAdminRealmResource(KeycloakSession session, RealmModel realm, AdminPermissionEvaluator auth) {
@@ -162,6 +171,35 @@ public class TideAdminRealmResource {
             logger.error("Error toggling IGA on realm: ", e);
             throw e;
         }
+    }
+
+    @POST
+    @Path("get-required-action-link")
+    public Response getRequiredActionLink(
+            @Parameter(description = "Select User Id") @QueryParam("userId") String userId,
+            @Parameter(description = "Redirect uri") @QueryParam(OIDCLoginProtocol.REDIRECT_URI_PARAM) String redirectUri,
+            @Parameter(description = "Client id") @QueryParam(OIDCLoginProtocol.CLIENT_ID_PARAM) String clientId,
+            @Parameter(description = "Number of seconds after which the generated token expires") @QueryParam("lifespan") Integer lifespan,
+            @Parameter(description = "Required actions the user needs to complete") List<String> actions
+    ){
+        UserModel user = session.users().getUserById(realm, userId);
+        auth.users().requireManage(user);
+
+        int expiration = Time.currentTime() + lifespan;
+        ExecuteActionsActionToken token = new ExecuteActionsActionToken(user.getId(), user.getEmail(), expiration, actions, redirectUri, clientId);
+        try {
+            UriBuilder builder = LoginActionsService.actionTokenProcessor(session.getContext().getUri());
+            builder.queryParam("key", token.serialize(session, realm, session.getContext().getUri()));
+
+            String link = builder.build(realm.getName()).toString();
+
+            return buildResponse(200, link);
+
+        } catch (Exception e) {
+            throw ErrorResponse.error("Failed to get link tide account URL " + e.getMessage(), Response.Status.INTERNAL_SERVER_ERROR);
+        }
+
+
     }
 
     private Response buildResponse(int status, String message) {

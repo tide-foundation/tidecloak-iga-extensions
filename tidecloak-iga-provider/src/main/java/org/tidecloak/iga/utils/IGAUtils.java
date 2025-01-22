@@ -17,7 +17,7 @@ import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
-import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
@@ -41,7 +41,6 @@ public class IGAUtils {
                 .collect(Collectors.toList());
     }
 
-    // ONLY WORKS FOR NO TIDE ADMIN. WITH IGA ENABLED TO ALLOW TIDE ADMIN TO EXIST
     public static List<String>  signInitialTideAdmin(MultivaluedHashMap<String, String> keyProviderConfig,
                                                       UserContext[] userContexts,
                                                       InitializerCertifcate initCert,
@@ -98,8 +97,8 @@ public class IGAUtils {
             return ((TideRoleDraftEntity) entity).getId();
         } else if (entity instanceof TideCompositeRoleMappingDraftEntity) {
             return ((TideCompositeRoleMappingDraftEntity) entity).getId();
-        } else if (entity instanceof TideClientFullScopeStatusDraftEntity) {
-            return ((TideClientFullScopeStatusDraftEntity) entity).getId();
+        } else if (entity instanceof TideClientDraftEntity) {
+            return ((TideClientDraftEntity) entity).getId();
         }
         return null;
     }
@@ -110,7 +109,7 @@ public class IGAUtils {
             case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, changeSetId);
             case ROLE -> em.find(TideRoleDraftEntity.class, changeSetId);
             case COMPOSITE_ROLE -> em.find(TideCompositeRoleMappingDraftEntity.class, changeSetId);
-            case CLIENT_FULLSCOPE -> em.find(TideClientFullScopeStatusDraftEntity.class, changeSetId);
+            case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, changeSetId);
             default -> null;
         };
     }
@@ -136,9 +135,9 @@ public class IGAUtils {
                 break;
             case CLIENT_FULLSCOPE:
                 if (changeSetAction == ActionType.CREATE) {
-                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeEnabled(DraftStatus.APPROVED);
+                    ((TideClientDraftEntity) draftRecordEntity).setFullScopeEnabled(DraftStatus.APPROVED);
                 } else if (changeSetAction == ActionType.DELETE) {
-                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeDisabled(DraftStatus.APPROVED);
+                    ((TideClientDraftEntity) draftRecordEntity).setFullScopeDisabled(DraftStatus.APPROVED);
                 }
                 break;
         }
@@ -167,10 +166,13 @@ public class IGAUtils {
                 break;
             case CLIENT_FULLSCOPE:
                 if (changeSetAction == ActionType.CREATE) {
-                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeEnabled(draftStatus);
+                    ((TideClientDraftEntity) draftRecordEntity).setFullScopeEnabled(draftStatus);
                 } else if (changeSetAction == ActionType.DELETE) {
-                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeDisabled(draftStatus);
+                    ((TideClientDraftEntity) draftRecordEntity).setFullScopeDisabled(draftStatus);
                 }
+                break;
+            case CLIENT:
+                ((TideClientDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
                 break;
         }
     }

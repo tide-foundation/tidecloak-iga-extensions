@@ -38,10 +38,8 @@ public class TideUserProvider extends JpaUserProvider {
         draftUser.setAction(ActionType.CREATE);
         em.persist(draftUser);
 
-        // Add draft record for user groups. DEFAULT ROLES ARE COMMITED BY DEFAULT FOR NOW
-        // TODO: have a step here that goes and gets it signed by VVK automatically and save final proof to DB
         RoleModel defaultRole =  realm.getDefaultRole();
-        var draftDefaultRoleUserRole = new TideUserRoleMappingDraftEntity();
+        TideUserRoleMappingDraftEntity draftDefaultRoleUserRole = new TideUserRoleMappingDraftEntity();
         draftDefaultRoleUserRole.setId(KeycloakModelUtils.generateId());
         draftDefaultRoleUserRole.setRoleId(defaultRole.getId());
         draftDefaultRoleUserRole.setUser(userEntity);
@@ -64,7 +62,7 @@ public class TideUserProvider extends JpaUserProvider {
     private void removeUser(UserEntity user) {
         em.createNamedQuery("deleteProofByUser").setParameter("user", user).executeUpdate(); // Deletes final proof from UserClientAccessProofEntity
         em.createNamedQuery("deleteAllDraftProofRecordsForUser").setParameter("user", user).executeUpdate(); // Deletes draft proof from AccessProofDetailEntity
-        em.createNamedQuery("deleteUserDrafts").setParameter("user", user).executeUpdate(); // Not implemented yet, user can be deleted
+        em.createNamedQuery("deleteUserDrafts").setParameter("user", user).executeUpdate(); // Not implemented yet, user can be deleted. tideuserprovider
         em.createNamedQuery("deleteUserRoleMappingDraftsByUser").setParameter("user", user).executeUpdate(); // Delete user role mapping draft records from TideUserRoleMappingDraftEntity
         em.createNamedQuery("deleteUserRoleMappingsByUser").setParameter("user", user).executeUpdate();
         em.createNamedQuery("deleteUserGroupMembershipsByUser").setParameter("user", user).executeUpdate();

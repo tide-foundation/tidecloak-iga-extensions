@@ -1,19 +1,27 @@
 package org.tidecloak.iga.changesetprocessors.utils;
 
+import jakarta.persistence.EntityManager;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
+import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
-import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
+
+import java.util.List;
 
 public class ChangeRequestUtils {
 
     public static ChangeSetRequest getChangeSetRequestFromEntity(KeycloakSession session, Object entity) {
         ChangeSetRequest changeSetRequest = new ChangeSetRequest();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
         if (entity instanceof TideUserRoleMappingDraftEntity userRoleEntity) {
             ActionType actionType = userRoleEntity.getDeleteStatus() != null ? ActionType.DELETE : ActionType.CREATE;
@@ -31,7 +39,7 @@ public class ChangeRequestUtils {
             changeSetRequest.setChangeSetId(roleEntity.getId());
             changeSetRequest.setType(ChangeSetType.ROLE);
             changeSetRequest.setActionType(actionType);
-        } else if (entity instanceof TideClientFullScopeStatusDraftEntity draftEntity) {
+        } else if (entity instanceof TideClientDraftEntity draftEntity) {
             boolean isFullScopeEnabledActive = draftEntity.getFullScopeEnabled() != null
                     && draftEntity.getFullScopeEnabled().equals(DraftStatus.ACTIVE);
             boolean isFullScopeDisabledActive = draftEntity.getFullScopeDisabled() != null
@@ -40,6 +48,13 @@ public class ChangeRequestUtils {
             // Ensure that both cannot be ACTIVE simultaneously
             if (isFullScopeEnabledActive && isFullScopeDisabledActive) {
                 throw new IllegalStateException("Both FullScopeEnabled and FullScopeDisabled cannot be active at the same time.");
+            }
+
+            if(isFullScopeDisabledActive && draftEntity.getFullScopeEnabled().equals(DraftStatus.NULL)){
+                changeSetRequest.setChangeSetId(draftEntity.getId());
+                changeSetRequest.setType(ChangeSetType.CLIENT);
+                changeSetRequest.setActionType(ActionType.CREATE);
+                return changeSetRequest;
             }
 
             // Determine the ActionType based on the statuses
@@ -62,5 +77,14 @@ public class ChangeRequestUtils {
         }
 
         return changeSetRequest;
+    }
+
+    private static ChangeSetType getChangeSetType(EntityManager em, String recordId){
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, recordId);
+        if(changesetRequestEntity == null) {
+            throw new RuntimeException("No changeSet found with id: " + recordId);
+        }
+        return changesetRequestEntity.getChangesetType();
+
     }
 }
