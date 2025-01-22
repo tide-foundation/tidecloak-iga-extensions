@@ -10,6 +10,7 @@ import java.util.function.Supplier;
 public enum ChangeSetTypeEntity {
     DEFAULT_ROLES(ChangeSetType.DEFAULT_ROLES, "COMPOSITE_ROLE_MAPPING_DRAFT", TideCompositeRoleMappingDraftEntity.class, CompositeRoleProcessor::new),
     CLIENT(ChangeSetType.CLIENT, "CLIENT_DRAFT", TideClientDraftEntity.class, ClientProcessor::new),
+    CLIENT_DEFAULT_USER_CONTEXT(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT, "CLIENT_FULLSCOPE_DRAFT", TideClientDraftEntity.class, ClientProcessor::new),
     ROLE(ChangeSetType.ROLE, "ROLE_ENTITY_DRAFT", TideRoleDraftEntity.class, RoleProcessor::new),
     USER_ROLE(ChangeSetType.USER_ROLE, "USER_ROLE_MAPPING_DRAFT", TideUserRoleMappingDraftEntity.class, UserRoleProcessor::new),
     COMPOSITE_ROLE(ChangeSetType.COMPOSITE_ROLE, "COMPOSITE_ROLE_MAPPING_DRAFT", TideCompositeRoleMappingDraftEntity.class, CompositeRoleProcessor::new),

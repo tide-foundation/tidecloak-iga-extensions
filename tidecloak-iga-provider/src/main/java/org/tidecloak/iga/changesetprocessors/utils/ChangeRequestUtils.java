@@ -40,15 +40,6 @@ public class ChangeRequestUtils {
             changeSetRequest.setType(ChangeSetType.ROLE);
             changeSetRequest.setActionType(actionType);
         } else if (entity instanceof TideClientDraftEntity draftEntity) {
-            ChangeSetType changeSetType = getChangeSetType(em, draftEntity.getId());
-
-            if(changeSetType.equals(ChangeSetType.CLIENT)){
-                changeSetRequest.setChangeSetId(draftEntity.getId());
-                changeSetRequest.setType(ChangeSetType.CLIENT);
-                changeSetRequest.setActionType(ActionType.CREATE);
-                return changeSetRequest;
-            }
-
             boolean isFullScopeEnabledActive = draftEntity.getFullScopeEnabled() != null
                     && draftEntity.getFullScopeEnabled().equals(DraftStatus.ACTIVE);
             boolean isFullScopeDisabledActive = draftEntity.getFullScopeDisabled() != null
@@ -57,6 +48,13 @@ public class ChangeRequestUtils {
             // Ensure that both cannot be ACTIVE simultaneously
             if (isFullScopeEnabledActive && isFullScopeDisabledActive) {
                 throw new IllegalStateException("Both FullScopeEnabled and FullScopeDisabled cannot be active at the same time.");
+            }
+
+            if(isFullScopeDisabledActive && draftEntity.getFullScopeEnabled().equals(DraftStatus.NULL)){
+                changeSetRequest.setChangeSetId(draftEntity.getId());
+                changeSetRequest.setType(ChangeSetType.CLIENT);
+                changeSetRequest.setActionType(ActionType.CREATE);
+                return changeSetRequest;
             }
 
             // Determine the ActionType based on the statuses

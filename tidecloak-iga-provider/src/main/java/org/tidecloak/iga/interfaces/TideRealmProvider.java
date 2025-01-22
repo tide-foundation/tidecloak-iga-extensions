@@ -54,11 +54,11 @@ public class TideRealmProvider extends JpaRealmProvider {
             clientDraftEntity.setClient(clientEntity);
 
             if(usersInRealm.isEmpty()) {
-                clientDraftEntity.setFullScopeEnabled(DraftStatus.ACTIVE);
+                clientDraftEntity.setFullScopeEnabled(DraftStatus.DRAFT);
                 clientDraftEntity.setFullScopeDisabled(DraftStatus.NULL);
                 clientEntity.setFullScopeAllowed(true);
             } else {
-                clientDraftEntity.setFullScopeDisabled(DraftStatus.ACTIVE);
+                clientDraftEntity.setFullScopeDisabled(DraftStatus.DRAFT);
                 clientDraftEntity.setFullScopeEnabled(DraftStatus.NULL);
                 clientEntity.setFullScopeAllowed(false);
             }

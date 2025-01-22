@@ -322,12 +322,11 @@ public class IGARealmResource {
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
 
-                if(p.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES) || p.getChangesetType().equals(ChangeSetType.CLIENT)) {
+                if(p.getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)) {
                     requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context for all USERS", p.getId(), c.getClient().getClientId(), p.getProofDraft()));
-
-                }else {
+                }
+                else if (p.getChangesetType().equals(ChangeSetType.CLIENT_FULLSCOPE)) {
                     requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), c.getClient().getClientId(), p.getProofDraft()));
-
                 }
             });
 
@@ -421,10 +420,10 @@ public class IGARealmResource {
 
             proofs.forEach(p -> {
                 if ( p.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES)){
-                    requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context For All Users", p.getId(), p.getClientId(), p.getProofDraft()));
+                    requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context For All Users", p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
 
                 } else {
-                    requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), p.getClientId(), p.getProofDraft()));
+                    requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
                 }
             });
             changes.add(requestChange);

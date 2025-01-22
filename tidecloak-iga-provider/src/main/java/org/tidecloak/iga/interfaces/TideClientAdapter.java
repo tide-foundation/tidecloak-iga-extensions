@@ -40,17 +40,37 @@ public class TideClientAdapter extends ClientAdapter {
     @Override
     public void setFullScopeAllowed(boolean value) {
         try {
+
+            List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
+
             List<TideClientDraftEntity> statusDraft = em.createNamedQuery("getClientFullScopeStatus", TideClientDraftEntity.class)
                     .setParameter("client", entity)
                     .getResultList();
 
+            if(statusDraft.isEmpty()){
+                throw new Exception("Client does not exist");
+            }
+            TideClientDraftEntity clientFullScopeStatuses = statusDraft.get(0);
+
+
+            if((clientFullScopeStatuses.getDraftStatus().equals(DraftStatus.DRAFT) && !realm.getName().equalsIgnoreCase(Config.getAdminRealm()))
+            ) {
+                if(!usersInRealm.isEmpty() && clientFullScopeStatuses.getFullScopeDisabled().equals(DraftStatus.DRAFT) && clientFullScopeStatuses.getFullScopeEnabled().equals(DraftStatus.NULL) ){
+                    clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.ACTIVE);
+                    return;
+                } else if (usersInRealm.isEmpty() && clientFullScopeStatuses.getFullScopeDisabled().equals(DraftStatus.NULL) && clientFullScopeStatuses.getFullScopeEnabled().equals(DraftStatus.DRAFT)) {
+                    clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.ACTIVE);
+                    return;
+                }
+            }
+
             if(isMigration || realm.getName().equalsIgnoreCase(Config.getAdminRealm())) {
                 if(value){
-                    statusDraft.get(0).setFullScopeDisabled(DraftStatus.NULL);
-                    statusDraft.get(0).setFullScopeEnabled(DraftStatus.ACTIVE);
+                    clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.NULL);
+                    clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.ACTIVE);
                 } else {
-                    statusDraft.get(0).setFullScopeEnabled(DraftStatus.NULL);
-                    statusDraft.get(0).setFullScopeDisabled(DraftStatus.ACTIVE);
+                    clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.NULL);
+                    clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.ACTIVE);
                 }
                 em.flush();
                 super.setFullScopeAllowed(value);
@@ -65,7 +85,6 @@ public class TideClientAdapter extends ClientAdapter {
                 }
             };
 
-            TideClientDraftEntity clientFullScopeStatuses = statusDraft.get(0);
             ActionType actionType = value ? ActionType.CREATE : ActionType.DELETE;
             WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, value, actionType, ChangeSetType.CLIENT_FULLSCOPE);
             changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT_FULLSCOPE).executeWorkflow(session, clientFullScopeStatuses, em, WorkflowType.REQUEST, params, callback);

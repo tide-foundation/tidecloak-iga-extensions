@@ -341,6 +341,15 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
         UserModel dummyUser = session.users().addUser(realm, id, id, true, false);
 
         AccessToken accessToken = ChangeSetProcessor.super.generateAccessToken(session, realm, client, dummyUser);
+        Set<RoleModel> rolesToAdd = getAllAccess(session, Set.of(realm.getDefaultRole()), client, client.getClientScopes(true).values().stream(), client.isFullScopeAllowed(), null);
+        rolesToAdd.forEach(r -> {
+            if ( realm.getName().equalsIgnoreCase(Config.getAdminRealm())){
+                addRoleToAccessTokenMasterRealm(accessToken, r, realm, em);
+            }
+            else{
+                addRoleToAccessToken(accessToken, r);
+            }
+        });
 
         if(clients.contains(client.getClientId())){
             accessToken.subject(null);
@@ -358,19 +367,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
                         removeRoleFromAccessToken(accessToken, r);
                     }
                 });
-            } else{
-                Set<RoleModel> rolesToAdd = getAllAccess(session, Set.of(realm.getDefaultRole()), client, client.getClientScopes(true).values().stream(), client.isFullScopeAllowed(), childRole);
-                rolesToAdd.forEach(r -> {
-                    if ( realm.getName().equalsIgnoreCase(Config.getAdminRealm())){
-                        addRoleToAccessTokenMasterRealm(accessToken, r, realm, em);
-                    }
-                    else{
-                        addRoleToAccessToken(accessToken, r);
-                    }
-                });
             }
-
-
             accessToken.subject(null);
             session.users().removeUser(realm, dummyUser);
             return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username"), client.isFullScopeAllowed());

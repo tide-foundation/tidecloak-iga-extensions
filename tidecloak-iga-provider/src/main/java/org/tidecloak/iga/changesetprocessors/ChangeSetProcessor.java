@@ -164,7 +164,7 @@ public interface ChangeSetProcessor<T> {
             for(AccessProofDetailEntity userContextDraft : userContextDrafts) {
                 em.lock(userContextDraft, LockModeType.PESSIMISTIC_WRITE);
 
-                if(change.getType().equals(ChangeSetType.USER_ROLE) &&  (userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT) || userContextDraft.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES))) {
+                if(change.getType().equals(ChangeSetType.USER_ROLE) && (userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT) || userContextDraft.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES) || userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT) )) {
                     return;
                 }
 
@@ -437,7 +437,12 @@ public interface ChangeSetProcessor<T> {
 
         ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);
         AccessToken userContext = processorFactory.getProcessor(changeSetRequest.getType()).transformUserContext(token, session, entity, user, client);
-        return this.cleanAccessToken(userContext, null, client.isFullScopeAllowed());
+
+        boolean isFullScopeAllowed = client.isFullScopeAllowed();
+        if( entity instanceof TideClientDraftEntity) {
+            isFullScopeAllowed = changeSetRequest.getActionType().equals(ActionType.CREATE);
+        }
+        return this.cleanAccessToken(userContext, null, isFullScopeAllowed);
     }
 
     /**
@@ -649,7 +654,7 @@ public interface ChangeSetProcessor<T> {
             throw new Exception("Could not find authorization signature for this user context. Request denied.");
         }
 
-        if(userContext.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES) || userContext.getChangesetType().equals(ChangeSetType.CLIENT)) {
+        if(userContext.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES) || userContext.getChangesetType().equals(ChangeSetType.CLIENT) || userContext.getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)) {
             ClientEntity clientEntity = em.find(ClientEntity.class, userContext.getClientId());
             TideClientDraftEntity defaultUserContext = em.createNamedQuery("getClientFullScopeStatus", TideClientDraftEntity.class).setParameter("client", clientEntity).getSingleResult();
             defaultUserContext.setDefaultUserContext(userContext.getProofDraft());
