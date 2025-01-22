@@ -11,6 +11,7 @@ import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.ClientUtils;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.iga.interfaces.TideRoleAdapter;
@@ -62,7 +63,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     @Override
-    public void request(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em, ActionType action, Runnable callback) {
+    public void request(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em, ActionType action, Runnable callback, ChangeSetType changeSetType) {
         try {
             // Log the start of the request with detailed context
             logger.info(String.format(
@@ -71,7 +72,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                     action,
                     entity.getId()
             ));
-
+            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getId(), changeSetType);
             switch (action) {
                 case CREATE:
                     logger.info(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
@@ -154,8 +155,8 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     @Override
-    public RoleModel getRoleRequestFromEntity(KeycloakSession session, TideUserRoleMappingDraftEntity entity) {
-        return session.getContext().getRealm().getRoleById(entity.getRoleId());
+    public RoleModel getRoleRequestFromEntity(KeycloakSession session, RealmModel realm, TideUserRoleMappingDraftEntity entity) {
+        return realm.getRoleById(entity.getRoleId());
     }
 
     @Override
@@ -174,12 +175,12 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             affectedUserRoleEntity.setDraftStatus(DraftStatus.DRAFT);
         }
 
-        String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, user, "openid", affectedUserRoleEntity);
+        String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, user, "openId", affectedUserRoleEntity);
         affectedUserContextDraft.setProofDraft(userContextDraft);
     }
 
     @Override
-    public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideUserRoleMappingDraftEntity entity, UserModel user){
+    public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideUserRoleMappingDraftEntity entity, UserModel user, ClientModel clientModel){
         RealmModel realm = session.getContext().getRealm();
         RoleModel role = realm.getRoleById(entity.getRoleId());
 
@@ -196,7 +197,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 removeRoleFromAccessToken(token, r);
             }
         });
-        userContextUtils.normalizeAccessToken(token);
+        userContextUtils.normalizeAccessToken(token, clientModel.isFullScopeAllowed());
         return token;
     }
 
@@ -226,17 +227,40 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
     private void processRealmManagementRoleAssignment(KeycloakSession session, EntityManager em, RealmModel realm, List<ClientModel> clientList,
                                                        TideUserRoleMappingDraftEntity entity, UserModel userModel) {
+        Set<UserModel> adminUsers = new HashSet<>();
+        adminUsers.add(userModel);
+        ClientModel realmManagementClient = realm.getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
+        RoleEntity roleEntity = em.find(RoleEntity.class, entity.getRoleId());
+        RoleModel role = realmManagementClient.getRole(roleEntity.getName());
+        if(role != null && role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
+            Set<UserModel> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
+                    .setParameter("draftStatus", DraftStatus.ACTIVE)
+                    .setParameter("roleId", entity.getRoleId())
+                    .getResultList().stream()
+                    .map(t -> session.users().getUserById(realm, t.getUser().getId()))
+                    .collect(Collectors.toSet());
+
+            adminUsers.addAll(users);
+        }
         clientList.forEach(client -> {
             try {
                 boolean isRealmManagementClient = client.getClientId().equalsIgnoreCase(Constants.REALM_MANAGEMENT_CLIENT_ID);
-                if (isRealmManagementClient) {
-                    ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, userModel, entity.getId(),
-                            ChangeSetType.USER_ROLE, entity);
-                } else {
-                    // Create empty user contexts for ADMIN-CLI and SECURITY-ADMIN-CONSOLE
-                    ChangeSetProcessor.super.generateAndSaveDefaultUserContextDraft(session, em, realm, client, userModel, entity.getId(),
-                            ChangeSetType.USER_ROLE);
-                }
+                boolean isAdminClient = client.getClientId().equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID) || client.getClientId().equalsIgnoreCase(Constants.ADMIN_CLI_CLIENT_ID);
+                adminUsers.forEach(u -> {
+                    try {
+                        if (isRealmManagementClient) {
+                            ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, u, entity.getId(),
+                                    ChangeSetType.USER_ROLE, entity);
+                        }
+                        else if (isAdminClient){
+                            // Create empty user contexts for ADMIN-CLI and SECURITY-ADMIN-CONSOLE
+                            ChangeSetProcessor.super.generateAndSaveDefaultUserContextDraft(session, em, realm, client, u, entity.getId(),
+                                    ChangeSetType.USER_ROLE);
+                        }
+                    }catch (Exception e) {
+                        throw new RuntimeException("Error processing client: " + client.getClientId(), e);
+                    }
+                });
             } catch (Exception e) {
                 throw new RuntimeException("Error processing client: " + client.getClientId(), e);
             }

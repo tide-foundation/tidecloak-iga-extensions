@@ -1,6 +1,8 @@
 package org.tidecloak.jpa.entities;
 
 import jakarta.persistence.*;
+import org.tidecloak.shared.enums.ChangeSetType;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -12,6 +14,10 @@ public class ChangesetRequestEntity {
     @Column(name = "CHANGESET_REQUEST_ID")
     private String changesetRequestId;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "CHANGE_SET_TYPE")
+    protected ChangeSetType changesetType;
+
     @ElementCollection
     @CollectionTable(name = "ADMIN_AUTHORIZATIONS", joinColumns = @JoinColumn(name = "ID"))
     @Column(name = "ADMIN_AUTHORIZATION")
@@ -22,6 +28,14 @@ public class ChangesetRequestEntity {
 
     @Column(name = "TIMESTAMP")
     protected Long timestamp = System.currentTimeMillis() / 1000;
+
+    public ChangeSetType getChangesetType() {
+        return changesetType;
+    }
+
+    public void setChangesetType(ChangeSetType changesetType) {
+        this.changesetType = changesetType;
+    }
 
     public String getChangesetRequestId() {
         return changesetRequestId;

@@ -38,6 +38,8 @@ import java.net.URI;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import static org.tidecloak.iga.TideRequests.TideRoleRequests.*;
+
 public class IGARealmResource {
 
     private final KeycloakSession session;
@@ -161,12 +163,12 @@ public class IGARealmResource {
             List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
                     .setParameter("ID", componentModel.getId()).getResultList();
 
-            boolean isAssigningTideAdminRole;
+            boolean isAssigningTideRealmAdminRole;
             if(draftRecordEntity instanceof TideUserRoleMappingDraftEntity){
-                RoleModel role = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-                isAssigningTideAdminRole = ((TideUserRoleMappingDraftEntity) draftRecordEntity).getRoleId().equals(role.getId()) && realmAuthorizers.size() == 1;
+                RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+                isAssigningTideRealmAdminRole = ((TideUserRoleMappingDraftEntity) draftRecordEntity).getRoleId().equals(tideRole.getId());
             } else {
-                isAssigningTideAdminRole = false;
+                isAssigningTideRealmAdminRole = false;
             }
 
             if (realmAuthorizers.isEmpty()){
@@ -188,12 +190,8 @@ public class IGARealmResource {
             if (changesetRequestEntity == null){
                 throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
             }
-            if (IGAUtils.isIGAEnabled(realm) && tideIdp != null){
-                if (isAssigningTideAdminRole) {
-                    if (!realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")){
-                        throw new Exception("Invalid realm authorizer type for initial tide admin role assignment. Found " + realmAuthorizers.get(0).getType());
-                    }
-
+            if (IGAUtils.isIGAEnabled(realm) && tideIdp != null) {
+                if (isAssigningTideRealmAdminRole &&  realmAuthorizers.size() == 1 && realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")) {
                     List<String> signatures = IGAUtils.signInitialTideAdmin(config, userContexts.toArray(new UserContext[0]), cert, realmAuthorizers.get(0), changesetRequestEntity);
                     tideRoleEntity.setInitCertSig(signatures.get(0));
                     for(int i = 0; i < userContexts.size(); i++){
@@ -206,18 +204,8 @@ public class IGARealmResource {
             ObjectMapper objectMapper = new ObjectMapper();
             if (!realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") && IGAUtils.isIGAEnabled(realm) && tideIdp != null) {
                 //String changeRequestString = objectMapper.writeValueAsString(changeSetRequests);
-                String redirectUrl = "";
-                String redirectUrlSig = "";
-                if(changeSet.getType().equals(ChangeSetType.USER_ROLE)){
-                    redirectUrl = tideIdp.getConfig().get("changeSetUsersEndpoint");
-                    redirectUrlSig = tideIdp.getConfig().get("changeSetUsersURLSig");
-                }else if (changeSet.getType().equals(ChangeSetType.COMPOSITE_ROLE) || changeSet.getType().equals(ChangeSetType.ROLE)){
-                    redirectUrl = tideIdp.getConfig().get("changeSetRolesEndpoint");
-                    redirectUrlSig = tideIdp.getConfig().get("changeSetRolesURLSig");
-                }else if (changeSet.getType().equals(ChangeSetType.CLIENT_FULLSCOPE)){
-                    redirectUrl = tideIdp.getConfig().get("changeSetClientsEndpoint");
-                    redirectUrlSig = tideIdp.getConfig().get("changeSetClientsURLSig");
-                }
+                String redirectUrl = tideIdp.getConfig().get("changeSetEndpoint");
+                String redirectUrlSig = tideIdp.getConfig().get("changeSetURLSig");
                 URI redirectURI = new URI(redirectUrl);
 
                 UserSessionModel userSession = session.sessions().getUserSession(realm, auth.adminAuth().getToken().getSessionId());
@@ -313,12 +301,12 @@ public class IGARealmResource {
 
     private List<RequestedChanges> processClientDraftRecords(EntityManager em) {
         List<RequestedChanges> changes = new ArrayList<>();
-        List<TideClientFullScopeStatusDraftEntity> mappings = em.createNamedQuery("getClientFullScopeStatusDraftThatDoesNotHaveStatus", TideClientFullScopeStatusDraftEntity.class)
+        List<TideClientDraftEntity> mappings = em.createNamedQuery("getClientFullScopeStatusDraftThatDoesNotHaveStatus", TideClientDraftEntity.class)
                 .setParameter("status", DraftStatus.ACTIVE)
                 .setParameter("status2", DraftStatus.NULL)
                 .getResultList();
 
-        for (TideClientFullScopeStatusDraftEntity c : mappings) {
+        for (TideClientDraftEntity c : mappings) {
             em.lock(c, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
             ClientModel client = realm.getClientById(c.getClient().getId());
             if (client == null) {
@@ -333,7 +321,13 @@ public class IGARealmResource {
             RequestedChanges requestChange = new RequestedChanges("",ChangeSetType.CLIENT_FULLSCOPE, RequestType.CLIENT, client.getClientId(), realm.getName(), c.getAction(), c.getId(), new ArrayList<>(), DraftStatus.DRAFT, DraftStatus.NULL);
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
-                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), c.getClient().getClientId(), p.getProofDraft()));
+
+                if(p.getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)) {
+                    requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context for all USERS", p.getId(), c.getClient().getClientId(), p.getProofDraft()));
+                }
+                else if (p.getChangesetType().equals(ChangeSetType.CLIENT_FULLSCOPE)) {
+                    requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), c.getClient().getClientId(), p.getProofDraft()));
+                }
             });
 
             if(c.getFullScopeEnabled() != DraftStatus.ACTIVE && c.getFullScopeEnabled() != DraftStatus.NULL) {
@@ -350,6 +344,20 @@ public class IGARealmResource {
                 requestChange.setActionType(ActionType.DELETE);
             }
             changes.add(requestChange);
+
+        }
+        List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndRealm", AccessProofDetailEntity.class)
+                .setParameter("realmId", realm.getId())
+                .setParameter("changesetType", ChangeSetType.CLIENT)
+                .getResultList();
+        if (!proofs.isEmpty()) {
+            proofs.forEach(p -> {
+                TideClientDraftEntity tideClientDraftEntity = em.find(TideClientDraftEntity.class, p.getRecordId());
+                ClientModel client = realm.getClientById(p.getClientId());
+                RequestedChanges requestChange = new RequestedChanges("New Client Created",ChangeSetType.CLIENT, RequestType.CLIENT, client.getClientId(), realm.getName(), ActionType.CREATE, p.getRecordId(), new ArrayList<>(), tideClientDraftEntity.getDraftStatus(), DraftStatus.NULL);
+                requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context for all USERS", p.getId(), client.getClientId(), p.getProofDraft()));
+                changes.add(requestChange);
+            });
         }
         return changes;
     }
@@ -396,7 +404,7 @@ public class IGARealmResource {
                 .getResultList();
 
         for (TideCompositeRoleMappingDraftEntity m : mappings) {
-            if (m.getComposite() == null || !m.getComposite().isClientRole()) {
+            if (m.getComposite() == null) {
                 continue;
             }
             List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
@@ -407,10 +415,21 @@ public class IGARealmResource {
             String actionDescription = isDeleteRequest ? "Removing Role from Composite Role": "Granting Role to Composite Role";
             ActionType action = isDeleteRequest ? ActionType.DELETE : ActionType.CREATE;
 
-            RequestedChanges requestChange = new CompositeRoleChangeRequest(m.getChildRole().getName(), m.getComposite().getName(), actionDescription, ChangeSetType.COMPOSITE_ROLE, RequestType.ROLE, realm.getClientById(m.getComposite().getClientId()).getClientId(), realm.getName(), action, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
-            proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft())));
+            String clientId = m.getComposite().isClientRole() ? realm.getClientById(m.getComposite().getClientId()).getClientId() : "" ;
+            RequestedChanges requestChange = new CompositeRoleChangeRequest(m.getChildRole().getName(), m.getComposite().getName(), actionDescription, ChangeSetType.COMPOSITE_ROLE, RequestType.ROLE, clientId, realm.getName(), action, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
+
+            proofs.forEach(p -> {
+                if ( p.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES)){
+                    requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context For All Users", p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
+
+                } else {
+                    requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
+                }
+            });
             changes.add(requestChange);
         }
+
+
         return changes;
     }
 
@@ -473,8 +492,8 @@ public class IGARealmResource {
                     throw new Exception("Authorizer not found for this realm.");
                 }
 
-
                 if ( !realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")) {
+
                     // Fetch the draft record entity and proof details based on the change set type
                     Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, change.getType(), change.getChangeSetId());
                     List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, IGAUtils.getEntityId(draftRecordEntity));;
@@ -510,6 +529,7 @@ public class IGARealmResource {
                     changesetRequestEntity.getAdminAuthorizations().forEach(auth -> {
                         authorizerBuilder.AddAdminAuthorization(AdminAuthorization.FromString(auth));
                     });
+
                     int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
                     int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
 
@@ -531,11 +551,26 @@ public class IGARealmResource {
                     settings.Threshold_N = max;
 
                     authorizerBuilder.AddAuthorizationToSignRequest(req);
-                    SignatureResponse response = Midgard.SignModel(settings, req);
 
-                    for ( int i = 0; i < userContexts.size(); i++){
-                        proofDetails.get(i).setSignature(response.Signatures[i]);
+                    if(isTideRealmRoleAssignment(mapping)) {
+                        RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, change.getChangeSetId());
+                        if(roleInitCert == null) {
+                            throw new Exception("Role Init Cert draft not found for changeSet, " + change.getChangeSetId());
+                        }
+                        req.SetInitializationCertificate(InitializerCertifcate.FromString(roleInitCert.getInitCert()));
+                        SignatureResponse response = Midgard.SignModel(settings, req);
+                        for ( int i = 0; i < userContexts.size(); i++){
+                            proofDetails.get(i).setSignature(response.Signatures[i + 1]);
+                        }
+                        commitRoleInitCert(session, change.getChangeSetId(), response.Signatures[0]);
+                    } else {
+                        SignatureResponse response = Midgard.SignModel(settings, req);
+
+                        for ( int i = 0; i < userContexts.size(); i++){
+                            proofDetails.get(i).setSignature(response.Signatures[i]);
+                        }
                     }
+
                 }
             }
 
@@ -546,12 +581,9 @@ public class IGARealmResource {
                 RoleModel role = realm.getRoleById(((TideUserRoleMappingDraftEntity) mapping).getRoleId());
                 if (role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
                     realmAuthorizers.get(0).setType("multiAdmin");
-
                 }
             }
 
-            ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, change.getChangeSetId());
-            em.remove(changesetRequestEntity);
             em.flush(); // Persist changes to the database
             // Return success message after approving the change sets
             return Response.ok("Change sets approved").build();
@@ -567,10 +599,12 @@ public class IGARealmResource {
         return switch (type) {
             case USER_ROLE -> getUserRoleMappings(em, change, action);
             case GROUP, USER_GROUP_MEMBERSHIP, GROUP_ROLE -> null;
-            case COMPOSITE_ROLE -> getCompositeRoleMappings(em, change, action);
+            case COMPOSITE_ROLE, DEFAULT_ROLES -> getCompositeRoleMappings(em, change, action);
             case ROLE -> getRoleMappings(em, change, action);
             case USER -> getUserMappings(em, change, action);
             case CLIENT_FULLSCOPE -> getClientMappings(em, change, action);
+            case CLIENT -> getClientEntity(em, change);
+            default -> Collections.emptyList();
         };
     }
 
@@ -609,8 +643,14 @@ public class IGARealmResource {
 
     private List<?> getClientMappings(EntityManager em, ChangeSetRequest change, ActionType action) {
         String queryName = action == ActionType.CREATE ? "getClientFullScopeStatusDraftByIdAndFullScopeEnabled" : "getClientFullScopeStatusDraftByIdAndFullScopeDisabled";
-        return em.createNamedQuery(queryName, TideClientFullScopeStatusDraftEntity.class)
+        return em.createNamedQuery(queryName, TideClientDraftEntity.class)
                 .setParameter(action == ActionType.CREATE ? "fullScopeEnabled" : "fullScopeDisabled", DraftStatus.APPROVED)
+                .setParameter("changesetId", change.getChangeSetId())
+                .getResultList();
+    }
+
+    private List<?> getClientEntity(EntityManager em, ChangeSetRequest change) {
+        return em.createNamedQuery("getClientDraftById", TideClientDraftEntity.class)
                 .setParameter("changesetId", change.getChangeSetId())
                 .getResultList();
     }
@@ -632,5 +672,12 @@ public class IGARealmResource {
                 .build();
     }
 
+    private boolean isTideRealmRoleAssignment(Object mapping){
+        if ( mapping instanceof  TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
+            RoleModel roleModel = realm.getRoleById(tideUserRoleMappingDraftEntity.getRoleId());
+            return roleModel.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        }
+        return false;
+    }
 
 }

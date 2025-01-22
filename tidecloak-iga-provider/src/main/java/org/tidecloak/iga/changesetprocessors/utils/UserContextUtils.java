@@ -2,11 +2,14 @@ package org.tidecloak.iga.changesetprocessors.utils;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.persistence.EntityManager;
+import org.keycloak.authorization.policy.evaluation.Realm;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.RoleUtils;
 import org.keycloak.representations.AccessToken;
+import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.utils.UserContextUtilBase;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
@@ -84,10 +87,65 @@ public class UserContextUtils extends UserContextUtilBase {
                 .collect(Collectors.toList());
     }
 
-    public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, ClientModel client) {
+    public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, String recordId, ChangeSetType changeSetType) {
+        return em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndId", AccessProofDetailEntity.class)
+                .setParameter("recordId", recordId)
+                .setParameter("changesetType", changeSetType)
+                .getResultStream()
+                .collect(Collectors.toList());
+    }
+
+
+    public static List<AccessProofDetailEntity>  getUserContextDrafts(EntityManager em, ClientModel client) {
         return em.createNamedQuery("getProofDetailsByClient", AccessProofDetailEntity.class)
                 .setParameter("clientId", client.getId())
                 .getResultList();
+    }
+
+    public static Set<RoleModel> expandCompositeRoles(KeycloakSession session, Set<RoleModel> roles) {
+        RealmModel realm = session.getContext().getRealm();
+
+        Set<RoleModel> visited = new HashSet<>();
+
+        return roles.stream()
+                .flatMap(roleModel -> UserContextUtils.expandCompositeRolesStream(TideEntityUtils.toTideRoleAdapter(roleModel, session, realm), visited, DraftStatus.ACTIVE))
+                .collect(Collectors.toSet());
+    }
+
+    public static Set<RoleModel> getAllAccess(KeycloakSession session, Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes, boolean isFullScopeAllowed, RoleModel roleToInclude) {
+        RealmModel realm = session.getContext().getRealm();
+
+        Set<RoleModel> visited = new HashSet<>();
+
+        Set<RoleModel> expanded = roleModels.stream()
+                .flatMap(roleModel -> UserContextUtils.expandCompositeRolesStream(TideEntityUtils.toTideRoleAdapter(roleModel, session, realm), visited, DraftStatus.ACTIVE))
+                .collect(Collectors.toSet());
+
+        if ( roleToInclude != null) {
+            expanded.add(roleToInclude);
+        }
+
+        if (isFullScopeAllowed) {
+            return expanded;
+        } else {
+
+            // 1 - Client roles of this client itself
+            Stream<RoleModel> scopeMappings = client.getRolesStream();
+
+            // 2 - Role mappings of client itself + default client scopes + optional client scopes requested by scope parameter (if applyScopeParam is true)
+            Stream<RoleModel> clientScopesMappings;
+            clientScopesMappings = clientScopes.flatMap(ScopeContainerModel::getScopeMappingsStream);
+
+            scopeMappings = Stream.concat(scopeMappings, clientScopesMappings);
+
+            // 3 - Expand scope mappings
+            scopeMappings = RoleUtils.expandCompositeRolesStream(scopeMappings);
+
+            // Intersection of expanded user roles and expanded scopeMappings
+            expanded.retainAll(scopeMappings.collect(Collectors.toSet()));
+
+            return expanded;
+        }
     }
 
 
@@ -112,6 +170,43 @@ public class UserContextUtils extends UserContextUtilBase {
             roleModels.retainAll(scopeMappings.collect(Collectors.toSet()));
 
             return roleModels;
+        }
+    }
+
+    public static void addRoleToAccessTokenMasterRealm(AccessToken token, RoleModel role, RealmModel realm, EntityManager em) {
+        AccessToken.Access access = null;
+        if (!role.isClientRole()) {
+            // Handle realm-level roles
+            access = token.getRealmAccess();
+            if (access == null) {
+                access = new AccessToken.Access();
+                token.setRealmAccess(access);
+            }
+
+            // Check for duplicates first
+            if (access.getRoles() != null && access.getRoles().contains(role.getName())) {
+                return; // Role already exists, skip adding
+            }
+
+            // Add the role if it's not already present
+            access.addRole(role.getName());
+        } else if (role.isClientRole()) {
+            RoleEntity roleEntity = em.find(RoleEntity.class, role.getId());
+            ClientModel client = realm.getClientById(roleEntity.getClientId());
+            // Handle client-level roles
+            access = token.getResourceAccess(client.getClientId());
+
+            if (access == null) {
+                access = token.addAccess(client.getClientId());
+                if (client.isSurrogateAuthRequired()) {
+                    access.verifyCaller(true);
+                }
+            } else if (access.getRoles() != null && access.getRoles().contains(role.getName())) {
+                return; // Role already exists, skip adding
+            }
+
+            // Add the role if it's not already present
+            access.addRole(role.getName());
         }
     }
 
@@ -152,6 +247,25 @@ public class UserContextUtils extends UserContextUtilBase {
         }
     }
 
+    public static void removeRoleFromAccessTokenMasterRealm(AccessToken token, RoleModel role, RealmModel realm, EntityManager em) {
+        if (!role.isClientRole()) {
+            // Handle realm-level roles
+            AccessToken.Access realmAccess = token.getRealmAccess();
+            if (realmAccess != null && realmAccess.getRoles().contains(role.getName())) {
+                realmAccess.getRoles().remove(role.getName());
+            }
+        } else if (role.isClientRole()) {
+            // Handle client-level roles
+            RoleEntity roleEntity = em.find(RoleEntity.class, role.getId());
+            ClientModel client = realm.getClientById(roleEntity.getClientId());
+            AccessToken.Access clientAccess = token.getResourceAccess(client.getClientId());
+            if (clientAccess != null && clientAccess.getRoles().contains(role.getName())) {
+                clientAccess.getRoles().remove(role.getName());
+            }
+        }
+    }
+
+
     public static void removeRoleFromAccessToken(AccessToken token, RoleModel role) {
         if (role.getContainer() instanceof RealmModel) {
             // Handle realm-level roles
@@ -169,12 +283,16 @@ public class UserContextUtils extends UserContextUtilBase {
         }
     }
 
-    public void normalizeAccessToken(AccessToken token){
-        updateTokenAudience(token);
+    public void normalizeAccessToken(AccessToken token, boolean isFullscope){
+        updateTokenAudience(token, isFullscope);
         cleanAccessToken(token);
     }
 
-    private void updateTokenAudience(AccessToken token) {
+    public static void updateTokenAudience(AccessToken token, boolean isFullscope) {
+        if(!isFullscope){
+            token.audience(null);
+            return;
+        }
         // Create a set to hold the updated audience
         Set<String> audience = new HashSet<>();
 
@@ -190,14 +308,14 @@ public class UserContextUtils extends UserContextUtilBase {
 
         // Update the token audience or remove it if empty
         if (audience.isEmpty()) {
-            token.audience(); // Remove the audience field
+            token.audience(null); // Remove the audience field
         } else {
             token.audience(audience.toArray(new String[0])); // Update the audience with filtered clients
         }
     }
 
 
-    private static void cleanAccessToken(AccessToken token) {
+    public static void cleanAccessToken(AccessToken token) {
         // Clean up realm access if roles are empty or null
         if (token.getRealmAccess() != null &&
                 (token.getRealmAccess().getRoles() == null || token.getRealmAccess().getRoles().isEmpty())) {
