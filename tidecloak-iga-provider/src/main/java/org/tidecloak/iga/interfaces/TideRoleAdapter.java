@@ -193,4 +193,23 @@ public class TideRoleAdapter extends RoleAdapter {
                 .setParameter("recordId", recordId)
                 .executeUpdate();
     }
+
+    public void removeChildRoleFromCompositeRoleRecords(TideCompositeRoleMappingDraftEntity entity){
+        deleteCompositeRoleMapping(entity.getComposite(), entity.getChildRole());
+        deleteProofRecords(entity.getId());
+        RoleModel childRole = session.roles().getRoleById(realm, entity.getChildRole().getId());
+        super.removeCompositeRole(childRole);
+    }
+
+    public void removeChildRoleFromCompositeRoleRecords(TideCompositeRoleMappingDraftEntity entity, ActionType actionType){
+        deleteProofRecords(entity.getId());
+
+        if(!actionType.equals(ActionType.DELETE)) {
+            deleteCompositeRoleMapping(entity.getComposite(), entity.getChildRole());
+            RoleModel childRole = session.roles().getRoleById(realm, entity.getChildRole().getId());
+            super.removeCompositeRole(childRole);
+        } else {
+            entity.setDeleteStatus(null);
+        }
+    }
 }

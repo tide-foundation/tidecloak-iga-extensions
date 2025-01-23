@@ -4,6 +4,7 @@ public enum WorkflowType {
     REQUEST,
     APPROVAL,
     COMMIT,
-    UPDATE
+    UPDATE,
+    CANCEL
 
 }

@@ -170,20 +170,21 @@ public class TideUserAdapter extends UserAdapter {
             boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
 
             if (!isIGAEnabled){
-                deleteUserRoleMappingDraftsByRoleAndRole(role.getId());
+                List<TideUserRoleMappingDraftEntity> draftEntities = getDraftEntities(role);
+                deleteRoleAndProofRecords(role, draftEntities);
                 return;
             }
 
             List<TideUserRoleMappingDraftEntity> activeDraftEntities = getActiveDraftEntities(role);
 
             if (activeDraftEntities.isEmpty()) {
-                deleteUserRoleMappingDraftsByRoleAndRole(role.getId());
+                deleteRoleAndProofRecords(role, activeDraftEntities);
                 return;
             }
 
             TideUserRoleMappingDraftEntity committedEntity = activeDraftEntities.get(0);
             if (committedEntity.getDeleteStatus() == DraftStatus.ACTIVE) {
-                deleteUserRoleMappingDraftsByRoleAndRole(role.getId());
+                deleteRoleAndProofRecords(role, activeDraftEntities);
                 return;
             }
 
@@ -242,16 +243,28 @@ public class TideUserAdapter extends UserAdapter {
                 .getResultList();
     }
 
-    private void deleteRoleAndProofRecords(RoleModel role, List<TideUserRoleMappingDraftEntity> activeDraftEntities) {
+    public void deleteRoleAndProofRecords(RoleModel role, List<TideUserRoleMappingDraftEntity> activeDraftEntities) {
         String recordId = activeDraftEntities == null || activeDraftEntities.isEmpty() ? getDraftEntities(role).get(0).getId() : activeDraftEntities.get(0).getId();
         deleteProofRecordForUser(recordId);
-        deleteUserRoleMappingDraftsByRole(role.getId());
-
-        if (role.isComposite()) {
-            deleteCompositeRoleProofRecords(role);
-        }
+        deleteUserRoleMappingDraftsByRoleAndRole(role.getId());
         super.deleteRoleMapping(role);
     }
+
+    public void deleteRoleAndProofRecords(RoleModel role, List<TideUserRoleMappingDraftEntity> activeDraftEntities, ActionType actionType) {
+        String recordId = activeDraftEntities == null || activeDraftEntities.isEmpty() ? getDraftEntities(role).get(0).getId() : activeDraftEntities.get(0).getId();
+        deleteProofRecordForUser(recordId);
+        if(!actionType.equals(ActionType.DELETE)){
+            deleteUserRoleMappingDraftsByRoleAndRole(role.getId());
+            super.deleteRoleMapping(role);
+
+        } else {
+            TideUserRoleMappingDraftEntity entity = em.find(TideUserRoleMappingDraftEntity.class, recordId);
+            if(entity != null) {
+                entity.setDeleteStatus(DraftStatus.NULL);
+            }
+        }
+    }
+
 
     private void deleteUserRoleMappingDraftsByRole(String roleId) {
         em.createNamedQuery("deleteUserRoleMappingDraftsByRoleAndUser")
@@ -262,7 +275,7 @@ public class TideUserAdapter extends UserAdapter {
     private void deleteUserRoleMappingDraftsByRoleAndRole(String roleId) {
         em.createNamedQuery("deleteUserRoleMappingDraftsByRoleAndUser")
                 .setParameter("roleId", roleId)
-                .setParameter("user", user)
+                .setParameter("user", getEntity())
                 .executeUpdate();
     }
 

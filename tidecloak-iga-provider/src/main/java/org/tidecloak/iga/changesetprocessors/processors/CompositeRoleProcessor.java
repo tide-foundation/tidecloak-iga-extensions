@@ -17,6 +17,7 @@ import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
+import org.tidecloak.iga.interfaces.TideRoleAdapter;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -38,6 +39,13 @@ import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.*;
 public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeRoleMappingDraftEntity> {
 
     protected static final Logger logger = Logger.getLogger(UserRoleProcessor.class);
+
+    @Override
+    public void cancel(KeycloakSession session, TideCompositeRoleMappingDraftEntity entity, EntityManager em, ActionType actionType){
+        RealmModel realm = session.getContext().getRealm();
+        TideRoleAdapter tideRoleAdapter = new TideRoleAdapter(session, realm, em, entity.getComposite());
+        tideRoleAdapter.removeChildRoleFromCompositeRoleRecords(entity, actionType);
+    }
 
     @Override
     public void request(KeycloakSession session, TideCompositeRoleMappingDraftEntity entity, EntityManager em, ActionType action, Runnable callback, ChangeSetType changeSetType) {

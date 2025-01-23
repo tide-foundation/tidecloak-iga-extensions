@@ -12,6 +12,8 @@ import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
+import org.tidecloak.iga.interfaces.TideRoleAdapter;
+import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -28,6 +30,25 @@ import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.*;
 
 public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDraftEntity> {
     protected static final Logger logger = Logger.getLogger(ClientFullScopeProcessor.class);
+
+    @Override
+    public void cancel(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, ActionType actionType) {
+        if(!entity.getFullScopeDisabled().equals(DraftStatus.ACTIVE)){
+            entity.setFullScopeDisabled(DraftStatus.NULL);
+        }else if (!entity.getFullScopeEnabled().equals(DraftStatus.ACTIVE)){
+            entity.setFullScopeEnabled(DraftStatus.NULL);
+        }
+
+        // Find any pending changes
+        List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndId", AccessProofDetailEntity.class)
+                .setParameter("recordId", entity.getId())
+                .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE)
+                .getResultList();
+
+        pendingChanges.forEach(em::remove);
+        em.flush();
+
+    }
 
     @Override
     public void commit(KeycloakSession session, ChangeSetRequest change, TideClientDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {

@@ -33,6 +33,20 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     protected static final Logger logger = Logger.getLogger(UserRoleProcessor.class);
 
     @Override
+    public void cancel(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em, ActionType actionType){
+        RealmModel realmModel = session.realms().getRealm(entity.getUser().getRealmId());
+        RoleModel role = realmModel.getRoleById(entity.getRoleId());
+        TideUserAdapter user = new TideUserAdapter(session, realmModel, em, entity.getUser());
+        List<TideUserRoleMappingDraftEntity> pendingDrafts = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatusNotEqualTo", TideUserRoleMappingDraftEntity.class)
+                .setParameter("user", entity.getUser())
+                .setParameter("roleId", role.getId())
+                .setParameter("draftStatus", DraftStatus.ACTIVE)
+                .getResultList();
+        user.deleteRoleAndProofRecords(role, pendingDrafts, actionType);
+        em.flush();
+    }
+
+    @Override
     public void commit(KeycloakSession session, ChangeSetRequest change, TideUserRoleMappingDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {
         logger.info(String.format(
                 "Starting workflow: COMMIT. Processor: %s, Action: %s, Entity ID: %s",

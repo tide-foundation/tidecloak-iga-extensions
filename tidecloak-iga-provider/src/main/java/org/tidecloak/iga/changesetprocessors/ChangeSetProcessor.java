@@ -88,6 +88,9 @@ public interface ChangeSetProcessor<T> {
             case REQUEST:
                 request(session, entity, em, params.getActionType(), callback, params.getChangeSetType());
                 break;
+            case CANCEL:
+                cancel(session, entity, em, params.getActionType());
+                break;
             default:
                 throw new IllegalArgumentException("Unsupported workflow: " + workflow);
         }
@@ -248,6 +251,18 @@ public interface ChangeSetProcessor<T> {
 
         // Update affected user contexts
         updateAffectedUserContexts(session, session.getContext().getRealm(), change, entity, em);
+    }
+
+    /**
+     * Cancels a change request and its dependencies.
+     *
+     * @param session   The Keycloak session for the current context.
+     * @param entity   The entity being processed.
+     * @param em        The EntityManager for database interactions.
+     * @throws IllegalArgumentException If the action type is not supported.
+     */
+    default void cancel(KeycloakSession session, T entity, EntityManager em, ActionType actionType) throws Exception {
+        throw new UnsupportedOperationException("Cancel has no default implementation");
     }
 
     /**
