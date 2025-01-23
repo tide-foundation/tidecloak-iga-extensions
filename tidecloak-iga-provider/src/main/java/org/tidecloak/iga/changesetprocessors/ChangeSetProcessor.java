@@ -178,7 +178,7 @@ public interface ChangeSetProcessor<T> {
                 processorFactory.getProcessor(userContextDraft.getChangesetType()).updateAffectedUserContextDrafts(session, userContextDraft, uniqRoles, client, user, em);
                 ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, userContextDraft.getRecordId());
                 if (changesetRequestEntity != null){
-                    changesetRequestEntity.setAdminAuthorizations(List.of()); // empty sigs!
+                    changesetRequestEntity.getAdminAuthorizations().clear(); // empty sigs!
                 }
             }
 
@@ -612,7 +612,6 @@ public interface ChangeSetProcessor<T> {
         if (changesetRequestEntity == null) {
             ChangesetRequestEntity entity = new ChangesetRequestEntity();
             entity.setChangesetRequestId(recordId);
-            entity.setAdminAuthorizations(new ArrayList<>());
             entity.setDraftRequest(draft);
             entity.setChangesetType(type);
             em.persist(entity);
@@ -628,7 +627,6 @@ public interface ChangeSetProcessor<T> {
         if (changesetRequestEntity == null) {
             ChangesetRequestEntity entity = new ChangesetRequestEntity();
             entity.setChangesetRequestId(recordId);
-            entity.setAdminAuthorizations(new ArrayList<>());
             entity.setChangesetType(changeSetType);
             em.persist(entity);
             em.flush();

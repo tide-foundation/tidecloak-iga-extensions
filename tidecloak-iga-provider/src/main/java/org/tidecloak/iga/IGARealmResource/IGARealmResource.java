@@ -135,9 +135,18 @@ public class IGARealmResource {
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign")
-    public Response signChangeset(ChangeSetRequest changeSet) {
+    public Response signChangeset(ChangeSetRequest changeSet) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+
+        // check is admin has signed this already.
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeSet.getChangeSetId());
+        if (changesetRequestEntity == null){
+            throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
+        }
+        if(changesetRequestEntity.getAdminAuthorizations().stream().anyMatch(a -> Objects.equals(a.getUserId(), auth.adminAuth().getUser().getId()))){
+            return Response.status(Response.Status.BAD_REQUEST).entity("This user has already signed this request. User ID: " + auth.adminAuth().getUser().getId()).build();
+        }
 
         // Fetch the draft record entity and proof details based on the change set type
         Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, changeSet.getType(), changeSet.getChangeSetId());
@@ -186,10 +195,6 @@ public class IGARealmResource {
                     .setParameter("role", role).getSingleResult();
 
             InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
-            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeSet.getChangeSetId());
-            if (changesetRequestEntity == null){
-                throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
-            }
             if (IGAUtils.isIGAEnabled(realm) && tideIdp != null) {
                 if (isAssigningTideRealmAdminRole &&  realmAuthorizers.size() == 1 && realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")) {
                     List<String> signatures = IGAUtils.signInitialTideAdmin(config, userContexts.toArray(new UserContext[0]), cert, realmAuthorizers.get(0), changesetRequestEntity);
@@ -261,7 +266,6 @@ public class IGARealmResource {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Error processing JSON " + e.getMessage()).build();
         } catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
-
         }
     }
 
@@ -527,7 +531,7 @@ public class IGARealmResource {
                     authorizerBuilder.AddInitCertSignature(tideRoleEntity.getInitCertSig());
 
                     changesetRequestEntity.getAdminAuthorizations().forEach(auth -> {
-                        authorizerBuilder.AddAdminAuthorization(AdminAuthorization.FromString(auth));
+                        authorizerBuilder.AddAdminAuthorization(AdminAuthorization.FromString(auth.getAdminAuthorization()));
                     });
 
                     int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
