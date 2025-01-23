@@ -179,8 +179,20 @@ public class IGARealmResource {
         if (changesetRequestEntity == null){
             throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
         }
-        if(changesetRequestEntity.getAdminAuthorizations().stream().anyMatch(a -> Objects.equals(a.getUserId(), auth.adminAuth().getUser().getId()))){
-            return Response.status(Response.Status.BAD_REQUEST).entity("This user has already signed this request. User ID: " + auth.adminAuth().getUser().getId()).build();
+        AdminAuthorizationEntity adminAuthorizationEntity = changesetRequestEntity
+                .getAdminAuthorizations()
+                .stream()
+                .filter(a -> Objects.equals(a.getUserId(), auth.adminAuth().getUser().getId()))
+                .findFirst()
+                .orElse(null);
+
+        if(adminAuthorizationEntity != null) {
+            if(adminAuthorizationEntity.getIsApproval()){
+                return Response.status(Response.Status.BAD_REQUEST).entity("This user account has already signed this request. User ID: " + auth.adminAuth().getUser().getId()).build();
+
+            }else {
+                return Response.status(Response.Status.BAD_REQUEST).entity("This user account has already denied this request. User ID: " + auth.adminAuth().getUser().getId()).build();
+            }
         }
 
         // Fetch the draft record entity and proof details based on the change set type

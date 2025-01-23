@@ -17,7 +17,9 @@ import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 
 import java.util.List;
+import java.util.stream.Collectors;
 
+import static org.tidecloak.iga.utils.IGAUtils.processDraftRejections;
 import static org.tidecloak.iga.utils.IGAUtils.updateDraftStatus;
 
 public class ChangesetRequestAdapter {
@@ -49,6 +51,31 @@ public class ChangesetRequestAdapter {
         IGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), draftRecordEntity);
     }
 
+    public static void saveAdminRejection(KeycloakSession session, String changeSetType, String changeSetRequestID, String changeSetActionType, UserModel adminUser) throws Exception {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeSetRequestID);
+        if(changesetRequestEntity == null){
+            throw new Exception("No change set request found with this record id, " + changeSetRequestID);
+        }
+        UserEntity adminEntity = em.find(UserEntity.class, adminUser.getId());
+        ClientModel client = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
+        List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserIdAndClientId", UserClientAccessProofEntity.class)
+                .setParameter("user", adminEntity)
+                .setParameter("clientId", client.getId()).getResultList();
+
+        if ( userClientAccessProofEntity == null ){
+            throw new Exception("This admin user does not have any realm management roles, " + adminUser.getId());
+        }
+
+        AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, null, userClientAccessProofEntity.get(0).getUser().getId(), em);
+        changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
+
+        // Check if change request is no longer valid and process it
+        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
+        processDraftRejections(session,  ChangeSetType.valueOf(changeSetType),  ActionType.valueOf(changeSetActionType), draftRecordEntity, changesetRequestEntity);
+    }
+
     public static DraftStatus getChangeSetStatus(KeycloakSession session, String changeSetId) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
@@ -59,7 +86,7 @@ public class ChangesetRequestAdapter {
             throw new Exception("No change set request found with this record id, " + changeSetId);
         }
 
-        int authorizationCount = changesetRequestEntity.getAdminAuthorizations().size();
+        int authorizationCount = changesetRequestEntity.getAdminAuthorizations().stream().filter(AdminAuthorizationEntity::getIsApproval).collect(Collectors.toSet()).size();
 
         if(authorizationCount < 1){
            return DraftStatus.DRAFT;
@@ -81,12 +108,15 @@ public class ChangesetRequestAdapter {
             throw new Exception("No changeset request found with this id, " + changeSetRequestId);
         }
 
+        boolean isApproval = adminAuthorization != null;
+        String adminAuth = isApproval ? adminAuthorization.ToString() : null;
+
         AdminAuthorizationEntity adminAuthorizationEntity = new AdminAuthorizationEntity();
         adminAuthorizationEntity.setId(KeycloakModelUtils.generateId());
         adminAuthorizationEntity.setChangesetRequest(changesetRequestEntity);
         adminAuthorizationEntity.setUserId(userId);
-        adminAuthorizationEntity.setAdminAuthorization(adminAuthorization.ToString());
-        adminAuthorizationEntity.setIsApproval(true);
+        adminAuthorizationEntity.setAdminAuthorization(adminAuth);
+        adminAuthorizationEntity.setIsApproval(isApproval);
         em.persist(adminAuthorizationEntity);
         em.flush();
 
