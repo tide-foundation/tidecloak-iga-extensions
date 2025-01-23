@@ -55,7 +55,7 @@ public class TideRoleRequests {
         em.flush();
     }
 
-    public static void createRoleInitCertDraft(KeycloakSession session,  String recordId, String certVersion, double thresholdPercentage ) throws Exception {
+    public static void createRoleInitCertDraft(KeycloakSession session,  String recordId, String certVersion, double thresholdPercentage, int numberOfAdditionalAdmins ) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         String resource = Constants.ADMIN_CONSOLE_CLIENT_ID;
         RoleModel tideRealmAdmin = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
@@ -73,7 +73,7 @@ public class TideRoleRequests {
 
         // numberOfActiveAdmins + 1 because we a requesting to add an additional admin
         // TODO: update to be able to change additional admin value when we can approve multiple admins at a time. ATM its one at a time.
-        int threshold = Math.max(1, (int) (thresholdPercentage * (numberOfActiveAdmins + 1)));
+        int threshold = Math.max(1, (int) (thresholdPercentage * (numberOfActiveAdmins + numberOfAdditionalAdmins)));
 
         // Grab from tide key provider
         ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
@@ -130,6 +130,7 @@ public class TideRoleRequests {
         tideRoleDraftEntity.get(0).setInitCertSig(signature);
         InitializerCertifcate initCert = InitializerCertifcate.FromString(roleInitCert.getInitCert());
         tideRealmAdmin.setSingleAttribute("tideThreshold", Integer.toString(initCert.getPayload().getThreshold()));
+        em.remove(roleInitializerCertificateDraftEntity.get(0));
         em.flush();
     }
 

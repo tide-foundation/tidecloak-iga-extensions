@@ -147,7 +147,7 @@ public class TideUserAdapter extends UserAdapter {
                         throw new Exception("Authorizer not found for this realm.");
                     }
                     if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                        createRoleInitCertDraft(session, draftUserRole.getId(), "1", 0.7);
+                        createRoleInitCertDraft(session, draftUserRole.getId(), "1", 0.7, 1);
                     }
                 }
 
@@ -170,22 +170,40 @@ public class TideUserAdapter extends UserAdapter {
             boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
 
             if (!isIGAEnabled){
-                List<TideUserRoleMappingDraftEntity> draftEntities = getDraftEntities(role);
-                deleteRoleAndProofRecords(role, draftEntities);
+                deleteUserRoleMappingDraftsByRoleAndRole(role.getId());
                 return;
             }
 
             List<TideUserRoleMappingDraftEntity> activeDraftEntities = getActiveDraftEntities(role);
 
             if (activeDraftEntities.isEmpty()) {
-                deleteRoleAndProofRecords(role, activeDraftEntities);
+                deleteUserRoleMappingDraftsByRoleAndRole(role.getId());
                 return;
             }
 
             TideUserRoleMappingDraftEntity committedEntity = activeDraftEntities.get(0);
             if (committedEntity.getDeleteStatus() == DraftStatus.ACTIVE) {
-                deleteRoleAndProofRecords(role, activeDraftEntities);
+                deleteUserRoleMappingDraftsByRoleAndRole(role.getId());
                 return;
+            }
+
+            if(roleModel.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+                ComponentModel componentModel = realm.getComponentsStream()
+                        .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                        .findFirst()
+                        .orElse(null);
+
+                if(componentModel == null) {
+                    throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+                }
+                List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
+                        .setParameter("ID", componentModel.getId()).getResultList();
+                if (realmAuthorizers.isEmpty()){
+                    throw new Exception("Authorizer not found for this realm.");
+                }
+                if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
+                    createRoleInitCertDraft(session, committedEntity.getId(), "1", 0.7, 0);
+                }
             }
 
             WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.USER_ROLE);
@@ -224,32 +242,6 @@ public class TideUserAdapter extends UserAdapter {
                 .getResultList();
     }
 
-//    private List<ClientModel> getUniqueClientList(KeycloakSession session, RealmModel realm, RoleModel role, EntityManager em) {
-//        List<ClientModel> clientList = session.clients().getClientsStream(realm)
-//                .map(client -> new TideClientAdapter(realm, em, session, em.find(ClientEntity.class, client.getId())))
-//                .filter(TideClientAdapter::isFullScopeAllowed)
-//                .collect(Collectors.toList());
-//
-//        if ( role.isClientRole()){
-//            clientList.add((ClientModel) role.getContainer());
-//        }
-//
-//        // need to expand role and get the clientlist here too
-//        RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
-//        Set<TideRoleAdapter> wrappedRoles = new HashSet<>();
-//        wrappedRoles.add(new TideRoleAdapter(session, realm, em, roleEntity));
-//
-//        Set<RoleModel> activeCompositeRoles = RoleUtils.expandCompositeRoles(wrappedRoles,DraftStatus.ACTIVE);
-//
-//        activeCompositeRoles.forEach(activeCompRole -> {
-//            if (activeCompRole.getContainer() instanceof ClientModel){
-//                clientList.add((ClientModel) activeCompRole.getContainer());
-//            }
-//        });
-//
-//        return clientList.stream().distinct().collect(Collectors.toList());
-//    }
-
     private void deleteRoleAndProofRecords(RoleModel role, List<TideUserRoleMappingDraftEntity> activeDraftEntities) {
         String recordId = activeDraftEntities == null || activeDraftEntities.isEmpty() ? getDraftEntities(role).get(0).getId() : activeDraftEntities.get(0).getId();
         deleteProofRecordForUser(recordId);
@@ -262,8 +254,15 @@ public class TideUserAdapter extends UserAdapter {
     }
 
     private void deleteUserRoleMappingDraftsByRole(String roleId) {
-        em.createNamedQuery("deleteUserRoleMappingDraftsByRole")
+        em.createNamedQuery("deleteUserRoleMappingDraftsByRoleAndUser")
                 .setParameter("roleId", roleId)
+                .executeUpdate();
+    }
+
+    private void deleteUserRoleMappingDraftsByRoleAndRole(String roleId) {
+        em.createNamedQuery("deleteUserRoleMappingDraftsByRoleAndUser")
+                .setParameter("roleId", roleId)
+                .setParameter("user", user)
                 .executeUpdate();
     }
 

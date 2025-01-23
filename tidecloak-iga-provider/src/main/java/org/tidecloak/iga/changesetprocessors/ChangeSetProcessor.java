@@ -274,7 +274,6 @@ public interface ChangeSetProcessor<T> {
         // Generate a transformed user context using entity-specific logic
         String userContextDraft = this.generateTransformedUserContext(session, realm, clientModel, userModel, "openid", entity);
         UserEntity user = TideEntityUtils.toUserEntity(userModel, em);
-
         saveUserContextDraft(session, em, realm, clientModel, user, recordId, type, userContextDraft);
     }
 
@@ -529,20 +528,26 @@ public interface ChangeSetProcessor<T> {
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
         RoleModel tideRole;
         boolean isAssigningTideAdminRole;
+        boolean isTideAdminRoleDelete;
         if (type.equals(ChangeSetType.USER_ROLE)) {
             TideUserRoleMappingDraftEntity roleMapping = em.find(TideUserRoleMappingDraftEntity.class, recordId);
             if (roleMapping == null) {
                 throw new Exception("Invalid request, no user role mapping draft entity found for this record ID: " + recordId);
             }
-            if( realmManagement == null) {
-                tideRole = null;
-                isAssigningTideAdminRole = false;
-            }else {
+            if( realmManagement != null) {
                 tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
                 isAssigningTideAdminRole =  tideRole != null && roleMapping.getRoleId().equals(tideRole.getId());
+                ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, roleMapping);
+                isTideAdminRoleDelete = changeSetRequest.getActionType().equals(ActionType.DELETE);
+
+            } else {
+                tideRole = null;
+                isTideAdminRoleDelete = false;
+                isAssigningTideAdminRole = false;
             }
         } else {
             tideRole = null;
+            isTideAdminRoleDelete = false;
             isAssigningTideAdminRole = false;
         }
 

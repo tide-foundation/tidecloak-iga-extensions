@@ -129,6 +129,19 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     public void handleDeleteRequest(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em, Runnable callback) {
         RealmModel realm = session.getContext().getRealm();
         RoleEntity roleEntity = em.find(RoleEntity.class, entity.getRoleId());
+
+        Set<UserModel> adminUsers = new HashSet<>();
+        if(roleEntity != null && roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
+            Set<UserModel> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
+                    .setParameter("draftStatus", DraftStatus.ACTIVE)
+                    .setParameter("roleId", entity.getRoleId())
+                    .getResultList().stream()
+                    .map(t -> session.users().getUserById(realm, t.getUser().getId()))
+                    .collect(Collectors.toSet());
+
+            adminUsers.addAll(users);
+        }
+
         RoleModel tideRoleModel = TideEntityUtils.toTideRoleAdapter(roleEntity, session, realm);
         List<TideUserRoleMappingDraftEntity> activeDraftEntities = TideUserAdapter.getActiveDraftEntities(em, entity.getUser(), tideRoleModel);
         if ( activeDraftEntities.isEmpty()){
@@ -142,15 +155,18 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         userRoleMapping.setTimestamp(System.currentTimeMillis());
 
         List<ClientModel> clientList = ClientUtils.getUniqueClientList(session, realm, tideRoleModel, em);
-        UserModel wrappedUser = TideEntityUtils.toTideUserAdapter(entity.getUser(), session, realm);
 
         clientList.forEach(client -> {
-            try {
-                ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, userRoleMapping.getId(),
-                        ChangeSetType.USER_ROLE, userRoleMapping);
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
+                adminUsers.forEach(admin -> {
+                    try {
+                        UserEntity u = em.find(UserEntity.class, admin.getId());
+                        UserModel wrappedUser = TideEntityUtils.toTideUserAdapter(u, session, realm);
+                        ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, userRoleMapping.getId(),
+                            ChangeSetType.USER_ROLE, userRoleMapping);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
         });
     }
 
@@ -194,7 +210,9 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             if(change.getActionType().equals(ActionType.CREATE)){
                 addRoleToAccessToken(token, r);
             } else if (change.getActionType().equals(ActionType.DELETE)) {
-                removeRoleFromAccessToken(token, r);
+                if(Objects.equals(entity.getUser().getId(), user.getId())) {
+                    removeRoleFromAccessToken(token, r);
+                }
             }
         });
         userContextUtils.normalizeAccessToken(token, clientModel.isFullScopeAllowed());
