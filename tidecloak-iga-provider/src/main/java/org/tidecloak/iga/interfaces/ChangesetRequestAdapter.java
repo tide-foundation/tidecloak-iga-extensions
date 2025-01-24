@@ -73,25 +73,45 @@ public class ChangesetRequestAdapter {
 
         // Check if change request is no longer valid and process it
         Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
-        processDraftRejections(session,  ChangeSetType.valueOf(changeSetType),  ActionType.valueOf(changeSetActionType), draftRecordEntity, changesetRequestEntity);
+        IGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), draftRecordEntity);
     }
 
     public static DraftStatus getChangeSetStatus(KeycloakSession session, String changeSetId) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-
-        RoleModel tideRole = session.clients().getClientByClientId(session.getContext().getRealm(), Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        RealmModel realm = session.getContext().getRealm();
+        RoleModel tideRole = session.clients()
+                .getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID)
+                .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
 
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeSetId);
-        if(changesetRequestEntity == null){
-            throw new Exception("No change set request found with this record id, " + changeSetId);
+        if (changesetRequestEntity == null) {
+            throw new Exception("No change set request found with ID: " + changeSetId);
         }
 
-        int authorizationCount = changesetRequestEntity.getAdminAuthorizations().stream().filter(AdminAuthorizationEntity::getIsApproval).collect(Collectors.toSet()).size();
+        int threshold = parseThreshold(tideRole);
+        int numberOfAdmins = getNumberOfAdmins(session, realm, tideRole);
+        int numberOfRejections = (int) changesetRequestEntity.getAdminAuthorizations()
+                .stream()
+                .filter(a -> !a.getIsApproval())
+                .count();
 
-        if(authorizationCount < 1){
-           return DraftStatus.DRAFT;
-        }else if ( authorizationCount == Integer.parseInt(tideRole.getFirstAttribute("tideThreshold"))) {
+        // If remaining admins to approve are less than the threshold, deny the request
+        if ((numberOfAdmins - numberOfRejections) < threshold) {
+            return DraftStatus.DENIED;
+        }
+
+        int numberOfApprovals = (int) changesetRequestEntity.getAdminAuthorizations()
+                .stream()
+                .filter(AdminAuthorizationEntity::getIsApproval)
+                .count();
+
+        // Determine the draft status based on approval/rejection counts
+        if (numberOfApprovals < 1 || numberOfRejections < 1) {
+            return DraftStatus.DRAFT;
+        } else if (numberOfApprovals >= threshold) {
             return DraftStatus.APPROVED;
+        } else if ((numberOfAdmins - numberOfRejections) < threshold) {
+            return DraftStatus.DENIED;
         } else {
             return DraftStatus.PENDING;
         }
@@ -122,5 +142,23 @@ public class ChangesetRequestAdapter {
 
         return adminAuthorizationEntity;
 
+    }
+
+    private static int parseThreshold(RoleModel tideRole) throws Exception {
+        String thresholdAttr = tideRole.getFirstAttribute("tideThreshold");
+        if (thresholdAttr == null || thresholdAttr.isEmpty()) {
+            throw new Exception("Missing or invalid 'tideThreshold' attribute for role: " + tideRole.getName());
+        }
+        try {
+            return Integer.parseInt(thresholdAttr);
+        } catch (NumberFormatException e) {
+            throw new Exception("Invalid 'tideThreshold' attribute value: " + thresholdAttr, e);
+        }
+    }
+
+    private static int getNumberOfAdmins(KeycloakSession session, RealmModel realm, RoleModel tideRole) {
+        return (int) session.users()
+                .getRoleMembersStream(realm, tideRole)
+                .count();
     }
 }

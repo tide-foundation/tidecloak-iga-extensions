@@ -12,6 +12,7 @@ import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.cache.CacheRealmProvider;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
@@ -155,6 +156,8 @@ public class IGARealmResource {
             if(changesetRequestEntity != null ) {
                 em.remove(changesetRequestEntity);
             }
+            CacheRealmProvider cacheRealmProvider = session.getProvider(CacheRealmProvider.class);
+            cacheRealmProvider.clear();
             // Return success message after approving the change sets
             return Response.ok("Change set request has been canceled").build();
 

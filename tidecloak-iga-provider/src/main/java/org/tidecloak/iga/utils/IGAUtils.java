@@ -182,7 +182,7 @@ public class IGAUtils {
         }
     }
 
-    public static void processDraftRejections(KeycloakSession session, ChangeSetType changeSetType, ActionType changeSetAction, Object draftRecordEntity, ChangesetRequestEntity changesetRequest) throws Exception {
+    public static DraftStatus processDraftRejections(KeycloakSession session, ChangeSetType changeSetType, ActionType changeSetAction, Object draftRecordEntity, ChangesetRequestEntity changesetRequest) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
         ClientModel client = realm.getClientByClientId(org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID);
@@ -193,10 +193,9 @@ public class IGAUtils {
 
         // Check the count of the remaining admins left to approve. If less than the threshold then just cancel change request
         if((numberOfAdmins - numberOfRejections) < Integer.parseInt(tideRealmAdmin.getFirstAttribute("tideThreshold"))) {
-            ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
-            WorkflowParams params = new WorkflowParams(null, false, changeSetAction, changeSetType);
-            processorFactory.getProcessor(changeSetType).executeWorkflow(session, draftRecordEntity, em, WorkflowType.CANCEL, params, null);
+            return DraftStatus.DENIED;
         }
+        return DraftStatus.PENDING;
     }
 }
 
