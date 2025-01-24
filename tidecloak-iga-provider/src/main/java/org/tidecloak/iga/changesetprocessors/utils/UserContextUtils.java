@@ -1,6 +1,9 @@
 package org.tidecloak.iga.changesetprocessors.utils;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import org.keycloak.authorization.policy.evaluation.Realm;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
@@ -9,6 +12,8 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.RoleUtils;
 import org.keycloak.representations.AccessToken;
+import org.midgard.Serialization.JsonSorter;
+import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.utils.UserContextUtilBase;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -23,9 +28,10 @@ import java.util.stream.Stream;
 
 public class UserContextUtils extends UserContextUtilBase {
 
-    public void updateUserContextDraft(KeycloakSession session, UserModel userModel) {
+    public void addTideUserKeyAndVuidToUserContext(KeycloakSession session, UserModel userModel) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
+        ObjectMapper objectMapper = new ObjectMapper();
         // get all affected clients from AccessProofDraftEntity
         // This returns the access proof in descending order by timestamp
         UserEntity user = em.find(UserEntity.class, userModel.getId());
@@ -35,18 +41,22 @@ public class UserContextUtils extends UserContextUtilBase {
                 .getResultStream()
                 .toList();
 
-
-        ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
         userAccessDrafts.forEach(x -> {
-            var processor = processorFactory.getProcessor(x.getChangesetType());
-
-            ClientModel client = realm.getClientById(x.getClientId());
             try {
-                String newUserContextDraft =  processor.generateDefaultUserContext(session, realm, client, userModel);
-                x.setProofDraft(newUserContextDraft);
+                ObjectNode proofDraftNode = (ObjectNode) objectMapper.readTree(x.getProofDraft());
+                String tideUserKey = userModel.getFirstAttribute("tideUserKey");
+                String vuid = userModel.getFirstAttribute("vuid");
+                if (tideUserKey != null) {
+                    proofDraftNode.put("tideuserkey", tideUserKey);
+                }
+                if (vuid != null) {
+                    proofDraftNode.put("vuid", vuid);
+                }
+                x.setProofDraft(objectMapper.writeValueAsString(JsonSorter.parseAndSortArrays(proofDraftNode)));
             } catch (JsonProcessingException e) {
                 throw new RuntimeException(e);
             }
+
         });
         em.flush();
     }
