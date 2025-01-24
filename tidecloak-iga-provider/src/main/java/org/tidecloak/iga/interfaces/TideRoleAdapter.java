@@ -95,6 +95,10 @@ public class TideRoleAdapter extends RoleAdapter {
     @Override
     public void addCompositeRole(RoleModel roleModel) {
         try {
+            RoleEntity entity = toRoleEntity(roleModel);
+            for (RoleEntity composite : getEntity().getCompositeRoles()) {
+                if (composite.equals(entity)) return;
+            }
             super.addCompositeRole(roleModel);
             RoleModel childRole = TideEntityUtils.wrapRoleModel(roleModel, session, realm);
             RoleEntity childEntity = toRoleEntity(childRole);

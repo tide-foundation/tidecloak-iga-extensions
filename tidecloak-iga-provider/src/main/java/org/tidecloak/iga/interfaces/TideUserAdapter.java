@@ -87,6 +87,8 @@ public class TideUserAdapter extends UserAdapter {
     @Override
     public void grantRole(RoleModel roleModel) {
         try {
+            if(hasDirectRole(roleModel)) return;
+
             RoleModel role = wrapRoleModel(roleModel, session, realm);
             super.grantRole(role);
             boolean isTempAdmin = this.user.getAttributes().stream()
