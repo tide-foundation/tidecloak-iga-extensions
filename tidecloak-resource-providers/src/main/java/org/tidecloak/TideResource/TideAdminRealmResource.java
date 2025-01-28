@@ -12,14 +12,10 @@ import org.keycloak.authentication.actiontoken.execactions.ExecuteActionsActionT
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.common.util.Time;
 import org.keycloak.component.ComponentModel;
-import org.keycloak.email.EmailException;
-import org.keycloak.email.EmailTemplateProvider;
-import org.keycloak.events.admin.OperationType;
 import org.keycloak.models.*;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.services.ErrorPage;
 import org.keycloak.services.ErrorResponse;
-import org.keycloak.services.ServicesLogger;
 import org.keycloak.services.resources.LoginActionsService;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
@@ -80,6 +76,33 @@ public class TideAdminRealmResource {
         } catch (Exception e) {
             logger.error("Error adding authorization to change set request with ID: " + changeSetId +"." + Arrays.toString(e.getStackTrace()));
             return  buildResponse(500, "Error adding authorization to change set request with ID: " + changeSetId +" ." + e.getMessage());
+        }
+    }
+
+    @POST
+    @Path("add-rejection")
+    @Produces(MediaType.TEXT_PLAIN)
+    public Response AddRejection(@FormParam("changeSetId") String changeSetId, @FormParam("actionType") String actionType, @FormParam("changeSetType") String changeSetType) throws Exception {
+        try {
+            RoleModel role = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
+            auth.adminAuth().getUser().hasRole(role);
+
+            ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
+                    .filter(x -> tideVendorKeyId.equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
+
+            if(componentModel == null) {
+                logger.warn("There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
+                return ErrorPage.error(session, null, Response.Status.BAD_REQUEST, "There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
+            }
+            ChangesetRequestAdapter.saveAdminRejection(session, changeSetType, changeSetId, actionType, auth.adminAuth().getUser());
+
+            return buildResponse(200, "Successfully added admin rejection to changeSetRequest with id " + changeSetId);
+
+        } catch (Exception e) {
+            logger.error("Error adding rejection to change set request with ID: " + changeSetId +"." + Arrays.toString(e.getStackTrace()));
+            return  buildResponse(500, "Error adding rejection to change set request with ID: " + changeSetId +" ." + e.getMessage());
         }
     }
 

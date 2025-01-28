@@ -50,7 +50,7 @@ public class ChangeRequestUtils {
                 throw new IllegalStateException("Both FullScopeEnabled and FullScopeDisabled cannot be active at the same time.");
             }
 
-            if(isFullScopeDisabledActive && draftEntity.getFullScopeEnabled().equals(DraftStatus.NULL)){
+            if((isFullScopeDisabledActive && draftEntity.getFullScopeEnabled().equals(DraftStatus.NULL)) || isFullScopeEnabledActive && draftEntity.getFullScopeDisabled().equals(DraftStatus.NULL)){
                 changeSetRequest.setChangeSetId(draftEntity.getId());
                 changeSetRequest.setType(ChangeSetType.CLIENT);
                 changeSetRequest.setActionType(ActionType.CREATE);

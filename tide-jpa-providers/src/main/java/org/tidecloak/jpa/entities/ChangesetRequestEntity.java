@@ -18,10 +18,8 @@ public class ChangesetRequestEntity {
     @Column(name = "CHANGE_SET_TYPE")
     protected ChangeSetType changesetType;
 
-    @ElementCollection
-    @CollectionTable(name = "ADMIN_AUTHORIZATIONS", joinColumns = @JoinColumn(name = "ID"))
-    @Column(name = "ADMIN_AUTHORIZATION")
-    protected List<String> adminAuthorizations = new ArrayList<>();
+    @OneToMany(mappedBy = "changesetRequest", cascade = CascadeType.ALL, orphanRemoval = true)
+    protected List<AdminAuthorizationEntity> adminAuthorizations = new ArrayList<>();
 
     @Column(name = "DRAFT_REQUEST")
     private String draftRequest;
@@ -45,15 +43,15 @@ public class ChangesetRequestEntity {
         this.changesetRequestId = changesetRequestId;
     }
 
-    public List<String> getAdminAuthorizations() {
+    public List<AdminAuthorizationEntity> getAdminAuthorizations() {
         return adminAuthorizations;
     }
 
-    public void setAdminAuthorizations(List<String> adminAuthorizations) {
+    public void setAdminAuthorizations(List<AdminAuthorizationEntity> adminAuthorizations) {
         this.adminAuthorizations = adminAuthorizations;
     }
 
-    public void addAdminAuthorization(String adminAuthorizations) {
+    public void addAdminAuthorization(AdminAuthorizationEntity adminAuthorizations) {
         this.adminAuthorizations.add(adminAuthorizations);
     }
 
