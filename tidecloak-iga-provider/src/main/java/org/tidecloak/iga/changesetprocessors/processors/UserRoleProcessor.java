@@ -264,6 +264,15 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         }
 
         String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, user, "openId", affectedUserRoleEntity);
+
+//        if(client.getClientId().equals(Constants.REALM_MANAGEMENT_CLIENT_ID)){
+//            RoleModel roleToBeAssigned = realm.getRoleById(affectedUserRoleEntity.getRoleId());
+//            System.out.println(roleToBeAssigned.getName());
+//            if(roleToBeAssigned.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+//
+//            }
+//        }
+//
         affectedUserContextDraft.setProofDraft(userContextDraft);
     }
 
@@ -334,10 +343,17 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         }
         clientList.forEach(client -> {
             try {
+                boolean isAdminClient = client.getClientId().equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID) || client.getClientId().equalsIgnoreCase(Constants.ADMIN_CLI_CLIENT_ID);
                 adminUsers.forEach(u -> {
                     try {
+                        if (isAdminClient){
+                            // Create empty user contexts for ADMIN-CLI and SECURITY-ADMIN-CONSOLE
+                            ChangeSetProcessor.super.generateAndSaveDefaultUserContextDraft(session, em, realm, client, u, entity.getId(),
+                                    ChangeSetType.USER_ROLE);
+                        } else {
                             ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, u, entity.getId(),
                                     ChangeSetType.USER_ROLE, entity);
+                        }
                     }catch (Exception e) {
                         throw new RuntimeException("Error processing client: " + client.getClientId(), e);
                     }

@@ -15,6 +15,7 @@ import org.keycloak.authorization.policy.evaluation.Realm;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.RealmAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
@@ -34,6 +35,8 @@ import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.keycloak.representations.AccessToken;
+import org.tidecloak.iga.changesetprocessors.processors.UserRoleProcessor;
+import org.tidecloak.iga.changesetprocessors.utils.ClientUtils;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
 import org.tidecloak.shared.enums.WorkflowType;
@@ -62,6 +65,7 @@ import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRoleInitCertDraft;
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
 import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.*;
@@ -177,6 +181,65 @@ public interface ChangeSetProcessor<T> {
                 Set<RoleModel> roleSet = new HashSet<>();
                 roleSet.add(getRoleRequestFromEntity(session, realm, entity));
                 var uniqRoles = roleSet.stream().distinct().filter(Objects::nonNull).collect(Collectors.toSet());
+
+                if(userContextDraft.getChangesetType() == ChangeSetType.USER_ROLE && client.getClientId().equalsIgnoreCase(Constants.REALM_MANAGEMENT_CLIENT_ID)) {
+                    TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity = em.find(TideUserRoleMappingDraftEntity.class, userContextDraft.getRecordId());
+                    if (tideUserRoleMappingDraftEntity != null) {
+                        RoleModel roleToBeAssinged = realm.getRoleById(tideUserRoleMappingDraftEntity.getRoleId());
+                        if(roleToBeAssinged.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+
+                            ComponentModel componentModel = realm.getComponentsStream()
+                                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                                    .findFirst()
+                                    .orElse(null);
+
+                            if(componentModel == null) {
+                                throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+                            }
+                            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
+                                    .setParameter("ID", componentModel.getId()).getResultList();
+                            if (realmAuthorizers.isEmpty()){
+                                throw new Exception("Authorizer not found for this realm.");
+                            }
+
+                            List<TideUserRoleMappingDraftEntity> tideAdminRealmRoleRequests = em.createNamedQuery("getUserRoleMappingDraftsByRoleAndStatusNotEqualTo", TideUserRoleMappingDraftEntity.class)
+                                    .setParameter("roleId", role.getId())
+                                    .setParameter("draftStatus", DraftStatus.ACTIVE)
+                                    .getResultList();
+
+                            List<ClientModel> clientList = ClientUtils.getUniqueClientList(session, realm, role, em);
+
+                            tideAdminRealmRoleRequests.forEach(request -> {
+                                try {
+                                    UserModel u = session.users().getUserById(realm, request.getUser().getId());
+                                    ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, request.getId());
+                                    if(changesetRequestEntity != null) {
+                                        em.remove(changesetRequestEntity);
+                                    }
+                                    List<AccessProofDetailEntity> accessProofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                                            .setParameter("recordId", request.getId()).getResultList();
+                                    accessProofs.forEach(p -> {
+                                        em.remove(p);
+                                        em.flush();
+                                    });
+                                    List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", request.getId()).getResultList();
+                                    if(!roleInitializerCertificateDraftEntity.isEmpty()){
+                                        em.remove(roleInitializerCertificateDraftEntity.get(0));
+                                        em.flush();
+                                    }
+                                    createRoleInitCertDraft(session, request.getId(), "1", 0.7, 1);
+                                    ChangeSetProcessor<UserRoleProcessor> userRoleProcessor = processorFactory.getProcessor(ChangeSetType.USER_ROLE);
+                                    proce
+                                } catch (Exception e) {
+                                    throw new RuntimeException(e);
+                                }
+
+                            });
+
+
+                        }
+                    }
+                }
 
                 processorFactory.getProcessor(userContextDraft.getChangesetType()).updateAffectedUserContextDrafts(session, userContextDraft, uniqRoles, client, user, em);
                 ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, userContextDraft.getRecordId());
@@ -379,22 +442,10 @@ public interface ChangeSetProcessor<T> {
                 .orElse(null);
 
         if (componentModel != null) {
-            MultivaluedHashMap<String, String> config = componentModel.getConfig();
-            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
-                    .setParameter("ID", componentModel.getId())
-                    .getResultList();
-
-            if (realmAuthorizers.isEmpty()) {
-                throw new Exception("Authorizer not found for this realm.");
-            }
-
-            // Remove specific clients if no "firstAdmin" authorizer exists
-            if (realmAuthorizers.stream().noneMatch(authorizer -> "firstAdmin".equalsIgnoreCase(authorizer.getType()))) {
-                affectedClients.removeIf(client ->
-                        Constants.ADMIN_CONSOLE_CLIENT_ID.equals(client.getClientId()) ||
-                                Constants.ADMIN_CLI_CLIENT_ID.equals(client.getClientId())
-                );
-            }
+            affectedClients.removeIf(client ->
+                    Constants.ADMIN_CONSOLE_CLIENT_ID.equals(client.getClientId()) ||
+                            Constants.ADMIN_CLI_CLIENT_ID.equals(client.getClientId())
+            );
         }
 
         return new ArrayList<>(affectedClients);
@@ -432,7 +483,8 @@ public interface ChangeSetProcessor<T> {
      * @return A serialized JSON string of the user context draft.
      * @throws JsonProcessingException If an error occurs during JSON serialization.
      */
-    default String generateTransformedUserContext(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, T entity) throws JsonProcessingException {
+    default String generateTransformedUserContext(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, T entity) throws Exception {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         ObjectMapper objectMapper = new ObjectMapper();
         objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
         objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
@@ -450,13 +502,15 @@ public interface ChangeSetProcessor<T> {
         }
 
         ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);
-        AccessToken userContext = processorFactory.getProcessor(changeSetRequest.getType()).transformUserContext(token, session, entity, user, client);
+        AccessToken userContextToken = processorFactory.getProcessor(changeSetRequest.getType()).transformUserContext(token, session, entity, user, client);
 
         boolean isFullScopeAllowed = client.isFullScopeAllowed();
         if( entity instanceof TideClientDraftEntity) {
             isFullScopeAllowed = changeSetRequest.getActionType().equals(ActionType.CREATE);
         }
-        return this.cleanAccessToken(userContext, null, isFullScopeAllowed);
+
+        return this.cleanAccessToken(userContextToken, null, isFullScopeAllowed);
+
     }
 
     /**
@@ -543,7 +597,6 @@ public interface ChangeSetProcessor<T> {
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
         RoleModel tideRole;
         boolean isAssigningTideAdminRole;
-        boolean isTideAdminRoleDelete;
         if (type.equals(ChangeSetType.USER_ROLE)) {
             TideUserRoleMappingDraftEntity roleMapping = em.find(TideUserRoleMappingDraftEntity.class, recordId);
             if (roleMapping == null) {
@@ -553,16 +606,13 @@ public interface ChangeSetProcessor<T> {
                 tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
                 isAssigningTideAdminRole =  tideRole != null && roleMapping.getRoleId().equals(tideRole.getId());
                 ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, roleMapping);
-                isTideAdminRoleDelete = changeSetRequest.getActionType().equals(ActionType.DELETE);
 
             } else {
                 tideRole = null;
-                isTideAdminRoleDelete = false;
                 isAssigningTideAdminRole = false;
             }
         } else {
             tideRole = null;
-            isTideAdminRoleDelete = false;
             isAssigningTideAdminRole = false;
         }
 
@@ -783,5 +833,45 @@ public interface ChangeSetProcessor<T> {
 
         }
         return roleModels;
+    }
+
+    private void processRealmManagementRoleAssignment(KeycloakSession session, EntityManager em, RealmModel realm, List<ClientModel> clientList,
+                                                      TideUserRoleMappingDraftEntity entity, UserModel userModel) {
+        Set<UserModel> adminUsers = new HashSet<>();
+        adminUsers.add(userModel);
+        ClientModel realmManagementClient = realm.getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
+        RoleEntity roleEntity = em.find(RoleEntity.class, entity.getRoleId());
+        RoleModel role = realmManagementClient.getRole(roleEntity.getName());
+        if(role != null && role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
+            Set<UserModel> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
+                    .setParameter("draftStatus", DraftStatus.ACTIVE)
+                    .setParameter("roleId", entity.getRoleId())
+                    .getResultList().stream()
+                    .map(t -> session.users().getUserById(realm, t.getUser().getId()))
+                    .collect(Collectors.toSet());
+
+            adminUsers.addAll(users);
+        }
+        clientList.forEach(client -> {
+            try {
+                boolean isAdminClient = client.getClientId().equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID) || client.getClientId().equalsIgnoreCase(Constants.ADMIN_CLI_CLIENT_ID);
+                adminUsers.forEach(u -> {
+                    try {
+                        if (isAdminClient){
+                            // Create empty user contexts for ADMIN-CLI and SECURITY-ADMIN-CONSOLE
+                            this.generateAndSaveDefaultUserContextDraft(session, em, realm, client, u, entity.getId(),
+                                    ChangeSetType.USER_ROLE);
+                        } else {
+                            this.generateAndSaveTransformedUserContextDraft(session, em, realm, client, u, entity.getId(),
+                                    ChangeSetType.USER_ROLE, entity);
+                        }
+                    }catch (Exception e) {
+                        throw new RuntimeException("Error processing client: " + client.getClientId(), e);
+                    }
+                });
+            } catch (Exception e) {
+                throw new RuntimeException("Error processing client: " + client.getClientId(), e);
+            }
+        });
     }
 }
