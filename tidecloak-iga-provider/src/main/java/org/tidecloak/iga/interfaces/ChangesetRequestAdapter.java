@@ -106,7 +106,7 @@ public class ChangesetRequestAdapter {
                 .count();
 
         // Determine the draft status based on approval/rejection counts
-        if (numberOfApprovals < 1 || numberOfRejections < 1) {
+        if (numberOfApprovals < 1 && numberOfRejections < 1) {
             return DraftStatus.DRAFT;
         } else if (numberOfApprovals >= threshold) {
             return DraftStatus.APPROVED;

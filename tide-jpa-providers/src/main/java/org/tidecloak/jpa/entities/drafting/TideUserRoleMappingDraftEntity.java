@@ -30,6 +30,10 @@ import org.tidecloak.shared.enums.DraftStatus;
         @NamedQuery(name="deleteUserRoleMappingDraftsByUser", query="delete from TideUserRoleMappingDraftEntity m where m.user = :user"),
         @NamedQuery(name="getUserRoleMappingDraftsByRole", query="SELECT t.id FROM TideUserRoleMappingDraftEntity t WHERE t.roleId = :roleId"),
         @NamedQuery(
+                name = "getUserRoleMappingDraftsByRoleAndStatusNotEqualTo",
+                query = "SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.roleId = :roleId AND t.draftStatus != :draftStatus"
+        ),
+        @NamedQuery(
                 name = "getUserRoleMappingsByUserAndClientId",
                 query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
                         "WHERE m.user =:user AND m.roleId IN (" +

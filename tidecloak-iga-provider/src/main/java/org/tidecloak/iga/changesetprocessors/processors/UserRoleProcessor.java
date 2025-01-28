@@ -2,6 +2,7 @@ package org.tidecloak.iga.changesetprocessors.processors;
 
 import jakarta.persistence.EntityManager;
 import org.jboss.logging.Logger;
+import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
@@ -11,7 +12,9 @@ import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.ClientUtils;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
+import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
+import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.iga.interfaces.TideRoleAdapter;
@@ -24,6 +27,7 @@ import org.tidecloak.shared.enums.ActionType;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRoleInitCertDraft;
 import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.addRoleToAccessToken;
 import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.removeRoleFromAccessToken;
@@ -48,7 +52,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
     @Override
     public void commit(KeycloakSession session, ChangeSetRequest change, TideUserRoleMappingDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {
-        logger.info(String.format(
+        logger.debug(String.format(
                 "Starting workflow: COMMIT. Processor: %s, Action: %s, Entity ID: %s",
                 this.getClass().getSimpleName(),
                 change.getActionType(),
@@ -68,8 +72,62 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
         ChangeSetProcessor.super.commit(session, change, entity, em, callback);
 
+        // Recreate for tide-admin-realm assignment here
+        RoleModel role = realm.getRoleById(entity.getRoleId());
+
+        if(Objects.equals(role.getName(), org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+            ComponentModel componentModel = realm.getComponentsStream()
+                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
+
+            if(componentModel == null) {
+                throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+            }
+            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
+                    .setParameter("ID", componentModel.getId()).getResultList();
+            if (realmAuthorizers.isEmpty()){
+                throw new Exception("Authorizer not found for this realm.");
+            }
+
+            List<TideUserRoleMappingDraftEntity> tideAdminRealmRoleRequests = em.createNamedQuery("getUserRoleMappingDraftsByRoleAndStatusNotEqualTo", TideUserRoleMappingDraftEntity.class)
+                    .setParameter("roleId", role.getId())
+                    .setParameter("draftStatus", DraftStatus.ACTIVE)
+                    .getResultList();
+
+            List<ClientModel> clientList = ClientUtils.getUniqueClientList(session, realm, role, em);
+
+            tideAdminRealmRoleRequests.forEach(request -> {
+                try {
+                    UserModel u = session.users().getUserById(realm, request.getUser().getId());
+                    ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, request.getId());
+                    if(changesetRequestEntity != null) {
+                        em.remove(changesetRequestEntity);
+                    }
+                    List<AccessProofDetailEntity> accessProofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                            .setParameter("recordId", request.getId()).getResultList();
+                    accessProofs.forEach(p -> {
+                        em.remove(p);
+                        em.flush();
+                    });
+                    List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", request.getId()).getResultList();
+                    if(!roleInitializerCertificateDraftEntity.isEmpty()){
+                        em.remove(roleInitializerCertificateDraftEntity.get(0));
+                        em.flush();
+                    }
+                    createRoleInitCertDraft(session, request.getId(), "1", 0.7, 1);
+                    processRealmManagementRoleAssignment(session, em, realm, clientList, request, u);
+
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+
+            });
+        }
+
+
         // Log successful completion
-        logger.info(String.format(
+        logger.debug(String.format(
                 "Successfully processed workflow: COMMIT. Processor: %s, Mapping ID: %s",
                 this.getClass().getSimpleName(),
                 entity.getId()
@@ -80,7 +138,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     public void request(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em, ActionType action, Runnable callback, ChangeSetType changeSetType) {
         try {
             // Log the start of the request with detailed context
-            logger.info(String.format(
+            logger.debug(String.format(
                     "Starting workflow: REQUEST. Processor: %s, Action: %s, Entity ID: %s",
                     this.getClass().getSimpleName(),
                     action,
@@ -89,11 +147,11 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getId(), changeSetType);
             switch (action) {
                 case CREATE:
-                    logger.info(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
+                    logger.debug(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleCreateRequest(session, entity, em, callback);
                     break;
                 case DELETE:
-                    logger.info(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
+                    logger.debug(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleDeleteRequest(session, entity, em, callback);
                     break;
                 default:
@@ -102,7 +160,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             }
 
             // Log successful completion
-            logger.info(String.format(
+            logger.debug(String.format(
                     "Successfully processed workflow: REQUEST. Processor: %s, Mapping ID: %s",
                     this.getClass().getSimpleName(),
                     entity.getId()

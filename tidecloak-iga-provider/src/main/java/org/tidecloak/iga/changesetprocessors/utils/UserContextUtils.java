@@ -14,7 +14,13 @@ import org.keycloak.models.utils.RoleUtils;
 import org.keycloak.representations.AccessToken;
 import org.midgard.Serialization.JsonSorter;
 import org.midgard.models.UserContext.UserContext;
+import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
+import org.tidecloak.jpa.entities.drafting.*;
+import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
+import org.tidecloak.shared.enums.WorkflowType;
+import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.utils.UserContextUtilBase;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
@@ -28,10 +34,9 @@ import java.util.stream.Stream;
 
 public class UserContextUtils extends UserContextUtilBase {
 
-    public void addTideUserKeyAndVuidToUserContext(KeycloakSession session, UserModel userModel) {
+    public void recreateUserContext(KeycloakSession session, UserModel userModel) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        RealmModel realm = session.getContext().getRealm();
-        ObjectMapper objectMapper = new ObjectMapper();
+
         // get all affected clients from AccessProofDraftEntity
         // This returns the access proof in descending order by timestamp
         UserEntity user = em.find(UserEntity.class, userModel.getId());
@@ -41,24 +46,34 @@ public class UserContextUtils extends UserContextUtilBase {
                 .getResultStream()
                 .toList();
 
-        userAccessDrafts.forEach(x -> {
+        Map<String, List<AccessProofDetailEntity>> groupedProofDetails = userAccessDrafts.stream()
+                .collect(Collectors.groupingBy(AccessProofDetailEntity::getRecordId));
+
+        groupedProofDetails.forEach((changeRequestId, details)  -> {
             try {
-                ObjectNode proofDraftNode = (ObjectNode) objectMapper.readTree(x.getProofDraft());
-                String tideUserKey = userModel.getFirstAttribute("tideUserKey");
-                String vuid = userModel.getFirstAttribute("vuid");
-                if (tideUserKey != null) {
-                    proofDraftNode.put("tideuserkey", tideUserKey);
+                // remove old request, then we recreate
+                ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeRequestId);
+                if(changesetRequestEntity != null) {
+                    em.remove(changesetRequestEntity);
                 }
-                if (vuid != null) {
-                    proofDraftNode.put("vuid", vuid);
-                }
-                x.setProofDraft(objectMapper.writeValueAsString(JsonSorter.parseAndSortArrays(proofDraftNode)));
-            } catch (JsonProcessingException e) {
+                details.forEach(d -> {
+                    em.remove(d);
+                    em.flush();
+                });
+
+                ChangeSetType changeSetType = details.get(0).getChangesetType();
+                ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+                WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, changeSetType);
+                Object mapping = getMappings(em, changeRequestId, changeSetType);
+                changeSetProcessorFactory.getProcessor(changeSetType).executeWorkflow(session, mapping, em, WorkflowType.REQUEST, params, null);
+                details.forEach(d -> {
+                    em.remove(d);
+                    em.flush();
+                });
+            } catch (Exception e) {
                 throw new RuntimeException(e);
             }
-
         });
-        em.flush();
     }
     
     @Override
@@ -402,6 +417,18 @@ public class UserContextUtils extends UserContextUtilBase {
         }
 
         return sb.build();
+    }
+
+    private Object getMappings(EntityManager em, String recordId, ChangeSetType type) {
+        return switch (type) {
+            case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, recordId);
+            case GROUP, USER_GROUP_MEMBERSHIP, GROUP_ROLE -> null;
+            case COMPOSITE_ROLE, DEFAULT_ROLES -> em.find(TideCompositeRoleMappingDraftEntity.class, recordId);
+            case ROLE -> em.find(TideRoleDraftEntity.class, recordId);
+            case USER -> em.find(TideUserDraftEntity.class, recordId);
+            case CLIENT_FULLSCOPE -> em.find(TideClientDraftEntity.class, recordId);
+            default -> null;
+        };
     }
 
 

@@ -51,7 +51,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
     public void request(KeycloakSession session, TideCompositeRoleMappingDraftEntity entity, EntityManager em, ActionType action, Runnable callback, ChangeSetType changeSetType) {
         try {
             // Log the start of the request with detailed context
-            logger.info(String.format(
+            logger.debug(String.format(
                     "Starting workflow: REQUEST. Processor: %s, Action: %s, Entity ID: %s",
                     this.getClass().getSimpleName(),
                     action,
@@ -60,11 +60,11 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
             ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getId(), changeSetType);
             switch (action) {
                 case CREATE:
-                    logger.info(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
+                    logger.debug(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleCreateRequest(session, entity, em, callback);
                     break;
                 case DELETE:
-                    logger.info(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
+                    logger.debug(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleDeleteRequest(session, entity, em, callback);
                     break;
                 default:
@@ -73,7 +73,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
             }
 
             // Log successful completion
-            logger.info(String.format(
+            logger.debug(String.format(
                     "Successfully processed workflow: REQUEST. Processor: %s, Mapping ID: %s",
                     this.getClass().getSimpleName(),
                     entity.getId()
@@ -94,7 +94,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
     @Override
     public  void commit(KeycloakSession session, ChangeSetRequest change, TideCompositeRoleMappingDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {
         // Log the start of the request with detailed context
-        logger.info(String.format(
+        logger.debug(String.format(
                 "Starting workflow: COMMIT. Processor: %s, Action: %s, Entity ID: %s",
                 this.getClass().getSimpleName(),
                 change.getActionType(),
@@ -114,7 +114,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
 
 
         // Log successful completion
-        logger.info(String.format(
+        logger.debug(String.format(
                 "Successfully processed workflow: COMMIT. Processor: %s, Entity ID: %s",
                 this.getClass().getSimpleName(),
                 entity.getId()
