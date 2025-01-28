@@ -12,6 +12,8 @@ import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.cache.CacheRealmProvider;
+import org.keycloak.models.cache.UserCache;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
@@ -32,6 +34,7 @@ import org.tidecloak.iga.interfaces.models.*;
 import org.tidecloak.iga.utils.IGAUtils;
 import org.tidecloak.jpa.entities.*;
 import org.tidecloak.jpa.entities.drafting.*;
+import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
 
 import java.net.URI;
@@ -130,14 +133,71 @@ public class IGARealmResource {
         }
     }
 
-    // TODO: Enclave signing to be done here (each admin will push a button that hits this endpoint)
-    // This current changes draftRecords to approve which marks the draft record ready to be commited(APPROVE IS NOT YET COMMITED)
+    @POST
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Path("change-set/cancel")
+    public Response cancelChangeSet(ChangeSetRequest changeSet) throws Exception {
+        try{
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            ChangeSetType type = changeSet.getType();
+
+            Object mapping = getMappings(em, changeSet, type);
+            if (mapping == null) {
+                if(type.equals(ChangeSetType.CLIENT)){
+                    return Response.status(Response.Status.NOT_FOUND).entity("Unable to cancel this request. Default user context need to be approved for a client.").build();
+                }
+                return Response.status(Response.Status.NOT_FOUND).entity("Change request was not found.").build();
+            }
+            em.lock(mapping, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
+            ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
+            WorkflowParams params = new WorkflowParams(null, false, changeSet.getActionType(), changeSet.getType());
+            processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, mapping, em, WorkflowType.CANCEL, params, null);
+            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeSet.getChangeSetId());
+            if(changesetRequestEntity != null ) {
+                em.remove(changesetRequestEntity);
+            }
+            em.flush();
+            UserCache userCache = session.getProvider(UserCache.class);
+            userCache.clear();
+            // Return success message after approving the change sets
+            return Response.ok("Change set request has been canceled").build();
+
+        } catch(Exception e) {
+            return buildResponse(500, "There was an error commiting this change set request. " + e.getMessage());
+
+        }
+    }
+
+
+
+
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign")
-    public Response signChangeset(ChangeSetRequest changeSet) {
+    public Response signChangeset(ChangeSetRequest changeSet) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+
+        // check is admin has signed this already.
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeSet.getChangeSetId());
+        if (changesetRequestEntity == null){
+            throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
+        }
+        AdminAuthorizationEntity adminAuthorizationEntity = changesetRequestEntity
+                .getAdminAuthorizations()
+                .stream()
+                .filter(a -> Objects.equals(a.getUserId(), auth.adminAuth().getUser().getId()))
+                .findFirst()
+                .orElse(null);
+
+        if(adminAuthorizationEntity != null) {
+            if(adminAuthorizationEntity.getIsApproval()){
+                return Response.status(Response.Status.BAD_REQUEST).entity("This user account has already signed this request. User ID: " + auth.adminAuth().getUser().getId()).build();
+
+            }else {
+                return Response.status(Response.Status.BAD_REQUEST).entity("This user account has already denied this request. User ID: " + auth.adminAuth().getUser().getId()).build();
+            }
+        }
 
         // Fetch the draft record entity and proof details based on the change set type
         Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, changeSet.getType(), changeSet.getChangeSetId());
@@ -186,10 +246,6 @@ public class IGARealmResource {
                     .setParameter("role", role).getSingleResult();
 
             InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
-            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeSet.getChangeSetId());
-            if (changesetRequestEntity == null){
-                throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
-            }
             if (IGAUtils.isIGAEnabled(realm) && tideIdp != null) {
                 if (isAssigningTideRealmAdminRole &&  realmAuthorizers.size() == 1 && realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")) {
                     List<String> signatures = IGAUtils.signInitialTideAdmin(config, userContexts.toArray(new UserContext[0]), cert, realmAuthorizers.get(0), changesetRequestEntity);
@@ -203,7 +259,6 @@ public class IGARealmResource {
 
             ObjectMapper objectMapper = new ObjectMapper();
             if (!realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") && IGAUtils.isIGAEnabled(realm) && tideIdp != null) {
-                //String changeRequestString = objectMapper.writeValueAsString(changeSetRequests);
                 String redirectUrl = tideIdp.getConfig().get("changeSetEndpoint");
                 String redirectUrlSig = tideIdp.getConfig().get("changeSetURLSig");
                 URI redirectURI = new URI(redirectUrl);
@@ -261,7 +316,6 @@ public class IGARealmResource {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Error processing JSON " + e.getMessage()).build();
         } catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
-
         }
     }
 
@@ -527,7 +581,7 @@ public class IGARealmResource {
                     authorizerBuilder.AddInitCertSignature(tideRoleEntity.getInitCertSig());
 
                     changesetRequestEntity.getAdminAuthorizations().forEach(auth -> {
-                        authorizerBuilder.AddAdminAuthorization(AdminAuthorization.FromString(auth));
+                        authorizerBuilder.AddAdminAuthorization(AdminAuthorization.FromString(auth.getAdminAuthorization()));
                     });
 
                     int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
@@ -605,6 +659,18 @@ public class IGARealmResource {
             case CLIENT_FULLSCOPE -> getClientMappings(em, change, action);
             case CLIENT -> getClientEntity(em, change);
             default -> Collections.emptyList();
+        };
+    }
+
+    private Object getMappings(EntityManager em, ChangeSetRequest change, ChangeSetType type) {
+        return switch (type) {
+            case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, change.getChangeSetId());
+            case GROUP, USER_GROUP_MEMBERSHIP, GROUP_ROLE -> null;
+            case COMPOSITE_ROLE, DEFAULT_ROLES -> em.find(TideCompositeRoleMappingDraftEntity.class, change.getChangeSetId());
+            case ROLE -> em.find(TideRoleDraftEntity.class, change.getChangeSetId());
+            case USER -> em.find(TideUserDraftEntity.class, change.getChangeSetId());
+            case CLIENT_FULLSCOPE -> em.find(TideClientDraftEntity.class, change.getChangeSetId());
+            default -> null;
         };
     }
 

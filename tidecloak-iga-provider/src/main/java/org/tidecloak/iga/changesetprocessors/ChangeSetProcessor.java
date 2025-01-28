@@ -88,6 +88,9 @@ public interface ChangeSetProcessor<T> {
             case REQUEST:
                 request(session, entity, em, params.getActionType(), callback, params.getChangeSetType());
                 break;
+            case CANCEL:
+                cancel(session, entity, em, params.getActionType());
+                break;
             default:
                 throw new IllegalArgumentException("Unsupported workflow: " + workflow);
         }
@@ -178,7 +181,7 @@ public interface ChangeSetProcessor<T> {
                 processorFactory.getProcessor(userContextDraft.getChangesetType()).updateAffectedUserContextDrafts(session, userContextDraft, uniqRoles, client, user, em);
                 ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, userContextDraft.getRecordId());
                 if (changesetRequestEntity != null){
-                    changesetRequestEntity.setAdminAuthorizations(List.of()); // empty sigs!
+                    changesetRequestEntity.getAdminAuthorizations().clear(); // empty sigs!
                 }
             }
 
@@ -251,6 +254,18 @@ public interface ChangeSetProcessor<T> {
     }
 
     /**
+     * Cancels a change request and its dependencies.
+     *
+     * @param session   The Keycloak session for the current context.
+     * @param entity   The entity being processed.
+     * @param em        The EntityManager for database interactions.
+     * @throws IllegalArgumentException If the action type is not supported.
+     */
+    default void cancel(KeycloakSession session, T entity, EntityManager em, ActionType actionType) throws Exception {
+        throw new UnsupportedOperationException("Cancel has no default implementation");
+    }
+
+    /**
      * Generates and saves a transformed user context draft for the given user and client models.
      * This method applies entity-specific transformations to the user context.
      *
@@ -274,7 +289,6 @@ public interface ChangeSetProcessor<T> {
         // Generate a transformed user context using entity-specific logic
         String userContextDraft = this.generateTransformedUserContext(session, realm, clientModel, userModel, "openid", entity);
         UserEntity user = TideEntityUtils.toUserEntity(userModel, em);
-
         saveUserContextDraft(session, em, realm, clientModel, user, recordId, type, userContextDraft);
     }
 
@@ -529,20 +543,26 @@ public interface ChangeSetProcessor<T> {
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
         RoleModel tideRole;
         boolean isAssigningTideAdminRole;
+        boolean isTideAdminRoleDelete;
         if (type.equals(ChangeSetType.USER_ROLE)) {
             TideUserRoleMappingDraftEntity roleMapping = em.find(TideUserRoleMappingDraftEntity.class, recordId);
             if (roleMapping == null) {
                 throw new Exception("Invalid request, no user role mapping draft entity found for this record ID: " + recordId);
             }
-            if( realmManagement == null) {
-                tideRole = null;
-                isAssigningTideAdminRole = false;
-            }else {
+            if( realmManagement != null) {
                 tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
                 isAssigningTideAdminRole =  tideRole != null && roleMapping.getRoleId().equals(tideRole.getId());
+                ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, roleMapping);
+                isTideAdminRoleDelete = changeSetRequest.getActionType().equals(ActionType.DELETE);
+
+            } else {
+                tideRole = null;
+                isTideAdminRoleDelete = false;
+                isAssigningTideAdminRole = false;
             }
         } else {
             tideRole = null;
+            isTideAdminRoleDelete = false;
             isAssigningTideAdminRole = false;
         }
 
@@ -607,7 +627,6 @@ public interface ChangeSetProcessor<T> {
         if (changesetRequestEntity == null) {
             ChangesetRequestEntity entity = new ChangesetRequestEntity();
             entity.setChangesetRequestId(recordId);
-            entity.setAdminAuthorizations(new ArrayList<>());
             entity.setDraftRequest(draft);
             entity.setChangesetType(type);
             em.persist(entity);
@@ -623,7 +642,6 @@ public interface ChangeSetProcessor<T> {
         if (changesetRequestEntity == null) {
             ChangesetRequestEntity entity = new ChangesetRequestEntity();
             entity.setChangesetRequestId(recordId);
-            entity.setAdminAuthorizations(new ArrayList<>());
             entity.setChangesetType(changeSetType);
             em.persist(entity);
             em.flush();

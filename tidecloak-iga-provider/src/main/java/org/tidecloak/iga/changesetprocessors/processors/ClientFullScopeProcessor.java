@@ -12,6 +12,8 @@ import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
+import org.tidecloak.iga.interfaces.TideRoleAdapter;
+import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -30,8 +32,27 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
     protected static final Logger logger = Logger.getLogger(ClientFullScopeProcessor.class);
 
     @Override
+    public void cancel(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, ActionType actionType) {
+        if(!entity.getFullScopeDisabled().equals(DraftStatus.ACTIVE)){
+            entity.setFullScopeDisabled(DraftStatus.NULL);
+        }else if (!entity.getFullScopeEnabled().equals(DraftStatus.ACTIVE)){
+            entity.setFullScopeEnabled(DraftStatus.NULL);
+        }
+
+        // Find any pending changes
+        List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndId", AccessProofDetailEntity.class)
+                .setParameter("recordId", entity.getId())
+                .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE)
+                .getResultList();
+
+        pendingChanges.forEach(em::remove);
+        em.flush();
+
+    }
+
+    @Override
     public void commit(KeycloakSession session, ChangeSetRequest change, TideClientDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {
-        logger.info(String.format(
+        logger.debug(String.format(
                 "Starting workflow: COMMIT. Processor: %s, Action: %s, Entity ID: %s",
                 this.getClass().getSimpleName(),
                 change.getActionType(),
@@ -54,7 +75,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
         ChangeSetProcessor.super.commit(session, change, entity, em, callback);
 
         // Log successful completion
-        logger.info(String.format(
+        logger.debug(String.format(
                 "Successfully processed workflow: COMMIT. Processor: %s, Mapping ID: %s",
                 this.getClass().getSimpleName(),
                 entity.getId()
@@ -65,7 +86,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
     public void request(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, ActionType action, Runnable callback, ChangeSetType changeSetType) {
         try {
             // Log the start of the request with detailed context
-            logger.info(String.format(
+            logger.debug(String.format(
                     "Starting workflow: REQUEST. Processor: %s, Action: %s, Entity ID: %s",
                     this.getClass().getSimpleName(),
                     action,
@@ -77,7 +98,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
             ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getId(), changeSetType);
             switch (action) {
                 case CREATE:
-                    logger.info(String.format("Initiating CREATE (enable) action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
+                    logger.debug(String.format("Initiating CREATE (enable) action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleCreateRequest(session, entity, em, callback);
                     if (!isIGAEnabled){
                         if (entity.getFullScopeEnabled().equals(DraftStatus.ACTIVE)){
@@ -87,7 +108,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
                     }
                     break;
                 case DELETE:
-                    logger.info(String.format("Initiating DELETE (disable) action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
+                    logger.debug(String.format("Initiating DELETE (disable) action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleDeleteRequest(session, entity, em, callback);
                     if (!isIGAEnabled){
                         if (entity.getFullScopeDisabled().equals(DraftStatus.ACTIVE)){

@@ -95,6 +95,10 @@ public class TideRoleAdapter extends RoleAdapter {
     @Override
     public void addCompositeRole(RoleModel roleModel) {
         try {
+            RoleEntity entity = toRoleEntity(roleModel);
+            for (RoleEntity composite : getEntity().getCompositeRoles()) {
+                if (composite.equals(entity)) return;
+            }
             super.addCompositeRole(roleModel);
             RoleModel childRole = TideEntityUtils.wrapRoleModel(roleModel, session, realm);
             RoleEntity childEntity = toRoleEntity(childRole);
@@ -192,5 +196,24 @@ public class TideRoleAdapter extends RoleAdapter {
         em.createNamedQuery("deleteProofRecords")
                 .setParameter("recordId", recordId)
                 .executeUpdate();
+    }
+
+    public void removeChildRoleFromCompositeRoleRecords(TideCompositeRoleMappingDraftEntity entity){
+        deleteCompositeRoleMapping(entity.getComposite(), entity.getChildRole());
+        deleteProofRecords(entity.getId());
+        RoleModel childRole = session.roles().getRoleById(realm, entity.getChildRole().getId());
+        super.removeCompositeRole(childRole);
+    }
+
+    public void removeChildRoleFromCompositeRoleRecords(TideCompositeRoleMappingDraftEntity entity, ActionType actionType){
+        deleteProofRecords(entity.getId());
+
+        if(!actionType.equals(ActionType.DELETE)) {
+            deleteCompositeRoleMapping(entity.getComposite(), entity.getChildRole());
+            RoleModel childRole = session.roles().getRoleById(realm, entity.getChildRole().getId());
+            super.removeCompositeRole(childRole);
+        } else {
+            entity.setDeleteStatus(null);
+        }
     }
 }
