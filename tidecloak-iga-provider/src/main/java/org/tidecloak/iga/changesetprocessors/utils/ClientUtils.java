@@ -43,11 +43,11 @@ public class ClientUtils {
             }
         });
 
-        // TODO: remove this temp method once we create empty userContexts on client creation for all users in a realm
         if (!role.getName().equalsIgnoreCase(Constants.TIDE_REALM_ADMIN)) {
             clientList.removeIf(r ->
                     r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.ADMIN_CONSOLE_CLIENT_ID) ||
-                            r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.ADMIN_CLI_CLIENT_ID)
+                            r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.ADMIN_CLI_CLIENT_ID) ||
+                            r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
             );
         }
 
