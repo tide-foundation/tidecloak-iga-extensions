@@ -17,6 +17,7 @@ import org.keycloak.services.Urls;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -302,6 +303,19 @@ public class TideRealmProvider extends JpaRealmProvider {
 
         try {
             em.flush();
+            List<TideClientDraftEntity> clientDraftEntities = em.createNamedQuery("getClientDraftDetails", TideClientDraftEntity.class).setParameter("client", clientEntity).getResultList();
+            clientDraftEntities.forEach(e -> {
+                ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, e.getId());
+                if(changesetRequestEntity != null){
+                    em.remove(changesetRequestEntity);
+                }
+            });
+            em.createNamedQuery("deleteClient").setParameter("client", clientEntity).executeUpdate();
+            em.createNamedQuery("DeleteAllAccessProofsByClient").setParameter("clientId", clientEntity.getId()).executeUpdate();
+            em.createNamedQuery("DeleteAllUserProofsByClient").setParameter("clientId", clientEntity.getId()).executeUpdate();
+            em.flush();
+
+
         } catch (RuntimeException e) {
             logger.errorv("Unable to delete client entity: {0} from realm {1}", client.getClientId(), realm.getName());
             throw e;
