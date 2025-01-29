@@ -26,6 +26,10 @@ import org.tidecloak.shared.enums.ActionType;
                 query = "DELETE FROM TideClientDraftEntity r " +
                         "WHERE r.client.id IN (SELECT c.id FROM ClientEntity c WHERE c.realmId = :realmId)"
         ),
+        @NamedQuery(name="deleteClient",
+                query = "DELETE FROM TideClientDraftEntity r " +
+                        "WHERE r.client =: client"
+        ),
         @NamedQuery(name="getClientDraftDetails", query="SELECT t FROM TideClientDraftEntity t WHERE t.client = :client"),
 
 })
