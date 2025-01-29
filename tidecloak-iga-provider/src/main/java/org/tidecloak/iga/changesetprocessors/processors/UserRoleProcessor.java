@@ -7,6 +7,8 @@ import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.representations.AccessToken;
+import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.ClientUtils;
@@ -15,6 +17,7 @@ import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.iga.interfaces.TideRoleAdapter;
@@ -265,14 +268,23 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
         String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, user, "openId", affectedUserRoleEntity);
 
-//        if(client.getClientId().equals(Constants.REALM_MANAGEMENT_CLIENT_ID)){
-//            RoleModel roleToBeAssigned = realm.getRoleById(affectedUserRoleEntity.getRoleId());
-//            System.out.println(roleToBeAssigned.getName());
-//            if(roleToBeAssigned.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
-//
-//            }
-//        }
-//
+        if(client.getClientId().equals(Constants.REALM_MANAGEMENT_CLIENT_ID)){
+            RoleEntity roleEntity = em.find(RoleEntity.class, affectedUserRoleEntity.getRoleId());
+            if(roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+                List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                        .setParameter("role", roleEntity).getResultList();
+                if(tideRoleDraftEntity.isEmpty()){
+                    throw new RuntimeException("Tide realm admin role doesnt exist");
+                }
+                UserContext userContext = new UserContext(userContextDraft);
+                InitializerCertifcate initializerCertifcate = InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
+                userContext.setInitCertHash(initializerCertifcate.hash());
+                userContext.setThreshold(initializerCertifcate.getPayload().getThreshold());
+                affectedUserContextDraft.setProofDraft(userContext.ToString());
+                return;
+            }
+        }
+
         affectedUserContextDraft.setProofDraft(userContextDraft);
     }
 

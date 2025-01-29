@@ -175,8 +175,22 @@ public class IGARealmResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign")
     public Response signChangeset(ChangeSetRequest changeSet) throws Exception {
+
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+        if(changeSet.getType().equals(ChangeSetType.USER_ROLE)){
+            TideUserRoleMappingDraftEntity entity = em.find(TideUserRoleMappingDraftEntity.class, changeSet.getChangeSetId());
+            if (entity != null) {
+                RoleEntity role = em.find(RoleEntity.class, entity.getRoleId());
+                // check if user has tide account linked
+                if(role != null &&
+                        role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN) &&
+                        !entity.getUser().getAttributes().stream().anyMatch(a -> a.getName().equalsIgnoreCase("vuid") || a.getName().equalsIgnoreCase("tideuserkey")))
+                {
+                    return Response.status(Response.Status.BAD_REQUEST).entity("User needs a tide account linked for the tide-realm-admin role").build();
+                }
+            }
+        }
 
         // check is admin has signed this already.
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeSet.getChangeSetId());
