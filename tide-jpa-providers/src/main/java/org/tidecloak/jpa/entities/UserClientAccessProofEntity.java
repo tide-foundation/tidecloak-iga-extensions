@@ -15,6 +15,10 @@ import java.io.Serializable;
                 query = "DELETE FROM UserClientAccessProofEntity r " +
                         "WHERE r.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
         ),
+        @NamedQuery(name="DeleteAllUserProofsByClient",
+                query = "DELETE FROM UserClientAccessProofEntity u " +
+                        "where u.clientId = :clientId"
+        ),
 })
 @Entity
 @Table(name = "USER_CLIENT_ACCESS_PROOF")

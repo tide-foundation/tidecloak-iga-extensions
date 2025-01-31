@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <changeSet id="26.0.6-23012025" author="tidecloak">
+        <!-- Add foreign key column to ADMIN_AUTHORIZATIONS -->
+        <addColumn tableName="ADMIN_AUTHORIZATIONS">
+            <column name="CHANGESET_REQUEST_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="USER_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="IS_APPROVAL" type="BOOLEAN">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <!-- Add foreign key constraint for CHANGESET_REQUEST_ID -->
+        <addForeignKeyConstraint
+                baseTableName="ADMIN_AUTHORIZATIONS"
+                baseColumnNames="CHANGESET_REQUEST_ID"
+                referencedTableName="CHANGESET_REQUEST"
+                referencedColumnNames="CHANGESET_REQUEST_ID"
+                constraintName="fk_changeset_request_admin_authorizations"/>
+
+        <!-- Drop unnecessary constraint -->
+        <dropForeignKeyConstraint
+                baseTableName="ADMIN_AUTHORIZATIONS"
+                constraintName="fk_my_entity_strings_entity_id"/>
+
+        <!-- Make ADMIN_AUTHORIZATION column nullable -->
+        <dropNotNullConstraint
+                tableName="ADMIN_AUTHORIZATIONS"
+                columnName="ADMIN_AUTHORIZATION"/>
+    </changeSet>
+</databaseChangeLog>

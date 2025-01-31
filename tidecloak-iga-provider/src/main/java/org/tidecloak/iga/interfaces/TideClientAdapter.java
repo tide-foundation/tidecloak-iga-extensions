@@ -1,6 +1,7 @@
 package org.tidecloak.iga.interfaces;
 
 import jakarta.persistence.EntityManager;
+import org.keycloak.Config;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.ClientAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
@@ -11,7 +12,7 @@ import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
-import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 
 import java.util.*;
 
@@ -29,7 +30,7 @@ public class TideClientAdapter extends ClientAdapter {
     @Override
     public boolean isFullScopeAllowed() {
 
-        List<TideClientFullScopeStatusDraftEntity> draft = em.createNamedQuery("getClientFullScopeStatus", TideClientFullScopeStatusDraftEntity.class)
+        List<TideClientDraftEntity> draft = em.createNamedQuery("getClientFullScopeStatus", TideClientDraftEntity.class)
                 .setParameter("client", entity)
                 .getResultList();
 
@@ -39,34 +40,40 @@ public class TideClientAdapter extends ClientAdapter {
     @Override
     public void setFullScopeAllowed(boolean value) {
         try {
+
             List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
-            List<TideClientFullScopeStatusDraftEntity> statusDraft = em.createNamedQuery("getClientFullScopeStatus", TideClientFullScopeStatusDraftEntity.class)
+
+            List<TideClientDraftEntity> statusDraft = em.createNamedQuery("getClientFullScopeStatus", TideClientDraftEntity.class)
                     .setParameter("client", entity)
                     .getResultList();
 
-            // if no users and no drafts
-            if (usersInRealm.isEmpty() && statusDraft.isEmpty()) {
-                createFullScopeStatusDraft(value);
-                super.setFullScopeAllowed(value);
-                return;
+            if(statusDraft.isEmpty()){
+                throw new Exception("Client does not exist");
+            }
+            TideClientDraftEntity clientFullScopeStatuses = statusDraft.get(0);
+
+
+            if((clientFullScopeStatuses.getDraftStatus().equals(DraftStatus.DRAFT) && !realm.getName().equalsIgnoreCase(Config.getAdminRealm()))
+            ) {
+                if(!usersInRealm.isEmpty() && clientFullScopeStatuses.getFullScopeDisabled().equals(DraftStatus.DRAFT) && clientFullScopeStatuses.getFullScopeEnabled().equals(DraftStatus.NULL) ){
+                    clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.ACTIVE);
+                    return;
+                } else if (usersInRealm.isEmpty() && clientFullScopeStatuses.getFullScopeDisabled().equals(DraftStatus.NULL) && clientFullScopeStatuses.getFullScopeEnabled().equals(DraftStatus.DRAFT)) {
+                    clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.ACTIVE);
+                    return;
+                }
             }
 
-            if(isMigration) {
+            if(isMigration || realm.getName().equalsIgnoreCase(Config.getAdminRealm())) {
                 if(value){
-                    statusDraft.get(0).setFullScopeDisabled(DraftStatus.NULL);
-                    statusDraft.get(0).setFullScopeEnabled(DraftStatus.ACTIVE);
+                    clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.NULL);
+                    clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.ACTIVE);
                 } else {
-                    statusDraft.get(0).setFullScopeEnabled(DraftStatus.NULL);
-                    statusDraft.get(0).setFullScopeDisabled(DraftStatus.ACTIVE);
+                    clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.NULL);
+                    clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.ACTIVE);
                 }
                 em.flush();
                 super.setFullScopeAllowed(value);
-                return;
-            }
-
-            // if theres users and no drafts
-            else if (!usersInRealm.isEmpty() && statusDraft.isEmpty()) {
-                createFullScopeStatusDraft(false); // New clients defaults to restricted scope if there are users in the realm.
                 return;
             }
 
@@ -78,31 +85,14 @@ public class TideClientAdapter extends ClientAdapter {
                 }
             };
 
-            TideClientFullScopeStatusDraftEntity clientFullScopeStatuses = statusDraft.get(0);
             ActionType actionType = value ? ActionType.CREATE : ActionType.DELETE;
-            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, value, actionType);
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, value, actionType, ChangeSetType.CLIENT_FULLSCOPE);
             changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT_FULLSCOPE).executeWorkflow(session, clientFullScopeStatuses, em, WorkflowType.REQUEST, params, callback);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
 
     }
-    private void createFullScopeStatusDraft(boolean value) {
-        TideClientFullScopeStatusDraftEntity draft = new TideClientFullScopeStatusDraftEntity();
-        draft.setId(KeycloakModelUtils.generateId());
-        draft.setClient(entity);
-        if (value) {
-            draft.setFullScopeEnabled(DraftStatus.ACTIVE);
-            draft.setFullScopeDisabled(DraftStatus.NULL);
-        } else {
-            draft.setFullScopeDisabled(DraftStatus.ACTIVE);
-            draft.setFullScopeEnabled(DraftStatus.NULL);
-        }
-        draft.setAction(ActionType.CREATE);
-        em.persist(draft);
-        em.flush();
-    }
-
 
     @Override
     public ProtocolMapperModel addProtocolMapper(ProtocolMapperModel model) {

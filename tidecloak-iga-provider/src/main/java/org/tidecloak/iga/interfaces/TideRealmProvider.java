@@ -2,6 +2,7 @@ package org.tidecloak.iga.interfaces;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
+import org.keycloak.Config;
 import org.keycloak.connections.jpa.util.JpaUtils;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.JpaRealmProvider;
@@ -10,10 +11,14 @@ import org.keycloak.models.jpa.RealmAdapter;
 import org.keycloak.models.jpa.entities.*;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.RepresentationToModel;
+import org.keycloak.representations.AccessToken;
 import org.keycloak.representations.idm.ProtocolMapperRepresentation;
+import org.keycloak.services.Urls;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -30,24 +35,47 @@ import static org.keycloak.common.util.StackUtil.getShortStackTrace;
 
 public class TideRealmProvider extends JpaRealmProvider {
     private final KeycloakSession session;
-    private final ChangeSetProcessor<TideRoleDraftEntity> processor;
+    private final ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();;
 
 
     public TideRealmProvider(KeycloakSession session, EntityManager em, Set<String> clientSearchableAttributes, Set<String> groupSearchableAttributes) {
         super(session, em, clientSearchableAttributes, groupSearchableAttributes);
         this.session = session;
-        ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
-        this.processor = changeSetProcessorFactory.getProcessor(ChangeSetType.ROLE);
-    }
-
-    @Override
-    public RealmModel createRealm(String name) {
-        return createRealm(KeycloakModelUtils.generateId(), name);
     }
 
     @Override
     public ClientModel addClient(RealmModel realm, String clientId) {
-        return addClient(realm, KeycloakModelUtils.generateId(), clientId);
+        try {
+            ClientModel client = addClient(realm, KeycloakModelUtils.generateId(), clientId);
+            ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
+            List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
+
+            TideClientDraftEntity clientDraftEntity = new TideClientDraftEntity();
+            clientDraftEntity.setId(KeycloakModelUtils.generateId());
+            clientDraftEntity.setClient(clientEntity);
+
+            if(usersInRealm.isEmpty()) {
+                clientDraftEntity.setFullScopeEnabled(DraftStatus.DRAFT);
+                clientDraftEntity.setFullScopeDisabled(DraftStatus.NULL);
+                clientEntity.setFullScopeAllowed(true);
+            } else {
+                clientDraftEntity.setFullScopeDisabled(DraftStatus.DRAFT);
+                clientDraftEntity.setFullScopeEnabled(DraftStatus.NULL);
+                clientEntity.setFullScopeAllowed(false);
+            }
+            clientDraftEntity.setAction(ActionType.CREATE);
+            em.persist(clientDraftEntity);
+            em.flush();
+
+            if(client.getRealm().getName().equalsIgnoreCase(Config.getAdminRealm())) {
+                return client;
+            }
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.CLIENT);
+            changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT).executeWorkflow(session, clientDraftEntity, em, WorkflowType.REQUEST, params, null);
+            return client;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Override
@@ -94,8 +122,8 @@ public class TideRealmProvider extends JpaRealmProvider {
             newDeletionRequest.setRole(roleEntity);
             newDeletionRequest.setDeleteStatus(DraftStatus.DRAFT);
             em.persist(newDeletionRequest);
-            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE);
-            processor.executeWorkflow(session, newDeletionRequest, em, WorkflowType.REQUEST, params, null);
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.ROLE);
+            changeSetProcessorFactory.getProcessor(ChangeSetType.ROLE).executeWorkflow(session, newDeletionRequest, em, WorkflowType.REQUEST, params, null);
             em.flush();
             // Can we return a better message here ?
             // e.g. change request created
@@ -275,6 +303,19 @@ public class TideRealmProvider extends JpaRealmProvider {
 
         try {
             em.flush();
+            List<TideClientDraftEntity> clientDraftEntities = em.createNamedQuery("getClientDraftDetails", TideClientDraftEntity.class).setParameter("client", clientEntity).getResultList();
+            clientDraftEntities.forEach(e -> {
+                ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, e.getId());
+                if(changesetRequestEntity != null){
+                    em.remove(changesetRequestEntity);
+                }
+            });
+            em.createNamedQuery("deleteClient").setParameter("client", clientEntity).executeUpdate();
+            em.createNamedQuery("DeleteAllAccessProofsByClient").setParameter("clientId", clientEntity.getId()).executeUpdate();
+            em.createNamedQuery("DeleteAllUserProofsByClient").setParameter("clientId", clientEntity.getId()).executeUpdate();
+            em.flush();
+
+
         } catch (RuntimeException e) {
             logger.errorv("Unable to delete client entity: {0} from realm {1}", client.getClientId(), realm.getName());
             throw e;

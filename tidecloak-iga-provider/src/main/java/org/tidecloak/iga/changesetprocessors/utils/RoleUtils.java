@@ -25,7 +25,7 @@ public class RoleUtils {
 
         // Check and persist draft if required
         if (shouldPersistDraft(parentName, childName, realm)) {
-            persistDraft(parentEntity, childEntity, em);
+            //persistDraft(parentEntity, childEntity, em);
             return true;
         }
 

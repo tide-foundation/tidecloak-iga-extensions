@@ -3,24 +3,31 @@ package org.tidecloak.iga.utils;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.RoleModel;
 import org.midgard.Midgard;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
 import org.midgard.models.UserContext.UserContext;
+import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
+import org.tidecloak.shared.Constants;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
-import org.tidecloak.jpa.entities.drafting.TideClientFullScopeStatusDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
+import org.tidecloak.shared.enums.WorkflowType;
+import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
 
 import java.util.*;
@@ -41,7 +48,6 @@ public class IGAUtils {
                 .collect(Collectors.toList());
     }
 
-    // ONLY WORKS FOR NO TIDE ADMIN. WITH IGA ENABLED TO ALLOW TIDE ADMIN TO EXIST
     public static List<String>  signInitialTideAdmin(MultivaluedHashMap<String, String> keyProviderConfig,
                                                       UserContext[] userContexts,
                                                       InitializerCertifcate initCert,
@@ -89,8 +95,6 @@ public class IGAUtils {
 
     }
 
-    // TODO: add signing method afer TIDEADMIN EXISTS
-
     public static String getEntityId(Object entity) {
         if (entity instanceof TideUserRoleMappingDraftEntity) {
             return ((TideUserRoleMappingDraftEntity) entity).getId();
@@ -98,8 +102,8 @@ public class IGAUtils {
             return ((TideRoleDraftEntity) entity).getId();
         } else if (entity instanceof TideCompositeRoleMappingDraftEntity) {
             return ((TideCompositeRoleMappingDraftEntity) entity).getId();
-        } else if (entity instanceof TideClientFullScopeStatusDraftEntity) {
-            return ((TideClientFullScopeStatusDraftEntity) entity).getId();
+        } else if (entity instanceof TideClientDraftEntity) {
+            return ((TideClientDraftEntity) entity).getId();
         }
         return null;
     }
@@ -110,7 +114,7 @@ public class IGAUtils {
             case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, changeSetId);
             case ROLE -> em.find(TideRoleDraftEntity.class, changeSetId);
             case COMPOSITE_ROLE -> em.find(TideCompositeRoleMappingDraftEntity.class, changeSetId);
-            case CLIENT_FULLSCOPE -> em.find(TideClientFullScopeStatusDraftEntity.class, changeSetId);
+            case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, changeSetId);
             default -> null;
         };
     }
@@ -136,9 +140,9 @@ public class IGAUtils {
                 break;
             case CLIENT_FULLSCOPE:
                 if (changeSetAction == ActionType.CREATE) {
-                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeEnabled(DraftStatus.APPROVED);
+                    ((TideClientDraftEntity) draftRecordEntity).setFullScopeEnabled(DraftStatus.APPROVED);
                 } else if (changeSetAction == ActionType.DELETE) {
-                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeDisabled(DraftStatus.APPROVED);
+                    ((TideClientDraftEntity) draftRecordEntity).setFullScopeDisabled(DraftStatus.APPROVED);
                 }
                 break;
         }
@@ -167,11 +171,31 @@ public class IGAUtils {
                 break;
             case CLIENT_FULLSCOPE:
                 if (changeSetAction == ActionType.CREATE) {
-                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeEnabled(draftStatus);
+                    ((TideClientDraftEntity) draftRecordEntity).setFullScopeEnabled(draftStatus);
                 } else if (changeSetAction == ActionType.DELETE) {
-                    ((TideClientFullScopeStatusDraftEntity) draftRecordEntity).setFullScopeDisabled(draftStatus);
+                    ((TideClientDraftEntity) draftRecordEntity).setFullScopeDisabled(draftStatus);
                 }
+                break;
+            case CLIENT:
+                ((TideClientDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
                 break;
         }
     }
+
+    public static DraftStatus processDraftRejections(KeycloakSession session, ChangeSetType changeSetType, ActionType changeSetAction, Object draftRecordEntity, ChangesetRequestEntity changesetRequest) throws Exception {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        RealmModel realm = session.getContext().getRealm();
+        ClientModel client = realm.getClientByClientId(org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID);
+        RoleModel tideRealmAdmin = client.getRole(Constants.TIDE_REALM_ADMIN);
+
+        int numberOfAdmins = session.users().getRoleMembersStream(realm, tideRealmAdmin).collect(Collectors.toSet()).size();
+        int numberOfRejections = changesetRequest.getAdminAuthorizations().stream().filter(a -> !a.getIsApproval()).collect(Collectors.toSet()).size();
+
+        // Check the count of the remaining admins left to approve. If less than the threshold then just cancel change request
+        if((numberOfAdmins - numberOfRejections) < Integer.parseInt(tideRealmAdmin.getFirstAttribute("tideThreshold"))) {
+            return DraftStatus.DENIED;
+        }
+        return DraftStatus.PENDING;
+    }
 }
+

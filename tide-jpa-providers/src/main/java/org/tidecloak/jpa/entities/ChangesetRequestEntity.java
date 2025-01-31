@@ -1,6 +1,8 @@
 package org.tidecloak.jpa.entities;
 
 import jakarta.persistence.*;
+import org.tidecloak.shared.enums.ChangeSetType;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -12,16 +14,26 @@ public class ChangesetRequestEntity {
     @Column(name = "CHANGESET_REQUEST_ID")
     private String changesetRequestId;
 
-    @ElementCollection
-    @CollectionTable(name = "ADMIN_AUTHORIZATIONS", joinColumns = @JoinColumn(name = "ID"))
-    @Column(name = "ADMIN_AUTHORIZATION")
-    protected List<String> adminAuthorizations = new ArrayList<>();
+    @Enumerated(EnumType.STRING)
+    @Column(name = "CHANGE_SET_TYPE")
+    protected ChangeSetType changesetType;
+
+    @OneToMany(mappedBy = "changesetRequest", cascade = CascadeType.ALL, orphanRemoval = true)
+    protected List<AdminAuthorizationEntity> adminAuthorizations = new ArrayList<>();
 
     @Column(name = "DRAFT_REQUEST")
     private String draftRequest;
 
     @Column(name = "TIMESTAMP")
     protected Long timestamp = System.currentTimeMillis() / 1000;
+
+    public ChangeSetType getChangesetType() {
+        return changesetType;
+    }
+
+    public void setChangesetType(ChangeSetType changesetType) {
+        this.changesetType = changesetType;
+    }
 
     public String getChangesetRequestId() {
         return changesetRequestId;
@@ -31,15 +43,15 @@ public class ChangesetRequestEntity {
         this.changesetRequestId = changesetRequestId;
     }
 
-    public List<String> getAdminAuthorizations() {
+    public List<AdminAuthorizationEntity> getAdminAuthorizations() {
         return adminAuthorizations;
     }
 
-    public void setAdminAuthorizations(List<String> adminAuthorizations) {
+    public void setAdminAuthorizations(List<AdminAuthorizationEntity> adminAuthorizations) {
         this.adminAuthorizations = adminAuthorizations;
     }
 
-    public void addAdminAuthorization(String adminAuthorizations) {
+    public void addAdminAuthorization(AdminAuthorizationEntity adminAuthorizations) {
         this.adminAuthorizations.add(adminAuthorizations);
     }
 

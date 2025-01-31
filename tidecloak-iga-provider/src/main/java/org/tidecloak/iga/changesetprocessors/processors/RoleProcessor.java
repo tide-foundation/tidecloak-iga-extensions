@@ -30,7 +30,7 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
 
     @Override
     public void commit(KeycloakSession session, ChangeSetRequest change, TideRoleDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {
-        logger.info(String.format(
+        logger.debug(String.format(
                 "Starting workflow: COMMIT. Processor: %s, Action: %s, Entity ID: %s",
                 this.getClass().getSimpleName(),
                 change.getActionType(),
@@ -50,7 +50,7 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
         ChangeSetProcessor.super.commit(session, change, entity, em, callback);
 
         // Log successful completion
-        logger.info(String.format(
+        logger.debug(String.format(
                 "Successfully processed workflow: COMMIT. Processor: %s, Mapping ID: %s",
                 this.getClass().getSimpleName(),
                 entity.getId()
@@ -58,23 +58,23 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
     }
 
     @Override
-    public void request(KeycloakSession session, TideRoleDraftEntity entity, EntityManager em, ActionType action, Runnable callback) {
+    public void request(KeycloakSession session, TideRoleDraftEntity entity, EntityManager em, ActionType action, Runnable callback, ChangeSetType changeSetType) {
         try {
             // Log the start of the request with detailed context
-            logger.info(String.format(
+            logger.debug(String.format(
                     "Starting workflow: REQUEST. Processor: %s, Action: %s, Entity ID: %s",
                     this.getClass().getSimpleName(),
                     action,
                     entity.getId()
             ));
-
+            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getId(), changeSetType);
             switch (action) {
                 case CREATE:
-                    logger.info(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
+                    logger.debug(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleCreateRequest(session, entity, em, callback);
                     break;
                 case DELETE:
-                    logger.info(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
+                    logger.debug(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleDeleteRequest(session, entity, em, callback);
                     break;
                 default:
@@ -83,7 +83,7 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
             }
 
             // Log successful completion
-            logger.info(String.format(
+            logger.debug(String.format(
                     "Successfully processed workflow: REQUEST. Processor: %s, Mapping ID: %s",
                     this.getClass().getSimpleName(),
                     entity.getId()
@@ -147,12 +147,12 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
     }
 
     @Override
-    public RoleModel getRoleRequestFromEntity(KeycloakSession session, TideRoleDraftEntity entity) {
-        return session.getContext().getRealm().getRoleById(entity.getRole().getId());
+    public RoleModel getRoleRequestFromEntity(KeycloakSession session,  RealmModel realm,TideRoleDraftEntity entity) {
+        return realm.getRoleById(entity.getRole().getId());
     }
 
     @Override
-    public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideRoleDraftEntity entity, UserModel user){
+    public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideRoleDraftEntity entity, UserModel user, ClientModel clientModel){
         RealmModel realm = session.getContext().getRealm();
         RoleModel role = realm.getRoleById(entity.getRole().getId());
 
@@ -169,7 +169,7 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
                 removeRoleFromAccessToken(token, r);
             }
         });
-        userContextUtils.normalizeAccessToken(token);
+        userContextUtils.normalizeAccessToken(token, clientModel.isFullScopeAllowed());
         return token;
     }
 

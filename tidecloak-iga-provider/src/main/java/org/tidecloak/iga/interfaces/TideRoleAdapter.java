@@ -12,7 +12,9 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
+import org.tidecloak.shared.Constants;
 import org.tidecloak.shared.enums.ActionType;
+import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -74,16 +76,15 @@ public class TideRoleAdapter extends RoleAdapter {
                 deleteCompositeRoleMapping(getEntity(), roleEntity);
                 deleteProofRecords(committedEntity.getId());
                 super.removeCompositeRole(role);
-                changeSetProcessorFactory.getProcessor(changesetRequest.getType()).updateAffectedUserContexts(session, changesetRequest, committedEntity, em);
+                changeSetProcessorFactory.getProcessor(changesetRequest.getType()).updateAffectedUserContexts(session, realm, changesetRequest, committedEntity, em);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
 
         }else{
             try {
-            ChangeSetRequest changesetRequest = getChangeSetRequestFromEntity(session, committedEntity);
-            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE);
-            changeSetProcessorFactory.getProcessor(changesetRequest.getType()).executeWorkflow(session, committedEntity, em, WorkflowType.REQUEST, params, null);
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.COMPOSITE_ROLE);
+            changeSetProcessorFactory.getProcessor(ChangeSetType.COMPOSITE_ROLE).executeWorkflow(session, committedEntity, em, WorkflowType.REQUEST, params, null);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
@@ -94,16 +95,11 @@ public class TideRoleAdapter extends RoleAdapter {
     @Override
     public void addCompositeRole(RoleModel roleModel) {
         try {
-            super.addCompositeRole(roleModel);
-            boolean isDefaultRoleCommit = commitDefaultRolesOnInitiation(session, realm, getEntity(), roleModel, em);
-            String adminRealmName = Config.getAdminRealm();
-            String realmName = roleModel.isClientRole() ? ((ClientModel) roleModel.getContainer()).getRealm().getName() : ((RealmModel) roleModel.getContainer()).getName();
-            boolean isDefaultAdminRole = realmName.equalsIgnoreCase(adminRealmName) && AdminRoles.ALL_ROLES.contains(roleModel.getName());
-
-            if (isDefaultRoleCommit || isDefaultAdminRole) {
-                return;
+            RoleEntity entity = toRoleEntity(roleModel);
+            for (RoleEntity composite : getEntity().getCompositeRoles()) {
+                if (composite.equals(entity)) return;
             }
-
+            super.addCompositeRole(roleModel);
             RoleModel childRole = TideEntityUtils.wrapRoleModel(roleModel, session, realm);
             RoleEntity childEntity = toRoleEntity(childRole);
             TideCompositeRoleMappingDraftEntity draft = new TideCompositeRoleMappingDraftEntity();
@@ -114,9 +110,18 @@ public class TideRoleAdapter extends RoleAdapter {
             draft.setAction(ActionType.CREATE);
             em.persist(draft);
 
-            ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, draft);
-            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE);
-            changeSetProcessorFactory.getProcessor(changeSetRequest.getType()).executeWorkflow(session, draft, em, WorkflowType.REQUEST, params, null);
+            if (realm.getRoleById(getEntity().getId()).getName().equalsIgnoreCase(Constants.TIDE_REALM_ADMIN)) {
+                draft.setDraftStatus(DraftStatus.ACTIVE);
+                draft.setAction(ActionType.CREATE);
+                em.persist(draft);
+                return;
+            }
+            draft.setDraftStatus(DraftStatus.DRAFT);
+            draft.setAction(ActionType.CREATE);
+            em.persist(draft);
+
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.COMPOSITE_ROLE);
+            changeSetProcessorFactory.getProcessor(ChangeSetType.COMPOSITE_ROLE).executeWorkflow(session, draft, em, WorkflowType.REQUEST, params, null);
             em.flush();
         } catch (Exception e) {
             throw new RuntimeException(e);
@@ -191,5 +196,24 @@ public class TideRoleAdapter extends RoleAdapter {
         em.createNamedQuery("deleteProofRecords")
                 .setParameter("recordId", recordId)
                 .executeUpdate();
+    }
+
+    public void removeChildRoleFromCompositeRoleRecords(TideCompositeRoleMappingDraftEntity entity){
+        deleteCompositeRoleMapping(entity.getComposite(), entity.getChildRole());
+        deleteProofRecords(entity.getId());
+        RoleModel childRole = session.roles().getRoleById(realm, entity.getChildRole().getId());
+        super.removeCompositeRole(childRole);
+    }
+
+    public void removeChildRoleFromCompositeRoleRecords(TideCompositeRoleMappingDraftEntity entity, ActionType actionType){
+        deleteProofRecords(entity.getId());
+
+        if(!actionType.equals(ActionType.DELETE)) {
+            deleteCompositeRoleMapping(entity.getComposite(), entity.getChildRole());
+            RoleModel childRole = session.roles().getRoleById(realm, entity.getChildRole().getId());
+            super.removeCompositeRole(childRole);
+        } else {
+            entity.setDeleteStatus(null);
+        }
     }
 }
