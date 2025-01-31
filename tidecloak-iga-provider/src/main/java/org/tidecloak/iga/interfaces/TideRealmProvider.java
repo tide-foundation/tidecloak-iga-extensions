@@ -46,7 +46,12 @@ public class TideRealmProvider extends JpaRealmProvider {
     @Override
     public ClientModel addClient(RealmModel realm, String clientId) {
         try {
+            String igaAttribute = realm.getAttribute("isIGAEnabled");
+            boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
             ClientModel client = addClient(realm, KeycloakModelUtils.generateId(), clientId);
+            if(!isIGAEnabled) {
+                return client;
+            }
             ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
             List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
 
@@ -55,11 +60,11 @@ public class TideRealmProvider extends JpaRealmProvider {
             clientDraftEntity.setClient(clientEntity);
 
             if(usersInRealm.isEmpty()) {
-                clientDraftEntity.setFullScopeEnabled(DraftStatus.DRAFT);
+                clientDraftEntity.setFullScopeEnabled(DraftStatus.ACTIVE);
                 clientDraftEntity.setFullScopeDisabled(DraftStatus.NULL);
                 clientEntity.setFullScopeAllowed(true);
             } else {
-                clientDraftEntity.setFullScopeDisabled(DraftStatus.DRAFT);
+                clientDraftEntity.setFullScopeDisabled(DraftStatus.ACTIVE);
                 clientDraftEntity.setFullScopeEnabled(DraftStatus.NULL);
                 clientEntity.setFullScopeAllowed(false);
             }

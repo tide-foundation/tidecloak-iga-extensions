@@ -47,47 +47,60 @@ public class TideClientAdapter extends ClientAdapter {
                     .setParameter("client", entity)
                     .getResultList();
 
-            if(statusDraft.isEmpty()){
-                throw new Exception("Client does not exist");
-            }
-            TideClientDraftEntity clientFullScopeStatuses = statusDraft.get(0);
-
-
-            if((clientFullScopeStatuses.getDraftStatus().equals(DraftStatus.DRAFT) && !realm.getName().equalsIgnoreCase(Config.getAdminRealm()))
-            ) {
-                if(!usersInRealm.isEmpty() && clientFullScopeStatuses.getFullScopeDisabled().equals(DraftStatus.DRAFT) && clientFullScopeStatuses.getFullScopeEnabled().equals(DraftStatus.NULL) ){
-                    clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.ACTIVE);
-                    return;
-                } else if (usersInRealm.isEmpty() && clientFullScopeStatuses.getFullScopeDisabled().equals(DraftStatus.NULL) && clientFullScopeStatuses.getFullScopeEnabled().equals(DraftStatus.DRAFT)) {
-                    clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.ACTIVE);
+            if(!statusDraft.isEmpty()){
+                TideClientDraftEntity clientFullScopeStatuses = statusDraft.get(0);
+                if((clientFullScopeStatuses.getDraftStatus().equals(DraftStatus.DRAFT) && !realm.getName().equalsIgnoreCase(Config.getAdminRealm()))) {
                     return;
                 }
-            }
-
-            if(isMigration || realm.getName().equalsIgnoreCase(Config.getAdminRealm())) {
-                if(value){
-                    clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.NULL);
-                    clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.ACTIVE);
-                } else {
-                    clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.NULL);
-                    clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.ACTIVE);
-                }
-                em.flush();
-                super.setFullScopeAllowed(value);
-                return;
-            }
-
-            Runnable callback = () -> {
-                try {
+                if(isMigration || realm.getName().equalsIgnoreCase(Config.getAdminRealm())) {
+                    if(value){
+                        clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.NULL);
+                        clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.ACTIVE);
+                    } else {
+                        clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.NULL);
+                        clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.ACTIVE);
+                    }
+                    em.flush();
                     super.setFullScopeAllowed(value);
-                } catch (Exception e) {
-                    throw new RuntimeException("Error during FULL_SCOPE callback", e);
+                    return;
                 }
-            };
 
-            ActionType actionType = value ? ActionType.CREATE : ActionType.DELETE;
-            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, value, actionType, ChangeSetType.CLIENT_FULLSCOPE);
-            changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT_FULLSCOPE).executeWorkflow(session, clientFullScopeStatuses, em, WorkflowType.REQUEST, params, callback);
+                Runnable callback = () -> {
+                    try {
+                        super.setFullScopeAllowed(value);
+                    } catch (Exception e) {
+                        throw new RuntimeException("Error during FULL_SCOPE callback", e);
+                    }
+                };
+
+                ActionType actionType = value ? ActionType.CREATE : ActionType.DELETE;
+                WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, value, actionType, ChangeSetType.CLIENT_FULLSCOPE);
+                changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT_FULLSCOPE).executeWorkflow(session, clientFullScopeStatuses, em, WorkflowType.REQUEST, params, callback);
+            } else {
+                TideClientDraftEntity clientDraftEntity = new TideClientDraftEntity();
+                clientDraftEntity.setId(KeycloakModelUtils.generateId());
+                clientDraftEntity.setClient(entity);
+
+                if(usersInRealm.isEmpty()) {
+                    clientDraftEntity.setFullScopeEnabled(DraftStatus.ACTIVE);
+                    clientDraftEntity.setFullScopeDisabled(DraftStatus.NULL);
+                    entity.setFullScopeAllowed(true);
+                } else {
+                    clientDraftEntity.setFullScopeDisabled(DraftStatus.ACTIVE);
+                    clientDraftEntity.setFullScopeEnabled(DraftStatus.NULL);
+                    entity.setFullScopeAllowed(false);
+                }
+                clientDraftEntity.setAction(ActionType.CREATE);
+                em.persist(clientDraftEntity);
+                em.flush();
+                String igaAttribute = realm.getAttribute("isIGAEnabled");
+                boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
+                if(isIGAEnabled) {
+                    WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.CLIENT);
+                    changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT).executeWorkflow(session, clientDraftEntity, em, WorkflowType.REQUEST, params, null);
+                }
+            }
+
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

@@ -693,6 +693,7 @@ public interface ChangeSetProcessor<T> {
     }
 
     private<R> R sessionAware(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, BiFunction<UserSessionModel, ClientSessionContext,R> function) {
+        session.getContext().setClient(client);
         AuthenticationSessionModel authSession = null;
         AuthenticationSessionManager authSessionManager = new AuthenticationSessionManager(session);
         URI uri = session.getContext().getUri().getBaseUri();
