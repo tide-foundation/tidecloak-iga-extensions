@@ -46,12 +46,26 @@ public class TideClientAdapter extends ClientAdapter {
             List<TideClientDraftEntity> statusDraft = em.createNamedQuery("getClientFullScopeStatus", TideClientDraftEntity.class)
                     .setParameter("client", entity)
                     .getResultList();
-
             if(!statusDraft.isEmpty()){
                 TideClientDraftEntity clientFullScopeStatuses = statusDraft.get(0);
-                if((clientFullScopeStatuses.getDraftStatus().equals(DraftStatus.DRAFT) && !realm.getName().equalsIgnoreCase(Config.getAdminRealm()))) {
+                if(clientFullScopeStatuses.getFullScopeEnabled().equals(DraftStatus.ACTIVE) && value) {
+                    super.setFullScopeAllowed(true);
                     return;
                 }
+                if(clientFullScopeStatuses.getFullScopeDisabled().equals(DraftStatus.ACTIVE) && !value) {
+                    super.setFullScopeAllowed(false);
+                    return;
+                }
+                if((clientFullScopeStatuses.getDraftStatus().equals(DraftStatus.DRAFT) && !realm.getName().equalsIgnoreCase(Config.getAdminRealm()))) {
+                    if(!usersInRealm.isEmpty() && clientFullScopeStatuses.getFullScopeDisabled().equals(DraftStatus.DRAFT) && clientFullScopeStatuses.getFullScopeEnabled().equals(DraftStatus.NULL) ){
+                        clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.ACTIVE);
+                        return;
+                    } else if (usersInRealm.isEmpty() && clientFullScopeStatuses.getFullScopeDisabled().equals(DraftStatus.NULL) && clientFullScopeStatuses.getFullScopeEnabled().equals(DraftStatus.DRAFT)) {
+                        clientFullScopeStatuses.setFullScopeEnabled(DraftStatus.ACTIVE);
+                        return;
+                    }
+                }
+
                 if(isMigration || realm.getName().equalsIgnoreCase(Config.getAdminRealm())) {
                     if(value){
                         clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.NULL);
