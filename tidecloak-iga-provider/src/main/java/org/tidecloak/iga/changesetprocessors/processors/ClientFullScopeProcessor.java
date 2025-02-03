@@ -180,20 +180,9 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
     public void handleDeleteRequest(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         ClientModel client = realm.getClientByClientId(entity.getClient().getClientId());
-        List<UserModel> usersInClient = new ArrayList<>();
-        client.getRolesStream().forEach(role -> session.users().getRoleMembersStream(realm, role).forEach(user -> {
-            UserEntity userEntity = em.find(UserEntity.class, user.getId());
-            List<TideUserRoleMappingDraftEntity> userRecords = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
-                    .setParameter("draftStatus", DraftStatus.ACTIVE)
-                    .setParameter("user", userEntity)
-                    .setParameter("roleId", role.getId())
-                    .getResultList();
+        List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
 
-            if (userRecords != null && !userRecords.isEmpty() && !usersInClient.contains(user)) {
-                usersInClient.add(TideEntityUtils.wrapUserModel(user, session, realm));
-            }
-        }));
-        if(usersInClient.isEmpty()){
+        if(usersInRealm.isEmpty()){
             if (callback != null) {
                 callback.run();
             }
@@ -207,7 +196,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
         em.merge(entity);
         em.flush();
 
-        usersInClient.forEach(user -> {
+        usersInRealm.forEach(user -> {
             // Find any pending changes
             List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                     .setParameter("recordId", entity.getId())
@@ -318,6 +307,10 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
             entity.setFullScopeDisabled(DraftStatus.ACTIVE);
             entity.setFullScopeEnabled(DraftStatus.NULL);
             clientModel.setFullScopeAllowed(false);
+        }
+
+        if(entity.getDraftStatus().equals(DraftStatus.DRAFT)){
+            entity.setDraftStatus(DraftStatus.ACTIVE);
         }
     }
 

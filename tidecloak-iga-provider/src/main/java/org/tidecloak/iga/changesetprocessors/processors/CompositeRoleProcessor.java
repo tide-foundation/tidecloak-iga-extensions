@@ -145,8 +145,6 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
 
 
         if (activeUsers.isEmpty() || commitDefaultRolesOnInitiation(session, realm, parentEntity, childRole, em) ) {
-            if(realm.getName().equalsIgnoreCase(Config.getAdminRealm())) return;
-
             // if no users are affected, we commit the request immediately and check any affected change requests and update them.
             entity.setDraftStatus(DraftStatus.ACTIVE);
             ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);

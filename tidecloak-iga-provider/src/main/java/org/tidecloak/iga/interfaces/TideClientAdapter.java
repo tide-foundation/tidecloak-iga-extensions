@@ -3,6 +3,7 @@ package org.tidecloak.iga.interfaces;
 import jakarta.persistence.EntityManager;
 import org.keycloak.Config;
 import org.keycloak.models.*;
+import org.keycloak.models.cache.CacheRealmProvider;
 import org.keycloak.models.jpa.ClientAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
@@ -48,14 +49,17 @@ public class TideClientAdapter extends ClientAdapter {
                     .getResultList();
             if(!statusDraft.isEmpty()){
                 TideClientDraftEntity clientFullScopeStatuses = statusDraft.get(0);
-                if(clientFullScopeStatuses.getFullScopeEnabled().equals(DraftStatus.ACTIVE) && value) {
-                    super.setFullScopeAllowed(true);
+                if((clientFullScopeStatuses.getFullScopeEnabled().equals(DraftStatus.ACTIVE) && value) || (clientFullScopeStatuses.getFullScopeDisabled().equals(DraftStatus.ACTIVE) && !value)) {
+                    super.setFullScopeAllowed(value);
+                    CacheRealmProvider cacheRealmProvider = session.getProvider(CacheRealmProvider.class);
+                    cacheRealmProvider.registerClientInvalidation(entity.getId(), entity.getId(), realm.getId());
                     return;
                 }
-                if(clientFullScopeStatuses.getFullScopeDisabled().equals(DraftStatus.ACTIVE) && !value) {
-                    super.setFullScopeAllowed(false);
+
+                if((value && !clientFullScopeStatuses.getFullScopeEnabled().equals(DraftStatus.NULL)) || (!value && !clientFullScopeStatuses.getFullScopeDisabled().equals(DraftStatus.NULL))) {
                     return;
                 }
+
                 if((clientFullScopeStatuses.getDraftStatus().equals(DraftStatus.DRAFT) && !realm.getName().equalsIgnoreCase(Config.getAdminRealm()))) {
                     if(!usersInRealm.isEmpty() && clientFullScopeStatuses.getFullScopeDisabled().equals(DraftStatus.DRAFT) && clientFullScopeStatuses.getFullScopeEnabled().equals(DraftStatus.NULL) ){
                         clientFullScopeStatuses.setFullScopeDisabled(DraftStatus.ACTIVE);
