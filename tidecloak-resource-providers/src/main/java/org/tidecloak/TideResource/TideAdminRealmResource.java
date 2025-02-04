@@ -2,6 +2,7 @@ package org.tidecloak.TideResource;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -12,6 +13,7 @@ import org.keycloak.authentication.actiontoken.execactions.ExecuteActionsActionT
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.common.util.Time;
 import org.keycloak.component.ComponentModel;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.services.ErrorPage;
@@ -20,7 +22,14 @@ import org.keycloak.services.resources.LoginActionsService;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.VendorData;
+import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
+import org.tidecloak.shared.enums.ActionType;
+import org.tidecloak.shared.enums.ChangeSetType;
+import org.tidecloak.shared.enums.DraftStatus;
+import org.tidecloak.shared.enums.WorkflowType;
+import org.tidecloak.shared.enums.models.WorkflowParams;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -160,6 +169,7 @@ public class TideAdminRealmResource {
 
     public Response toggleIGA(@FormParam("isIGAEnabled") boolean isEnabled) throws Exception {
         try{
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
             auth.realm().requireManageRealm();
             session.getContext().getRealm().setAttribute("isIGAEnabled", isEnabled);
             logger.info("IGA has been toggled to : " + isEnabled);
@@ -179,6 +189,19 @@ public class TideAdminRealmResource {
                     if(session.roles().getClientRole(realmManagement, org.tidecloak.shared.Constants.TIDE_REALM_ADMIN) == null){
                         createRealmAdminInitCert(session);
                     }
+
+                    // Check the TideClientDraft Table and generate and AccessProofDetails that dont exist.
+                    List<TideClientDraftEntity> entities = findDraftsNotInAccessProof(em);
+                    entities.forEach(c -> {
+                        try {
+                            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.CLIENT);
+                            ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+                            changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT).executeWorkflow(session, c, em, WorkflowType.REQUEST, params, null);
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
+
+                    });
                 } else {
                     // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA
                     // TODO: Fix error: Uncaught server error: java.lang.RuntimeException: org.keycloak.crypto.SignatureException:
@@ -243,5 +266,11 @@ public class TideAdminRealmResource {
         public void addToHistory(String newEntry) {
             history.add(newEntry);
         }
+    }
+
+    private List<TideClientDraftEntity> findDraftsNotInAccessProof(EntityManager em) {
+        return em.createNamedQuery("TideClientDraftEntity.findDraftsNotInAccessProof", TideClientDraftEntity.class)
+                .setParameter("draftStatus", DraftStatus.DRAFT)
+                .getResultList();
     }
 }

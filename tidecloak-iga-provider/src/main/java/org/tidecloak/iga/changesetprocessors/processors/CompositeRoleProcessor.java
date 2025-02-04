@@ -156,9 +156,6 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
             }
             em.flush();
 
-
-
-
             List<AccessProofDetailEntity> clientEntities = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndRealm", AccessProofDetailEntity.class)
                     .setParameter("changesetType", ChangeSetType.CLIENT)
                     .setParameter("realmId", realm.getId()).getResultList();

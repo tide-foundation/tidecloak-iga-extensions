@@ -12,7 +12,6 @@ import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
-import org.keycloak.models.cache.CacheRealmProvider;
 import org.keycloak.models.cache.UserCache;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
@@ -169,15 +168,13 @@ public class IGARealmResource {
     }
 
 
-
-
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign")
     public Response signChangeset(ChangeSetRequest changeSet) throws Exception {
-
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+        ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
         if(changeSet.getType().equals(ChangeSetType.USER_ROLE)){
             TideUserRoleMappingDraftEntity entity = em.find(TideUserRoleMappingDraftEntity.class, changeSet.getChangeSetId());
             if (entity != null) {
@@ -189,7 +186,12 @@ public class IGARealmResource {
                 {
                     return Response.status(Response.Status.BAD_REQUEST).entity("User needs a tide account linked for the tide-realm-admin role").build();
                 }
+                if(!auth.adminAuth().hasAppRole(realmManagement, org.tidecloak.shared.Constants.TIDE_REALM_ADMIN) && !role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN )) {
+                    return Response.status(Response.Status.BAD_REQUEST).entity("Current user account does not have permission to sign change requests.").build();
+                }
             }
+        } else if (!auth.adminAuth().hasAppRole(realmManagement, org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+            return Response.status(Response.Status.BAD_REQUEST).entity("Current user account does not have permission to sign change requests.").build();
         }
 
         // check is admin has signed this already.
@@ -197,6 +199,8 @@ public class IGARealmResource {
         if (changesetRequestEntity == null){
             throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
         }
+        ClientModel realmManagementClient = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
+
         AdminAuthorizationEntity adminAuthorizationEntity = changesetRequestEntity
                 .getAdminAuthorizations()
                 .stream()
@@ -247,6 +251,10 @@ public class IGARealmResource {
 
             if (realmAuthorizers.isEmpty()){
                 throw new Exception("Authorizer not found for this realm.");
+            }
+
+            if(!auth.adminAuth().hasAppRole(realmManagement, org.tidecloak.shared.Constants.TIDE_REALM_ADMIN) && !realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")) {
+                return Response.status(Response.Status.BAD_REQUEST).entity("Current user account does not have permission to sign change requests.").build();
             }
 
             List<UserContext> userContexts = new ArrayList<>();
