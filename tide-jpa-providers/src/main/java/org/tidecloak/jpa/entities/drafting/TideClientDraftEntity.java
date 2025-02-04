@@ -31,6 +31,15 @@ import org.tidecloak.shared.enums.ActionType;
                         "WHERE r.client =: client"
         ),
         @NamedQuery(name="getClientDraftDetails", query="SELECT t FROM TideClientDraftEntity t WHERE t.client = :client"),
+        @NamedQuery(
+                name = "TideClientDraftEntity.findDraftsNotInAccessProof",
+                query = "SELECT t FROM TideClientDraftEntity t " +
+                        "WHERE (t.draftStatus = :draftStatus) " +
+                        "AND NOT EXISTS ( " +
+                        "   SELECT a FROM AccessProofDetailEntity a " +
+                        "   WHERE a.recordId = t.id" +
+                        ")"
+        )
 
 })
 

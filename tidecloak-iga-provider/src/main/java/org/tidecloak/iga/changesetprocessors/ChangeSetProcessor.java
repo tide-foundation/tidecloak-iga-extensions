@@ -486,7 +486,6 @@ public interface ChangeSetProcessor<T> {
     }
 
     default AccessToken generateAccessToken(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user){
-        session.getContext().setClient(client);
         AccessToken token = sessionAware(session, realm, client, user, "openid", (userSession, clientSessionCtx) -> {
             TokenManager tokenManager = new TokenManager();
             return tokenManager.responseBuilder(realm, client, null, session, userSession, clientSessionCtx)
@@ -693,6 +692,8 @@ public interface ChangeSetProcessor<T> {
     }
 
     private<R> R sessionAware(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, BiFunction<UserSessionModel, ClientSessionContext,R> function) {
+        session.getContext().setClient(client);
+        session.getContext().setRealm(realm);
         AuthenticationSessionModel authSession = null;
         AuthenticationSessionManager authSessionManager = new AuthenticationSessionManager(session);
         URI uri = session.getContext().getUri().getBaseUri();
@@ -702,7 +703,6 @@ public interface ChangeSetProcessor<T> {
             RootAuthenticationSessionModel rootAuthSession = authSessionManager.createAuthenticationSession(realm, false);
             authSession = rootAuthSession.createAuthenticationSession(client);
 
-            authSession.setAuthenticatedUser(user);
             authSession.setProtocol(OIDCLoginProtocol.LOGIN_PROTOCOL);
             authSession.setClientNote(OIDCLoginProtocol.ISSUER, Urls.realmIssuer(uri, realm.getName()));
             authSession.setClientNote(OIDCLoginProtocol.SCOPE_PARAM, scopeParam);
