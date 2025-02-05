@@ -9,6 +9,7 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.midgard.models.AdminAuthorization;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.jpa.entities.AdminAuthorizationEntity;
+import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -89,7 +90,7 @@ public class ChangesetRequestAdapter {
         }
 
         int threshold = parseThreshold(tideRole);
-        int numberOfAdmins = getNumberOfAdmins(session, realm, tideRole);
+        int numberOfAdmins = getNumberOfActiveAdmins(session, realm, tideRole, em);
         int numberOfRejections = (int) changesetRequestEntity.getAdminAuthorizations()
                 .stream()
                 .filter(a -> !a.getIsApproval())
@@ -156,9 +157,16 @@ public class ChangesetRequestAdapter {
         }
     }
 
-    private static int getNumberOfAdmins(KeycloakSession session, RealmModel realm, RoleModel tideRole) {
-        return (int) session.users()
-                .getRoleMembersStream(realm, tideRole)
-                .count();
+    private static int getNumberOfActiveAdmins(KeycloakSession session, RealmModel realm, RoleModel tideRole, EntityManager em) {
+         return (int) session.users()
+                .getRoleMembersStream(realm, tideRole).filter( u -> {
+                    UserEntity user = em.find(UserEntity.class, u.getId());
+                     List<TideUserRoleMappingDraftEntity> entity = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
+                             .setParameter("user", user)
+                             .setParameter("roleId", tideRole.getId())
+                             .setParameter("draftStatus", DraftStatus.ACTIVE).getResultList();
+                     return !entity.isEmpty();
+                 }).count();
+
     }
 }
