@@ -150,7 +150,8 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
             ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);
             ChangeSetProcessor.super.updateAffectedUserContexts(session, realm, changeSetRequest, entity, em);
             em.persist(entity);
-            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, entity.getId());
+
+            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(entity.getId(), changeSetRequest.getType()));
             if(changesetRequestEntity != null) {
                 em.remove(changesetRequestEntity);
             }

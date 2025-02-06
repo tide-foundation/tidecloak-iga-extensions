@@ -183,7 +183,7 @@ public interface ChangeSetProcessor<T> {
                 var uniqRoles = roleSet.stream().distinct().filter(Objects::nonNull).collect(Collectors.toSet());
 
                 processorFactory.getProcessor(userContextDraft.getChangesetType()).updateAffectedUserContextDrafts(session, userContextDraft, uniqRoles, client, user, em);
-                ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, userContextDraft.getRecordId());
+                ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, userContextDraft.getRecordId(), userContextDraft.getChangesetType());
                 if (changesetRequestEntity != null){
                     changesetRequestEntity.getAdminAuthorizations().clear(); // empty sigs!
                 }
@@ -204,7 +204,7 @@ public interface ChangeSetProcessor<T> {
                     UserContextSignRequest updatedReq = new UserContextSignRequest("Admin:1");
                     updatedReq.SetUserContexts(userContexts.toArray(new UserContext[0]));
 
-                    ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeRequestId);
+                    ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeRequestId, details.get(0).getChangesetType());
                     changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(updatedReq.GetDraft()));
                 } catch (Exception e) {
                     throw new RuntimeException(e);
@@ -246,7 +246,7 @@ public interface ChangeSetProcessor<T> {
         if (commitCallback != null) {
             commitCallback.run();
         }
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, change.getChangeSetId());
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
         if (changesetRequestEntity != null) {
             em.remove(changesetRequestEntity);
         }
@@ -612,7 +612,7 @@ public interface ChangeSetProcessor<T> {
         req.SetUserContexts(userContexts.toArray(new UserContext[0]));
         String draft = Base64.getEncoder().encodeToString(req.GetDraft());
 
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, recordId);
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(recordId, type));
         if (changesetRequestEntity == null) {
             ChangesetRequestEntity entity = new ChangesetRequestEntity();
             entity.setChangesetRequestId(recordId);
@@ -627,7 +627,7 @@ public interface ChangeSetProcessor<T> {
     }
 
     default void createChangeRequestEntity(EntityManager em, String recordId, ChangeSetType changeSetType) {
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, recordId);
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(recordId, changeSetType));
         if (changesetRequestEntity == null) {
             ChangesetRequestEntity entity = new ChangesetRequestEntity();
             entity.setChangesetRequestId(recordId);

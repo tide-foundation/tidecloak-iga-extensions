@@ -41,6 +41,13 @@ public class TideRoleAdapter extends RoleAdapter {
 
     @Override
     public void removeCompositeRole(RoleModel roleModel) {
+        // Dont draft for master realm
+        RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+        if(realm.equals(masterRealm)){
+            super.removeCompositeRole(roleModel);
+            return;
+        }
+
         RoleModel role = TideEntityUtils.wrapRoleModel(roleModel, session, realm);
         RoleEntity roleEntity = toRoleEntity(role);
         List<TideCompositeRoleMappingDraftEntity> entity = findCompositeRoleMappingDrafts(getEntity(), roleEntity, DraftStatus.ACTIVE);
@@ -100,6 +107,11 @@ public class TideRoleAdapter extends RoleAdapter {
                 if (composite.equals(entity)) return;
             }
             super.addCompositeRole(roleModel);
+            // Dont draft for master realm
+            RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+            if(realm.equals(masterRealm)){
+                return;
+            }
             RoleModel childRole = TideEntityUtils.wrapRoleModel(roleModel, session, realm);
             RoleEntity childEntity = toRoleEntity(childRole);
             TideCompositeRoleMappingDraftEntity draft = new TideCompositeRoleMappingDraftEntity();

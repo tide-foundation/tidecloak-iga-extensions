@@ -79,8 +79,9 @@ public class ChangeRequestUtils {
         return changeSetRequest;
     }
 
-    private static ChangeSetType getChangeSetType(EntityManager em, String recordId){
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, recordId);
+    private static ChangeSetType getChangeSetType(EntityManager em, String recordId, ChangeSetType changeSetType){
+
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(recordId, changeSetType));
         if(changesetRequestEntity == null) {
             throw new RuntimeException("No changeSet found with id: " + recordId);
         }

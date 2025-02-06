@@ -48,8 +48,11 @@ public class TideRealmProvider extends JpaRealmProvider {
         try {
             String igaAttribute = realm.getAttribute("isIGAEnabled");
             boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
+
+            // Dont draft for master realm or IGA disabled realms
+            RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
             ClientModel client = addClient(realm, KeycloakModelUtils.generateId(), clientId);
-            if(!isIGAEnabled) {
+            if(!isIGAEnabled || realm.equals(masterRealm)) {
                 return client;
             }
             ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());
@@ -101,7 +104,10 @@ public class TideRealmProvider extends JpaRealmProvider {
 
             String igaAttribute = session.getContext().getRealm().getAttribute("isIGAEnabled");
             boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
-            if (!isIGAEnabled){
+
+            // Dont draft for master realm or for IGA disabled realms
+            RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+            if (!isIGAEnabled || session.getContext().getRealm().equals(masterRealm)){
                 List<TideRoleDraftEntity> pendingDrafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                         .setParameter("role", roleEntity)
                         .getResultList();
@@ -166,6 +172,12 @@ public class TideRealmProvider extends JpaRealmProvider {
     public RoleModel addClientRole(ClientModel client, String id, String name) {
         RoleModel role = super.addClientRole(client, id, name);
 
+        // Dont draft for master realm
+        RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+        if(client.getRealm().equals(masterRealm)){
+            return role;
+        }
+
         List<TideRoleDraftEntity> roleDraft = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", TideEntityUtils.toRoleEntity(role, em))
                 .getResultList();
@@ -191,6 +203,12 @@ public class TideRealmProvider extends JpaRealmProvider {
     @Override
     public RoleModel addRealmRole(RealmModel realm, String id, String name) {
         RoleModel role = super.addRealmRole(realm, id, name);
+
+        // Dont draft for master realm
+        RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+        if(realm.equals(masterRealm)){
+            return role;
+        }
 
         List<TideRoleDraftEntity> roleDraft = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", TideEntityUtils.toRoleEntity(role, em))
@@ -310,10 +328,11 @@ public class TideRealmProvider extends JpaRealmProvider {
             em.flush();
             List<TideClientDraftEntity> clientDraftEntities = em.createNamedQuery("getClientDraftDetails", TideClientDraftEntity.class).setParameter("client", clientEntity).getResultList();
             clientDraftEntities.forEach(e -> {
-                ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, e.getId());
-                if(changesetRequestEntity != null){
-                    em.remove(changesetRequestEntity);
+                List<ChangesetRequestEntity> changeRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", e.getId()).getResultList();
+                if(!changeRequestEntity.isEmpty()){
+                    changeRequestEntity.forEach(c -> em.remove(c));
                 }
+
             });
             em.createNamedQuery("deleteClient").setParameter("client", clientEntity).executeUpdate();
             em.createNamedQuery("DeleteAllAccessProofsByClient").setParameter("clientId", clientEntity.getId()).executeUpdate();

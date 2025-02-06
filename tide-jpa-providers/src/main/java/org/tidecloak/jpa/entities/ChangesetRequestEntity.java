@@ -5,15 +5,24 @@ import org.tidecloak.shared.enums.ChangeSetType;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.io.Serializable;
+@NamedQueries({
+        @NamedQuery(
+                name = "getAllChangeRequestsByRecordId",
+                query = "SELECT c FROM ChangesetRequestEntity c WHERE c.changesetRequestId = :changesetRequestId"
+        ),
+})
 
 @Entity
 @Table(name = "CHANGESET_REQUEST")
+@IdClass(ChangesetRequestEntity.Key.class)
 public class ChangesetRequestEntity {
 
     @Id
     @Column(name = "CHANGESET_REQUEST_ID")
     private String changesetRequestId;
 
+    @Id
     @Enumerated(EnumType.STRING)
     @Column(name = "CHANGE_SET_TYPE")
     protected ChangeSetType changesetType;
@@ -70,5 +79,70 @@ public class ChangesetRequestEntity {
 
     public void setTimestamp(Long timestamp) {
         this.timestamp = timestamp;
+    }
+
+    public static class Key implements Serializable {
+
+        protected String changesetRequestId;
+
+        protected ChangeSetType changesetType;
+
+        public Key() {
+        }
+
+        public Key(String changesetRequestId, ChangeSetType changesetType) {
+            this.changesetRequestId = changesetRequestId;
+            this.changesetType = changesetType;
+        }
+
+        public String getChangesetRequestId() {
+            return changesetRequestId;
+        }
+
+        public ChangeSetType getChangeSetType() {
+            return changesetType;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+
+            ChangesetRequestEntity.Key key = (ChangesetRequestEntity.Key) o;
+
+            if (!changesetType.equals(key.changesetType)) return false;
+            if (!changesetRequestId.equals(key.changesetRequestId)) return false;
+
+            return true;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = changesetRequestId.hashCode();
+            result = 31 * result + changesetType.hashCode();
+
+            return result;
+        }
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null) return false;
+        if (!(o instanceof ChangesetRequestEntity)) return false;
+
+        ChangesetRequestEntity key = (ChangesetRequestEntity) o;
+
+        if (!changesetType.equals(key.changesetType)) return false;
+        if (!changesetRequestId.equals(key.changesetRequestId)) return false;
+
+        return true;
+    }
+
+    @Override
+    public int hashCode() {
+        int result = changesetRequestId.hashCode();
+        result = 31 * result + changesetType.hashCode();
+        return result;
     }
 }

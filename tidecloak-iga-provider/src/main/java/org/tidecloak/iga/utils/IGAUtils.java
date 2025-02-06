@@ -149,7 +149,7 @@ public class IGAUtils {
     }
 
     public static void updateDraftStatus(KeycloakSession session, ChangeSetType changeSetType, String changeSetID, ActionType changeSetAction, Object draftRecordEntity) throws Exception {
-        DraftStatus draftStatus = getChangeSetStatus(session, changeSetID);
+        DraftStatus draftStatus = getChangeSetStatus(session, changeSetID, changeSetType);
 
         switch (changeSetType) {
             case USER_ROLE:

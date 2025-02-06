@@ -52,24 +52,22 @@ public class UserContextUtils extends UserContextUtilBase {
         groupedProofDetails.forEach((changeRequestId, details)  -> {
             try {
                 // remove old request, then we recreate
-                ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeRequestId);
-                if(changesetRequestEntity != null) {
-                    em.remove(changesetRequestEntity);
+                List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("ChangesetRequestEntity", ChangesetRequestEntity.class).setParameter("changesetRequestId", changeRequestId).getResultList();
+                if(!changesetRequestEntity.isEmpty()) {
+                    changesetRequestEntity.forEach(em::remove);
                 }
-                details.forEach(d -> {
-                    em.remove(d);
-                    em.flush();
-                });
+                em.flush();
+
 
                 ChangeSetType changeSetType = details.get(0).getChangesetType();
                 ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
                 WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, changeSetType);
                 Object mapping = getMappings(em, changeRequestId, changeSetType);
                 changeSetProcessorFactory.getProcessor(changeSetType).executeWorkflow(session, mapping, em, WorkflowType.REQUEST, params, null);
-                details.forEach(d -> {
-                    em.remove(d);
-                    em.flush();
-                });
+
+                details.forEach(em::remove);
+                em.flush();
+
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }

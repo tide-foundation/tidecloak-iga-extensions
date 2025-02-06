@@ -151,7 +151,7 @@ public class IGARealmResource {
             ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
             WorkflowParams params = new WorkflowParams(null, false, changeSet.getActionType(), changeSet.getType());
             processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, mapping, em, WorkflowType.CANCEL, params, null);
-            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeSet.getChangeSetId());
+            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
             if(changesetRequestEntity != null ) {
                 em.remove(changesetRequestEntity);
             }
@@ -195,7 +195,7 @@ public class IGARealmResource {
         }
 
         // check is admin has signed this already.
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeSet.getChangeSetId());
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
         if (changesetRequestEntity == null){
             throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
         }
@@ -578,7 +578,7 @@ public class IGARealmResource {
                     proofDetails.forEach(p -> {
                         userContexts.add(new UserContext(p.getProofDraft()));
                     });
-                    ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, change.getChangeSetId());
+                    ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
                     if (changesetRequestEntity == null){
                         throw new Exception("No change-set request entity found with this recordId " + change.getChangeSetId());
                     }
