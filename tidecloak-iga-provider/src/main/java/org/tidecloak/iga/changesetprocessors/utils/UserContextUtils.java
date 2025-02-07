@@ -52,7 +52,7 @@ public class UserContextUtils extends UserContextUtilBase {
         groupedProofDetails.forEach((changeRequestId, details)  -> {
             try {
                 // remove old request, then we recreate
-                List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("ChangesetRequestEntity", ChangesetRequestEntity.class).setParameter("changesetRequestId", changeRequestId).getResultList();
+                List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", changeRequestId).getResultList();
                 if(!changesetRequestEntity.isEmpty()) {
                     changesetRequestEntity.forEach(em::remove);
                 }
@@ -111,12 +111,18 @@ public class UserContextUtils extends UserContextUtilBase {
     }
 
     public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, String recordId, ChangeSetType changeSetType) {
-        return em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndId", AccessProofDetailEntity.class)
+        List<ChangeSetType> changeSetTypes = new ArrayList<>();
+        changeSetTypes.add(changeSetType);
+        if (changeSetType.equals(ChangeSetType.CLIENT_FULLSCOPE)) {
+            changeSetTypes.add(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT);
+        }
+        return em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
                 .setParameter("recordId", recordId)
-                .setParameter("changesetType", changeSetType)
+                .setParameter("changesetTypes", changeSetTypes)
                 .getResultStream()
                 .collect(Collectors.toList());
     }
+
 
 
     public static List<AccessProofDetailEntity>  getUserContextDrafts(EntityManager em, ClientModel client) {

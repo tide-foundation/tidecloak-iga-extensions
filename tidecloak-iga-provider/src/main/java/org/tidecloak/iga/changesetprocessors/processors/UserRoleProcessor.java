@@ -103,7 +103,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             tideAdminRealmRoleRequests.forEach(request -> {
                 try {
                     UserModel u = session.users().getUserById(realm, request.getUser().getId());
-                    List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("ChangesetRequestEntity", ChangesetRequestEntity.class).setParameter("changesetRequestId", request.getId()).getResultList();
+                    List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", request.getId()).getResultList();
                     if(!changesetRequestEntity.isEmpty()) {
                         changesetRequestEntity.forEach(em::remove);
                     }

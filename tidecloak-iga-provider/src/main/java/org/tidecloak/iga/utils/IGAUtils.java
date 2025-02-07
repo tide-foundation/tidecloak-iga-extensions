@@ -41,9 +41,15 @@ public class IGAUtils {
         return isIGAEnabled != null && !isIGAEnabled.isEmpty() && isIGAEnabled.equalsIgnoreCase("true");
     }
 
-    public static List<AccessProofDetailEntity> getAccessProofs(EntityManager em, String recordId) {
-        return em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+    public static List<AccessProofDetailEntity> getAccessProofs(EntityManager em, String recordId, ChangeSetType changeSetType) {
+        List<ChangeSetType> changeSetTypes = new ArrayList<>();
+        changeSetTypes.add(changeSetType);
+        if (changeSetType.equals(ChangeSetType.CLIENT_FULLSCOPE)) {
+            changeSetTypes.add(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT);
+        }
+        return em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
                 .setParameter("recordId", recordId)
+                .setParameter("changesetTypes", changeSetTypes) // Pass list instead of single value
                 .getResultStream()
                 .collect(Collectors.toList());
     }

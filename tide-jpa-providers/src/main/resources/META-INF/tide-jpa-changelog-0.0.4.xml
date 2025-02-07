@@ -3,7 +3,48 @@
                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
 
-    <changeSet id="26.1.0-06022025" author="tidecloak">
-        <addUniqueConstraint columnNames="CHANGESET_REQUEST_ID,CHANGE_SET_TYPE" constraintName="changeset_request_id" tableName="CHANGESET_REQUEST"/>
+    <changeSet id="26.1.0-07022025" author="tidecloak">
+
+        <!-- Step 1: Drop foreign key constraint in ADMIN_AUTHORIZATIONS -->
+        <dropForeignKeyConstraint baseTableName="ADMIN_AUTHORIZATIONS"
+                                  constraintName="fk_changeset_request_admin_authorizations"/>
+
+        <!-- Step 2: Drop the existing primary key in CHANGESET_REQUEST -->
+        <dropPrimaryKey tableName="CHANGESET_REQUEST"/>
+
+        <!-- Step 3: Add new composite primary key on (CHANGESET_REQUEST_ID, CHANGE_SET_TYPE) -->
+        <addPrimaryKey tableName="CHANGESET_REQUEST"
+                       columnNames="CHANGESET_REQUEST_ID, CHANGE_SET_TYPE"
+                       constraintName="CHANGESET_REQUEST_pkey"/>
+
+        <!-- Step 4: Add CHANGE_SET_TYPE column to ADMIN_AUTHORIZATIONS as NULLABLE first -->
+        <addColumn tableName="ADMIN_AUTHORIZATIONS">
+            <column name="CHANGE_SET_TYPE" type="VARCHAR(50)">
+                <constraints nullable="true"/> <!-- Allow NULL initially -->
+            </column>
+        </addColumn>
+
+        <!-- Step 5: Populate CHANGE_SET_TYPE for existing rows -->
+        <update tableName="ADMIN_AUTHORIZATIONS">
+            <column name="CHANGE_SET_TYPE" valueComputed="
+                (SELECT cr.CHANGE_SET_TYPE
+                 FROM CHANGESET_REQUEST cr
+                 WHERE cr.CHANGESET_REQUEST_ID = ADMIN_AUTHORIZATIONS.CHANGESET_REQUEST_ID
+                 ORDER BY cr.TIMESTAMP DESC LIMIT 1)"
+            />
+            <where>CHANGE_SET_TYPE IS NULL</where> <!-- Only update NULL values -->
+        </update>
+
+        <!-- Step 6: Make CHANGE_SET_TYPE Non-Nullable -->
+        <addNotNullConstraint tableName="ADMIN_AUTHORIZATIONS" columnName="CHANGE_SET_TYPE"/>
+
+        <!-- Step 7: Add new foreign key referencing the new composite primary key -->
+        <addForeignKeyConstraint
+                baseTableName="ADMIN_AUTHORIZATIONS"
+                baseColumnNames="CHANGESET_REQUEST_ID, CHANGE_SET_TYPE"
+                referencedTableName="CHANGESET_REQUEST"
+                referencedColumnNames="CHANGESET_REQUEST_ID, CHANGE_SET_TYPE"
+                constraintName="fk_changeset_request_admin_auth_composite"/>
     </changeSet>
+
 </databaseChangeLog>

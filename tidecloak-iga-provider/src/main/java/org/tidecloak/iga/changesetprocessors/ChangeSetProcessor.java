@@ -225,7 +225,7 @@ public interface ChangeSetProcessor<T> {
      */
     default void commit(KeycloakSession session, ChangeSetRequest change, T entity, EntityManager em, Runnable commitCallback) throws Exception {
         // Retrieve the user context drafts
-        List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, change.getChangeSetId());
+        List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, change.getChangeSetId(), change.getType());
 
         if (userContextDrafts.isEmpty()) {
             throw new Exception("No user context drafts found for this change set id, " + change.getChangeSetId());
@@ -532,7 +532,7 @@ public interface ChangeSetProcessor<T> {
         newDetail.setRealmId(realm.getId());
         em.persist(newDetail);
 
-        List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, recordId);
+        List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, recordId, type);
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
         RoleModel tideRole;
         boolean isAssigningTideAdminRole;
