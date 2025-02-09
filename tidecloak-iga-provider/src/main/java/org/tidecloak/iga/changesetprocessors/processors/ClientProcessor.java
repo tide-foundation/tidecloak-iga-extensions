@@ -35,6 +35,25 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
     protected static final Logger logger = Logger.getLogger(ClientProcessor.class);
 
     @Override
+    public void cancel(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, ActionType actionType) {
+        if(!entity.getFullScopeDisabled().equals(DraftStatus.ACTIVE)){
+            entity.setFullScopeDisabled(DraftStatus.NULL);
+        }else if (!entity.getFullScopeEnabled().equals(DraftStatus.ACTIVE)){
+            entity.setFullScopeEnabled(DraftStatus.NULL);
+        }
+
+        // Find any pending changes
+        List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndId", AccessProofDetailEntity.class)
+                .setParameter("recordId", entity.getId())
+                .setParameter("changesetType", ChangeSetType.CLIENT)
+                .getResultList();
+
+        pendingChanges.forEach(em::remove);
+        em.flush();
+
+    }
+
+    @Override
     public  void commit(KeycloakSession session, ChangeSetRequest change, TideClientDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {
         // Log the start of the request with detailed context
         logger.debug(String.format(

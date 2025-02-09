@@ -84,10 +84,10 @@ public interface ChangeSetProcessor<T> {
     default void executeWorkflow(KeycloakSession session, T entity, EntityManager em, WorkflowType workflow, WorkflowParams params, Runnable callback) throws Exception {
         switch (workflow) {
             case APPROVAL:
-                approve(session, getChangeSetRequestFromEntity(session, entity), entity, em, params.getDraftStatus(), params.isDelete());
+                approve(session, getChangeSetRequestFromEntity(session, entity, params.getChangeSetType()), entity, em, params.getDraftStatus(), params.isDelete());
                 break;
             case COMMIT:
-                commit(session, getChangeSetRequestFromEntity(session, entity), entity, em, null);
+                commit(session, getChangeSetRequestFromEntity(session, entity, params.getChangeSetType()), entity, em, null);
                 break;
             case REQUEST:
                 request(session, entity, em, params.getActionType(), callback, params.getChangeSetType());
@@ -531,6 +531,8 @@ public interface ChangeSetProcessor<T> {
         newDetail.setChangesetType(type);
         newDetail.setRealmId(realm.getId());
         em.persist(newDetail);
+        em.flush();
+
 
         List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, recordId, type);
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
@@ -612,7 +614,8 @@ public interface ChangeSetProcessor<T> {
         req.SetUserContexts(userContexts.toArray(new UserContext[0]));
         String draft = Base64.getEncoder().encodeToString(req.GetDraft());
 
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(recordId, type));
+        ChangeSetType changeSetType = type.equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT) ? ChangeSetType.CLIENT_FULLSCOPE : type;
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(recordId, changeSetType));
         if (changesetRequestEntity == null) {
             ChangesetRequestEntity entity = new ChangesetRequestEntity();
             entity.setChangesetRequestId(recordId);

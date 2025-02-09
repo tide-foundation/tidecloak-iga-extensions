@@ -142,11 +142,9 @@ public class IGARealmResource {
 
             Object mapping = getMappings(em, changeSet, type);
             if (mapping == null) {
-                if(type.equals(ChangeSetType.CLIENT)){
-                    return Response.status(Response.Status.NOT_FOUND).entity("Unable to cancel this request. Default user context need to be approved for a client.").build();
-                }
                 return Response.status(Response.Status.NOT_FOUND).entity("Change request was not found.").build();
             }
+
             em.lock(mapping, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
             ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
             WorkflowParams params = new WorkflowParams(null, false, changeSet.getActionType(), changeSet.getType());
@@ -651,7 +649,9 @@ public class IGARealmResource {
             }
 
             ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
-            processorFactory.getProcessor(type).executeWorkflow(session, mapping, em, WorkflowType.COMMIT, null, null);
+
+            WorkflowParams workflowParams = new WorkflowParams(null, false, null, change.getType());
+            processorFactory.getProcessor(type).executeWorkflow(session, mapping, em, WorkflowType.COMMIT, workflowParams, null);
 
             if (type.equals(ChangeSetType.USER_ROLE) && realmAuthorizers != null){
                 RoleModel role = realm.getRoleById(((TideUserRoleMappingDraftEntity) mapping).getRoleId());
@@ -691,7 +691,7 @@ public class IGARealmResource {
             case COMPOSITE_ROLE, DEFAULT_ROLES -> em.find(TideCompositeRoleMappingDraftEntity.class, change.getChangeSetId());
             case ROLE -> em.find(TideRoleDraftEntity.class, change.getChangeSetId());
             case USER -> em.find(TideUserDraftEntity.class, change.getChangeSetId());
-            case CLIENT_FULLSCOPE -> em.find(TideClientDraftEntity.class, change.getChangeSetId());
+            case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, change.getChangeSetId());
             default -> null;
         };
     }
