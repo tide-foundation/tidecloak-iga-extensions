@@ -35,7 +35,7 @@ import static org.keycloak.common.util.StackUtil.getShortStackTrace;
 
 public class TideRealmProvider extends JpaRealmProvider {
     private final KeycloakSession session;
-    private final ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();;
+    private final ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
 
 
     public TideRealmProvider(KeycloakSession session, EntityManager em, Set<String> clientSearchableAttributes, Set<String> groupSearchableAttributes) {

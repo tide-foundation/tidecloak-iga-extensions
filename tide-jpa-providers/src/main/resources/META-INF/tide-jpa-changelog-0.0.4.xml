@@ -5,26 +5,39 @@
 
     <changeSet id="26.1.0-07022025" author="tidecloak">
 
-        <!-- Step 1: Drop foreign key constraint in ADMIN_AUTHORIZATIONS -->
+        <!-- Delete records from ACCESS_PROOF_DETAIL where RECORD_ID matches CHANGESET_REQUEST_ID of type CLIENT or CLIENT_FULLSCOPE -->
+        <delete tableName="ACCESS_PROOF_DETAIL">
+            <where>RECORD_ID IN (
+                SELECT CHANGESET_REQUEST_ID FROM CHANGESET_REQUEST WHERE CHANGE_SET_TYPE IN ('CLIENT', 'CLIENT_FULLSCOPE', 'CLIENT_DEFAULT_USER_CONTEXT')
+                )</where>
+        </delete>
+        <!-- Delete records from ADMIN_AUTHORIZATIONS where CHANGESET_REQUEST_ID matches the affected CHANGESET_REQUEST records -->
+        <delete tableName="ADMIN_AUTHORIZATIONS">
+            <where>CHANGESET_REQUEST_ID IN (
+                SELECT CHANGESET_REQUEST_ID FROM CHANGESET_REQUEST WHERE CHANGE_SET_TYPE IN ('CLIENT', 'CLIENT_FULLSCOPE', 'CLIENT_DEFAULT_USER_CONTEXT')
+                )</where>
+        </delete>
+
+        <!-- Finally, delete records from CHANGESET_REQUEST where CHANGE_SET_TYPE is CLIENT or CLIENT_FULLSCOPE -->
+        <delete tableName="CHANGESET_REQUEST">
+            <where>CHANGE_SET_TYPE IN ('CLIENT', 'CLIENT_FULLSCOPE', 'CLIENT_DEFAULT_USER_CONTEXT')</where>
+        </delete>
+
         <dropForeignKeyConstraint baseTableName="ADMIN_AUTHORIZATIONS"
                                   constraintName="fk_changeset_request_admin_authorizations"/>
 
-        <!-- Step 2: Drop the existing primary key in CHANGESET_REQUEST -->
         <dropPrimaryKey tableName="CHANGESET_REQUEST"/>
 
-        <!-- Step 3: Add new composite primary key on (CHANGESET_REQUEST_ID, CHANGE_SET_TYPE) -->
         <addPrimaryKey tableName="CHANGESET_REQUEST"
                        columnNames="CHANGESET_REQUEST_ID, CHANGE_SET_TYPE"
                        constraintName="CHANGESET_REQUEST_pkey"/>
 
-        <!-- Step 4: Add CHANGE_SET_TYPE column to ADMIN_AUTHORIZATIONS as NULLABLE first -->
         <addColumn tableName="ADMIN_AUTHORIZATIONS">
             <column name="CHANGE_SET_TYPE" type="VARCHAR(50)">
                 <constraints nullable="true"/> <!-- Allow NULL initially -->
             </column>
         </addColumn>
 
-        <!-- Step 5: Populate CHANGE_SET_TYPE for existing rows -->
         <update tableName="ADMIN_AUTHORIZATIONS">
             <column name="CHANGE_SET_TYPE" valueComputed="
                 (SELECT cr.CHANGE_SET_TYPE
@@ -35,10 +48,8 @@
             <where>CHANGE_SET_TYPE IS NULL</where> <!-- Only update NULL values -->
         </update>
 
-        <!-- Step 6: Make CHANGE_SET_TYPE Non-Nullable -->
         <addNotNullConstraint tableName="ADMIN_AUTHORIZATIONS" columnName="CHANGE_SET_TYPE"/>
 
-        <!-- Step 7: Add new foreign key referencing the new composite primary key -->
         <addForeignKeyConstraint
                 baseTableName="ADMIN_AUTHORIZATIONS"
                 baseColumnNames="CHANGESET_REQUEST_ID, CHANGE_SET_TYPE"
