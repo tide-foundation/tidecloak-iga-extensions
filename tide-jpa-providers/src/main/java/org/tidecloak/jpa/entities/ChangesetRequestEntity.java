@@ -11,6 +11,10 @@ import java.io.Serializable;
                 name = "getAllChangeRequestsByRecordId",
                 query = "SELECT c FROM ChangesetRequestEntity c WHERE c.changesetRequestId = :changesetRequestId"
         ),
+        @NamedQuery(
+                name = "getAllChangeRequestsByChangeSetType",
+                query = "SELECT c FROM ChangesetRequestEntity c WHERE c.changesetType = :changesetType"
+        ),
 })
 
 @Entity

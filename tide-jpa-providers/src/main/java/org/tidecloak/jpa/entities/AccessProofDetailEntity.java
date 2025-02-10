@@ -11,6 +11,7 @@ import org.tidecloak.shared.enums.ChangeSetType;
         @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndRealm", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.realmId = :realmId"),
         @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndIdAndRealm", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.recordId = :recordId and a.realmId = :realmId"),
         @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndId", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.recordId = :recordId"),
+        @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndIdAndUser", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.recordId = :recordId and user.id = :userId"),
         @NamedQuery(
                 name = "getProofDetailsForDraftByChangeSetTypesAndId",
                 query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType IN :changesetTypes AND a.recordId = :recordId"

@@ -154,6 +154,7 @@ public class IGARealmResource {
             processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, mapping, em, WorkflowType.CANCEL, params, null);
             ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
             if(changesetRequestEntity != null ) {
+                changesetRequestEntity.getAdminAuthorizations().forEach(em::remove);
                 em.remove(changesetRequestEntity);
             }
             em.flush();
@@ -553,8 +554,9 @@ public class IGARealmResource {
                     }
 
                     // Execute Workflow
-                    WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.CLIENT);
                     try {
+                        draft.setDraftStatus(DraftStatus.DRAFT);
+                        WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.CLIENT);
                         changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT)
                                 .executeWorkflow(session, draft, em, WorkflowType.REQUEST, params, null);
                     } catch (Exception e) {

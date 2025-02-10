@@ -54,10 +54,13 @@ public class UserContextUtils extends UserContextUtilBase {
                 // remove old request, then we recreate
                 List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", changeRequestId).getResultList();
                 if(!changesetRequestEntity.isEmpty()) {
-                    changesetRequestEntity.forEach(em::remove);
+                    changesetRequestEntity.forEach(c -> {
+                        c.getAdminAuthorizations().forEach(em::remove);
+                        em.remove(c);
+                    });
                 }
+                details.forEach(em::remove);
                 em.flush();
-
 
                 ChangeSetType changeSetType = details.get(0).getChangesetType();
                 ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
@@ -65,13 +68,11 @@ public class UserContextUtils extends UserContextUtilBase {
                 Object mapping = getMappings(em, changeRequestId, changeSetType);
                 changeSetProcessorFactory.getProcessor(changeSetType).executeWorkflow(session, mapping, em, WorkflowType.REQUEST, params, null);
 
-                details.forEach(em::remove);
-                em.flush();
-
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
         });
+        em.flush();
     }
     
     @Override
@@ -430,7 +431,7 @@ public class UserContextUtils extends UserContextUtilBase {
             case COMPOSITE_ROLE, DEFAULT_ROLES -> em.find(TideCompositeRoleMappingDraftEntity.class, recordId);
             case ROLE -> em.find(TideRoleDraftEntity.class, recordId);
             case USER -> em.find(TideUserDraftEntity.class, recordId);
-            case CLIENT_FULLSCOPE -> em.find(TideClientDraftEntity.class, recordId);
+            case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, recordId);
             default -> null;
         };
     }

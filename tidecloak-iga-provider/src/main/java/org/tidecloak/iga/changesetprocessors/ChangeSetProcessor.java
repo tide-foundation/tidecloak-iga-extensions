@@ -171,7 +171,7 @@ public interface ChangeSetProcessor<T> {
             for(AccessProofDetailEntity userContextDraft : userContextDrafts) {
                 em.lock(userContextDraft, LockModeType.PESSIMISTIC_WRITE);
 
-                if(change.getType().equals(ChangeSetType.USER_ROLE) && (userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT) || userContextDraft.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES) || userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT) )) {
+                if(change.getType().equals(ChangeSetType.USER_ROLE) && (userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT) || userContextDraft.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES) || userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT) || userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT_FULLSCOPE))) {
                     return;
                 }
 
@@ -251,6 +251,29 @@ public interface ChangeSetProcessor<T> {
             em.remove(changesetRequestEntity);
         }
         em.flush();
+
+        // Regenerate for client full scope change request.
+        List<ChangesetRequestEntity> clientFullScopeChangeRequests = em.createNamedQuery("getAllChangeRequestsByChangeSetType", ChangesetRequestEntity.class)
+                .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE).getResultList();
+        ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+        clientFullScopeChangeRequests.forEach(req -> {
+            TideClientDraftEntity tideClientDraftEntity = em.find(TideClientDraftEntity.class, req.getChangesetRequestId());
+            ChangeSetRequest c = getChangeSetRequestFromEntity(session, tideClientDraftEntity, ChangeSetType.CLIENT_FULLSCOPE);
+            req.getAdminAuthorizations().forEach(em::remove);
+            em.remove(req);
+            em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", req.getChangesetRequestId()).getResultStream().forEach(em::remove);
+            em.flush();
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, c.getActionType().equals(ActionType.DELETE), c.getActionType(), ChangeSetType.CLIENT_FULLSCOPE);
+            try {
+                changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT_FULLSCOPE).executeWorkflow(session, tideClientDraftEntity, em, WorkflowType.REQUEST, params, null);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+
+
 
         // Update affected user contexts
         updateAffectedUserContexts(session, session.getContext().getRealm(), change, entity, em);
