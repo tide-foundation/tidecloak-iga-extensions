@@ -23,6 +23,23 @@
             <where>CHANGE_SET_TYPE IN ('CLIENT', 'CLIENT_FULLSCOPE', 'CLIENT_DEFAULT_USER_CONTEXT')</where>
         </delete>
 
+        <!-- Revert client draft status back -->
+        <update tableName="CLIENT_DRAFT">
+            <column name="DraftStatus" value="NULL"/>
+            <where>deleteStatus = 'active'
+                AND (DraftStatus IS NULL OR DraftStatus != 'ACTIVE')
+                AND ID NOT IN (SELECT CHANGESET_REQUEST_ID FROM CHANGESET_REQUEST)
+            </where>
+        </update>
+
+        <update tableName="CLIENT_DRAFT">
+            <column name="deleteStatus" value="NULL"/>
+            <where>DraftStatus = 'active'
+                AND (deleteStatus IS NULL OR deleteStatus != 'ACTIVE')
+                AND ID NOT IN (SELECT CHANGESET_REQUEST_ID FROM CHANGESET_REQUEST)
+            </where>
+        </update>
+
         <dropForeignKeyConstraint baseTableName="ADMIN_AUTHORIZATIONS"
                                   constraintName="fk_changeset_request_admin_authorizations"/>
 
