@@ -103,10 +103,11 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             tideAdminRealmRoleRequests.forEach(request -> {
                 try {
                     UserModel u = session.users().getUserById(realm, request.getUser().getId());
-                    ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, request.getId());
-                    if(changesetRequestEntity != null) {
-                        em.remove(changesetRequestEntity);
+                    List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", request.getId()).getResultList();
+                    if(!changesetRequestEntity.isEmpty()) {
+                        changesetRequestEntity.forEach(em::remove);
                     }
+                    em.flush();
                     List<AccessProofDetailEntity> accessProofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                             .setParameter("recordId", request.getId()).getResultList();
                     accessProofs.forEach(p -> {
@@ -204,17 +205,18 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     public void handleDeleteRequest(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em, Runnable callback) {
         RealmModel realm = session.getContext().getRealm();
         RoleEntity roleEntity = em.find(RoleEntity.class, entity.getRoleId());
-
-        Set<UserModel> adminUsers = new HashSet<>();
+        UserModel affectedUser = session.users().getUserById(realm, entity.getUser().getId());
+        Set<UserModel> users = new TreeSet<>(Comparator.comparing(UserModel::getId));
+        users.add(affectedUser);
         if(roleEntity != null && roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
-            Set<UserModel> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
+            Set<UserModel> adminUsers = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
                     .setParameter("draftStatus", DraftStatus.ACTIVE)
                     .setParameter("roleId", entity.getRoleId())
                     .getResultList().stream()
                     .map(t -> session.users().getUserById(realm, t.getUser().getId()))
                     .collect(Collectors.toSet());
 
-            adminUsers.addAll(users);
+            users.addAll(adminUsers);
         }
 
         RoleModel tideRoleModel = TideEntityUtils.toTideRoleAdapter(roleEntity, session, realm);
@@ -232,9 +234,9 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         List<ClientModel> clientList = ClientUtils.getUniqueClientList(session, realm, tideRoleModel, em);
 
         clientList.forEach(client -> {
-                adminUsers.forEach(admin -> {
+            users.forEach(user -> {
                     try {
-                        UserEntity u = em.find(UserEntity.class, admin.getId());
+                        UserEntity u = em.find(UserEntity.class, user.getId());
                         UserModel wrappedUser = TideEntityUtils.toTideUserAdapter(u, session, realm);
                         ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, userRoleMapping.getId(),
                             ChangeSetType.USER_ROLE, userRoleMapping);

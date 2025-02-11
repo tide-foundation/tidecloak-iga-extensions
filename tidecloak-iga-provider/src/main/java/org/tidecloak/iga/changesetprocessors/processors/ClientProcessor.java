@@ -35,6 +35,25 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
     protected static final Logger logger = Logger.getLogger(ClientProcessor.class);
 
     @Override
+    public void cancel(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, ActionType actionType) {
+        if(!entity.getFullScopeDisabled().equals(DraftStatus.ACTIVE)){
+            entity.setFullScopeDisabled(DraftStatus.NULL);
+        }else if (!entity.getFullScopeEnabled().equals(DraftStatus.ACTIVE)){
+            entity.setFullScopeEnabled(DraftStatus.NULL);
+        }
+
+        // Find any pending changes
+        List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndId", AccessProofDetailEntity.class)
+                .setParameter("recordId", entity.getId())
+                .setParameter("changesetType", ChangeSetType.CLIENT)
+                .getResultList();
+
+        pendingChanges.forEach(em::remove);
+        em.flush();
+
+    }
+
+    @Override
     public  void commit(KeycloakSession session, ChangeSetRequest change, TideClientDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {
         // Log the start of the request with detailed context
         logger.debug(String.format(
@@ -150,7 +169,7 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
     }
 
     private String generateRealmDefaultUserContext(KeycloakSession session, RealmModel realm, ClientModel client, EntityManager em) throws Exception {
-        List<String> clients = List.of(Constants.ADMIN_CLI_CLIENT_ID, Constants.ADMIN_CONSOLE_CLIENT_ID, Constants.ACCOUNT_CONSOLE_CLIENT_ID);
+        List<String> clients = List.of(Constants.ADMIN_CLI_CLIENT_ID, Constants.ADMIN_CONSOLE_CLIENT_ID);
         String id = KeycloakModelUtils.generateId();
         UserModel dummyUser = session.users().addUser(realm, id, id, true, false);
         AccessToken accessToken = ChangeSetProcessor.super.generateAccessToken(session, realm, client, dummyUser);

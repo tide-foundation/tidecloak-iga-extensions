@@ -42,9 +42,9 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
         }
 
         // Find any pending changes
-        List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndId", AccessProofDetailEntity.class)
+        List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
                 .setParameter("recordId", entity.getId())
-                .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE)
+                .setParameter("changesetTypes", List.of(ChangeSetType.CLIENT_FULLSCOPE, ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT))
                 .getResultList();
 
         pendingChanges.forEach(em::remove);
@@ -146,13 +146,20 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
         em.persist(entity);
         em.flush();
 
+        // Update Default user context for client aswell
+        ChangeSetRequest change = getChangeSetRequestFromEntity(session, entity, ChangeSetType.CLIENT_FULLSCOPE);
+        String defaultFullScopeUserContext = generateRealmDefaultUserContext(session, realm, client, em, change);
+        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, client, null, entity.getId(), ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT, defaultFullScopeUserContext);
+        em.flush();
+
         List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
         usersInRealm.forEach(user -> {
             try{
                 // Find any pending changes
-                List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndId", AccessProofDetailEntity.class)
+                List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndIdAndUser", AccessProofDetailEntity.class)
                         .setParameter("recordId", entity.getId())
                         .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE)
+                        .setParameter("userId", user.getId())
                         .getResultList();
 
                 if(pendingChanges != null && !pendingChanges.isEmpty()){
@@ -169,11 +176,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
                 throw new RuntimeException(e);
             }
         });
-        // Update Default user context for client aswell
-        ChangeSetRequest change = getChangeSetRequestFromEntity(session, entity);
-        String defaultFullScopeUserContext = generateRealmDefaultUserContext(session, realm, client, em, change);
-        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, client, null, entity.getId(), ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT, defaultFullScopeUserContext);
-
+        em.flush();
     }
 
     @Override
@@ -196,10 +199,17 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
         em.merge(entity);
         em.flush();
 
+        // Update Default user context for client aswell
+        ChangeSetRequest change = getChangeSetRequestFromEntity(session, entity);
+        String defaultFullScopeUserContext = generateRealmDefaultUserContext(session, realm, client, em, change);
+        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, client, null, entity.getId(), ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT, defaultFullScopeUserContext);
+        em.flush();
+
         usersInRealm.forEach(user -> {
             // Find any pending changes
-            List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+            List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndId", AccessProofDetailEntity.class)
                     .setParameter("recordId", entity.getId())
+                    .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE)
                     .getResultList();
 
             if ( pendingChanges != null && !pendingChanges.isEmpty()) {
@@ -211,12 +221,9 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
                 throw new RuntimeException(e);
             }
         });
-
-        // Update Default user context for client aswell
-        ChangeSetRequest change = getChangeSetRequestFromEntity(session, entity);
-        String defaultFullScopeUserContext = generateRealmDefaultUserContext(session, realm, client, em, change);
-        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, client, null, entity.getId(), ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT, defaultFullScopeUserContext);
+        em.flush();
     }
+
 
     @Override
     public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> uniqRoles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
@@ -237,6 +244,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
 
         String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, user, "openid", affectedClientFullScopeEntity);
         affectedUserContextDraft.setProofDraft(userContextDraft);
+        em.flush();
 
     }
 

@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <changeSet id="26.1.0-07022025" author="tidecloak">
+
+        <!-- Delete records from ACCESS_PROOF_DETAIL where RECORD_ID matches CHANGESET_REQUEST_ID of type CLIENT or CLIENT_FULLSCOPE -->
+        <delete tableName="ACCESS_PROOF_DETAIL">
+            <where>RECORD_ID IN (
+                SELECT CHANGESET_REQUEST_ID FROM CHANGESET_REQUEST WHERE CHANGE_SET_TYPE IN ('CLIENT', 'CLIENT_FULLSCOPE', 'CLIENT_DEFAULT_USER_CONTEXT')
+                )</where>
+        </delete>
+        <!-- Delete records from ADMIN_AUTHORIZATIONS where CHANGESET_REQUEST_ID matches the affected CHANGESET_REQUEST records -->
+        <delete tableName="ADMIN_AUTHORIZATIONS">
+            <where>CHANGESET_REQUEST_ID IN (
+                SELECT CHANGESET_REQUEST_ID FROM CHANGESET_REQUEST WHERE CHANGE_SET_TYPE IN ('CLIENT', 'CLIENT_FULLSCOPE', 'CLIENT_DEFAULT_USER_CONTEXT')
+                )</where>
+        </delete>
+
+        <!-- Finally, delete records from CHANGESET_REQUEST where CHANGE_SET_TYPE is CLIENT or CLIENT_FULLSCOPE -->
+        <delete tableName="CHANGESET_REQUEST">
+            <where>CHANGE_SET_TYPE IN ('CLIENT', 'CLIENT_FULLSCOPE', 'CLIENT_DEFAULT_USER_CONTEXT')</where>
+        </delete>
+
+        <!-- Revert client draft status back -->
+        <update tableName="CLIENT_DRAFT">
+            <column name="FULL_SCOPE_ENABLED" value="NULL"/>
+            <where>FULL_SCOPE_DISABLED = 'ACTIVE'
+                AND (FULL_SCOPE_ENABLED = 'NULL' OR FULL_SCOPE_ENABLED != 'ACTIVE')
+                AND ID NOT IN (SELECT CHANGESET_REQUEST_ID FROM CHANGESET_REQUEST)
+            </where>
+        </update>
+
+        <update tableName="CLIENT_DRAFT">
+            <column name="FULL_SCOPE_DISABLED" value="NULL"/>
+            <where>FULL_SCOPE_ENABLED = 'ACTIVE'
+                AND (FULL_SCOPE_DISABLED = 'NULL' OR FULL_SCOPE_DISABLED != 'ACTIVE')
+                AND ID NOT IN (SELECT CHANGESET_REQUEST_ID FROM CHANGESET_REQUEST)
+            </where>
+        </update>
+
+        <dropForeignKeyConstraint baseTableName="ADMIN_AUTHORIZATIONS"
+                                  constraintName="fk_changeset_request_admin_authorizations"/>
+
+        <dropPrimaryKey tableName="CHANGESET_REQUEST"/>
+
+        <addPrimaryKey tableName="CHANGESET_REQUEST"
+                       columnNames="CHANGESET_REQUEST_ID, CHANGE_SET_TYPE"
+                       constraintName="CHANGESET_REQUEST_pkey"/>
+
+        <addColumn tableName="ADMIN_AUTHORIZATIONS">
+            <column name="CHANGE_SET_TYPE" type="VARCHAR(50)">
+                <constraints nullable="true"/> <!-- Allow NULL initially -->
+            </column>
+        </addColumn>
+
+        <update tableName="ADMIN_AUTHORIZATIONS">
+            <column name="CHANGE_SET_TYPE" valueComputed="
+                (SELECT cr.CHANGE_SET_TYPE
+                 FROM CHANGESET_REQUEST cr
+                 WHERE cr.CHANGESET_REQUEST_ID = ADMIN_AUTHORIZATIONS.CHANGESET_REQUEST_ID
+                 ORDER BY cr.TIMESTAMP DESC LIMIT 1)"
+            />
+            <where>CHANGE_SET_TYPE IS NULL</where> <!-- Only update NULL values -->
+        </update>
+
+        <addNotNullConstraint tableName="ADMIN_AUTHORIZATIONS" columnName="CHANGE_SET_TYPE"/>
+
+        <addForeignKeyConstraint
+                baseTableName="ADMIN_AUTHORIZATIONS"
+                baseColumnNames="CHANGESET_REQUEST_ID, CHANGE_SET_TYPE"
+                referencedTableName="CHANGESET_REQUEST"
+                referencedColumnNames="CHANGESET_REQUEST_ID, CHANGE_SET_TYPE"
+                constraintName="fk_changeset_request_admin_auth_composite"/>
+    </changeSet>
+
+</databaseChangeLog>

@@ -2,6 +2,7 @@ package org.tidecloak.iga.interfaces;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
+import org.keycloak.Config;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
@@ -52,6 +53,12 @@ public class TideUserAdapter extends UserAdapter {
     @Override
     public void joinGroup(GroupModel group) {
         super.joinGroup(group);
+
+        // Dont draft for master realm
+        RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+        if(realm.equals(masterRealm)){
+            return;
+        }
         TideUserGroupMembershipEntity entity = new TideUserGroupMembershipEntity();
 
         //TODO: !!!! CHECK IF THIS EXISTS BEFORE ADDING
@@ -91,6 +98,13 @@ public class TideUserAdapter extends UserAdapter {
 
             RoleModel role = wrapRoleModel(roleModel, session, realm);
             super.grantRole(role);
+
+            // Dont draft for master realm
+            RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+            if(realm.equals(masterRealm)){
+                return;
+            }
+
             boolean isTempAdmin = this.user.getAttributes().stream()
                     .anyMatch(attribute -> attribute.getName().equalsIgnoreCase(Constants.IS_TEMP_ADMIN_ATTR_NAME));
             if (isTempAdmin) {
@@ -170,6 +184,13 @@ public class TideUserAdapter extends UserAdapter {
 
             String igaAttribute = session.getContext().getRealm().getAttribute("isIGAEnabled");
             boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
+
+            // Dont draft for master realm
+            RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+            if(realm.equals(masterRealm)){
+                super.deleteRoleMapping(roleModel);
+                return;
+            }
 
             if (!isIGAEnabled){
                 List<TideUserRoleMappingDraftEntity> draftEntities = getDraftEntities(role);

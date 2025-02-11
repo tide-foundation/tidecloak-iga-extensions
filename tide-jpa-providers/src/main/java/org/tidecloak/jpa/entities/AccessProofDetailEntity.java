@@ -11,6 +11,11 @@ import org.tidecloak.shared.enums.ChangeSetType;
         @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndRealm", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.realmId = :realmId"),
         @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndIdAndRealm", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.recordId = :recordId and a.realmId = :realmId"),
         @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndId", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.recordId = :recordId"),
+        @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndIdAndUser", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.recordId = :recordId and user.id = :userId"),
+        @NamedQuery(
+                name = "getProofDetailsForDraftByChangeSetTypesAndId",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType IN :changesetTypes AND a.recordId = :recordId"
+        ),
         @NamedQuery(name="getProofDetailsForDraftByChangeSetType", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType"),
         @NamedQuery(name="getProofDetailsForUserByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user and a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForUserByClientAndRecordId", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user and a.clientId = :clientId and a.recordId = :recordId ORDER BY a.createdTimestamp DESC"),
