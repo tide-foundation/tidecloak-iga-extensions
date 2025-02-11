@@ -25,7 +25,7 @@
 
         <!-- Revert client draft status back -->
         <update tableName="CLIENT_DRAFT">
-            <column name="FULL_SCOPE_ENABLED" value="'NULL'"/>
+            <column name="FULL_SCOPE_ENABLED" value="NULL"/>
             <where>FULL_SCOPE_DISABLED = 'ACTIVE'
                 AND (FULL_SCOPE_ENABLED = 'NULL' OR FULL_SCOPE_ENABLED != 'ACTIVE')
                 AND ID NOT IN (SELECT CHANGESET_REQUEST_ID FROM CHANGESET_REQUEST)
@@ -33,7 +33,7 @@
         </update>
 
         <update tableName="CLIENT_DRAFT">
-            <column name="FULL_SCOPE_DISABLED" value="'NULL'"/>
+            <column name="FULL_SCOPE_DISABLED" value="NULL"/>
             <where>FULL_SCOPE_ENABLED = 'ACTIVE'
                 AND (FULL_SCOPE_DISABLED = 'NULL' OR FULL_SCOPE_DISABLED != 'ACTIVE')
                 AND ID NOT IN (SELECT CHANGESET_REQUEST_ID FROM CHANGESET_REQUEST)
