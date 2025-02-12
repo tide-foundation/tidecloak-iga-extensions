@@ -28,6 +28,13 @@ public class TideUserProvider extends JpaUserProvider {
     public UserModel addUser(RealmModel realm, String username) {
         // Call the existing functionality from the superclass
         UserModel user = super.addUser(realm, username);
+
+        // Dont draft for master realm
+        RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+        if(realm.equals(masterRealm)){
+            return user;
+        }
+
         UserEntity userEntity = em.getReference(UserEntity.class, user.getId());
 
         // Add draft record for user

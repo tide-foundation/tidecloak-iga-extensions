@@ -52,28 +52,27 @@ public class UserContextUtils extends UserContextUtilBase {
         groupedProofDetails.forEach((changeRequestId, details)  -> {
             try {
                 // remove old request, then we recreate
-                ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, changeRequestId);
-                if(changesetRequestEntity != null) {
-                    em.remove(changesetRequestEntity);
+                List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", changeRequestId).getResultList();
+                if(!changesetRequestEntity.isEmpty()) {
+                    changesetRequestEntity.forEach(c -> {
+                        c.getAdminAuthorizations().forEach(em::remove);
+                        em.remove(c);
+                    });
                 }
-                details.forEach(d -> {
-                    em.remove(d);
-                    em.flush();
-                });
+                details.forEach(em::remove);
+                em.flush();
 
                 ChangeSetType changeSetType = details.get(0).getChangesetType();
                 ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
                 WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, changeSetType);
                 Object mapping = getMappings(em, changeRequestId, changeSetType);
                 changeSetProcessorFactory.getProcessor(changeSetType).executeWorkflow(session, mapping, em, WorkflowType.REQUEST, params, null);
-                details.forEach(d -> {
-                    em.remove(d);
-                    em.flush();
-                });
+
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
         });
+        em.flush();
     }
     
     @Override
@@ -113,12 +112,18 @@ public class UserContextUtils extends UserContextUtilBase {
     }
 
     public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, String recordId, ChangeSetType changeSetType) {
-        return em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndId", AccessProofDetailEntity.class)
+        List<ChangeSetType> changeSetTypes = new ArrayList<>();
+        changeSetTypes.add(changeSetType);
+        if (changeSetType.equals(ChangeSetType.CLIENT_FULLSCOPE)) {
+            changeSetTypes.add(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT);
+        }
+        return em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
                 .setParameter("recordId", recordId)
-                .setParameter("changesetType", changeSetType)
+                .setParameter("changesetTypes", changeSetTypes)
                 .getResultStream()
                 .collect(Collectors.toList());
     }
+
 
 
     public static List<AccessProofDetailEntity>  getUserContextDrafts(EntityManager em, ClientModel client) {
@@ -426,7 +431,7 @@ public class UserContextUtils extends UserContextUtilBase {
             case COMPOSITE_ROLE, DEFAULT_ROLES -> em.find(TideCompositeRoleMappingDraftEntity.class, recordId);
             case ROLE -> em.find(TideRoleDraftEntity.class, recordId);
             case USER -> em.find(TideUserDraftEntity.class, recordId);
-            case CLIENT_FULLSCOPE -> em.find(TideClientDraftEntity.class, recordId);
+            case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, recordId);
             default -> null;
         };
     }

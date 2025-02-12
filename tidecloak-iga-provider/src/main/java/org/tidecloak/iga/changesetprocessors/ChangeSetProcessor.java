@@ -84,10 +84,10 @@ public interface ChangeSetProcessor<T> {
     default void executeWorkflow(KeycloakSession session, T entity, EntityManager em, WorkflowType workflow, WorkflowParams params, Runnable callback) throws Exception {
         switch (workflow) {
             case APPROVAL:
-                approve(session, getChangeSetRequestFromEntity(session, entity), entity, em, params.getDraftStatus(), params.isDelete());
+                approve(session, getChangeSetRequestFromEntity(session, entity, params.getChangeSetType()), entity, em, params.getDraftStatus(), params.isDelete());
                 break;
             case COMMIT:
-                commit(session, getChangeSetRequestFromEntity(session, entity), entity, em, null);
+                commit(session, getChangeSetRequestFromEntity(session, entity, params.getChangeSetType()), entity, em, null);
                 break;
             case REQUEST:
                 request(session, entity, em, params.getActionType(), callback, params.getChangeSetType());
@@ -171,7 +171,7 @@ public interface ChangeSetProcessor<T> {
             for(AccessProofDetailEntity userContextDraft : userContextDrafts) {
                 em.lock(userContextDraft, LockModeType.PESSIMISTIC_WRITE);
 
-                if(change.getType().equals(ChangeSetType.USER_ROLE) && (userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT) || userContextDraft.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES) || userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT) )) {
+                if(change.getType().equals(ChangeSetType.USER_ROLE) && (userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT) || userContextDraft.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES) || userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT) || userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT_FULLSCOPE))) {
                     return;
                 }
 
@@ -183,7 +183,7 @@ public interface ChangeSetProcessor<T> {
                 var uniqRoles = roleSet.stream().distinct().filter(Objects::nonNull).collect(Collectors.toSet());
 
                 processorFactory.getProcessor(userContextDraft.getChangesetType()).updateAffectedUserContextDrafts(session, userContextDraft, uniqRoles, client, user, em);
-                ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, userContextDraft.getRecordId());
+                ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, userContextDraft.getRecordId(), userContextDraft.getChangesetType());
                 if (changesetRequestEntity != null){
                     changesetRequestEntity.getAdminAuthorizations().clear(); // empty sigs!
                 }
@@ -204,7 +204,7 @@ public interface ChangeSetProcessor<T> {
                     UserContextSignRequest updatedReq = new UserContextSignRequest("Admin:1");
                     updatedReq.SetUserContexts(userContexts.toArray(new UserContext[0]));
 
-                    ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeRequestId);
+                    ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeRequestId, details.get(0).getChangesetType());
                     changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(updatedReq.GetDraft()));
                 } catch (Exception e) {
                     throw new RuntimeException(e);
@@ -225,7 +225,7 @@ public interface ChangeSetProcessor<T> {
      */
     default void commit(KeycloakSession session, ChangeSetRequest change, T entity, EntityManager em, Runnable commitCallback) throws Exception {
         // Retrieve the user context drafts
-        List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, change.getChangeSetId());
+        List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, change.getChangeSetId(), change.getType());
 
         if (userContextDrafts.isEmpty()) {
             throw new Exception("No user context drafts found for this change set id, " + change.getChangeSetId());
@@ -246,11 +246,34 @@ public interface ChangeSetProcessor<T> {
         if (commitCallback != null) {
             commitCallback.run();
         }
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, change.getChangeSetId());
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
         if (changesetRequestEntity != null) {
             em.remove(changesetRequestEntity);
         }
         em.flush();
+
+        // Regenerate for client full scope change request.
+        List<ChangesetRequestEntity> clientFullScopeChangeRequests = em.createNamedQuery("getAllChangeRequestsByChangeSetType", ChangesetRequestEntity.class)
+                .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE).getResultList();
+        ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+        clientFullScopeChangeRequests.forEach(req -> {
+            TideClientDraftEntity tideClientDraftEntity = em.find(TideClientDraftEntity.class, req.getChangesetRequestId());
+            ChangeSetRequest c = getChangeSetRequestFromEntity(session, tideClientDraftEntity, ChangeSetType.CLIENT_FULLSCOPE);
+            req.getAdminAuthorizations().forEach(em::remove);
+            em.remove(req);
+            em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", req.getChangesetRequestId()).getResultStream().forEach(em::remove);
+            em.flush();
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, c.getActionType().equals(ActionType.DELETE), c.getActionType(), ChangeSetType.CLIENT_FULLSCOPE);
+            try {
+                changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT_FULLSCOPE).executeWorkflow(session, tideClientDraftEntity, em, WorkflowType.REQUEST, params, null);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+
+
 
         // Update affected user contexts
         updateAffectedUserContexts(session, session.getContext().getRealm(), change, entity, em);
@@ -531,8 +554,10 @@ public interface ChangeSetProcessor<T> {
         newDetail.setChangesetType(type);
         newDetail.setRealmId(realm.getId());
         em.persist(newDetail);
+        em.flush();
 
-        List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, recordId);
+
+        List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, recordId, type);
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
         RoleModel tideRole;
         boolean isAssigningTideAdminRole;
@@ -612,7 +637,8 @@ public interface ChangeSetProcessor<T> {
         req.SetUserContexts(userContexts.toArray(new UserContext[0]));
         String draft = Base64.getEncoder().encodeToString(req.GetDraft());
 
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, recordId);
+        ChangeSetType changeSetType = type.equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT) ? ChangeSetType.CLIENT_FULLSCOPE : type;
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(recordId, changeSetType));
         if (changesetRequestEntity == null) {
             ChangesetRequestEntity entity = new ChangesetRequestEntity();
             entity.setChangesetRequestId(recordId);
@@ -627,7 +653,7 @@ public interface ChangeSetProcessor<T> {
     }
 
     default void createChangeRequestEntity(EntityManager em, String recordId, ChangeSetType changeSetType) {
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, recordId);
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(recordId, changeSetType));
         if (changesetRequestEntity == null) {
             ChangesetRequestEntity entity = new ChangesetRequestEntity();
             entity.setChangesetRequestId(recordId);

@@ -9,6 +9,7 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriBuilder;
 import org.eclipse.microprofile.openapi.annotations.parameters.Parameter;
 import org.jboss.logging.Logger;
+import org.keycloak.Config;
 import org.keycloak.authentication.actiontoken.execactions.ExecuteActionsActionToken;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.common.util.Time;
@@ -169,6 +170,11 @@ public class TideAdminRealmResource {
 
     public Response toggleIGA(@FormParam("isIGAEnabled") boolean isEnabled) throws Exception {
         try{
+            RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+            if(realm.equals(masterRealm)){
+                return buildResponse(400, "Master realm does not support IGA.");
+            }
+
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
             auth.realm().requireManageRealm();
             session.getContext().getRealm().setAttribute("isIGAEnabled", isEnabled);

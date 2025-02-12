@@ -12,9 +12,12 @@ public class AdminAuthorizationEntity {
     @Column(name = "ID")
     private String id;
 
-    // Many-to-One relationship with ChangesetRequestEntity
+    // Many-to-One relationship with ChangesetRequestEntity (composite key)
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "CHANGESET_REQUEST_ID", referencedColumnName = "CHANGESET_REQUEST_ID")
+    @JoinColumns({
+            @JoinColumn(name = "CHANGESET_REQUEST_ID", referencedColumnName = "CHANGESET_REQUEST_ID"),
+            @JoinColumn(name = "CHANGE_SET_TYPE", referencedColumnName = "CHANGE_SET_TYPE")
+    })
     private ChangesetRequestEntity changesetRequest;
 
     @Column(name="USER_ID")

@@ -150,7 +150,8 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
             ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);
             ChangeSetProcessor.super.updateAffectedUserContexts(session, realm, changeSetRequest, entity, em);
             em.persist(entity);
-            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, entity.getId());
+
+            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(entity.getId(), changeSetRequest.getType()));
             if(changesetRequestEntity != null) {
                 em.remove(changesetRequestEntity);
             }
@@ -341,7 +342,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
     }
 
     private String generateRealmDefaultUserContext(KeycloakSession session, RealmModel realm, ClientModel client, RoleModel childRole, EntityManager em, Boolean isDelete) throws Exception {
-        List<String> clients = List.of(Constants.ADMIN_CLI_CLIENT_ID, Constants.ADMIN_CONSOLE_CLIENT_ID, Constants.ACCOUNT_CONSOLE_CLIENT_ID);
+        List<String> clients = List.of(Constants.ADMIN_CLI_CLIENT_ID, Constants.ADMIN_CONSOLE_CLIENT_ID);
         String id = KeycloakModelUtils.generateId();
         UserModel dummyUser = session.users().addUser(realm, id, id, true, false);
 

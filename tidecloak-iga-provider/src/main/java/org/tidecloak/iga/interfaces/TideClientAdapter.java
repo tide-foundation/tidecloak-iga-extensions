@@ -41,6 +41,12 @@ public class TideClientAdapter extends ClientAdapter {
     @Override
     public void setFullScopeAllowed(boolean value) {
         try {
+            // Dont draft for master realm
+            RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+            if(realm.equals(masterRealm)){
+                super.setFullScopeAllowed(value);
+                return;
+            }
 
             List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
 
