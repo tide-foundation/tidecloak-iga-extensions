@@ -579,6 +579,7 @@ public interface ChangeSetProcessor<T> {
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
         RoleModel tideRole;
         boolean isAssigningTideAdminRole;
+        boolean isUnassignRole;
         if (type.equals(ChangeSetType.USER_ROLE)) {
             TideUserRoleMappingDraftEntity roleMapping = em.find(TideUserRoleMappingDraftEntity.class, recordId);
             if (roleMapping == null) {
@@ -588,12 +589,15 @@ public interface ChangeSetProcessor<T> {
                 tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
                 isAssigningTideAdminRole =  tideRole != null && roleMapping.getRoleId().equals(tideRole.getId());
                 ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, roleMapping);
+                isUnassignRole = changeSetRequest.getActionType().equals(ActionType.DELETE);
 
             } else {
+                isUnassignRole = false;
                 tideRole = null;
                 isAssigningTideAdminRole = false;
             }
         } else {
+            isUnassignRole = false;
             tideRole = null;
             isAssigningTideAdminRole = false;
         }
@@ -640,8 +644,10 @@ public interface ChangeSetProcessor<T> {
                         throw new Exception("No Init Cert draft not found for realm, " + realm.getName());
                     }
 
-                    userContext.setThreshold(cert.getPayload().getThreshold());
-                    userContext.setInitCertHash(certHash);
+                    if(!p.getUser().equals(user) && !isUnassignRole) {
+                        userContext.setThreshold(cert.getPayload().getThreshold());
+                        userContext.setInitCertHash(certHash);
+                    }
                     p.setProofDraft(userContext.ToString());
                     em.flush();
                     req.SetInitializationCertificate(cert);

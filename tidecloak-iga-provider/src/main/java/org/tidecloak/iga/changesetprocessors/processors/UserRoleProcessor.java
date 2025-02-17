@@ -270,7 +270,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
         String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, user, "openId", affectedUserRoleEntity);
 
-        if(client.getClientId().equals(Constants.REALM_MANAGEMENT_CLIENT_ID)){
+        if(client.getClientId().equals(Constants.REALM_MANAGEMENT_CLIENT_ID)) {
             RoleEntity roleEntity = em.find(RoleEntity.class, affectedUserRoleEntity.getRoleId());
             if(roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
                 List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
@@ -280,8 +280,13 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 }
                 UserContext userContext = new UserContext(userContextDraft);
                 InitializerCertifcate initializerCertifcate = InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
-                userContext.setInitCertHash(initializerCertifcate.hash());
-                userContext.setThreshold(initializerCertifcate.getPayload().getThreshold());
+                if(affectedChangeRequest.getActionType() == ActionType.DELETE){
+                    userContext.setInitCertHash(null);
+                    userContext.setThreshold(0);
+                } else {
+                    userContext.setInitCertHash(initializerCertifcate.hash());
+                    userContext.setThreshold(initializerCertifcate.getPayload().getThreshold());
+                }
                 affectedUserContextDraft.setProofDraft(userContext.ToString());
                 return;
             }

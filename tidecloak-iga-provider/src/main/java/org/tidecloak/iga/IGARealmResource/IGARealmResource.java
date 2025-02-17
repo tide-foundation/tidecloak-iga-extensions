@@ -37,6 +37,7 @@ import org.tidecloak.jpa.entities.*;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
+import twitter4j.v1.User;
 
 import java.net.URI;
 import java.util.*;
@@ -421,14 +422,18 @@ public class IGARealmResource {
                     // Fetch the draft record entity and proof details based on the change set type
                     Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, change.getType(), change.getChangeSetId());
                     List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, IGAUtils.getEntityId(draftRecordEntity), change.getType());;
-
-                    List<UserContext> userContexts = new ArrayList<>();
                     proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
 
-                    proofDetails.forEach(p -> {
-                        userContexts.add(new UserContext(p.getProofDraft()));
-                    });
-
+                    List<UserContext> userContexts = new ArrayList<>();
+                    int numberOfUserContext = 0;
+                    for (AccessProofDetailEntity p : proofDetails) {
+                        UserContext userContext = new UserContext(p.getProofDraft());
+                        if (userContext.getInitCertHash() == null) {
+                            numberOfUserContext++;
+                        }
+                        userContexts.add(userContext);
+                    }
+                    
                     ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
                     if (changesetRequestEntity == null){
                         throw new Exception("No change-set request entity found with this recordId " + change.getChangeSetId());
@@ -478,7 +483,7 @@ public class IGARealmResource {
                     settings.Threshold_N = max;
 
                     authorizerBuilder.AddAuthorizationToSignRequest(req);
-
+                    req.(numberOfUserContext);
                     if(isTideRealmRoleAssignment(mapping)) {
                         RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, change.getChangeSetId());
                         if(roleInitCert == null) {
