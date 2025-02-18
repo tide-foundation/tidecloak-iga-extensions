@@ -423,9 +423,12 @@ public class IGARealmResource {
                     List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, IGAUtils.getEntityId(draftRecordEntity), change.getType());;
 
                     List<UserContext> userContexts = new ArrayList<>();
+                    proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
+
                     proofDetails.forEach(p -> {
                         userContexts.add(new UserContext(p.getProofDraft()));
                     });
+
                     ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
                     if (changesetRequestEntity == null){
                         throw new Exception("No change-set request entity found with this recordId " + change.getChangeSetId());

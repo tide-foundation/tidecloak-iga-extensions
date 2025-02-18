@@ -52,7 +52,7 @@ public class TideRealmProvider extends JpaRealmProvider {
             // Dont draft for master realm or IGA disabled realms
             RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
             ClientModel client = addClient(realm, KeycloakModelUtils.generateId(), clientId);
-            if(!isIGAEnabled || realm.equals(masterRealm)) {
+            if(!isIGAEnabled || realm.equals(masterRealm) || clientId.equalsIgnoreCase(Constants.BROKER_SERVICE_CLIENT_ID)) {
                 return client;
             }
             ClientEntity clientEntity = em.find(ClientEntity.class, client.getId());

@@ -188,29 +188,47 @@ public interface ChangeSetProcessor<T> {
                     changesetRequestEntity.getAdminAuthorizations().clear(); // empty sigs!
                 }
             }
-
-            // Group proofDetails by changeRequestId
-            Map<String, List<AccessProofDetailEntity>> groupedProofDetails = userContextDrafts.stream()
-                    .collect(Collectors.groupingBy(AccessProofDetailEntity::getRecordId));
-
-            // Process each group
-            groupedProofDetails.forEach((changeRequestId, details) -> {
-                try {
-                    // Create a list of UserContext for the current changeRequestId
-                    List<UserContext>  userContexts = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                            .setParameter("recordId", changeRequestId).getResultStream().map(p -> new UserContext(p.getProofDraft())).collect(Collectors.toList());
-
-                    // Create UserContextSignRequest
-                    UserContextSignRequest updatedReq = new UserContextSignRequest("Admin:1");
-                    updatedReq.SetUserContexts(userContexts.toArray(new UserContext[0]));
-
-                    ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeRequestId, details.get(0).getChangesetType());
-                    changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(updatedReq.GetDraft()));
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-            });
         }
+        em.flush();
+
+        // Group proofDetails by changeRequestId
+        Map<String, List<AccessProofDetailEntity>> groupedProofDetails = getUserContextDraftsForRealm(em, realm.getId()).stream()
+                .filter(proof -> !Objects.equals(proof.getRecordId(), change.getChangeSetId()))
+                .collect(Collectors.groupingBy(AccessProofDetailEntity::getRecordId));
+
+        // Process each group
+        groupedProofDetails.forEach((changeRequestId, details) -> {
+            try {
+                details.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
+                // Create a list of UserContext for the current changeRequestId
+                List<UserContext>  userContexts = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                        .setParameter("recordId", changeRequestId).getResultStream().map(p -> new UserContext(p.getProofDraft())).collect(Collectors.toList());
+
+                if(userContexts.isEmpty()){
+                    return;
+                }
+                // Create UserContextSignRequest
+                UserContextSignRequest updatedReq = new UserContextSignRequest("Admin:1");
+                updatedReq.SetUserContexts(userContexts.toArray(new UserContext[0]));
+
+                ChangeSetType changeSetType;
+                if(details.get(0).getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)){
+                    changeSetType = ChangeSetType.CLIENT_FULLSCOPE;
+                }
+                else if (details.get(0).getChangesetType().equals(ChangeSetType.DEFAULT_ROLES)) {
+                    changeSetType = ChangeSetType.COMPOSITE_ROLE;
+                }
+                else{
+                    changeSetType = details.get(0).getChangesetType();
+                }
+
+                ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeRequestId, changeSetType);
+                changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(updatedReq.GetDraft()));
+                em.flush();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
     }
 
     /**
@@ -271,9 +289,7 @@ public interface ChangeSetProcessor<T> {
                 throw new RuntimeException(e);
             }
         });
-
-
-
+        em.flush();
 
         // Update affected user contexts
         updateAffectedUserContexts(session, session.getContext().getRealm(), change, entity, em);
@@ -406,10 +422,12 @@ public interface ChangeSetProcessor<T> {
 
         if (componentModel != null) {
             affectedClients.removeIf(client ->
-                    Constants.ADMIN_CONSOLE_CLIENT_ID.equals(client.getClientId()) ||
-                            Constants.ADMIN_CLI_CLIENT_ID.equals(client.getClientId())
+                    Constants.ADMIN_CONSOLE_CLIENT_ID.equalsIgnoreCase(client.getClientId()) ||
+                            Constants.ADMIN_CLI_CLIENT_ID.equalsIgnoreCase(client.getClientId()) ||
+                            Constants.REALM_MANAGEMENT_CLIENT_ID.equalsIgnoreCase(client.getClientId())
             );
         }
+        affectedClients.removeIf(r -> r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.BROKER_SERVICE_CLIENT_ID));
 
         return new ArrayList<>(affectedClients);
     }
@@ -634,10 +652,20 @@ public interface ChangeSetProcessor<T> {
             }
             userContexts.add(userContext);
         });
-        req.SetUserContexts(userContexts.toArray(new UserContext[0]));
+        req.SetUserContexts(userContexts.toArray(new UserContext[userContexts.size()]));
         String draft = Base64.getEncoder().encodeToString(req.GetDraft());
 
-        ChangeSetType changeSetType = type.equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT) ? ChangeSetType.CLIENT_FULLSCOPE : type;
+        ChangeSetType changeSetType;
+        if(type.equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)){
+            changeSetType = ChangeSetType.CLIENT_FULLSCOPE;
+        }
+        else if (type.equals(ChangeSetType.DEFAULT_ROLES)) {
+            changeSetType = ChangeSetType.COMPOSITE_ROLE;
+        }
+        else{
+            changeSetType = type;
+        }
+
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(recordId, changeSetType));
         if (changesetRequestEntity == null) {
             ChangesetRequestEntity entity = new ChangesetRequestEntity();

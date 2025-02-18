@@ -6,6 +6,7 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 
 @NamedQueries({
+        @NamedQuery(name="getProofDetailsForRealm", query="SELECT a FROM AccessProofDetailEntity a WHERE a.realmId = :realmId ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForUser", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForDraft", query="SELECT a FROM AccessProofDetailEntity a WHERE a.recordId = :recordId ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndRealm", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.realmId = :realmId"),
@@ -14,7 +15,7 @@ import org.tidecloak.shared.enums.ChangeSetType;
         @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndIdAndUser", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.recordId = :recordId and user.id = :userId"),
         @NamedQuery(
                 name = "getProofDetailsForDraftByChangeSetTypesAndId",
-                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType IN :changesetTypes AND a.recordId = :recordId"
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType IN :changesetTypes AND a.recordId = :recordId ORDER BY a.createdTimestamp DESC"
         ),
         @NamedQuery(name="getProofDetailsForDraftByChangeSetType", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType"),
         @NamedQuery(name="getProofDetailsForUserByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user and a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),

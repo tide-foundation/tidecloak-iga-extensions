@@ -43,9 +43,16 @@ public class IGAUtils {
 
     public static List<AccessProofDetailEntity> getAccessProofs(EntityManager em, String recordId, ChangeSetType changeSetType) {
         List<ChangeSetType> changeSetTypes = new ArrayList<>();
-        changeSetTypes.add(changeSetType);
-        if (changeSetType.equals(ChangeSetType.CLIENT_FULLSCOPE)) {
+        if(changeSetType.equals(ChangeSetType.COMPOSITE_ROLE) || changeSetType.equals(ChangeSetType.DEFAULT_ROLES) ) {
+            changeSetTypes.add(ChangeSetType.DEFAULT_ROLES);
+            changeSetTypes.add(ChangeSetType.COMPOSITE_ROLE);
+        }
+        else if (changeSetType.equals(ChangeSetType.CLIENT_FULLSCOPE) || changeSetType.equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)) {
             changeSetTypes.add(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT);
+            changeSetTypes.add(ChangeSetType.CLIENT_FULLSCOPE);
+        }
+        else {
+            changeSetTypes.add(changeSetType);
         }
         return em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
                 .setParameter("recordId", recordId)
