@@ -346,7 +346,9 @@ public class UserContextUtils extends UserContextUtilBase {
         if (resourceAccess != null) {
             resourceAccess.forEach((clientId, access) -> {
                 if (access != null && access.getRoles() != null && !access.getRoles().isEmpty()) {
-                    audience.add(clientId); // Include only clients with roles
+                    if(!clientId.equalsIgnoreCase(token.getIssuedFor())) {
+                        audience.add(clientId); // Include only clients with roles
+                    }
                 }
             });
         }
