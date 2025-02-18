@@ -111,11 +111,26 @@ public class UserContextUtils extends UserContextUtilBase {
                 .collect(Collectors.toList());
     }
 
+    public static List<AccessProofDetailEntity> getUserContextDraftsForRealm(EntityManager em, String realmId) {
+        return em.createNamedQuery("getProofDetailsForRealm", AccessProofDetailEntity.class)
+                .setParameter("realmId", realmId)
+                .getResultStream()
+                .collect(Collectors.toList());
+    }
+
+
     public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, String recordId, ChangeSetType changeSetType) {
         List<ChangeSetType> changeSetTypes = new ArrayList<>();
-        changeSetTypes.add(changeSetType);
-        if (changeSetType.equals(ChangeSetType.CLIENT_FULLSCOPE)) {
+        if(changeSetType.equals(ChangeSetType.COMPOSITE_ROLE) || changeSetType.equals(ChangeSetType.DEFAULT_ROLES) ) {
+            changeSetTypes.add(ChangeSetType.DEFAULT_ROLES);
+            changeSetTypes.add(ChangeSetType.COMPOSITE_ROLE);
+        }
+        else if (changeSetType.equals(ChangeSetType.CLIENT_FULLSCOPE) || changeSetType.equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)) {
             changeSetTypes.add(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT);
+            changeSetTypes.add(ChangeSetType.CLIENT_FULLSCOPE);
+        }
+        else{
+            changeSetTypes.add(changeSetType);
         }
         return em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
                 .setParameter("recordId", recordId)
