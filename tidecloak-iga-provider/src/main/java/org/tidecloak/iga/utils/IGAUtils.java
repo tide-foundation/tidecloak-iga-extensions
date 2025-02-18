@@ -72,6 +72,12 @@ public class IGAUtils {
         SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
         int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
         int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
+        int numberOfUserContext = 0;
+        for(UserContext userContext : userContexts){
+            if(userContext.getInitCertHash() == null) {
+                numberOfUserContext++;
+            }
+        }
 
         if ( threshold == 0 || max == 0){
             throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
@@ -97,6 +103,7 @@ public class IGAUtils {
 
         req.SetAuthorizer(HexFormat.of().parseHex(authorizer.getAuthorizer()));
         req.SetAuthorizerCertificate(Base64.getDecoder().decode(authorizer.getAuthorizerCertificate()));
+        req.SetNumberOfUserContexts(numberOfUserContext);
 
         SignatureResponse response = Midgard.SignModel(settings, req);
 

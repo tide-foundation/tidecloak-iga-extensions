@@ -261,6 +261,7 @@ public class IGARealmResource {
             }
 
             List<UserContext> userContexts = new ArrayList<>();
+            proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
             proofDetails.forEach(p -> {
                 userContexts.add(new UserContext(p.getProofDraft()));
             });

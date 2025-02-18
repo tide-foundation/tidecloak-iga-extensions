@@ -648,6 +648,7 @@ public interface ChangeSetProcessor<T> {
                         userContext.setThreshold(cert.getPayload().getThreshold());
                         userContext.setInitCertHash(certHash);
                     }
+                    // filter out non admin clients here
                     p.setProofDraft(userContext.ToString());
                     em.flush();
                     req.SetInitializationCertificate(cert);
