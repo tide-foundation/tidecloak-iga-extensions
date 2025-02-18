@@ -483,7 +483,7 @@ public class IGARealmResource {
                     settings.Threshold_N = max;
 
                     authorizerBuilder.AddAuthorizationToSignRequest(req);
-                    req.(numberOfUserContext);
+                    req.SetNumberOfUserContexts(numberOfUserContext);
                     if(isTideRealmRoleAssignment(mapping)) {
                         RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, change.getChangeSetId());
                         if(roleInitCert == null) {
