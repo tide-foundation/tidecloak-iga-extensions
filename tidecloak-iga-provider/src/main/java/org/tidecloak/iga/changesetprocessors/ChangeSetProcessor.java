@@ -172,7 +172,7 @@ public interface ChangeSetProcessor<T> {
                 em.lock(userContextDraft, LockModeType.PESSIMISTIC_WRITE);
 
                 if(change.getType().equals(ChangeSetType.USER_ROLE) && (userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT) || userContextDraft.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES) || userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT) || userContextDraft.getChangesetType().equals(ChangeSetType.CLIENT_FULLSCOPE))) {
-                    return;
+                    continue;
                 }
 
                 UserEntity userEntity = userContextDraft.getUser();
