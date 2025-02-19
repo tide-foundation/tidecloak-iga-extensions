@@ -253,7 +253,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     @Override
-    public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> roles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
+    public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> roles, ClientModel client, TideUserAdapter userChangesMadeTo, EntityManager em) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         TideUserRoleMappingDraftEntity affectedUserRoleEntity = em.find(TideUserRoleMappingDraftEntity.class, affectedUserContextDraft.getRecordId());
         if (affectedUserRoleEntity == null || (affectedUserRoleEntity.getDraftStatus() == DraftStatus.ACTIVE && (affectedUserRoleEntity.getDeleteStatus() == null || affectedUserRoleEntity.getDeleteStatus().equals(DraftStatus.NULL)))){
@@ -268,7 +268,10 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             affectedUserRoleEntity.setDraftStatus(DraftStatus.DRAFT);
         }
 
-        String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, user, "openId", affectedUserRoleEntity);
+        UserEntity userEntity = affectedUserContextDraft.getUser();
+        TideUserAdapter affectedUser = TideEntityUtils.toTideUserAdapter(userEntity, session, realm);
+
+        String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, affectedUser, "openId", affectedUserRoleEntity);
 
         if(client.getClientId().equals(Constants.REALM_MANAGEMENT_CLIENT_ID)) {
             RoleEntity roleEntity = em.find(RoleEntity.class, affectedUserRoleEntity.getRoleId());
@@ -280,7 +283,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 }
                 UserContext userContext = new UserContext(userContextDraft);
                 InitializerCertifcate initializerCertifcate = InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
-                if(affectedChangeRequest.getActionType() == ActionType.DELETE){
+                if(affectedChangeRequest.getActionType() == ActionType.DELETE && affectedUser.equals(userChangesMadeTo)){
                     userContext.setInitCertHash(null);
                     userContext.setThreshold(0);
                 } else {

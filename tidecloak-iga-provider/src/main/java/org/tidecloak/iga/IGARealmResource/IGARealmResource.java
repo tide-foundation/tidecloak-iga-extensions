@@ -42,6 +42,7 @@ import twitter4j.v1.User;
 import java.net.URI;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.*;
 
@@ -426,15 +427,20 @@ public class IGARealmResource {
                     proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
 
                     List<UserContext> userContexts = new ArrayList<>();
-                    int numberOfUserContext = 0;
                     for (AccessProofDetailEntity p : proofDetails) {
                         UserContext userContext = new UserContext(p.getProofDraft());
-                        if (userContext.getInitCertHash() == null) {
-                            numberOfUserContext++;
-                        }
                         userContexts.add(userContext);
                     }
-                    
+
+                    List<UserContext> orderedContext;
+                    if(isTideRealmRoleAssignment(mapping)){
+                        Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
+                        Stream<UserContext> adminContexts = userContexts.stream().filter(x -> x.getInitCertHash() != null);
+                        orderedContext = Stream.concat(adminContexts, normalUserContext).toList();
+                    } else {
+                        orderedContext = userContexts;
+                    }
+
                     ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
                     if (changesetRequestEntity == null){
                         throw new Exception("No change-set request entity found with this recordId " + change.getChangeSetId());
@@ -453,7 +459,7 @@ public class IGARealmResource {
                     UserContextSignRequest req = new UserContextSignRequest("Admin:1");
 
                     req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
-                    req.SetUserContexts(userContexts.toArray(new UserContext[0]));
+                    req.SetUserContexts(orderedContext.toArray(new UserContext[0]));
                     req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000); // expiry in 1 month
                     AdminAuthorizerBuilder authorizerBuilder = new AdminAuthorizerBuilder();
                     authorizerBuilder.AddInitCert(cert);
@@ -484,7 +490,7 @@ public class IGARealmResource {
                     settings.Threshold_N = max;
 
                     authorizerBuilder.AddAuthorizationToSignRequest(req);
-                    req.SetNumberOfUserContexts(numberOfUserContext);
+
                     if(isTideRealmRoleAssignment(mapping)) {
                         RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, change.getChangeSetId());
                         if(roleInitCert == null) {
@@ -492,6 +498,13 @@ public class IGARealmResource {
                         }
                         req.SetInitializationCertificate(InitializerCertifcate.FromString(roleInitCert.getInitCert()));
                         SignatureResponse response = Midgard.SignModel(settings, req);
+
+
+                        proofDetails.sort(Comparator.comparingInt(x -> {
+                            UserContext userContext = new UserContext(x.getProofDraft());
+                            return orderedContext.indexOf(userContext);
+                        }));
+
                         for ( int i = 0; i < userContexts.size(); i++){
                             proofDetails.get(i).setSignature(response.Signatures[i + 1]);
                         }
