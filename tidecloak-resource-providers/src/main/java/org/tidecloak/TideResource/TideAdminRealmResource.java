@@ -256,7 +256,6 @@ public class TideAdminRealmResource {
 
     private Response buildResponse(int status, String message) {
         return Response.status(status)
-                .header("Access-Control-Allow-Origin", "*")
                 .entity(message)
                 .type(MediaType.TEXT_PLAIN)
                 .build();
