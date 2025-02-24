@@ -506,6 +506,7 @@ public class IGARealmResource {
                         }));
 
                         for ( int i = 0; i < userContexts.size(); i++){
+                            System.out.println(proofDetails.get(i));
                             proofDetails.get(i).setSignature(response.Signatures[i + 1]);
                         }
                         commitRoleInitCert(session, change.getChangeSetId(), response.Signatures[0]);

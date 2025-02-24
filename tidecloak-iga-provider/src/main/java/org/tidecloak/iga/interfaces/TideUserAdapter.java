@@ -226,7 +226,7 @@ public class TideUserAdapter extends UserAdapter {
                     throw new Exception("Authorizer not found for this realm.");
                 }
                 if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                    createRoleInitCertDraft(session, committedEntity.getId(), "1", 0.7, 0);
+                    createRoleInitCertDraft(session, committedEntity.getId(), "1", 0.7, -1);
                 }
             }
 

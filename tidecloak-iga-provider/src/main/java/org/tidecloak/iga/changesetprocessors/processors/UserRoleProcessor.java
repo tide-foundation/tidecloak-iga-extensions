@@ -30,6 +30,7 @@ import org.tidecloak.shared.enums.ActionType;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import static org.tidecloak.iga.TideRequests.TideRoleRequests.commitRoleInitCert;
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRoleInitCertDraft;
 import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.addRoleToAccessToken;
@@ -119,7 +120,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                         em.remove(roleInitializerCertificateDraftEntity.get(0));
                         em.flush();
                     }
-                    createRoleInitCertDraft(session, request.getId(), "1", 0.7, 1);
+                    //createRoleInitCertDraft(session, request.getId(), "1", 0.7, 1);
                     processRealmManagementRoleAssignment(session, em, realm, clientList, request, u);
 
                 } catch (Exception e) {
@@ -283,14 +284,14 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 }
                 UserContext userContext = new UserContext(userContextDraft);
                 InitializerCertifcate initializerCertifcate = InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
-                if(affectedChangeRequest.getActionType() == ActionType.DELETE && affectedUser.equals(userChangesMadeTo)){
-                    userContext.setInitCertHash(null);
-                    userContext.setThreshold(0);
-                } else {
-                    userContext.setInitCertHash(initializerCertifcate.hash());
+                userContext.setInitCertHash(initializerCertifcate.hash());
+
+                UserContext oldUserContext = new UserContext(affectedUserContextDraft.getProofDraft());
+                if(oldUserContext.getInitCertHash() != null || oldUserContext.getThreshold() != 0){
                     userContext.setThreshold(initializerCertifcate.getPayload().getThreshold());
+                    affectedUserContextDraft.setProofDraft(userContext.ToString());
                 }
-                affectedUserContextDraft.setProofDraft(userContext.ToString());
+
                 return;
             }
         }

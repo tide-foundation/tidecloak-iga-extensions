@@ -587,29 +587,25 @@ public interface ChangeSetProcessor<T> {
 
         List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, recordId, type);
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
-        RoleModel tideRole;
-        boolean isAssigningTideAdminRole;
+        RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);;
+        boolean isTideAdminRole;
         boolean isUnassignRole;
+        UserModel originalUser;
+
         if (type.equals(ChangeSetType.USER_ROLE)) {
             TideUserRoleMappingDraftEntity roleMapping = em.find(TideUserRoleMappingDraftEntity.class, recordId);
             if (roleMapping == null) {
                 throw new Exception("Invalid request, no user role mapping draft entity found for this record ID: " + recordId);
             }
-            if( realmManagement != null) {
-                tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-                isAssigningTideAdminRole =  tideRole != null && roleMapping.getRoleId().equals(tideRole.getId());
-                ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, roleMapping);
-                isUnassignRole = changeSetRequest.getActionType().equals(ActionType.DELETE);
+            isTideAdminRole = tideRole != null && roleMapping.getRoleId().equals(tideRole.getId());
+            ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, roleMapping);
+            isUnassignRole = changeSetRequest.getActionType().equals(ActionType.DELETE);
+            originalUser = session.users().getUserById(realm, roleMapping.getUser().getId());
 
-            } else {
-                isUnassignRole = false;
-                tideRole = null;
-                isAssigningTideAdminRole = false;
-            }
         } else {
+            originalUser = null;
             isUnassignRole = false;
-            tideRole = null;
-            isAssigningTideAdminRole = false;
+            isTideAdminRole = false;
         }
 
         List<UserContext> userContexts = new ArrayList<>();
@@ -618,7 +614,7 @@ public interface ChangeSetProcessor<T> {
         InitializerCertifcate cert = null;
         byte[] certHash = new byte[0];
 
-        if (isAssigningTideAdminRole) {
+        if (isTideAdminRole) {
             try {
                 ComponentModel componentModel = realm.getComponentsStream()
                         .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
@@ -662,12 +658,12 @@ public interface ChangeSetProcessor<T> {
 
         proofDetails.forEach(p -> {
             UserContext userContext = new UserContext(p.getProofDraft());
-            if (isAssigningTideAdminRole) {
+            if (isTideAdminRole) {
                 try {
                     if(!isUnassignRole) {
                         userContext.setThreshold(finalCert.getPayload().getThreshold());
                         userContext.setInitCertHash(finalCertHash);
-                    } else if (!p.getUser().equals(user)) {
+                    } else if (originalUser != null && !p.getUser().getId().equals(originalUser.getId())) {
                         userContext.setThreshold(finalCert.getPayload().getThreshold());
                         userContext.setInitCertHash(finalCertHash);
                     } else {
@@ -692,7 +688,7 @@ public interface ChangeSetProcessor<T> {
         });
         req.SetNumberOfUserContexts(numberOfNormalUserContext.get());
 
-        if(isAssigningTideAdminRole) { req.SetInitializationCertificate(finalCert); }
+        if(isTideAdminRole) { req.SetInitializationCertificate(finalCert); }
 
         // filter user contexts, admin contexts first then normal user context
         Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
