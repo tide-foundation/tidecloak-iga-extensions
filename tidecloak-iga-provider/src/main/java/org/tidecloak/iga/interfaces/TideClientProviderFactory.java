@@ -7,7 +7,11 @@ import org.keycloak.models.ClientProvider;
 import org.keycloak.models.ClientProviderFactory;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
+import org.keycloak.models.utils.PostMigrationEvent;
 import org.keycloak.protocol.saml.SamlConfigAttributes;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
+import org.tidecloak.shared.enums.DraftStatus;
+
 
 import java.util.*;
 
@@ -42,7 +46,33 @@ public class TideClientProviderFactory implements ClientProviderFactory {
 
     @Override
     public void postInit(KeycloakSessionFactory factory) {
+        factory.register((event) -> {
+            if (event instanceof PostMigrationEvent) {
+                try (KeycloakSession session = factory.create()) {
+                    session.getTransactionManager().begin();
 
+                    EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+                    List<TideClientDraftEntity> drafts = em
+                            .createQuery("SELECT t FROM TideClientDraftEntity t WHERE t.fullScopeEnabled IS NULL OR t.fullScopeDisabled IS NULL",
+                                    TideClientDraftEntity.class)
+                            .getResultList();
+
+                    drafts.forEach(d -> {
+                        if(d.getFullScopeEnabled() == null) {
+                            d.setFullScopeEnabled(DraftStatus.NULL);
+                        }
+                        if(d.getFullScopeDisabled() == null) {
+                            d.setFullScopeDisabled(DraftStatus.NULL);
+                        }
+                    });
+                    em.flush();
+                    session.getTransactionManager().commit();
+                } catch (Exception e) {
+                    System.err.println("Error during PostMigrationEvent processing: " + e.getMessage());
+                    e.printStackTrace();
+                }
+            }
+        });
     }
 
     @Override
