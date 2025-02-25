@@ -39,6 +39,10 @@ import org.tidecloak.shared.enums.ActionType;
                         "   SELECT a FROM AccessProofDetailEntity a " +
                         "   WHERE a.recordId = t.id" +
                         ")"
+        ),
+        @NamedQuery(
+                name = "getClientDraftsWithNullScopes",
+                query = "SELECT t FROM TideClientDraftEntity t WHERE t.fullScopeEnabled IS NULL OR t.fullScopeDisabled IS NULL"
         )
 
 })
