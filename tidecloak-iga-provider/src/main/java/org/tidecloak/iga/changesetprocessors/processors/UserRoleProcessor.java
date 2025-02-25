@@ -45,6 +45,9 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         RealmModel realmModel = session.realms().getRealm(entity.getUser().getRealmId());
         RoleModel role = realmModel.getRoleById(entity.getRoleId());
         TideUserAdapter user = new TideUserAdapter(session, realmModel, em, entity.getUser());
+        List<AccessProofDetailEntity> accessProofDetailEntities = UserContextUtils.getUserContextDrafts(em, entity.getId());
+        accessProofDetailEntities.forEach(em::remove);
+
         List<TideUserRoleMappingDraftEntity> pendingDrafts = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatusNotEqualTo", TideUserRoleMappingDraftEntity.class)
                 .setParameter("user", entity.getUser())
                 .setParameter("roleId", role.getId())

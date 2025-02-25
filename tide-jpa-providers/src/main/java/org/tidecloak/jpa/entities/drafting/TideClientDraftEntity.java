@@ -35,6 +35,7 @@ import org.tidecloak.shared.enums.ActionType;
                 name = "TideClientDraftEntity.findDraftsNotInAccessProof",
                 query = "SELECT t FROM TideClientDraftEntity t " +
                         "WHERE (t.draftStatus = :draftStatus) " +
+                        "AND (t.client.id IN (SELECT c.id FROM ClientEntity c WHERE c.realmId = :realmId)) " +
                         "AND NOT EXISTS ( " +
                         "   SELECT a FROM AccessProofDetailEntity a " +
                         "   WHERE a.recordId = t.id" +

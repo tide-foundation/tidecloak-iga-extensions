@@ -193,12 +193,12 @@ public interface ChangeSetProcessor<T> {
         // Group proofDetails by changeRequestId
         Map<String, List<AccessProofDetailEntity>> groupedProofDetails = getUserContextDraftsForRealm(em, realm.getId()).stream()
                 .filter(proof -> !Objects.equals(proof.getRecordId(), change.getChangeSetId()))
+                .sorted(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed())
                 .collect(Collectors.groupingBy(AccessProofDetailEntity::getRecordId));
 
         // Process each group
         groupedProofDetails.forEach((changeRequestId, details) -> {
             try {
-                details.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
                 // Create a list of UserContext for the current changeRequestId
                 List<UserContext>  userContexts = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                         .setParameter("recordId", changeRequestId).getResultStream().map(p -> new UserContext(p.getProofDraft())).collect(Collectors.toList());
@@ -212,9 +212,13 @@ public interface ChangeSetProcessor<T> {
                         numberOfNormalUserContext.getAndIncrement();
                     }
                 });
+                Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
+                Stream<UserContext> adminContexts = userContexts.stream().filter(x -> x.getInitCertHash() != null);
+                List<UserContext> orderedContext = Stream.concat(adminContexts, normalUserContext).toList();
+
                 // Create UserContextSignRequest
                 UserContextSignRequest updatedReq = new UserContextSignRequest("Admin:1");
-                updatedReq.SetUserContexts(userContexts.toArray(new UserContext[0]));
+                updatedReq.SetUserContexts(orderedContext.toArray(new UserContext[0]));
                 updatedReq.SetNumberOfUserContexts(numberOfNormalUserContext.get());
 
                 ChangeSetType changeSetType;
@@ -586,6 +590,7 @@ public interface ChangeSetProcessor<T> {
 
 
         List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, recordId, type);
+        proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
         RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);;
         boolean isTideAdminRole;
@@ -666,7 +671,8 @@ public interface ChangeSetProcessor<T> {
                     } else if (originalUser != null && !p.getUser().getId().equals(originalUser.getId())) {
                         userContext.setThreshold(finalCert.getPayload().getThreshold());
                         userContext.setInitCertHash(finalCertHash);
-                    } else {
+                    }
+                    else {
                         userContext.setThreshold(0);
                         userContext.setInitCertHash(null);
                     }

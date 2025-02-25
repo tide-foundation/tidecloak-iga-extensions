@@ -19,6 +19,7 @@ import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -98,6 +99,14 @@ public class TideRealmProvider extends JpaRealmProvider {
     @Override
     public boolean removeRole(RoleModel role) {
         try {
+            List<UserModel> users = session.users().searchForUserStream(session.getContext().getRealm(), new HashMap<>()).filter(u -> u.hasRole(role)).toList();
+            if(users.isEmpty()){
+                em.createNamedQuery("DeleteAllCompositeRoleMappingsByRoleId")
+                        .setParameter("roleId", role.getId())
+                        .executeUpdate();
+                return super.removeRole(role);
+            }
+
             // Deletion of roles need to be first approved
             // Check if draft record already exists
             RoleEntity roleEntity = TideEntityUtils.toRoleEntity(role, em);
@@ -108,36 +117,50 @@ public class TideRealmProvider extends JpaRealmProvider {
             // Dont draft for master realm or for IGA disabled realms
             RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
             if (!isIGAEnabled || session.getContext().getRealm().equals(masterRealm)){
+                em.createNamedQuery("DeleteAllCompositeRoleMappingsByRoleId")
+                        .setParameter("roleId", role.getId())
+                        .executeUpdate();
                 List<TideRoleDraftEntity> pendingDrafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                         .setParameter("role", roleEntity)
                         .getResultList();
 
                 pendingDrafts.forEach(r -> em.remove(r));
                 em.flush();
+
                 return super.removeRole(role);
             }
 
-            List<TideRoleDraftEntity> drafts = em.createNamedQuery("getRoleDraftByRoleEntityAndDeleteStatus", TideRoleDraftEntity.class)
+            List<TideRoleDraftEntity> draftsToBeRemoved = em.createNamedQuery("getRoleDraftByRoleEntityAndDeleteStatus", TideRoleDraftEntity.class)
                     .setParameter("role", roleEntity)
                     .setParameter("deleteStatus", DraftStatus.ACTIVE)
                     .getResultList();
 
-            if (drafts != null && !drafts.isEmpty()){
-                TideRoleDraftEntity draft = drafts.get(0);
+            if (draftsToBeRemoved != null && !draftsToBeRemoved.isEmpty()){
+                TideRoleDraftEntity draft = draftsToBeRemoved.get(0);
                 em.remove(draft);
                 em.flush();
+                em.createNamedQuery("DeleteAllCompositeRoleMappingsByRoleId")
+                        .setParameter("roleId", role.getId())
+                        .executeUpdate();
                 return super.removeRole(role);
             }
-            TideRoleDraftEntity newDeletionRequest = new TideRoleDraftEntity();
-            newDeletionRequest.setId(KeycloakModelUtils.generateId());
-            newDeletionRequest.setRole(roleEntity);
-            newDeletionRequest.setDeleteStatus(DraftStatus.DRAFT);
-            em.persist(newDeletionRequest);
-            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.ROLE);
-            changeSetProcessorFactory.getProcessor(ChangeSetType.ROLE).executeWorkflow(session, newDeletionRequest, em, WorkflowType.REQUEST, params, null);
-            em.flush();
-            // Can we return a better message here ?
-            // e.g. change request created
+
+            List<TideRoleDraftEntity> drafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                    .setParameter("role", roleEntity)
+                    .getResultList();
+
+            if(drafts.isEmpty()){ throw new Exception("Draft for this role does not exist.");}
+
+            drafts.forEach(d -> {
+                try {
+                    d.setDeleteStatus(DraftStatus.DRAFT);
+                    WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.ROLE);
+                    changeSetProcessorFactory.getProcessor(ChangeSetType.ROLE).executeWorkflow(session, d, em, WorkflowType.REQUEST, params, null);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+                em.flush();
+            });
             return true;
         } catch (Exception e) {
             throw new RuntimeException(e);

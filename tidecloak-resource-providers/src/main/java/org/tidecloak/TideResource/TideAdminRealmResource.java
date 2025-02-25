@@ -197,7 +197,7 @@ public class TideAdminRealmResource {
                     }
 
                     // Check the TideClientDraft Table and generate and AccessProofDetails that dont exist.
-                    List<TideClientDraftEntity> entities = findDraftsNotInAccessProof(em);
+                    List<TideClientDraftEntity> entities = findDraftsNotInAccessProof(em, realm);
                     entities.forEach(c -> {
                         try {
                             WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.CLIENT);
@@ -273,9 +273,10 @@ public class TideAdminRealmResource {
         }
     }
 
-    private List<TideClientDraftEntity> findDraftsNotInAccessProof(EntityManager em) {
+    private List<TideClientDraftEntity> findDraftsNotInAccessProof(EntityManager em, RealmModel realm) {
         return em.createNamedQuery("TideClientDraftEntity.findDraftsNotInAccessProof", TideClientDraftEntity.class)
                 .setParameter("draftStatus", DraftStatus.DRAFT)
+                .setParameter("realmId", realm.getId())
                 .getResultList();
     }
 }

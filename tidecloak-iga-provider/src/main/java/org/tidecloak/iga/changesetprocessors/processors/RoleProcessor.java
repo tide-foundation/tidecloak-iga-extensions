@@ -8,6 +8,7 @@ import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
+import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -16,6 +17,7 @@ import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.iga.interfaces.TideUserAdapter;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
 
@@ -27,6 +29,24 @@ import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.remov
 public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
 
     protected static final Logger logger = Logger.getLogger(RoleProcessor.class);
+
+    @Override
+    public void cancel(KeycloakSession session, TideRoleDraftEntity entity, EntityManager em, ActionType actionType){
+        List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndId", AccessProofDetailEntity.class)
+                .setParameter("recordId", entity.getId())
+                .setParameter("changesetType", ChangeSetType.ROLE)
+                .getResultList();
+        pendingChanges.forEach(em::remove);
+
+        List<TideRoleDraftEntity> pendingDrafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                .setParameter("role", entity.getRole())
+                .getResultList();
+
+        pendingDrafts.forEach(d -> {
+            d.setDeleteStatus(DraftStatus.NULL);
+        });
+        em.flush();
+    }
 
     @Override
     public void commit(KeycloakSession session, ChangeSetRequest change, TideRoleDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {
@@ -110,20 +130,19 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
     public void handleDeleteRequest(KeycloakSession session, TideRoleDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         RoleModel role = realm.getRoleById(entity.getRole().getId());
-        List<UserModel> users =  session.users().getRoleMembersStream(realm, role).toList();
+        List<UserModel> users = session.users().searchForUserStream(realm, new HashMap<>()).filter(u -> u.hasRole(role)).toList();
 
         List<ClientModel> clientList = getUniqueClientList(session, realm, role);
         clientList.forEach(client -> {
             users.forEach(user -> {
                 UserModel wrappedUser = TideEntityUtils.wrapUserModel(user, session, realm);
                 try {
-                    ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, entity.getId(),ChangeSetType.USER_ROLE, entity);
+                    ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, entity.getId(),ChangeSetType.ROLE, entity);
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
             });
         });
-
 
     }
 

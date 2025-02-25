@@ -191,14 +191,8 @@ public class IGARealmResource {
                 {
                     return Response.status(Response.Status.BAD_REQUEST).entity("User needs a tide account linked for the tide-realm-admin role").build();
                 }
-                if(!auth.adminAuth().hasAppRole(realmManagement, org.tidecloak.shared.Constants.TIDE_REALM_ADMIN) && !role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN )) {
-                    return Response.status(Response.Status.BAD_REQUEST).entity("Current user account does not have permission to sign change requests.").build();
-                }
             }
-        } else if (!auth.adminAuth().hasAppRole(realmManagement, org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
-            return Response.status(Response.Status.BAD_REQUEST).entity("Current user account does not have permission to sign change requests.").build();
         }
-
         // check is admin has signed this already.
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
         if (changesetRequestEntity == null){
@@ -266,6 +260,9 @@ public class IGARealmResource {
             proofDetails.forEach(p -> {
                 userContexts.add(new UserContext(p.getProofDraft()));
             });
+            Stream<UserContext> adminContexts = userContexts.stream().filter(x -> x.getInitCertHash() != null);
+            Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
+            List<UserContext> orderedContext = Stream.concat(adminContexts, normalUserContext).toList();
 
             RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
             RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
@@ -273,12 +270,34 @@ public class IGARealmResource {
                     .setParameter("role", role).getSingleResult();
 
             InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
-            if (IGAUtils.isIGAEnabled(realm) && tideIdp != null) {
-                if (isAssigningTideRealmAdminRole &&  realmAuthorizers.size() == 1 && realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")) {
-                    List<String> signatures = IGAUtils.signInitialTideAdmin(config, userContexts.toArray(new UserContext[0]), cert, realmAuthorizers.get(0), changesetRequestEntity);
+            if (IGAUtils.isIGAEnabled(realm) && tideIdp != null && realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") &&  realmAuthorizers.size() == 1) {
+                if (isAssigningTideRealmAdminRole ) {
+                    List<String> signatures = IGAUtils.signInitialTideAdmin(config, orderedContext.toArray(new UserContext[0]), cert, realmAuthorizers.get(0), changesetRequestEntity);
+                    Stream<AccessProofDetailEntity> adminproofs = proofDetails.stream().filter(x -> {
+                        UserContext userContext = new UserContext(x.getProofDraft());
+                        if(userContext.getInitCertHash() != null) {
+                            return true;
+                        }
+                        return false;
+                    });
+                    Stream<AccessProofDetailEntity> normalProofs = proofDetails.stream().filter(x -> {
+                        UserContext userContext = new UserContext(x.getProofDraft());
+                        if(userContext.getInitCertHash() == null) {
+                            return true;
+                        }
+                        return false;
+                    });
+
+                    List<AccessProofDetailEntity> orderedProofDetails = Stream.concat(adminproofs, normalProofs).toList();
                     tideRoleEntity.setInitCertSig(signatures.get(0));
+                    for(int i = 0; i < orderedProofDetails.size(); i++){
+                        orderedProofDetails.get(i).setSignature(signatures.get(i + 1));
+                    }
+                    em.flush();
+                } else {
+                    List<String> signatures = IGAUtils.signContextsWithVrk(config, orderedContext.toArray(new UserContext[0]), realmAuthorizers.get(0), changesetRequestEntity);
                     for(int i = 0; i < userContexts.size(); i++){
-                        proofDetails.get(i).setSignature(signatures.get(i + 1));
+                        proofDetails.get(i).setSignature(signatures.get(i));
                     }
                     em.flush();
                 }
@@ -433,12 +452,34 @@ public class IGARealmResource {
                     }
 
                     List<UserContext> orderedContext;
-                    if(isTideRealmRoleAssignment(mapping)){
-                        Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
+                    List<AccessProofDetailEntity> orderedProofDetails;
+                    if(isTideRealmRoleAssignment(mapping) && change.getActionType().equals(ActionType.DELETE)){
                         Stream<UserContext> adminContexts = userContexts.stream().filter(x -> x.getInitCertHash() != null);
+                        Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
                         orderedContext = Stream.concat(adminContexts, normalUserContext).toList();
+                        Stream<AccessProofDetailEntity> adminproofs = proofDetails.stream().filter(x -> {
+                            UserContext userContext = new UserContext(x.getProofDraft());
+                            if(userContext.getInitCertHash() != null) {
+                                return true;
+                            }
+                            return false;
+
+                        });
+                        Stream<AccessProofDetailEntity> normalProofs = proofDetails.stream().filter(x -> {
+                            UserContext userContext = new UserContext(x.getProofDraft());
+                            if(userContext.getInitCertHash() == null) {
+                                return true;
+                            }
+                            return false;
+                        });
+
+                        orderedProofDetails = Stream.concat(adminproofs, normalProofs).toList();
+
+
                     } else {
                         orderedContext = userContexts;
+                        orderedProofDetails = proofDetails;
+
                     }
 
                     ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
@@ -499,22 +540,15 @@ public class IGARealmResource {
                         req.SetInitializationCertificate(InitializerCertifcate.FromString(roleInitCert.getInitCert()));
                         SignatureResponse response = Midgard.SignModel(settings, req);
 
-
-                        proofDetails.sort(Comparator.comparingInt(x -> {
-                            UserContext userContext = new UserContext(x.getProofDraft());
-                            return orderedContext.indexOf(userContext);
-                        }));
-
                         for ( int i = 0; i < userContexts.size(); i++){
-                            System.out.println(proofDetails.get(i));
-                            proofDetails.get(i).setSignature(response.Signatures[i + 1]);
+                            orderedProofDetails.get(i).setSignature(response.Signatures[i + 1]);
                         }
                         commitRoleInitCert(session, change.getChangeSetId(), response.Signatures[0]);
                     } else {
                         SignatureResponse response = Midgard.SignModel(settings, req);
 
                         for ( int i = 0; i < userContexts.size(); i++){
-                            proofDetails.get(i).setSignature(response.Signatures[i]);
+                            orderedProofDetails.get(i).setSignature(response.Signatures[i]);
                         }
                     }
 
@@ -743,13 +777,14 @@ public class IGARealmResource {
             String clientId = m.getRole().isClientRole() ? m.getRole().getClientId() : null;
             List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                     .setParameter("recordId", m.getId())
-                    .setLockMode(LockModeType.PESSIMISTIC_WRITE)
                     .getResultList();
-            String action = "Deleting Role from Client";
-            RequestedChanges requestChange = new RoleChangeRequest(m.getRole().getName(), action, ChangeSetType.ROLE, RequestType.ROLE, clientId, realm.getName(), ActionType.DELETE, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
-            proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft())));
 
-            changes.add(requestChange);
+            if(!proofs.isEmpty()) {
+                String action = clientId != null ? "Deleting Role from Client" : "Deleting Role from Realm" ;
+                RequestedChanges requestChange = new RoleChangeRequest(m.getRole().getName(), action, ChangeSetType.ROLE, RequestType.ROLE, clientId, realm.getName(), ActionType.DELETE, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
+                proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft())));
+                changes.add(requestChange);
+            }
         }
         return changes;
     }
