@@ -30,6 +30,7 @@ import org.tidecloak.shared.enums.ActionType;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import static org.tidecloak.iga.TideRequests.TideRoleRequests.commitRoleInitCert;
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRoleInitCertDraft;
 import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.addRoleToAccessToken;
@@ -44,6 +45,9 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         RealmModel realmModel = session.realms().getRealm(entity.getUser().getRealmId());
         RoleModel role = realmModel.getRoleById(entity.getRoleId());
         TideUserAdapter user = new TideUserAdapter(session, realmModel, em, entity.getUser());
+        List<AccessProofDetailEntity> accessProofDetailEntities = UserContextUtils.getUserContextDrafts(em, entity.getId());
+        accessProofDetailEntities.forEach(em::remove);
+
         List<TideUserRoleMappingDraftEntity> pendingDrafts = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatusNotEqualTo", TideUserRoleMappingDraftEntity.class)
                 .setParameter("user", entity.getUser())
                 .setParameter("roleId", role.getId())
@@ -119,7 +123,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                         em.remove(roleInitializerCertificateDraftEntity.get(0));
                         em.flush();
                     }
-                    createRoleInitCertDraft(session, request.getId(), "1", 0.7, 1);
+                    //createRoleInitCertDraft(session, request.getId(), "1", 0.7, 1);
                     processRealmManagementRoleAssignment(session, em, realm, clientList, request, u);
 
                 } catch (Exception e) {
@@ -253,7 +257,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     @Override
-    public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> roles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
+    public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> roles, ClientModel client, TideUserAdapter userChangesMadeTo, EntityManager em) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         TideUserRoleMappingDraftEntity affectedUserRoleEntity = em.find(TideUserRoleMappingDraftEntity.class, affectedUserContextDraft.getRecordId());
         if (affectedUserRoleEntity == null || (affectedUserRoleEntity.getDraftStatus() == DraftStatus.ACTIVE && (affectedUserRoleEntity.getDeleteStatus() == null || affectedUserRoleEntity.getDeleteStatus().equals(DraftStatus.NULL)))){
@@ -268,9 +272,12 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             affectedUserRoleEntity.setDraftStatus(DraftStatus.DRAFT);
         }
 
-        String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, user, "openId", affectedUserRoleEntity);
+        UserEntity userEntity = affectedUserContextDraft.getUser();
+        TideUserAdapter affectedUser = TideEntityUtils.toTideUserAdapter(userEntity, session, realm);
 
-        if(client.getClientId().equals(Constants.REALM_MANAGEMENT_CLIENT_ID)){
+        String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, affectedUser, "openId", affectedUserRoleEntity);
+
+        if(client.getClientId().equals(Constants.REALM_MANAGEMENT_CLIENT_ID)) {
             RoleEntity roleEntity = em.find(RoleEntity.class, affectedUserRoleEntity.getRoleId());
             if(roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
                 List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
@@ -281,8 +288,13 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 UserContext userContext = new UserContext(userContextDraft);
                 InitializerCertifcate initializerCertifcate = InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
                 userContext.setInitCertHash(initializerCertifcate.hash());
-                userContext.setThreshold(initializerCertifcate.getPayload().getThreshold());
-                affectedUserContextDraft.setProofDraft(userContext.ToString());
+
+                UserContext oldUserContext = new UserContext(affectedUserContextDraft.getProofDraft());
+                if(oldUserContext.getInitCertHash() != null || oldUserContext.getThreshold() != 0){
+                    userContext.setThreshold(initializerCertifcate.getPayload().getThreshold());
+                    affectedUserContextDraft.setProofDraft(userContext.ToString());
+                }
+
                 return;
             }
         }

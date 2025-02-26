@@ -46,7 +46,6 @@ public class ChangesetRequestAdapter {
         UserContext adminContext = new UserContext(userClientAccessProofEntity.get(0).getAccessProof());
         AdminAuthorization adminAuthorization = new AdminAuthorization(adminContext.ToString(), userClientAccessProofEntity.get(0).getAccessProofSig(), adminTideAuthMsg, adminTideBlindSig, adminSessionApprovalSig);
         AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), adminAuthorization, userClientAccessProofEntity.get(0).getUser().getId(), em);
-
         changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
 
         Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);

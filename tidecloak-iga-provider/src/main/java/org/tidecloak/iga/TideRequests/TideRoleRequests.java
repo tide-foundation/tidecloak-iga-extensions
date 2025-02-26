@@ -119,18 +119,16 @@ public class TideRoleRequests {
         if(tideRoleDraftEntity.isEmpty()){
             throw new Exception("No tide role entity found for tide-realm-admin");
         }
-        List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", recordId).getResultList();
-
-        if(roleInitializerCertificateDraftEntity.isEmpty()){
+        RoleInitializerCertificateDraftEntity roleInitializerCertificateDraftEntity = getDraftRoleInitCert(session, recordId);
+        if(roleInitializerCertificateDraftEntity == null) {
             throw new Exception("There is no change request with this record ID, " + recordId);
         }
 
-        RoleInitializerCertificateDraftEntity roleInitCert = roleInitializerCertificateDraftEntity.get(0);
-        tideRoleDraftEntity.get(0).setInitCert(roleInitCert.getInitCert());
+        tideRoleDraftEntity.get(0).setInitCert(roleInitializerCertificateDraftEntity.getInitCert());
         tideRoleDraftEntity.get(0).setInitCertSig(signature);
-        InitializerCertifcate initCert = InitializerCertifcate.FromString(roleInitCert.getInitCert());
+        InitializerCertifcate initCert = InitializerCertifcate.FromString(roleInitializerCertificateDraftEntity.getInitCert());
         tideRealmAdmin.setSingleAttribute("tideThreshold", Integer.toString(initCert.getPayload().getThreshold()));
-        em.remove(roleInitializerCertificateDraftEntity.get(0));
+        em.remove(roleInitializerCertificateDraftEntity);
         em.flush();
     }
 
