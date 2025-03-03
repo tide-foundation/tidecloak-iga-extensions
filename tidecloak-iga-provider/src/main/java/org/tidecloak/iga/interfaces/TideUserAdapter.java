@@ -97,10 +97,34 @@ public class TideUserAdapter extends UserAdapter {
             if(hasDirectRole(roleModel)) return;
 
             RoleModel role = wrapRoleModel(roleModel, session, realm);
+
+            // if has an indirect role, we let it be added but we dont need it to be drafted.
+            if(!hasDirectRole(roleModel) && hasRole(roleModel)) {
+                super.grantRole(role);
+                List<TideUserRoleMappingDraftEntity> entities = em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class)
+                        .setParameter("user", getEntity())
+                        .setParameter("roleId", role.getId())
+                        .getResultList();
+                // Check if this has already been action before
+                if(entities.isEmpty()){
+                    TideUserRoleMappingDraftEntity draftUserRole = new TideUserRoleMappingDraftEntity();
+                    draftUserRole.setId(KeycloakModelUtils.generateId());
+                    draftUserRole.setRoleId(role.getId());
+                    draftUserRole.setUser(this.getEntity());
+                    draftUserRole.setAction(ActionType.CREATE);
+                    draftUserRole.setDraftStatus(DraftStatus.ACTIVE);
+                    em.persist(draftUserRole);
+                }else{
+                    entities.get(0).setDeleteStatus(null);
+                    entities.get(0).setDraftStatus(DraftStatus.ACTIVE);
+                    entities.get(0).setAction(ActionType.CREATE);
+                }
+                em.flush();
+                return;
+
+            };
+
             super.grantRole(role);
-
-            if(hasRole(roleModel)) return; // if has an indirect role, we let it be added but we dont need it to be drafted.
-
 
             // Dont draft for master realm
             RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
@@ -115,16 +139,16 @@ public class TideUserAdapter extends UserAdapter {
             }
 
             // Check if this has already been action before
-            List<TideUserRoleMappingDraftEntity> entity = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatusAndAction", TideUserRoleMappingDraftEntity.class)
+            List<TideUserRoleMappingDraftEntity> draftEntities = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatusAndAction", TideUserRoleMappingDraftEntity.class)
                     .setParameter("user", getEntity())
                     .setParameter("roleId", role.getId())
                     .setParameter("draftStatus", DraftStatus.DRAFT)
                     .setParameter("actionType", ActionType.CREATE)
                     .getResultList();
 
-            // Add draft request
-            if (entity == null || entity.isEmpty()) {
 
+            // Add draft request
+            if (draftEntities == null || draftEntities.isEmpty()) {
                 if(role.getContainer() instanceof  RealmModel) {
                     // if realm role, check if theres any affected clients. If no affected clients then dont need to create draft.
                     List<ClientModel> affectedClients = ClientUtils.getUniqueClientList(session, realm, roleModel);
@@ -183,9 +207,16 @@ public class TideUserAdapter extends UserAdapter {
     @Override
     public void deleteRoleMapping(RoleModel roleModel) {
         try {
-            // If this is an indirect role, then just remove it.
-            if(!hasDirectRole(roleModel) && hasRole(roleModel)){
+            // If we are removing a direct role but this user has an indirect role assignment, we remove the direct role without drafting. No change to the user context
+            boolean hasIndirectRole = getRoleMappingsStream().anyMatch(role -> !role.getId().equalsIgnoreCase(roleModel.getId()) && role.hasRole(roleModel));
+            if(hasDirectRole(roleModel) && hasIndirectRole ){
                 super.deleteRoleMapping(roleModel);
+                List<TideUserRoleMappingDraftEntity> entities = em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class)
+                        .setParameter("user", getEntity())
+                        .setParameter("roleId", roleModel.getId())
+                        .getResultList();
+
+                entities.forEach(e -> em.remove(e));
                 return;
             }
 

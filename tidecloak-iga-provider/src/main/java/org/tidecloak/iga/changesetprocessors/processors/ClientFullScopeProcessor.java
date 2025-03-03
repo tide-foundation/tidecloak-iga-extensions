@@ -324,12 +324,17 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
             clientModel.setFullScopeAllowed(false);
         }
 
-        if(entity.getDraftStatus().equals(DraftStatus.DRAFT)){
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT));
+        if(entity.getDraftStatus().equals(DraftStatus.DRAFT) && changesetRequestEntity != null){
             entity.setDraftStatus(DraftStatus.ACTIVE);
-            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT));
-            if (changesetRequestEntity != null) {
-                em.remove(changesetRequestEntity);
-            }
+            // Find any pending changes
+            List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
+                    .setParameter("recordId", entity.getId())
+                    .setParameter("changesetTypes", List.of(ChangeSetType.CLIENT))
+                    .getResultList();
+            pendingChanges.forEach(em::remove);
+            em.remove(changesetRequestEntity);
+
         }
     }
 

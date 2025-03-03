@@ -233,7 +233,9 @@ public interface ChangeSetProcessor<T> {
                 }
 
                 ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeRequestId, changeSetType);
-                changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(updatedReq.GetDraft()));
+                if(changesetRequestEntity != null){
+                    changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(updatedReq.GetDraft()));
+                }
                 em.flush();
             } catch (Exception e) {
                 throw new RuntimeException(e);
