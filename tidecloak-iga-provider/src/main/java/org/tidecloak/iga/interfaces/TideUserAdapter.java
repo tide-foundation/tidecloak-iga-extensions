@@ -99,6 +99,9 @@ public class TideUserAdapter extends UserAdapter {
             RoleModel role = wrapRoleModel(roleModel, session, realm);
             super.grantRole(role);
 
+            if(hasRole(roleModel)) return; // if has an indirect role, we let it be added but we dont need it to be drafted.
+
+
             // Dont draft for master realm
             RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
             if(realm.equals(masterRealm)){
@@ -180,6 +183,12 @@ public class TideUserAdapter extends UserAdapter {
     @Override
     public void deleteRoleMapping(RoleModel roleModel) {
         try {
+            // If this is an indirect role, then just remove it.
+            if(!hasDirectRole(roleModel) && hasRole(roleModel)){
+                super.deleteRoleMapping(roleModel);
+                return;
+            }
+
             RoleModel role = wrapRoleModel(roleModel, session, realm);
 
             String igaAttribute = session.getContext().getRealm().getAttribute("isIGAEnabled");

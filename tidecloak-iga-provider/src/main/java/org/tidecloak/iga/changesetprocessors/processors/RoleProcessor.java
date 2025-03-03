@@ -8,6 +8,7 @@ import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -46,6 +47,12 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
             d.setDeleteStatus(DraftStatus.NULL);
         });
         em.flush();
+
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(entity.getId(), ChangeSetType.ROLE));
+        if(changesetRequestEntity != null){
+            em.remove(changesetRequestEntity);
+            em.flush();
+        }
     }
 
     @Override

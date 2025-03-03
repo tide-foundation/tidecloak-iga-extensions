@@ -45,6 +45,12 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
         RealmModel realm = session.getContext().getRealm();
         TideRoleAdapter tideRoleAdapter = new TideRoleAdapter(session, realm, em, entity.getComposite());
         tideRoleAdapter.removeChildRoleFromCompositeRoleRecords(entity, actionType);
+
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(entity.getId(), ChangeSetType.COMPOSITE_ROLE));
+        if(changesetRequestEntity != null){
+            em.remove(changesetRequestEntity);
+            em.flush();
+        }
     }
 
     @Override

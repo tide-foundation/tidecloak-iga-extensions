@@ -282,7 +282,6 @@ public interface ChangeSetProcessor<T> {
         if (changesetRequestEntity != null) {
             em.remove(changesetRequestEntity);
         }
-        em.flush();
 
         // Regenerate for client full scope change request.
         List<ChangesetRequestEntity> clientFullScopeChangeRequests = em.createNamedQuery("getAllChangeRequestsByChangeSetType", ChangesetRequestEntity.class)
@@ -290,6 +289,11 @@ public interface ChangeSetProcessor<T> {
         ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
         clientFullScopeChangeRequests.forEach(req -> {
             TideClientDraftEntity tideClientDraftEntity = em.find(TideClientDraftEntity.class, req.getChangesetRequestId());
+            if(tideClientDraftEntity == null) {
+                em.remove(req); // remove empty change request
+                em.flush();
+                return;
+            }
             ChangeSetRequest c = getChangeSetRequestFromEntity(session, tideClientDraftEntity, ChangeSetType.CLIENT_FULLSCOPE);
             req.getAdminAuthorizations().forEach(em::remove);
             em.remove(req);
@@ -614,7 +618,7 @@ public interface ChangeSetProcessor<T> {
         }
 
         List<UserContext> userContexts = new ArrayList<>();
-        UserContextSignRequest req = new UserContextSignRequest("VRK:1");
+        UserContextSignRequest req = new UserContextSignRequest("Admin:1");
 
         InitializerCertifcate cert = null;
         byte[] certHash = new byte[0];
