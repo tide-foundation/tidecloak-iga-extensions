@@ -236,8 +236,9 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         }
 
         TideUserRoleMappingDraftEntity userRoleMapping = activeDraftEntities.get(0);
-        
-        if(userRoleMapping.getDeleteStatus() != null)
+
+        // Check if there is a delete status pending. Only create a delete request if its not yet actioned
+        if(userRoleMapping.getDeleteStatus() != null && userRoleMapping.getDeleteStatus().equals(DraftStatus.NULL))
         {
             return;
         }

@@ -323,7 +323,7 @@ public class TideUserAdapter extends UserAdapter {
         } else {
             TideUserRoleMappingDraftEntity entity = em.find(TideUserRoleMappingDraftEntity.class, recordId);
             if(entity != null) {
-                entity.setDeleteStatus(DraftStatus.NULL);
+                entity.setDeleteStatus(null);
             }
         }
     }

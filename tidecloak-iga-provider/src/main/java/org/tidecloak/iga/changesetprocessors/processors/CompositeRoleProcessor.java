@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.persistence.EntityManager;
 import org.jboss.logging.Logger;
 import org.keycloak.Config;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.UserAdapter;
 import org.keycloak.models.jpa.entities.RoleEntity;
@@ -215,6 +216,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
 
     @Override
     public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideCompositeRoleMappingDraftEntity entity, UserModel user, ClientModel clientModel){
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
         RoleModel childRole = realm.getRoleById(entity.getChildRole().getId());
         RoleModel compositeRole = realm.getRoleById(entity.getComposite().getId());
@@ -226,14 +228,22 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
             roleToAdd.forEach(r -> {
                 if(change.getActionType().equals(ActionType.CREATE)){
                     addRoleToAccessToken(token, r);
-                } else if (change.getActionType().equals(ActionType.DELETE)) {
-                    removeRoleFromAccessToken(token, r);
                 }
             });
         }
         else if (change.getActionType().equals(ActionType.DELETE)) {
+            List<TideUserRoleMappingDraftEntity> activeDirectRole = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatusAndUserId", TideUserRoleMappingDraftEntity.class)
+                    .setParameter("draftStatus", DraftStatus.ACTIVE)
+                    .setParameter("roleId", childRole.getId())
+                    .setParameter("userId", user.getId())
+                    .getResultList();
+
             Set<RoleModel> rolesToDelete = expandCompositeRoles(session, Set.of(childRole));
-            rolesToDelete.add(childRole);
+            //If the user does not have an active direct role assignment, then we remove the child role from the context
+            rolesToDelete.remove(childRole);
+            if(activeDirectRole.isEmpty()) {
+                rolesToDelete.add(childRole);
+            }
             rolesToDelete.forEach(r -> {
                 removeRoleFromAccessToken(token, r);
             });
