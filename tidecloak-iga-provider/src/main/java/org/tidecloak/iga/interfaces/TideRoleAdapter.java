@@ -60,6 +60,14 @@ public class TideRoleAdapter extends RoleAdapter {
             return;
         }
 
+        List<DraftStatus> statuses = Arrays.asList(DraftStatus.PENDING, DraftStatus.DRAFT, DraftStatus.APPROVED, DraftStatus.DENIED);
+        List<TideCompositeRoleMappingDraftEntity> deleteDraftEntityList = findCompositeRoleMappingDraftsByDeleteStatuses(getEntity(), roleEntity, statuses);
+
+        // If request has already been action we dont need to create another one.
+        if(!deleteDraftEntityList.isEmpty()){
+            return;
+        }
+
         TideCompositeRoleMappingDraftEntity committedEntity = entity.get(0);
 
         List<TideUserAdapter> activeUsers =  session.users().getRoleMembersStream(realm, realm.getRoleById(getEntity().getId())).map(user -> {
@@ -194,6 +202,20 @@ public class TideRoleAdapter extends RoleAdapter {
                 .setParameter("composite", composite)
                 .setParameter("childRole", childRole)
                 .setParameter("draftStatus", status)
+                .getResultList();
+    }
+    private List<TideCompositeRoleMappingDraftEntity> findCompositeRoleMappingDraftsByStatuses(RoleEntity composite, RoleEntity childRole, List<DraftStatus> status) {
+        return em.createNamedQuery("getCompositeRoleMappingDraftByStatuses", TideCompositeRoleMappingDraftEntity.class)
+                .setParameter("composite", composite)
+                .setParameter("childRole", childRole)
+                .setParameter("draftStatuses", status)
+                .getResultList();
+    }
+    private List<TideCompositeRoleMappingDraftEntity> findCompositeRoleMappingDraftsByDeleteStatuses(RoleEntity composite, RoleEntity childRole, List<DraftStatus> status) {
+        return em.createNamedQuery("getCompositeRoleMappingDraftByDeleteStatuses", TideCompositeRoleMappingDraftEntity.class)
+                .setParameter("composite", composite)
+                .setParameter("childRole", childRole)
+                .setParameter("draftStatuses", status)
                 .getResultList();
     }
 

@@ -15,6 +15,7 @@ import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
 import org.tidecloak.iga.interfaces.TideRoleAdapter;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -50,6 +51,12 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
         pendingChanges.forEach(em::remove);
         em.flush();
 
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(entity.getId(), ChangeSetType.CLIENT_FULLSCOPE));
+        if(changesetRequestEntity != null){
+            em.remove(changesetRequestEntity);
+            em.flush();
+        }
+
     }
 
     @Override
@@ -66,7 +73,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
 
         Runnable callback = () -> {
             try {
-                commitCallback(change, entity, client);
+                commitCallback(change, entity, client, em);
                 em.flush();
 
             } catch (Exception e) {
@@ -300,7 +307,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
         return token;
     }
 
-    private void commitCallback(ChangeSetRequest change, TideClientDraftEntity entity, ClientModel clientModel){
+    private void commitCallback(ChangeSetRequest change, TideClientDraftEntity entity, ClientModel clientModel, EntityManager em){
         if (change.getActionType() == ActionType.CREATE) {
             if(entity.getFullScopeEnabled() != DraftStatus.APPROVED){
                 throw new RuntimeException("Draft record has not been approved by all admins.");
@@ -317,8 +324,17 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
             clientModel.setFullScopeAllowed(false);
         }
 
-        if(entity.getDraftStatus().equals(DraftStatus.DRAFT)){
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT));
+        if(entity.getDraftStatus().equals(DraftStatus.DRAFT) && changesetRequestEntity != null){
             entity.setDraftStatus(DraftStatus.ACTIVE);
+            // Find any pending changes
+            List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
+                    .setParameter("recordId", entity.getId())
+                    .setParameter("changesetTypes", List.of(ChangeSetType.CLIENT))
+                    .getResultList();
+            pendingChanges.forEach(em::remove);
+            em.remove(changesetRequestEntity);
+
         }
     }
 

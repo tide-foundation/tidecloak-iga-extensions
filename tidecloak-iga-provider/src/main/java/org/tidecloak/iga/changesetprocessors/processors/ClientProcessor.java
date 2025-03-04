@@ -16,6 +16,7 @@ import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
 import org.tidecloak.iga.interfaces.TideClientAdapter;
 import org.tidecloak.iga.interfaces.TideUserAdapter;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
@@ -50,6 +51,12 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
 
         pendingChanges.forEach(em::remove);
         em.flush();
+
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(entity.getId(), ChangeSetType.CLIENT));
+        if(changesetRequestEntity != null){
+            em.remove(changesetRequestEntity);
+            em.flush();
+        }
 
     }
 

@@ -305,10 +305,11 @@ public class IGARealmResource {
 
             ObjectMapper objectMapper = new ObjectMapper();
             if (!realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") && IGAUtils.isIGAEnabled(realm) && tideIdp != null) {
-                String redirectUrl = tideIdp.getConfig().get("changeSetEndpoint");
+                String defaultAdminUiDomain = tideIdp.getConfig().get("changeSetEndpoint");
+                String customAdminUiDomain = tideIdp.getConfig().get("CustomAdminUIDomain");
                 String redirectUrlSig = tideIdp.getConfig().get("changeSetURLSig");
-                URI redirectURI = new URI(redirectUrl);
 
+                URI redirectURI = new URI(defaultAdminUiDomain);
                 UserSessionModel userSession = session.sessions().getUserSession(realm, auth.adminAuth().getToken().getSessionId());
                 String port = redirectURI.getPort() == -1 ? "" : ":" + redirectURI.getPort();
                 String voucherURL = redirectURI.getScheme() + "://" + redirectURI.getHost() + port + "/realms/" +
@@ -332,12 +333,37 @@ public class IGARealmResource {
                         ""
                 );
 
+                URI customDomainUri = null;
+                if(customAdminUiDomain != null) {
+                    customDomainUri = Midgard.CreateURL(
+                            auth.adminAuth().getToken().getSessionId(),
+                            customAdminUiDomain,//userSession.getNote("redirectUri"),
+                            tideIdp.getConfig().get("customAdminUIDomainSig"),
+                            tideIdp.getConfig().get("homeORKurl"),
+                            config.getFirst("clientId"),
+                            config.getFirst("gVRK"),
+                            config.getFirst("gVRKCertificate"),
+                            realm.isRegistrationAllowed(),
+                            Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
+                            tideIdp.getConfig().get("LogoURL"),
+                            tideIdp.getConfig().get("ImageURL"),
+                            "approval",
+                            tideIdp.getConfig().get("settingsSig"),
+                            voucherURL, //voucherURL,
+                            ""
+                    );
+                }
+
                 Map<String, String> response = new HashMap<>();
                 response.put("message", "Opening Enclave to request approval.");
                 response.put("uri", String.valueOf(uri));
                 response.put("changeSetRequests", changesetRequestEntity.getDraftRequest());
                 response.put("requiresApprovalPopup", "true");
                 response.put("expiry", String.valueOf(changesetRequestEntity.getTimestamp() + 2628000)); // month expiry
+                if(customAdminUiDomain != null) {
+                    response.put("customDomainUri", String.valueOf(customDomainUri));
+                }
+
 
                 return buildResponse(200, objectMapper.writeValueAsString(response));
             }
@@ -714,6 +740,11 @@ public class IGARealmResource {
             List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                     .setParameter("recordId", m.getId())
                     .getResultList();
+
+            if(proofs.isEmpty()){
+                continue;
+            }
+
             boolean isDeleteRequest = m.getDraftStatus() == DraftStatus.ACTIVE && (m.getDeleteStatus() != DraftStatus.ACTIVE || m.getDeleteStatus() != null);
             String actionDescription = isDeleteRequest ? "Unassigning Role from User" : "Granting Role to User";
             ActionType action = isDeleteRequest ? ActionType.DELETE : ActionType.CREATE;
@@ -743,6 +774,9 @@ public class IGARealmResource {
                     .setParameter("recordId", m.getId())
                     .setLockMode(LockModeType.PESSIMISTIC_WRITE)
                     .getResultList();
+            if(proofs.isEmpty()){
+                continue;
+            }
             boolean isDeleteRequest = m.getDraftStatus() == DraftStatus.ACTIVE && (m.getDeleteStatus() != DraftStatus.ACTIVE || m.getDeleteStatus() != null);
             String actionDescription = isDeleteRequest ? "Removing Role from Composite Role": "Granting Role to Composite Role";
             ActionType action = isDeleteRequest ? ActionType.DELETE : ActionType.CREATE;
@@ -778,13 +812,14 @@ public class IGARealmResource {
             List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                     .setParameter("recordId", m.getId())
                     .getResultList();
-
-            if(!proofs.isEmpty()) {
-                String action = clientId != null ? "Deleting Role from Client" : "Deleting Role from Realm" ;
-                RequestedChanges requestChange = new RoleChangeRequest(m.getRole().getName(), action, ChangeSetType.ROLE, RequestType.ROLE, clientId, realm.getName(), ActionType.DELETE, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
-                proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft())));
-                changes.add(requestChange);
+            if(proofs.isEmpty()){
+                continue;
             }
+
+            String action = clientId != null ? "Deleting Role from Client" : "Deleting Role from Realm" ;
+            RequestedChanges requestChange = new RoleChangeRequest(m.getRole().getName(), action, ChangeSetType.ROLE, RequestType.ROLE, clientId, realm.getName(), ActionType.DELETE, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
+            proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft())));
+            changes.add(requestChange);
         }
         return changes;
     }

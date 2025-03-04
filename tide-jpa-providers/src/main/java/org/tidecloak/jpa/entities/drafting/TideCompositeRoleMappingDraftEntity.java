@@ -47,7 +47,16 @@ import org.tidecloak.shared.enums.ActionType;
                 query = "DELETE FROM TideCompositeRoleMappingDraftEntity r " +
                         "WHERE r.composite.id = :roleId " +
                         "OR r.childRole.id = :roleId"
-        )
+        ),
+        @NamedQuery(
+                name = "getCompositeRoleMappingDraftByStatuses",
+                query = "select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole AND r.draftStatus IN :draftStatuses"
+        ),
+        @NamedQuery(
+                name = "getCompositeRoleMappingDraftByDeleteStatuses",
+                query = "select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole AND r.deleteStatus IN :draftStatuses"
+        ),
+
 })
 
 @Entity

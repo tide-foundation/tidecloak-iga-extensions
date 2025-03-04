@@ -55,6 +55,12 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 .getResultList();
         user.deleteRoleAndProofRecords(role, pendingDrafts, actionType);
         em.flush();
+
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(entity.getId(), ChangeSetType.USER_ROLE));
+        if(changesetRequestEntity != null){
+            em.remove(changesetRequestEntity);
+            em.flush();
+        }
     }
 
     @Override
@@ -230,6 +236,12 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         }
 
         TideUserRoleMappingDraftEntity userRoleMapping = activeDraftEntities.get(0);
+
+        // Check if there is a delete status pending. Only create a delete request if its not yet actioned
+        if(userRoleMapping.getDeleteStatus() != null && userRoleMapping.getDeleteStatus().equals(DraftStatus.NULL))
+        {
+            return;
+        }
 
         // Mark entities as pending delete.
         userRoleMapping.setDeleteStatus(DraftStatus.DRAFT);
