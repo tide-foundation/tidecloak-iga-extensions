@@ -139,7 +139,7 @@ public class TideUserAdapter extends UserAdapter {
             }
 
             // Check if this has already been action before
-            List<DraftStatus> statuses = Arrays.asList(DraftStatus.PENDING, DraftStatus.DRAFT, DraftStatus.APPROVED);
+            List<DraftStatus> statuses = Arrays.asList(DraftStatus.PENDING, DraftStatus.DRAFT, DraftStatus.APPROVED, DraftStatus.DENIED);
             List<TideUserRoleMappingDraftEntity> draftEntities = getDraftEntities(roleModel, statuses);
 
 
@@ -233,7 +233,7 @@ public class TideUserAdapter extends UserAdapter {
                 deleteRoleAndProofRecords(role, entities);
                 return;
             }
-            List<DraftStatus> statuses = Arrays.asList(DraftStatus.PENDING, DraftStatus.DRAFT, DraftStatus.APPROVED);
+            List<DraftStatus> statuses = Arrays.asList(DraftStatus.PENDING, DraftStatus.DRAFT, DraftStatus.APPROVED, DraftStatus.DENIED);
             List<TideUserRoleMappingDraftEntity> deleteDraftEntities = getDeleteDraftEntities(roleModel, statuses);
 
             // Check if this request has been actioned before

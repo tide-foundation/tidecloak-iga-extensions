@@ -60,7 +60,7 @@ public class TideRoleAdapter extends RoleAdapter {
             return;
         }
 
-        List<DraftStatus> statuses = Arrays.asList(DraftStatus.PENDING, DraftStatus.DRAFT, DraftStatus.APPROVED);
+        List<DraftStatus> statuses = Arrays.asList(DraftStatus.PENDING, DraftStatus.DRAFT, DraftStatus.APPROVED, DraftStatus.DENIED);
         List<TideCompositeRoleMappingDraftEntity> deleteDraftEntityList = findCompositeRoleMappingDraftsByDeleteStatuses(getEntity(), roleEntity, statuses);
 
         // If request has already been action we dont need to create another one.
