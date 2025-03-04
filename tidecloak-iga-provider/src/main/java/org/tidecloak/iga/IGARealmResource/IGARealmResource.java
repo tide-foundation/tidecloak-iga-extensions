@@ -354,10 +354,6 @@ public class IGARealmResource {
                     );
                 }
 
-                System.out.println(customAdminUiDomain);
-                System.out.println(tideIdp.getConfig().get("customAdminUIDomainSig"));
-
-
                 Map<String, String> response = new HashMap<>();
                 response.put("message", "Opening Enclave to request approval.");
                 response.put("uri", String.valueOf(uri));
