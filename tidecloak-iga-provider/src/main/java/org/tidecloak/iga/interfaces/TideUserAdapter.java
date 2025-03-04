@@ -139,12 +139,8 @@ public class TideUserAdapter extends UserAdapter {
             }
 
             // Check if this has already been action before
-            List<TideUserRoleMappingDraftEntity> draftEntities = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatusAndAction", TideUserRoleMappingDraftEntity.class)
-                    .setParameter("user", getEntity())
-                    .setParameter("roleId", role.getId())
-                    .setParameter("draftStatus", DraftStatus.DRAFT)
-                    .setParameter("actionType", ActionType.CREATE)
-                    .getResultList();
+            List<DraftStatus> statuses = Arrays.asList(DraftStatus.PENDING, DraftStatus.DRAFT, DraftStatus.APPROVED);
+            List<TideUserRoleMappingDraftEntity> draftEntities = getDraftEntities(roleModel, statuses);
 
 
             // Add draft request
@@ -231,10 +227,17 @@ public class TideUserAdapter extends UserAdapter {
                 super.deleteRoleMapping(roleModel);
                 return;
             }
+            List<TideUserRoleMappingDraftEntity> entities = getDraftEntities(role);
 
             if (!isIGAEnabled){
-                List<TideUserRoleMappingDraftEntity> draftEntities = getDraftEntities(role);
-                deleteRoleAndProofRecords(role, draftEntities);
+                deleteRoleAndProofRecords(role, entities);
+                return;
+            }
+            List<DraftStatus> statuses = Arrays.asList(DraftStatus.PENDING, DraftStatus.DRAFT, DraftStatus.APPROVED);
+            List<TideUserRoleMappingDraftEntity> deleteDraftEntities = getDeleteDraftEntities(roleModel, statuses);
+
+            // Check if this request has been actioned before
+            if(!deleteDraftEntities.isEmpty()){
                 return;
             }
 
@@ -303,6 +306,20 @@ public class TideUserAdapter extends UserAdapter {
         return em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class)
                 .setParameter("user", getEntity())
                 .setParameter("roleId", role.getId())
+                .getResultList();
+    }
+    private List<TideUserRoleMappingDraftEntity> getDraftEntities(RoleModel role, List<DraftStatus> statuses) {
+        return em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatuses", TideUserRoleMappingDraftEntity.class)
+                .setParameter("user", getEntity())
+                .setParameter("roleId", role.getId())
+                .setParameter("draftStatuses", statuses)
+                .getResultList();
+    }
+    private List<TideUserRoleMappingDraftEntity> getDeleteDraftEntities(RoleModel role, List<DraftStatus> statuses) {
+        return em.createNamedQuery("getUserRoleAssignmentDraftEntityByDeleteStatuses", TideUserRoleMappingDraftEntity.class)
+                .setParameter("user", getEntity())
+                .setParameter("roleId", role.getId())
+                .setParameter("draftStatuses", statuses)
                 .getResultList();
     }
 
