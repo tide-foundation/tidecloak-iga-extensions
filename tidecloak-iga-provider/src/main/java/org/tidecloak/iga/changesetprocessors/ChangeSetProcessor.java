@@ -254,6 +254,7 @@ public interface ChangeSetProcessor<T> {
      * @throws Exception If any error occurs during the commit process.
      */
     default void commit(KeycloakSession session, ChangeSetRequest change, T entity, EntityManager em, Runnable commitCallback) throws Exception {
+        String realmId = session.getContext().getRealm().getId();
         // Retrieve the user context drafts
         List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, change.getChangeSetId(), change.getType());
 
@@ -287,28 +288,50 @@ public interface ChangeSetProcessor<T> {
 
         // Regenerate for client full scope change request.
         List<ChangesetRequestEntity> clientFullScopeChangeRequests = em.createNamedQuery("getAllChangeRequestsByChangeSetType", ChangesetRequestEntity.class)
-                .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE).getResultList();
+                .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE)
+                .getResultStream()
+                .filter(x -> {
+                    TideClientDraftEntity tideClientDraftEntity = em.find(TideClientDraftEntity.class, x.getChangesetRequestId());
+                    if (tideClientDraftEntity == null) {
+                        em.remove(x); // Remove empty change request
+                        return false;
+                    }
+                    return tideClientDraftEntity.getClient().getRealmId().equalsIgnoreCase(realmId);
+                })
+                .toList();
+
         ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+
         clientFullScopeChangeRequests.forEach(req -> {
             TideClientDraftEntity tideClientDraftEntity = em.find(TideClientDraftEntity.class, req.getChangesetRequestId());
-            if(tideClientDraftEntity == null) {
-                em.remove(req); // remove empty change request
-                em.flush();
-                return;
-            }
+
+            if (tideClientDraftEntity == null) return; // Skip if draft entity is missing
+
             ChangeSetRequest c = getChangeSetRequestFromEntity(session, tideClientDraftEntity, ChangeSetType.CLIENT_FULLSCOPE);
+
+            // Remove associated admin authorizations
             req.getAdminAuthorizations().forEach(em::remove);
-            em.remove(req);
+
+            // Remove associated proof details
             em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                    .setParameter("recordId", req.getChangesetRequestId()).getResultStream().forEach(em::remove);
-            em.flush();
+                    .setParameter("recordId", req.getChangesetRequestId())
+                    .getResultStream()
+                    .forEach(em::remove);
+
+            // Remove the changeset request
+            em.remove(req);
+
+            // Process the workflow
             WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, c.getActionType().equals(ActionType.DELETE), c.getActionType(), ChangeSetType.CLIENT_FULLSCOPE);
             try {
-                changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT_FULLSCOPE).executeWorkflow(session, tideClientDraftEntity, em, WorkflowType.REQUEST, params, null);
+                changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT_FULLSCOPE)
+                        .executeWorkflow(session, tideClientDraftEntity, em, WorkflowType.REQUEST, params, null);
             } catch (Exception e) {
-                throw new RuntimeException(e);
+                throw new RuntimeException("Error executing workflow for request ID: " + req.getChangesetRequestId(), e);
             }
         });
+
+        // Flush once after batch processing
         em.flush();
 
         // Update affected user contexts
