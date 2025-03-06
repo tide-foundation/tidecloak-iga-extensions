@@ -236,8 +236,10 @@ public class IGARealmResource {
 
             // Check if changeset is for adding a tide realm admin.
             MultivaluedHashMap<String, String> config = componentModel.getConfig();
-            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
-                    .setParameter("ID", componentModel.getId()).getResultList();
+            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)
+                    .setParameter("ID", componentModel.getId())
+                    .setParameter("types", List.of("firstAdmin", "multiAdmin"))
+                    .getResultList();
 
             boolean isAssigningTideRealmAdminRole;
             if(draftRecordEntity instanceof TideUserRoleMappingDraftEntity){
@@ -576,7 +578,11 @@ public class IGARealmResource {
                         for ( int i = 0; i < userContexts.size(); i++){
                             orderedProofDetails.get(i).setSignature(response.Signatures[i]);
                         }
+
+                        commitRoleInitCert(session, change.getChangeSetId(), response.Signatures[0]);
+
                     }
+
 
                 }
             }

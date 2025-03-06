@@ -289,14 +289,32 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
         String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, affectedUser, "openId", affectedUserRoleEntity);
 
-        if(client.getClientId().equals(Constants.REALM_MANAGEMENT_CLIENT_ID)) {
-            RoleEntity roleEntity = em.find(RoleEntity.class, affectedUserRoleEntity.getRoleId());
-            if(roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
-                List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                        .setParameter("role", roleEntity).getResultList();
-                if(tideRoleDraftEntity.isEmpty()){
-                    throw new RuntimeException("Tide realm admin role doesnt exist");
-                }
+        RoleEntity roleEntity = em.find(RoleEntity.class, affectedUserRoleEntity.getRoleId());
+        List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                .setParameter("role", roleEntity).getResultList();
+
+//        if(client.getClientId().equals(Constants.REALM_MANAGEMENT_CLIENT_ID)) {
+//            if(roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+//                if(tideRoleDraftEntity.isEmpty()){
+//                    throw new RuntimeException("Tide realm admin role doesnt exist");
+//                }
+//                UserContext userContext = new UserContext(userContextDraft);
+//                InitializerCertifcate initializerCertifcate = InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
+//                userContext.setInitCertHash(initializerCertifcate.hash());
+//
+//                UserContext oldUserContext = new UserContext(affectedUserContextDraft.getProofDraft());
+//                if(oldUserContext.getInitCertHash() != null || oldUserContext.getThreshold() != 0){
+//                    userContext.setThreshold(initializerCertifcate.getPayload().getThreshold());
+//                    affectedUserContextDraft.setProofDraft(userContext.ToString());
+//                }
+//
+//                return;
+//            }
+//        }
+        if(!tideRoleDraftEntity.isEmpty()){
+            //check if this role has an init cert hash
+            String initCert = tideRoleDraftEntity.get(0).getInitCert();
+            if(initCert != null && !initCert.isEmpty()){
                 UserContext userContext = new UserContext(userContextDraft);
                 InitializerCertifcate initializerCertifcate = InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
                 userContext.setInitCertHash(initializerCertifcate.hash());
@@ -306,9 +324,9 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                     userContext.setThreshold(initializerCertifcate.getPayload().getThreshold());
                     affectedUserContextDraft.setProofDraft(userContext.ToString());
                 }
-
                 return;
             }
+
         }
 
         affectedUserContextDraft.setProofDraft(userContextDraft);
