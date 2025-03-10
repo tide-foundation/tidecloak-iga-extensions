@@ -16,27 +16,29 @@ import org.keycloak.common.util.Time;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.services.ErrorPage;
 import org.keycloak.services.ErrorResponse;
 import org.keycloak.services.resources.LoginActionsService;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
+import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+import org.midgard.models.RuleDefinition;
 import org.midgard.models.VendorData;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.util.*;
 
-import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRealmAdminInitCert;
+import static org.tidecloak.iga.TideRequests.TideRoleRequests.*;
 
 public class TideAdminRealmResource {
 
@@ -224,6 +226,93 @@ public class TideAdminRealmResource {
             throw e;
         }
     }
+
+    @POST
+    @Path("add-rules")
+    @Produces(MediaType.TEXT_PLAIN)
+
+    public Response AddRules(@QueryParam("roleId") String roleId, @Parameter() List<String> rules) throws Exception {
+        try{
+            ObjectMapper objectMapper = new ObjectMapper();
+            RoleModel roleModel = session.roles().getRoleById(realm, roleId);
+            roleModel.setSingleAttribute("tideThreshold", "1");
+            roleModel.setSingleAttribute("isAuthorizerRole", "true");
+
+            ArrayList<String> signModels = new ArrayList<String>();
+            signModels.add("CardanoTx:1");
+            ArrayList<RuleDefinition> rulesToAdd = new ArrayList<>();
+
+            rules.forEach(rule -> {
+                try {
+                    rulesToAdd.add(objectMapper.readValue(rule, RuleDefinition.class));
+                } catch (JsonProcessingException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            String id = KeycloakModelUtils.generateId();
+            createRoleInitCert(session, id, roleModel.getContainerId(), roleModel, "1", "EdDSA", signModels, "Transaction", rulesToAdd);
+
+            roleModel.setSingleAttribute("InitCertDraftId", id);
+
+            return buildResponse(200, "added ?" );
+        }catch(Exception e) {
+            logger.error("Error toggling IGA on realm: ", e);
+            throw e;
+        }
+    }
+
+    @GET
+    @Path("get-init-cert")
+    @Produces(MediaType.TEXT_PLAIN)
+    public Response GetInitCert(@QueryParam("roleId") String roleId) throws Exception {
+        try{
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            ObjectMapper objectMapper = new ObjectMapper();
+            List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+                    .setParameter("roleId", roleId).getResultList();
+
+            if(tideRoleDraftEntity.isEmpty()){
+                throw new Exception("Invalid request, no role draft entity found for this role ID: " + roleId);
+            }
+
+            InitializerCertifcate initializerCertifcate = InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
+
+            Map<String, String> response = new HashMap<>();
+            response.put("cert", Base64.getUrlEncoder().encodeToString(initializerCertifcate.Encode()));
+            response.put("sig", tideRoleDraftEntity.get(0).getInitCertSig());
+
+            return buildResponse(200, objectMapper.writeValueAsString(response));
+        }catch(Exception e) {
+            logger.error("Error getting init cert: ", e);
+            throw e;
+        }
+    }
+
+//    @GET
+//    @Path("get-init-cert")
+//    @Produces(MediaType.TEXT_PLAIN)
+//    public Response GetInitCert(@QueryParam("roleId") String roleId) throws Exception {
+//        try{
+//            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+//            ObjectMapper objectMapper = new ObjectMapper();
+//            List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+//                    .setParameter("roleId", roleId).getResultList();
+//
+//            if(tideRoleDraftEntity.isEmpty()){
+//                throw new Exception("Invalid request, no role draft entity found for this role ID: " + roleId);
+//            }
+//
+//            Map<String, String> response = new HashMap<>();
+//            response.put("cert", tideRoleDraftEntity.get(0).getInitCert());
+//            response.put("sig", tideRoleDraftEntity.get(0).getInitCertSig());
+//
+//            return buildResponse(200, objectMapper.writeValueAsString(response));
+//        }catch(Exception e) {
+//            logger.error("Error getting init cert: ", e);
+//            throw e;
+//        }
+//    }
 
     @POST
     @Path("get-required-action-link")

@@ -181,6 +181,18 @@ public class IGAUtils {
         return null;
     }
 
+    public static String getRoleIdFromEntity(Object entity) {
+        if (entity instanceof TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity) {
+            return tideUserRoleMappingDraftEntity.getRoleId();
+        } else if (entity instanceof TideRoleDraftEntity tideRoleDraftEntity) {
+            return tideRoleDraftEntity.getRole().getId();
+        } else if (entity instanceof TideCompositeRoleMappingDraftEntity tideCompositeRoleMappingDraftEntity) {
+            return tideCompositeRoleMappingDraftEntity.getComposite().getId();
+        }
+        return null;
+    }
+
+
 
     public static Object fetchDraftRecordEntity(EntityManager em, ChangeSetType type, String changeSetId) {
         return switch (type) {

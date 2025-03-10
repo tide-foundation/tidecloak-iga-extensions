@@ -11,12 +11,14 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.jpa.entities.UserGroupMembershipEntity;
 
 import org.keycloak.models.utils.KeycloakModelUtils;
+import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 
 import org.tidecloak.iga.changesetprocessors.utils.ClientUtils;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
+import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
@@ -31,6 +33,7 @@ import java.util.stream.Stream;
 
 import static org.keycloak.utils.StreamsUtil.closing;
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRoleInitCertDraft;
+import static org.tidecloak.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
 import static org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils.wrapRoleModel;
 
 
@@ -186,7 +189,17 @@ public class TideUserAdapter extends UserAdapter {
                         throw new Exception("Authorizer not found for this realm.");
                     }
                     if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                        createRoleInitCertDraft(session, draftUserRole.getId(), "1", 0.7, 1);
+                        createRoleInitCertDraft(session, draftUserRole.getId(), "1", 0.7, 1, "Admin", new ArrayList<>());
+                    }
+
+                }
+                else if(roleModel.getFirstAttribute("isAuthorizerRole") != null && Boolean.parseBoolean(roleModel.getFirstAttribute("isAuthorizerRole")))
+                {
+                    RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, roleModel.getFirstAttribute("InitCertDraftId"));
+
+                    if(roleInitCert != null){
+                        roleInitCert.setChangesetRequestId(draftUserRole.getId());
+                        em.flush();
                     }
                 }
 
@@ -269,7 +282,7 @@ public class TideUserAdapter extends UserAdapter {
                     throw new Exception("Authorizer not found for this realm.");
                 }
                 if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                    createRoleInitCertDraft(session, committedEntity.getId(), "1", 0.7, -1);
+                    createRoleInitCertDraft(session, committedEntity.getId(), "1", 0.7, -1, "Admin", new ArrayList<>());
                 }
             }
 
