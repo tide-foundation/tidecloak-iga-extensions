@@ -47,6 +47,9 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
         TideRoleAdapter tideRoleAdapter = new TideRoleAdapter(session, realm, em, entity.getComposite());
         tideRoleAdapter.removeChildRoleFromCompositeRoleRecords(entity, actionType);
 
+        List<AccessProofDetailEntity> accessProofDetailEntities = UserContextUtils.getUserContextDrafts(em, entity.getId());
+        accessProofDetailEntities.forEach(em::remove);
+
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(entity.getId(), ChangeSetType.COMPOSITE_ROLE));
         if(changesetRequestEntity != null){
             em.remove(changesetRequestEntity);
@@ -363,7 +366,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
         UserModel dummyUser = session.users().addUser(realm, id, id, true, false);
 
         AccessToken accessToken = ChangeSetProcessor.super.generateAccessToken(session, realm, client, dummyUser);
-        Set<RoleModel> rolesToAdd = getAllAccess(session, Set.of(realm.getDefaultRole()), client, client.getClientScopes(true).values().stream(), client.isFullScopeAllowed(), null);
+        Set<RoleModel> rolesToAdd = getAllAccess(session, Set.of(realm.getDefaultRole()), client, client.getClientScopes(true).values().stream(), client.isFullScopeAllowed(), childRole);
         rolesToAdd.forEach(r -> {
             if ( realm.getName().equalsIgnoreCase(Config.getAdminRealm())){
                 addRoleToAccessTokenMasterRealm(accessToken, r, realm, em);
