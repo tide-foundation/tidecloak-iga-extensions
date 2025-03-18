@@ -31,7 +31,7 @@ public class UserContextUtilBase {
         UserEntity user = em.getReference(UserEntity.class, userModel.getId());
 
         try {
-            return em.createNamedQuery("getAccessProofByUserIdAndClientId", UserClientAccessProofEntity.class)
+            return em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
                     .setParameter("user", user)
                     .setParameter("clientId", clientId)
                     .getSingleResult();

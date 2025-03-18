@@ -199,7 +199,7 @@ public class IGAUtils {
             case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, changeSetId);
             case ROLE -> em.find(TideRoleDraftEntity.class, changeSetId);
             case COMPOSITE_ROLE -> em.find(TideCompositeRoleMappingDraftEntity.class, changeSetId);
-            case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, changeSetId);
+            case CLIENT_DEFAULT_USER_CONTEXT, CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, changeSetId);
             default -> null;
         };
     }

@@ -37,6 +37,7 @@ import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.*;
 
@@ -221,41 +222,6 @@ public class TideAdminRealmResource {
                 }
             }
             return buildResponse(200, "IGA has been toggled to : " + isEnabled);
-        }catch(Exception e) {
-            logger.error("Error toggling IGA on realm: ", e);
-            throw e;
-        }
-    }
-
-    @POST
-    @Path("add-rules")
-    @Produces(MediaType.TEXT_PLAIN)
-
-    public Response AddRules(@QueryParam("roleId") String roleId, @Parameter() List<String> rules) throws Exception {
-        try{
-            ObjectMapper objectMapper = new ObjectMapper();
-            RoleModel roleModel = session.roles().getRoleById(realm, roleId);
-            roleModel.setSingleAttribute("tideThreshold", "1");
-            roleModel.setSingleAttribute("isAuthorizerRole", "true");
-
-            ArrayList<String> signModels = new ArrayList<String>();
-            signModels.add("CardanoTx:1");
-            ArrayList<RuleDefinition> rulesToAdd = new ArrayList<>();
-
-            rules.forEach(rule -> {
-                try {
-                    rulesToAdd.add(objectMapper.readValue(rule, RuleDefinition.class));
-                } catch (JsonProcessingException e) {
-                    throw new RuntimeException(e);
-                }
-            });
-
-            String id = KeycloakModelUtils.generateId();
-            createRoleInitCert(session, id, roleModel.getContainerId(), roleModel, "1", "EdDSA", signModels, "Transaction", rulesToAdd);
-
-            roleModel.setSingleAttribute("InitCertDraftId", id);
-
-            return buildResponse(200, "added ?" );
         }catch(Exception e) {
             logger.error("Error toggling IGA on realm: ", e);
             throw e;

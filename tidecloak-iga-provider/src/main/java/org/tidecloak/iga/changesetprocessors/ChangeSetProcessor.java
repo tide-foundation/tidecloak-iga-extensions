@@ -31,6 +31,7 @@ import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.keycloak.representations.AccessToken;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
+import org.tidecloak.iga.utils.IGAUtils;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -60,6 +61,7 @@ import java.util.stream.Stream;
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
 import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.*;
+import static org.tidecloak.iga.utils.IGAUtils.fetchDraftRecordEntity;
 
 public interface ChangeSetProcessor<T> {
 
@@ -373,7 +375,6 @@ public interface ChangeSetProcessor<T> {
 
         // Generate a transformed user context using entity-specific logic
         String userContextDraft = this.generateTransformedUserContext(session, realm, clientModel, userModel, "openid", entity);
-        UserContext userContext = new UserContext(userContextDraft);
         UserEntity user = TideEntityUtils.toUserEntity(userModel, em);
         saveUserContextDraft(session, em, realm, clientModel, user, recordId, type, userContextDraft);
     }
