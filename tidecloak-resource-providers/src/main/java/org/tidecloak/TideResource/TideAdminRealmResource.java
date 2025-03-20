@@ -36,6 +36,8 @@ import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -253,6 +255,82 @@ public class TideAdminRealmResource {
             logger.error("Error getting init cert: ", e);
             throw e;
         }
+    }
+
+    @GET
+    @Path("Create-Approval-URI")
+    public Response CreateApprovalUri() throws URISyntaxException, JsonProcessingException {
+        IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
+
+        ComponentModel componentModel = realm.getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .findFirst()
+                .orElse(null);
+
+        if(componentModel == null) {
+            return buildResponse(400, "There is no tide-vendor-key component set up for this realm, " + realm.getName());
+        }
+
+        MultivaluedHashMap<String, String> config = componentModel.getConfig();
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        String defaultAdminUiDomain = tideIdp.getConfig().get("changeSetEndpoint");
+        String customAdminUiDomain = tideIdp.getConfig().get("CustomAdminUIDomain");
+        String redirectUrlSig = tideIdp.getConfig().get("changeSetURLSig");
+
+        URI redirectURI = new URI(defaultAdminUiDomain);
+        UserSessionModel userSession = session.sessions().getUserSession(realm, auth.adminAuth().getToken().getSessionId());
+        String port = redirectURI.getPort() == -1 ? "" : ":" + redirectURI.getPort();
+        String voucherURL = redirectURI.getScheme() + "://" + redirectURI.getHost() + port + "/realms/" +
+                session.getContext().getRealm().getName() + "/tidevouchers/fromUserSession?sessionId=" +userSession.getId();
+
+        URI uri = Midgard.CreateURL(
+                auth.adminAuth().getToken().getSessionId(),
+                redirectURI.toString(),//userSession.getNote("redirectUri"),
+                redirectUrlSig,
+                tideIdp.getConfig().get("homeORKurl"),
+                config.getFirst("clientId"),
+                config.getFirst("gVRK"),
+                config.getFirst("gVRKCertificate"),
+                realm.isRegistrationAllowed(),
+                Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
+                tideIdp.getConfig().get("LogoURL"),
+                tideIdp.getConfig().get("ImageURL"),
+                "approval",
+                tideIdp.getConfig().get("settingsSig"),
+                voucherURL, //voucherURL,
+                ""
+        );
+
+        URI customDomainUri = null;
+        if(customAdminUiDomain != null) {
+            customDomainUri = Midgard.CreateURL(
+                    auth.adminAuth().getToken().getSessionId(),
+                    customAdminUiDomain,//userSession.getNote("redirectUri"),
+                    tideIdp.getConfig().get("customAdminUIDomainSig"),
+                    tideIdp.getConfig().get("homeORKurl"),
+                    config.getFirst("clientId"),
+                    config.getFirst("gVRK"),
+                    config.getFirst("gVRKCertificate"),
+                    realm.isRegistrationAllowed(),
+                    Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
+                    tideIdp.getConfig().get("LogoURL"),
+                    tideIdp.getConfig().get("ImageURL"),
+                    "approval",
+                    tideIdp.getConfig().get("settingsSig"),
+                    voucherURL, //voucherURL,
+                    ""
+            );
+        }
+
+        Map<String, String> response = new HashMap<>();
+        response.put("message", "Opening Enclave to request approval.");
+        response.put("uri", String.valueOf(uri));
+        if(customAdminUiDomain != null) {
+            response.put("customDomainUri", String.valueOf(customDomainUri));
+        }
+
+        return buildResponse(200, objectMapper.writeValueAsString(response));
     }
 
 //    @GET
