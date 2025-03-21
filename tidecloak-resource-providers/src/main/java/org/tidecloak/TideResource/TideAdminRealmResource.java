@@ -16,6 +16,7 @@ import org.keycloak.common.util.Time;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.services.ErrorPage;
@@ -23,11 +24,14 @@ import org.keycloak.services.ErrorResponse;
 import org.keycloak.services.resources.LoginActionsService;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
+import org.midgard.models.AdminAuthorization;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RuleDefinition;
+import org.midgard.models.UserContext.UserContext;
 import org.midgard.models.VendorData;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
+import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
@@ -331,6 +335,52 @@ public class TideAdminRealmResource {
         }
 
         return buildResponse(200, objectMapper.writeValueAsString(response));
+    }
+
+    @POST
+    @Path("create-authorization")
+    @Produces(MediaType.TEXT_PLAIN)
+    public Response CreateAuthorization(@QueryParam("clientId") String clientId, @FormParam("authorizerApproval") String authorizerApproval, @FormParam("authorizerAuthentication") String authorizerAuthentication ) throws Exception {
+        try {
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            UserModel user = auth.adminAuth().getUser();
+
+            ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
+                    .filter(x -> tideVendorKeyId.equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
+
+            if(componentModel == null) {
+                logger.warn("There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
+                return ErrorPage.error(session, null, Response.Status.BAD_REQUEST, "There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
+            }
+            MultivaluedHashMap<String, String> tideVendorKeyConfig = componentModel.getConfig();
+            ObjectMapper objectMapper = new ObjectMapper();
+            String currentSecretKeys = tideVendorKeyConfig.getFirst("clientSecret");
+
+            SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
+            String vrk = secretKeys.activeVrk;
+
+            VendorData vendorData = Midgard.DecryptVendorData(authorizerAuthentication, vrk);
+            ;
+            UserEntity userEntity = em.find(UserEntity.class, user.getId());
+            List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
+                    .setParameter("user", userEntity)
+                    .setParameter("clientId", realm.getClientByClientId(clientId).getId()).getResultList();
+
+            if ( userClientAccessProofEntity == null || userClientAccessProofEntity.isEmpty() ){
+                throw new Exception("This user does not have any roles for this client: Client UID: " + clientId + ", User ID: " + userEntity.getId());
+            }
+
+            AdminAuthorization adminAuthorization = new AdminAuthorization(userClientAccessProofEntity.get(0).getAccessProof(), userClientAccessProofEntity.get(0).getAccessProofSig(), vendorData.AuthToken, vendorData.blindSig, authorizerApproval);
+
+
+            return buildResponse(200, adminAuthorization.ToString());
+
+        } catch (Exception e) {
+            logger.error("Error creating authorization" + Arrays.toString(e.getStackTrace()));
+            return  buildResponse(500, "Error creating authorization" + e.getMessage());
+        }
     }
 
 //    @GET
