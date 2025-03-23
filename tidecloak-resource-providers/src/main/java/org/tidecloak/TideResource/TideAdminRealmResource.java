@@ -372,7 +372,8 @@ public class TideAdminRealmResource {
                 throw new Exception("This user does not have any roles for this client: Client UID: " + clientId + ", User ID: " + userEntity.getId());
             }
 
-            AdminAuthorization adminAuthorization = new AdminAuthorization(userClientAccessProofEntity.get(0).getAccessProof(), userClientAccessProofEntity.get(0).getAccessProofSig(), vendorData.AuthToken, vendorData.blindSig, authorizerApproval);
+            UserContext adminContext = new UserContext(userClientAccessProofEntity.get(0).getAccessProof());
+            AdminAuthorization adminAuthorization = new AdminAuthorization(adminContext.ToString(), userClientAccessProofEntity.get(0).getAccessProofSig(), vendorData.AuthToken, vendorData.blindSig, authorizerApproval);
 
 
             return buildResponse(200, adminAuthorization.ToString());
