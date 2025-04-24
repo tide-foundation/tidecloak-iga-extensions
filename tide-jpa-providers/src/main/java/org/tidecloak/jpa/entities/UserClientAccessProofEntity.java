@@ -9,7 +9,8 @@ import java.io.Serializable;
 @NamedQueries({
         @NamedQuery(name="getAccessProofByUserId", query="select u from UserClientAccessProofEntity u where u.user = :user"),
         @NamedQuery(name="getAccessProofByClientId", query="select u from UserClientAccessProofEntity u where u.clientId = :clientId"),
-        @NamedQuery(name="getAccessProofByUserIdAndClientId", query="select u from UserClientAccessProofEntity u where u.user = :user and u.clientId = :clientId "),
+        @NamedQuery(name="getAccessProofByUserAndClientId", query="select u from UserClientAccessProofEntity u where u.user = :user and u.clientId = :clientId "),
+        @NamedQuery(name="getAccessProofByUserIdAndClientId", query="select u from UserClientAccessProofEntity u where u.user.Id = :userId and u.clientId = :clientId "),
         @NamedQuery(name="deleteProofByUser", query="delete from UserClientAccessProofEntity m where m.user = :user"),
         @NamedQuery(name="DeleteAllUserProofsByRealm",
                 query = "DELETE FROM UserClientAccessProofEntity r " +

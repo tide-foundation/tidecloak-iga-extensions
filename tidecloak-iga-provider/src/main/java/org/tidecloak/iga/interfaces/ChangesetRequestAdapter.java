@@ -35,7 +35,7 @@ public class ChangesetRequestAdapter {
         }
         UserEntity adminEntity = em.find(UserEntity.class, adminUser.getId());
         ClientModel client = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
-        List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserIdAndClientId", UserClientAccessProofEntity.class)
+        List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
                 .setParameter("user", adminEntity)
                 .setParameter("clientId", client.getId()).getResultList();
 
@@ -61,7 +61,7 @@ public class ChangesetRequestAdapter {
         }
         UserEntity adminEntity = em.find(UserEntity.class, adminUser.getId());
         ClientModel client = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
-        List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserIdAndClientId", UserClientAccessProofEntity.class)
+        List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
                 .setParameter("user", adminEntity)
                 .setParameter("clientId", client.getId()).getResultList();
 

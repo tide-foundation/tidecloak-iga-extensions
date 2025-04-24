@@ -138,6 +138,10 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
         RealmModel realm = session.getContext().getRealm();
         RoleModel role = realm.getRoleById(entity.getRole().getId());
         List<UserModel> users = session.users().searchForUserStream(realm, new HashMap<>()).filter(u -> u.hasRole(role)).toList();
+        if(users.isEmpty()){
+            return;
+        }
+        entity.setAction(ActionType.DELETE);
 
         List<ClientModel> clientList = getUniqueClientList(session, realm, role);
         clientList.forEach(client -> {

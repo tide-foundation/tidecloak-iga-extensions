@@ -236,8 +236,10 @@ public class IGARealmResource {
 
             // Check if changeset is for adding a tide realm admin.
             MultivaluedHashMap<String, String> config = componentModel.getConfig();
-            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
-                    .setParameter("ID", componentModel.getId()).getResultList();
+            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)
+                    .setParameter("ID", componentModel.getId())
+                    .setParameter("types", List.of("firstAdmin", "multiAdmin"))
+                    .getResultList();
 
             boolean isAssigningTideRealmAdminRole;
             if(draftRecordEntity instanceof TideUserRoleMappingDraftEntity){
@@ -479,7 +481,7 @@ public class IGARealmResource {
 
                     List<UserContext> orderedContext;
                     List<AccessProofDetailEntity> orderedProofDetails;
-                    if(isTideRealmRoleAssignment(mapping) && change.getActionType().equals(ActionType.DELETE)){
+                    if(isAuthorityAssignment(mapping, em) && change.getActionType().equals(ActionType.DELETE)){
                         Stream<UserContext> adminContexts = userContexts.stream().filter(x -> x.getInitCertHash() != null);
                         Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
                         orderedContext = Stream.concat(adminContexts, normalUserContext).toList();
@@ -558,7 +560,7 @@ public class IGARealmResource {
 
                     authorizerBuilder.AddAuthorizationToSignRequest(req);
 
-                    if(isTideRealmRoleAssignment(mapping)) {
+                    if(isAuthorityAssignment(mapping, em)) {
                         RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, change.getChangeSetId());
                         if(roleInitCert == null) {
                             throw new Exception("Role Init Cert draft not found for changeSet, " + change.getChangeSetId());
@@ -569,7 +571,8 @@ public class IGARealmResource {
                         for ( int i = 0; i < userContexts.size(); i++){
                             orderedProofDetails.get(i).setSignature(response.Signatures[i + 1]);
                         }
-                        commitRoleInitCert(session, change.getChangeSetId(), response.Signatures[0]);
+                        commitRoleInitCert(session, change.getChangeSetId(), mapping, response.Signatures[0]);
+
                     } else {
                         SignatureResponse response = Midgard.SignModel(settings, req);
 
@@ -577,6 +580,7 @@ public class IGARealmResource {
                             orderedProofDetails.get(i).setSignature(response.Signatures[i]);
                         }
                     }
+
 
                 }
             }
@@ -824,6 +828,20 @@ public class IGARealmResource {
         return changes;
     }
 
+
+    private List<?> getRoleFromMapping(EntityManager em, ChangeSetRequest change, ChangeSetType type, ActionType action) {
+        return switch (type) {
+            case USER_ROLE -> getUserRoleMappings(em, change, action);
+            case GROUP, USER_GROUP_MEMBERSHIP, GROUP_ROLE -> null;
+            case COMPOSITE_ROLE, DEFAULT_ROLES -> getCompositeRoleMappings(em, change, action);
+            case ROLE -> getRoleMappings(em, change, action);
+            case USER -> getUserMappings(em, change, action);
+            case CLIENT_FULLSCOPE -> getClientMappings(em, change, action);
+            case CLIENT -> getClientEntity(em, change);
+            default -> Collections.emptyList();
+        };
+    }
+
     private List<?> getMappings(EntityManager em, ChangeSetRequest change, ChangeSetType type, ActionType action) {
         return switch (type) {
             case USER_ROLE -> getUserRoleMappings(em, change, action);
@@ -912,10 +930,11 @@ public class IGARealmResource {
                 .build();
     }
 
-    private boolean isTideRealmRoleAssignment(Object mapping){
+    private boolean isAuthorityAssignment(Object mapping, EntityManager em){
         if ( mapping instanceof  TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
-            RoleModel roleModel = realm.getRoleById(tideUserRoleMappingDraftEntity.getRoleId());
-            return roleModel.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, tideUserRoleMappingDraftEntity.getId());
+
+            return roleInitCert != null;
         }
         return false;
     }

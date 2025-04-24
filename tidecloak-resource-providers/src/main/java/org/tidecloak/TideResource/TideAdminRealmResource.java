@@ -16,27 +16,36 @@ import org.keycloak.common.util.Time;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.services.ErrorPage;
 import org.keycloak.services.ErrorResponse;
 import org.keycloak.services.resources.LoginActionsService;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
+import org.midgard.models.AdminAuthorization;
+import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+import org.midgard.models.RuleDefinition;
+import org.midgard.models.UserContext.UserContext;
 import org.midgard.models.VendorData;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
+import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.*;
+import java.util.stream.Collectors;
 
-import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRealmAdminInitCert;
+import static org.tidecloak.iga.TideRequests.TideRoleRequests.*;
 
 public class TideAdminRealmResource {
 
@@ -224,6 +233,181 @@ public class TideAdminRealmResource {
             throw e;
         }
     }
+
+    @GET
+    @Path("get-init-cert")
+    @Produces(MediaType.TEXT_PLAIN)
+    public Response GetInitCert(@QueryParam("roleId") String roleId) throws Exception {
+        try{
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            ObjectMapper objectMapper = new ObjectMapper();
+            List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+                    .setParameter("roleId", roleId).getResultList();
+
+            if(tideRoleDraftEntity.isEmpty()){
+                throw new Exception("Invalid request, no role draft entity found for this role ID: " + roleId);
+            }
+
+            InitializerCertifcate initializerCertifcate = InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
+
+            Map<String, String> response = new HashMap<>();
+            response.put("cert", Base64.getUrlEncoder().encodeToString(initializerCertifcate.Encode()));
+            response.put("sig", tideRoleDraftEntity.get(0).getInitCertSig());
+
+            return buildResponse(200, objectMapper.writeValueAsString(response));
+        }catch(Exception e) {
+            logger.error("Error getting init cert: ", e);
+            throw e;
+        }
+    }
+
+    @GET
+    @Path("Create-Approval-URI")
+    public Response CreateApprovalUri() throws URISyntaxException, JsonProcessingException {
+        IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
+
+        ComponentModel componentModel = realm.getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .findFirst()
+                .orElse(null);
+
+        if(componentModel == null) {
+            return buildResponse(400, "There is no tide-vendor-key component set up for this realm, " + realm.getName());
+        }
+
+        MultivaluedHashMap<String, String> config = componentModel.getConfig();
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        String defaultAdminUiDomain = tideIdp.getConfig().get("changeSetEndpoint");
+        String customAdminUiDomain = tideIdp.getConfig().get("CustomAdminUIDomain");
+        String redirectUrlSig = tideIdp.getConfig().get("changeSetURLSig");
+
+        URI redirectURI = new URI(defaultAdminUiDomain);
+        UserSessionModel userSession = session.sessions().getUserSession(realm, auth.adminAuth().getToken().getSessionId());
+        String port = redirectURI.getPort() == -1 ? "" : ":" + redirectURI.getPort();
+        String voucherURL = redirectURI.getScheme() + "://" + redirectURI.getHost() + port + "/realms/" +
+                session.getContext().getRealm().getName() + "/tidevouchers/fromUserSession?sessionId=" +userSession.getId();
+
+        URI uri = Midgard.CreateURL(
+                auth.adminAuth().getToken().getSessionId(),
+                redirectURI.toString(),//userSession.getNote("redirectUri"),
+                redirectUrlSig,
+                tideIdp.getConfig().get("homeORKurl"),
+                config.getFirst("clientId"),
+                config.getFirst("gVRK"),
+                config.getFirst("gVRKCertificate"),
+                realm.isRegistrationAllowed(),
+                Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
+                tideIdp.getConfig().get("LogoURL"),
+                tideIdp.getConfig().get("ImageURL"),
+                "approval",
+                tideIdp.getConfig().get("settingsSig"),
+                voucherURL, //voucherURL,
+                ""
+        );
+
+        URI customDomainUri = null;
+        if(customAdminUiDomain != null) {
+            customDomainUri = Midgard.CreateURL(
+                    auth.adminAuth().getToken().getSessionId(),
+                    customAdminUiDomain,//userSession.getNote("redirectUri"),
+                    tideIdp.getConfig().get("customAdminUIDomainSig"),
+                    tideIdp.getConfig().get("homeORKurl"),
+                    config.getFirst("clientId"),
+                    config.getFirst("gVRK"),
+                    config.getFirst("gVRKCertificate"),
+                    realm.isRegistrationAllowed(),
+                    Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
+                    tideIdp.getConfig().get("LogoURL"),
+                    tideIdp.getConfig().get("ImageURL"),
+                    "approval",
+                    tideIdp.getConfig().get("settingsSig"),
+                    voucherURL, //voucherURL,
+                    ""
+            );
+        }
+
+        Map<String, String> response = new HashMap<>();
+        response.put("message", "Opening Enclave to request approval.");
+        response.put("uri", String.valueOf(uri));
+        if(customAdminUiDomain != null) {
+            response.put("customDomainUri", String.valueOf(customDomainUri));
+        }
+
+        return buildResponse(200, objectMapper.writeValueAsString(response));
+    }
+
+    @POST
+    @Path("create-authorization")
+    @Produces(MediaType.TEXT_PLAIN)
+    public Response CreateAuthorization(@QueryParam("clientId") String clientId, @FormParam("authorizerApproval") String authorizerApproval, @FormParam("authorizerAuthentication") String authorizerAuthentication ) throws Exception {
+        try {
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            UserModel user = auth.adminAuth().getUser();
+
+            ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
+                    .filter(x -> tideVendorKeyId.equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
+
+            if(componentModel == null) {
+                logger.warn("There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
+                return ErrorPage.error(session, null, Response.Status.BAD_REQUEST, "There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
+            }
+            MultivaluedHashMap<String, String> tideVendorKeyConfig = componentModel.getConfig();
+            ObjectMapper objectMapper = new ObjectMapper();
+            String currentSecretKeys = tideVendorKeyConfig.getFirst("clientSecret");
+
+            SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
+            String vrk = secretKeys.activeVrk;
+
+            VendorData vendorData = Midgard.DecryptVendorData(authorizerAuthentication, vrk);
+            ;
+            UserEntity userEntity = em.find(UserEntity.class, user.getId());
+            List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
+                    .setParameter("user", userEntity)
+                    .setParameter("clientId", realm.getClientByClientId(clientId).getId()).getResultList();
+
+            if ( userClientAccessProofEntity == null || userClientAccessProofEntity.isEmpty() ){
+                throw new Exception("This user does not have any roles for this client: Client UID: " + clientId + ", User ID: " + userEntity.getId());
+            }
+
+            UserContext adminContext = new UserContext(userClientAccessProofEntity.get(0).getAccessProof());
+            AdminAuthorization adminAuthorization = new AdminAuthorization(adminContext.ToString(), userClientAccessProofEntity.get(0).getAccessProofSig(), vendorData.AuthToken, vendorData.blindSig, authorizerApproval);
+
+
+            return buildResponse(200, adminAuthorization.ToString());
+
+        } catch (Exception e) {
+            logger.error("Error creating authorization" + Arrays.toString(e.getStackTrace()));
+            return  buildResponse(500, "Error creating authorization" + e.getMessage());
+        }
+    }
+
+//    @GET
+//    @Path("get-init-cert")
+//    @Produces(MediaType.TEXT_PLAIN)
+//    public Response GetInitCert(@QueryParam("roleId") String roleId) throws Exception {
+//        try{
+//            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+//            ObjectMapper objectMapper = new ObjectMapper();
+//            List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+//                    .setParameter("roleId", roleId).getResultList();
+//
+//            if(tideRoleDraftEntity.isEmpty()){
+//                throw new Exception("Invalid request, no role draft entity found for this role ID: " + roleId);
+//            }
+//
+//            Map<String, String> response = new HashMap<>();
+//            response.put("cert", tideRoleDraftEntity.get(0).getInitCert());
+//            response.put("sig", tideRoleDraftEntity.get(0).getInitCertSig());
+//
+//            return buildResponse(200, objectMapper.writeValueAsString(response));
+//        }catch(Exception e) {
+//            logger.error("Error getting init cert: ", e);
+//            throw e;
+//        }
+//    }
 
     @POST
     @Path("get-required-action-link")

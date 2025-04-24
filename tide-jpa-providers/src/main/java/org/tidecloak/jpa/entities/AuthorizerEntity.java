@@ -7,6 +7,11 @@ import org.keycloak.models.jpa.entities.UserEntity;
 
 @NamedQueries({
         @NamedQuery(name="getAuthorizerByProviderId", query="SELECT a FROM AuthorizerEntity a WHERE a.keyProvider.ID = :ID"),
+        @NamedQuery(
+                name = "getAuthorizerByProviderIdAndTypes",
+                query = "SELECT a FROM AuthorizerEntity a WHERE a.keyProvider.ID = :ID AND a.type IN (:types)"
+        )
+
 })
 
 @Entity

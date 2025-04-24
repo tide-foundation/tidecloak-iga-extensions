@@ -14,6 +14,7 @@ import org.tidecloak.shared.enums.ActionType;
                         "AND r.role IN ( SELECT u from RoleEntity u where u.realmId =:realmId )"
         ),
         @NamedQuery(name="getRoleDraftByRole", query="SELECT r FROM TideRoleDraftEntity r WHERE r.role = :role"),
+        @NamedQuery(name="getRoleDraftByRoleId", query="SELECT r FROM TideRoleDraftEntity r WHERE r.role.id = :roleId"),
         @NamedQuery(name="getRoleDraftByRoleEntityAndDeleteStatus", query="SELECT r FROM TideRoleDraftEntity r WHERE r.role = :role And r.deleteStatus = :deleteStatus"),
         @NamedQuery(name="getRoleDraftByRoleAndDeleteStatus", query="SELECT r FROM TideRoleDraftEntity r WHERE r.id = :changesetId AND r.deleteStatus = :deleteStatus"),
         @NamedQuery(name="DeleteRoleDraftByRole", query="DELETE from TideRoleDraftEntity r WHERE r.id = :id"),

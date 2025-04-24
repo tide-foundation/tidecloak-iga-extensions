@@ -181,13 +181,25 @@ public class IGAUtils {
         return null;
     }
 
+    public static String getRoleIdFromEntity(Object entity) {
+        if (entity instanceof TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity) {
+            return tideUserRoleMappingDraftEntity.getRoleId();
+        } else if (entity instanceof TideRoleDraftEntity tideRoleDraftEntity) {
+            return tideRoleDraftEntity.getRole().getId();
+        } else if (entity instanceof TideCompositeRoleMappingDraftEntity tideCompositeRoleMappingDraftEntity) {
+            return tideCompositeRoleMappingDraftEntity.getComposite().getId();
+        }
+        return null;
+    }
+
+
 
     public static Object fetchDraftRecordEntity(EntityManager em, ChangeSetType type, String changeSetId) {
         return switch (type) {
             case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, changeSetId);
             case ROLE -> em.find(TideRoleDraftEntity.class, changeSetId);
             case COMPOSITE_ROLE -> em.find(TideCompositeRoleMappingDraftEntity.class, changeSetId);
-            case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, changeSetId);
+            case CLIENT_DEFAULT_USER_CONTEXT, CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, changeSetId);
             default -> null;
         };
     }
