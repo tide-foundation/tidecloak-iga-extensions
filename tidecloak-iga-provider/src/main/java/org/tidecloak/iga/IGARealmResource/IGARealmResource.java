@@ -178,6 +178,7 @@ public class IGARealmResource {
     public Response signChangeset(ChangeSetRequest changeSet) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, changeSet.getType(), changeSet.getChangeSetId());
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
 
         if(changeSet.getType().equals(ChangeSetType.USER_ROLE)){
@@ -216,11 +217,18 @@ public class IGARealmResource {
         }
 
         // Fetch the draft record entity and proof details based on the change set type
-        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, changeSet.getType(), changeSet.getChangeSetId());
         List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, IGAUtils.getEntityId(draftRecordEntity), changeSet.getType());;
 
         if (draftRecordEntity == null) {
             return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
+        }
+
+        if(IGAUtils.isIGAEnabled(realm) && tideIdp == null){
+            // If no IDP, we just get "approval" from users with ADMIN role
+            IGAUtils.approveChangeRequest(session, auth.adminAuth().getUser(), proofDetails);
+            IGAUtils.updateDraftStatus(changeSet.getType(), changeSet.getActionType(), draftRecordEntity);
+            em.flush();
+            return buildResponse(200, "approved");
         }
 
         try {

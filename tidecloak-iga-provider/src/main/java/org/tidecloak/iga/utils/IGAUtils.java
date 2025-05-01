@@ -4,10 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
-import org.keycloak.models.ClientModel;
-import org.keycloak.models.KeycloakSession;
-import org.keycloak.models.RealmModel;
-import org.keycloak.models.RoleModel;
+import org.keycloak.models.*;
 import org.midgard.Midgard;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
@@ -59,6 +56,21 @@ public class IGAUtils {
                 .setParameter("changesetTypes", changeSetTypes) // Pass list instead of single value
                 .getResultStream()
                 .collect(Collectors.toList());
+    }
+
+    public static void approveChangeRequest(KeycloakSession session, UserModel user, List<AccessProofDetailEntity> proofDetails) throws Exception {
+        var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+        if(tideIdp != null) {
+            throw new Exception("This method can only be run without Tide IDP.");
+        }
+        RoleModel realmAdminRole = session.getContext().getRealm().getClientByClientId(org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(AdminRoles.REALM_ADMIN);
+        if (!user.hasRole(realmAdminRole)){
+            throw new Exception("User is not authorized to approve requests.");
+        }
+
+        for(int i = 0; i < proofDetails.size(); i++){
+            proofDetails.get(i).setSignature(user.getId());
+        }
     }
 
     public static List<String>  signInitialTideAdmin(MultivaluedHashMap<String, String> keyProviderConfig,

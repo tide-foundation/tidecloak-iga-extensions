@@ -257,6 +257,12 @@ public interface ChangeSetProcessor<T> {
      */
     default void commit(KeycloakSession session, ChangeSetRequest change, T entity, EntityManager em, Runnable commitCallback) throws Exception {
         String realmId = session.getContext().getRealm().getId();
+        var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+
+        if(IGAUtils.isIGAEnabled(session.getContext().getRealm()) && tideIdp == null){
+            commitCallback.run();
+            return;
+        }
         // Retrieve the user context drafts
         List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, change.getChangeSetId(), change.getType());
 

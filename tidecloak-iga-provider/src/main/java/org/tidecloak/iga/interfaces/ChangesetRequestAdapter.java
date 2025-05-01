@@ -35,9 +35,17 @@ public class ChangesetRequestAdapter {
         }
         UserEntity adminEntity = em.find(UserEntity.class, adminUser.getId());
         ClientModel client = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
+        var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+
+        if(IGAUtils.isIGAEnabled(session.getContext().getRealm()) && tideIdp == null) {
+            AdminAuthorization adminAuthorization = new AdminAuthorization(adminUser.getId(), "", "", "", "");
+
+        }
+
+
         List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
-                .setParameter("user", adminEntity)
-                .setParameter("clientId", client.getId()).getResultList();
+            .setParameter("user", adminEntity)
+            .setParameter("clientId", client.getId()).getResultList();
 
         if ( userClientAccessProofEntity == null ){
             throw new Exception("This admin user does not have any realm management roles, " + adminUser.getId());
