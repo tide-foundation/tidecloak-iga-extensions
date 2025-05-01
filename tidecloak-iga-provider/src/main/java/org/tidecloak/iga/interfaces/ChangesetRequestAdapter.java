@@ -38,10 +38,13 @@ public class ChangesetRequestAdapter {
         var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
 
         if(IGAUtils.isIGAEnabled(session.getContext().getRealm()) && tideIdp == null) {
-            AdminAuthorization adminAuthorization = new AdminAuthorization(adminUser.getId(), "", "", "", "");
-
+            AdminAuthorization adminAuthorization = new AdminAuthorization(adminUser.getId(), "approvedBy::"+adminUser.getId(), "", "", "");
+            AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), adminAuthorization, adminUser.getId(), em);
+            changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
+            Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
+            IGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), draftRecordEntity);
+            return;
         }
-
 
         List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
             .setParameter("user", adminEntity)
@@ -53,7 +56,7 @@ public class ChangesetRequestAdapter {
 
         UserContext adminContext = new UserContext(userClientAccessProofEntity.get(0).getAccessProof());
         AdminAuthorization adminAuthorization = new AdminAuthorization(adminContext.ToString(), userClientAccessProofEntity.get(0).getAccessProofSig(), adminTideAuthMsg, adminTideBlindSig, adminSessionApprovalSig);
-        AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), adminAuthorization, userClientAccessProofEntity.get(0).getUser().getId(), em);
+        AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), adminAuthorization, adminUser.getId(), em);
         changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
 
         Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
@@ -77,7 +80,7 @@ public class ChangesetRequestAdapter {
             throw new Exception("This admin user does not have any realm management roles, " + adminUser.getId());
         }
 
-        AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), null, userClientAccessProofEntity.get(0).getUser().getId(), em);
+        AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), null, adminUser.getId(), em);
         changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
 
         // Check if change request is no longer valid and process it
