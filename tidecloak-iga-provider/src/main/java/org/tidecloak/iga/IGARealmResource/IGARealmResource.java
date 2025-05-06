@@ -181,11 +181,17 @@ public class IGARealmResource {
         Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, changeSet.getType(), changeSet.getChangeSetId());
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
 
+        // check is admin has signed this already.
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
+        if (changesetRequestEntity == null){
+            throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
+        }
+
+        // Check if this request is assigning TIDE-REALM-ADMIN role to a user. User to be assigned this role required a tide account linked.
         if(changeSet.getType().equals(ChangeSetType.USER_ROLE)){
             TideUserRoleMappingDraftEntity entity = em.find(TideUserRoleMappingDraftEntity.class, changeSet.getChangeSetId());
             if (entity != null) {
                 RoleEntity role = em.find(RoleEntity.class, entity.getRoleId());
-                // check if user has tide account linked
                 if(role != null &&
                         role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN) &&
                         !entity.getUser().getAttributes().stream().anyMatch(a -> a.getName().equalsIgnoreCase("vuid") || a.getName().equalsIgnoreCase("tideuserkey")))
@@ -193,11 +199,6 @@ public class IGARealmResource {
                     return Response.status(Response.Status.BAD_REQUEST).entity("User needs a tide account linked for the tide-realm-admin role").build();
                 }
             }
-        }
-        // check is admin has signed this already.
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
-        if (changesetRequestEntity == null){
-            throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
         }
 
         AdminAuthorizationEntity adminAuthorizationEntity = changesetRequestEntity
@@ -223,10 +224,21 @@ public class IGARealmResource {
             return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
         }
 
+        // Check if IGA is enabled with no tide.
         if(IGAUtils.isIGAEnabled(realm) && tideIdp == null){
-            // If no IDP, we just get "approval" from users with ADMIN role
+            RoleModel realmAdminRole = session.roles().getClientRole(realmManagement, AdminRoles.REALM_ADMIN);
+            int adminCount = ChangesetRequestAdapter.getNumberOfActiveAdmins(session, realm, realmAdminRole, em);
+            boolean isTemporaryAdmin = auth.adminAuth().getUser().getFirstAttribute("is_temporary_admin") != null && auth.adminAuth().getUser().getFirstAttribute("is_temporary_admin").equalsIgnoreCase("true");
+
+            // if approver is temp admin, check if there are users with realm-admin role. IF a realm-admin user exists, temp admin is not allowed to approve a request.
+            if(isTemporaryAdmin && adminCount > 0){
+                return Response.status(Response.Status.BAD_REQUEST).entity("Temporary admin is not allowed to approve change request, contact a realm-admin to approve. User ID: " + auth.adminAuth().getUser().getId()).build();
+            }
+
+            // If no IDP, we just get "approval" from users with REALM_ADMIN role
             IGAUtils.approveChangeRequest(session, auth.adminAuth().getUser(), proofDetails);
-            IGAUtils.updateDraftStatus(changeSet.getType(), changeSet.getActionType(), draftRecordEntity);
+            ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSet.getType().name(), changeSet.getChangeSetId(), changeSet.getActionType().name(), auth.adminAuth().getUser(), "", "", "");
+            IGAUtils.updateDraftStatus(session, changeSet.getType(), changeSet.getChangeSetId(), changeSet.getActionType(), draftRecordEntity);
             em.flush();
             return buildResponse(200, "approved");
         }
@@ -374,7 +386,6 @@ public class IGARealmResource {
                     response.put("customDomainUri", String.valueOf(customDomainUri));
                 }
 
-
                 return buildResponse(200, objectMapper.writeValueAsString(response));
             }
 
@@ -454,7 +465,7 @@ public class IGARealmResource {
                     .findFirst()
                     .orElse(null);
 
-            var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+            var tideIdp = session.identityProviders().getByAlias("tide");
             ActionType action = change.getActionType();
             ChangeSetType type = change.getType();
 
@@ -466,7 +477,7 @@ public class IGARealmResource {
             Object mapping = mappings.get(0);
             em.lock(mapping, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
 
-            if (tideIdp != null && componentModel != null){
+            if (tideIdp != null && componentModel != null) {
                 realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
                         .setParameter("ID", componentModel.getId()).getResultList();
 

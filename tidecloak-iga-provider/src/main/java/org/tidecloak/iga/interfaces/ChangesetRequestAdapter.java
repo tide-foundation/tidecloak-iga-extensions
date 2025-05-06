@@ -38,7 +38,7 @@ public class ChangesetRequestAdapter {
         var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
 
         if(IGAUtils.isIGAEnabled(session.getContext().getRealm()) && tideIdp == null) {
-            AdminAuthorization adminAuthorization = new AdminAuthorization(adminUser.getId(), "approvedBy::"+adminUser.getId(), "", "", "");
+            AdminAuthorization adminAuthorization = new AdminAuthorization(adminUser.getId(), "approvedBy::"+ adminUser.getId(), "", "", "");
             AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), adminAuthorization, adminUser.getId(), em);
             changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
             Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
@@ -91,18 +91,31 @@ public class ChangesetRequestAdapter {
     public static DraftStatus getChangeSetStatus(KeycloakSession session, String changeSetId, ChangeSetType changeSetType) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
-        RoleModel tideRole = session.clients()
-                .getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID)
-                .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
 
+        var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+        int threshold;
+        int numberOfAdmins;
+
+        if(IGAUtils.isIGAEnabled(session.getContext().getRealm()) && tideIdp == null){
+            RoleModel adminRole = session.clients()
+                    .getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID)
+                    .getRole(AdminRoles.REALM_ADMIN);
+            numberOfAdmins = getNumberOfActiveAdmins(session, realm, adminRole, em);
+            threshold = Math.max(1, (int) (0.7 * numberOfAdmins));
+        } else {
+            RoleModel tideAdmin = session.clients()
+                    .getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID)
+                    .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+            threshold = parseThreshold(tideAdmin);
+            numberOfAdmins = getNumberOfActiveAdmins(session, realm, tideAdmin, em);
+
+        }
 
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSetId, changeSetType));
         if (changesetRequestEntity == null) {
             throw new Exception("No change set request found with ID: " + changeSetId);
         }
 
-        int threshold = parseThreshold(tideRole);
-        int numberOfAdmins = getNumberOfActiveAdmins(session, realm, tideRole, em);
         int numberOfRejections = (int) changesetRequestEntity.getAdminAuthorizations()
                 .stream()
                 .filter(a -> !a.getIsApproval())
@@ -170,7 +183,7 @@ public class ChangesetRequestAdapter {
         }
     }
 
-    private static int getNumberOfActiveAdmins(KeycloakSession session, RealmModel realm, RoleModel tideRole, EntityManager em) {
+    public static int getNumberOfActiveAdmins(KeycloakSession session, RealmModel realm, RoleModel tideRole, EntityManager em) {
          return (int) session.users()
                 .getRoleMembersStream(realm, tideRole).filter( u -> {
                     UserEntity user = em.find(UserEntity.class, u.getId());
