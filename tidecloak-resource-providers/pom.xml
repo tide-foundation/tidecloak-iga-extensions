@@ -81,5 +81,11 @@
             <version>1.0-SNAPSHOT</version>
             <scope>provided</scope>
         </dependency>
+        <dependency>
+            <groupId>org.tidecloak</groupId>
+            <artifactId>shared-utility</artifactId>
+            <version>1.0-SNAPSHOT</version>
+            <scope>provided</scope>
+        </dependency>
     </dependencies>
 </project>
