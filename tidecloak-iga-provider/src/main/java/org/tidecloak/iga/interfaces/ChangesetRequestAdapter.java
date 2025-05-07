@@ -2,6 +2,7 @@ package org.tidecloak.iga.interfaces;
 
 import jakarta.persistence.EntityManager;
 import org.checkerframework.checker.units.qual.A;
+import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
@@ -27,6 +28,7 @@ public class ChangesetRequestAdapter {
 
     public static void saveAdminAuthorizaton(KeycloakSession session, String changeSetType, String changeSetRequestID, String changeSetActionType, UserModel adminUser, String adminTideAuthMsg, String adminTideBlindSig, String adminSessionApprovalSig) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        RealmModel realm = session.getContext().getRealm();
 
 
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSetRequestID, ChangeSetType.valueOf(changeSetType)));
@@ -35,10 +37,15 @@ public class ChangesetRequestAdapter {
         }
         UserEntity adminEntity = em.find(UserEntity.class, adminUser.getId());
         ClientModel client = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
-        var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+        ComponentModel componentModel = realm.getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .findFirst()
+                .orElse(null);
 
-        if(IGAUtils.isIGAEnabled(session.getContext().getRealm()) && tideIdp == null) {
-            AdminAuthorization adminAuthorization = new AdminAuthorization(adminUser.getId(), "approvedBy::"+ adminUser.getId(), "", "", "");
+
+        if(IGAUtils.isIGAEnabled(session.getContext().getRealm()) && componentModel == null) {
+            String json = "{\"id\":\"" + adminUser.getId() + "\"}";
+            AdminAuthorization adminAuthorization = new AdminAuthorization(json.getBytes(),  json.getBytes(), json.getBytes(), json.getBytes(), json.getBytes());
             AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), adminAuthorization, adminUser.getId(), em);
             changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
             Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
@@ -46,16 +53,16 @@ public class ChangesetRequestAdapter {
             return;
         }
 
-        List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
+        List<UserClientAccessProofEntity> adminAccessProof = em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
             .setParameter("user", adminEntity)
             .setParameter("clientId", client.getId()).getResultList();
 
-        if ( userClientAccessProofEntity == null ){
+        if ( adminAccessProof == null ){
             throw new Exception("This admin user does not have any realm management roles, " + adminUser.getId());
         }
 
-        UserContext adminContext = new UserContext(userClientAccessProofEntity.get(0).getAccessProof());
-        AdminAuthorization adminAuthorization = new AdminAuthorization(adminContext.ToString(), userClientAccessProofEntity.get(0).getAccessProofSig(), adminTideAuthMsg, adminTideBlindSig, adminSessionApprovalSig);
+        UserContext adminContext = new UserContext(adminAccessProof.get(0).getAccessProof());
+        AdminAuthorization adminAuthorization = new AdminAuthorization(adminContext.ToString(), adminAccessProof.get(0).getAccessProofSig(), adminTideAuthMsg, adminTideBlindSig, adminSessionApprovalSig);
         AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), adminAuthorization, adminUser.getId(), em);
         changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
 
@@ -92,15 +99,22 @@ public class ChangesetRequestAdapter {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
 
-        var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+        ComponentModel componentModel = realm.getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .findFirst()
+                .orElse(null);
+
         int threshold;
         int numberOfAdmins;
 
-        if(IGAUtils.isIGAEnabled(session.getContext().getRealm()) && tideIdp == null){
+        if(IGAUtils.isIGAEnabled(session.getContext().getRealm()) && componentModel == null){
             RoleModel adminRole = session.clients()
                     .getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID)
                     .getRole(AdminRoles.REALM_ADMIN);
-            numberOfAdmins = getNumberOfActiveAdmins(session, realm, adminRole, em);
+            int numberOfActiveRealmAdmins = getNumberOfActiveAdmins(session, realm, adminRole, em);
+
+            // if no realm admins yet, then threshold is just one
+            numberOfAdmins = numberOfActiveRealmAdmins <= 0 ? 1 : numberOfActiveRealmAdmins;
             threshold = Math.max(1, (int) (0.7 * numberOfAdmins));
         } else {
             RoleModel tideAdmin = session.clients()

@@ -177,7 +177,7 @@ public class IGARealmResource {
     @Path("change-set/sign")
     public Response signChangeset(ChangeSetRequest changeSet) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+        var tideIdp = session.identityProviders().getByAlias("tide");
         Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, changeSet.getType(), changeSet.getChangeSetId());
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
 
@@ -194,7 +194,7 @@ public class IGARealmResource {
                 RoleEntity role = em.find(RoleEntity.class, entity.getRoleId());
                 if(role != null &&
                         role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN) &&
-                        !entity.getUser().getAttributes().stream().anyMatch(a -> a.getName().equalsIgnoreCase("vuid") || a.getName().equalsIgnoreCase("tideuserkey")))
+                        entity.getUser().getAttributes().stream().noneMatch(a -> a.getName().equalsIgnoreCase("vuid") || a.getName().equalsIgnoreCase("tideuserkey")))
                 {
                     return Response.status(Response.Status.BAD_REQUEST).entity("User needs a tide account linked for the tide-realm-admin role").build();
                 }
@@ -223,36 +223,21 @@ public class IGARealmResource {
         if (draftRecordEntity == null) {
             return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
         }
+        ComponentModel componentModel = realm.getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .findFirst()
+                .orElse(null);
 
-        // Check if IGA is enabled with no tide.
-        if(IGAUtils.isIGAEnabled(realm) && tideIdp == null){
-            RoleModel realmAdminRole = session.roles().getClientRole(realmManagement, AdminRoles.REALM_ADMIN);
-            int adminCount = ChangesetRequestAdapter.getNumberOfActiveAdmins(session, realm, realmAdminRole, em);
-            boolean isTemporaryAdmin = auth.adminAuth().getUser().getFirstAttribute("is_temporary_admin") != null && auth.adminAuth().getUser().getFirstAttribute("is_temporary_admin").equalsIgnoreCase("true");
-
-            // if approver is temp admin, check if there are users with realm-admin role. IF a realm-admin user exists, temp admin is not allowed to approve a request.
-            if(isTemporaryAdmin && adminCount > 0){
-                return Response.status(Response.Status.BAD_REQUEST).entity("Temporary admin is not allowed to approve change request, contact a realm-admin to approve. User ID: " + auth.adminAuth().getUser().getId()).build();
-            }
-
+        // Check if IGA is enabled with no tide idp and key.
+        if(IGAUtils.isIGAEnabled(realm) && componentModel == null){
             // If no IDP, we just get "approval" from users with REALM_ADMIN role
-            IGAUtils.approveChangeRequest(session, auth.adminAuth().getUser(), proofDetails);
-            ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSet.getType().name(), changeSet.getChangeSetId(), changeSet.getActionType().name(), auth.adminAuth().getUser(), "", "", "");
+            IGAUtils.approveChangeRequest(session, auth.adminAuth().getUser(), proofDetails, em, changeSet);
             IGAUtils.updateDraftStatus(session, changeSet.getType(), changeSet.getChangeSetId(), changeSet.getActionType(), draftRecordEntity);
             em.flush();
             return buildResponse(200, "approved");
         }
 
         try {
-            ComponentModel componentModel = realm.getComponentsStream()
-                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
-                    .findFirst()
-                    .orElse(null);
-
-            if(componentModel == null) {
-                return buildResponse(400, "There is no tide-vendor-key component set up for this realm, " + realm.getName());
-            }
-
 
             // Check if changeset is for adding a tide realm admin.
             MultivaluedHashMap<String, String> config = componentModel.getConfig();
@@ -405,10 +390,10 @@ public class IGARealmResource {
         catch (NumberFormatException e) {
             throw new RuntimeException("Environment variables THRESHOLD_T or THRESHOLD_N is invalid: " + e.getMessage());
         }
-        catch (JsonProcessingException e) {
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Error processing JSON " + e.getMessage()).build();
+        catch (JsonProcessingException ex) {
+            return buildResponse(Response.Status.BAD_REQUEST.getStatusCode(), ex.toString());
         } catch (Exception ex) {
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
+            return buildResponse(Response.Status.INTERNAL_SERVER_ERROR.getStatusCode(), ex.toString());
         }
     }
 

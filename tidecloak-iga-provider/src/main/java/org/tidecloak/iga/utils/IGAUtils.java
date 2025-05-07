@@ -2,7 +2,9 @@ package org.tidecloak.iga.utils;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
+import jakarta.ws.rs.core.Response;
 import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.midgard.Midgard;
@@ -12,6 +14,8 @@ import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
+import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
+import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
 import org.tidecloak.shared.Constants;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -58,19 +62,33 @@ public class IGAUtils {
                 .collect(Collectors.toList());
     }
 
-    public static void approveChangeRequest(KeycloakSession session, UserModel user, List<AccessProofDetailEntity> proofDetails) throws Exception {
-        var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
-        if(tideIdp != null) {
-            throw new Exception("This method can only be run without Tide IDP.");
+    public static void approveChangeRequest(KeycloakSession session, UserModel adminUser, List<AccessProofDetailEntity> proofDetails, EntityManager em, ChangeSetRequest changeSet) throws Exception {
+        RealmModel realm = session.getContext().getRealm();
+        ClientModel realmManagement = session.clients().getClientByClientId(realm, org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID);
+        RoleModel realmAdminRole = session.roles().getClientRole(realmManagement, AdminRoles.REALM_ADMIN);
+        int adminCount = ChangesetRequestAdapter.getNumberOfActiveAdmins(session, realm, realmAdminRole, em);
+        boolean isTemporaryAdmin = adminUser.getFirstAttribute("is_temporary_admin") != null && adminUser.getFirstAttribute("is_temporary_admin").equalsIgnoreCase("true");
+        ComponentModel componentModel = realm.getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .findFirst()
+                .orElse(null);
+
+        if(componentModel != null) {
+            throw new Exception("This method can only be run without Tide keys.");
         }
-        RoleModel realmAdminRole = session.getContext().getRealm().getClientByClientId(org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(AdminRoles.REALM_ADMIN);
-        if (!user.hasRole(realmAdminRole)){
+        // if approver is temp admin, check if there are users with realm-admin role. IF a realm-admin user exists, temp admin is not allowed to approve a request.
+        if(isTemporaryAdmin && adminCount > 0){
+            throw new Exception("Temporary admin is not allowed to approve change request, contact a realm-admin to approve. User ID: " + adminUser.getId());
+        }
+        else if(!isTemporaryAdmin && !adminUser.hasRole(realmAdminRole)) {
             throw new Exception("User is not authorized to approve requests.");
         }
 
         for(int i = 0; i < proofDetails.size(); i++){
-            proofDetails.get(i).setSignature(user.getId());
+            proofDetails.get(i).setSignature(adminUser.getId());
         }
+
+        ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSet.getType().name(), changeSet.getChangeSetId(), changeSet.getActionType().name(), adminUser, "", "", "");
     }
 
     public static List<String>  signInitialTideAdmin(MultivaluedHashMap<String, String> keyProviderConfig,

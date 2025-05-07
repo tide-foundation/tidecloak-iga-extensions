@@ -257,15 +257,26 @@ public interface ChangeSetProcessor<T> {
      */
     default void commit(KeycloakSession session, ChangeSetRequest change, T entity, EntityManager em, Runnable commitCallback) throws Exception {
         String realmId = session.getContext().getRealm().getId();
-        var tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+        ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .findFirst()
+                .orElse(null);
 
-        if(IGAUtils.isIGAEnabled(session.getContext().getRealm()) && tideIdp == null){
+        if(IGAUtils.isIGAEnabled(session.getContext().getRealm()) && componentModel == null){
             commitCallback.run();
+            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
+            if (changesetRequestEntity != null) {
+                em.remove(changesetRequestEntity);
+            }
+
+            if (changesetRequestEntity != null && changesetRequestEntity.getAdminAuthorizations() != null) {
+                changesetRequestEntity.getAdminAuthorizations().forEach(em::remove);
+            }
+
             return;
         }
         // Retrieve the user context drafts
         List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, change.getChangeSetId(), change.getType());
-
 
         if (userContextDrafts.isEmpty()) {
             throw new Exception("No user context drafts found for this change set id, " + change.getChangeSetId());
@@ -630,7 +641,8 @@ public interface ChangeSetProcessor<T> {
         List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, recordId, type);
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
-        RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);;
+        RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        var tideIdp = session.identityProviders().getByAlias("tide");
         boolean hasInitCert;
         boolean isTideAdminRole;
         boolean isUnassignRole;
@@ -658,38 +670,34 @@ public interface ChangeSetProcessor<T> {
             ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, roleMapping);
             isUnassignRole = changeSetRequest.getActionType().equals(ActionType.DELETE);
             originalUser = session.users().getUserById(realm, roleMapping.getUser().getId());
-
             ComponentModel componentModel = realm.getComponentsStream()
                     .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
                     .findFirst()
                     .orElse(null);
 
-            if (componentModel == null) {
-                throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+            if(componentModel != null){
+                List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)
+                        .setParameter("ID", componentModel.getId())
+                        .setParameter("types", List.of("firstAdmin", "multiAdmin")).getResultList();
+
+                if (realmAuthorizers.isEmpty()) {
+                    throw new Exception("Authorizer not found for this realm.");
+                }
+
+                if(isTideAdminRole && realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") && realmAuthorizers.size() == 1){
+                    RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
+
+                    TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                            .setParameter("role", role).getSingleResult();
+                    cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
+                    certHash = cert.hash();
+                }
+
+                else if (hasInitCert) {
+                    cert = InitializerCertifcate.FromString(roleInitCert.getInitCert());
+                    certHash = cert.hash();
+                }
             }
-            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)
-                    .setParameter("ID", componentModel.getId())
-                    .setParameter("types", List.of("firstAdmin", "multiAdmin")).getResultList();
-
-            if (realmAuthorizers.isEmpty()) {
-                throw new Exception("Authorizer not found for this realm.");
-            }
-
-            if(isTideAdminRole && realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") && realmAuthorizers.size() == 1){
-                RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
-
-                TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                        .setParameter("role", role).getSingleResult();
-                cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
-                certHash = cert.hash();
-            }
-
-            else if (hasInitCert) {
-                cert = InitializerCertifcate.FromString(roleInitCert.getInitCert());
-                certHash = cert.hash();
-
-            }
-
         } else {
             isTideAdminRole = false;
             hasInitCert = false;
