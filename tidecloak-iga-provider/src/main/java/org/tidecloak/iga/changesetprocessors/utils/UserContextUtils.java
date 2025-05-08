@@ -55,7 +55,7 @@ public class UserContextUtils extends UserContextUtilBase {
                 List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", changeRequestId).getResultList();
                 if(!changesetRequestEntity.isEmpty()) {
                     changesetRequestEntity.forEach(c -> {
-                        c.getAdminAuthorizations().forEach(em::remove);
+                        c.getAdminAuthorizations().clear();
                         em.remove(c);
                     });
                 }

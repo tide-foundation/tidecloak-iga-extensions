@@ -32,6 +32,7 @@ import org.keycloak.representations.AccessToken;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
 import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
 import org.tidecloak.iga.utils.IGAUtils;
+import org.tidecloak.jpa.entities.*;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -39,10 +40,6 @@ import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.iga.interfaces.TideClientAdapter;
 import org.tidecloak.iga.interfaces.TideRoleAdapter;
 import org.tidecloak.iga.interfaces.TideUserAdapter;
-import org.tidecloak.jpa.entities.AccessProofDetailEntity;
-import org.tidecloak.jpa.entities.AuthorizerEntity;
-import org.tidecloak.jpa.entities.ChangesetRequestEntity;
-import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
 import org.keycloak.protocol.oidc.TokenManager;
@@ -262,24 +259,23 @@ public interface ChangeSetProcessor<T> {
                 .findFirst()
                 .orElse(null);
 
-        if(IGAUtils.isIGAEnabled(session.getContext().getRealm()) && componentModel == null){
-            commitCallback.run();
-            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
-            if (changesetRequestEntity != null) {
-                em.remove(changesetRequestEntity);
-            }
 
-            if (changesetRequestEntity != null && changesetRequestEntity.getAdminAuthorizations() != null) {
-                changesetRequestEntity.getAdminAuthorizations().forEach(em::remove);
-            }
-
-            return;
-        }
         // Retrieve the user context drafts
         List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, change.getChangeSetId(), change.getType());
 
         if (userContextDrafts.isEmpty()) {
             throw new Exception("No user context drafts found for this change set id, " + change.getChangeSetId());
+        }
+
+        if(IGAUtils.isIGAEnabled(session.getContext().getRealm()) && componentModel == null){
+            commitCallback.run();
+            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
+            if (changesetRequestEntity != null) {
+                changesetRequestEntity.getAdminAuthorizations().clear();
+                em.flush();
+            }
+
+            return;
         }
 
         // Process each user context draft
@@ -329,7 +325,7 @@ public interface ChangeSetProcessor<T> {
             ChangeSetRequest c = getChangeSetRequestFromEntity(session, tideClientDraftEntity, ChangeSetType.CLIENT_FULLSCOPE);
 
             // Remove associated admin authorizations
-            req.getAdminAuthorizations().forEach(em::remove);
+            req.getAdminAuthorizations().clear();
 
             // Remove associated proof details
             em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
