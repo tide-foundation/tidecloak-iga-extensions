@@ -1,6 +1,11 @@
 package org.tidecloak.iga.utils;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.core.Response;
 import org.keycloak.common.util.MultivaluedHashMap;
@@ -31,9 +36,13 @@ import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
 
+import java.io.UncheckedIOException;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
+import static io.vertx.core.json.impl.JsonUtil.asStream;
 import static org.tidecloak.iga.interfaces.ChangesetRequestAdapter.getChangeSetStatus;
 
 public class IGAUtils {
@@ -314,6 +323,120 @@ public class IGAUtils {
             return DraftStatus.DENIED;
         }
         return DraftStatus.PENDING;
+    }
+
+    /**
+     * Merge update into mainNode directly, no deep clone.
+     * - Objects recurse
+     * - Arrays merge via HashSet (preserves order, no duplicates)
+     * - Scalars: preserve mainNode’s value
+     */
+    public static void mergeInPlace(ObjectNode mainNode, ObjectNode update) {
+        Iterator<Map.Entry<String, JsonNode>> fields = update.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            String key = entry.getKey();
+            JsonNode value = entry.getValue();
+
+            if (!mainNode.has(key)) {
+                // brand-new field → just add
+                mainNode.set(key, value);
+            }
+            else {
+                JsonNode existing = mainNode.get(key);
+                // both are objects → recurse
+                if (existing.isObject() && value.isObject()) {
+                    mergeInPlace((ObjectNode) existing, (ObjectNode) value);
+                }
+                // both are arrays → dedupe in O(n)
+                else if (existing.isArray() && value.isArray()) {
+                    ArrayNode array = (ArrayNode) existing;
+                    Set<JsonNode> seen = new LinkedHashSet<>();
+                    array.forEach(seen::add);
+                    value.forEach(seen::add);
+                    array.removeAll();  // clear existing
+                    seen.forEach(array::add);
+                }
+                else if(key.equalsIgnoreCase("aud")){
+
+                    // scalar/array mismatch or two scalars → unify into array
+                    ArrayNode merged = JsonNodeFactory.instance.arrayNode();
+                    // helper: stream either the one node or all elements if it's an array
+                    Stream<JsonNode> fromExisting = asStream(existing);
+                    Stream<JsonNode> fromUpdate   = asStream(value);
+
+                    // LinkedHashSet preserves order and dedups by JsonNode.equals()
+                    Set<JsonNode> seen = new LinkedHashSet<>();
+                    Stream.concat(fromExisting, fromUpdate)
+                            .forEach(seen::add);
+
+                    seen.forEach(merged::add);
+                    merged.add(mainNode.get("azp"));
+                    mainNode.set(key, merged);
+                }
+                // scalar or type mismatch → skip (keep mainNode)
+            }
+        }
+    }
+
+    /** If node is an ArrayNode, stream its elements; otherwise stream just the node itself. */
+    private static Stream<JsonNode> asStream(JsonNode node) {
+        if (node.isArray()) {
+            return StreamSupport.stream(node.spliterator(), false);
+        } else {
+            return Stream.of(node);
+        }
+    }
+
+    public static class UserRecordKey {
+        public final String draftId;
+        public final String username;
+        public final String clientId;
+
+        public UserRecordKey(String draftId, String username, String clientId) {
+            this.draftId = draftId;
+            this.username = username;
+            this.clientId = clientId;
+        }
+        @Override public boolean equals(Object o) {
+            if (!(o instanceof UserRecordKey)) return false;
+            UserRecordKey k = (UserRecordKey)o;
+            return draftId.equals(k.draftId)
+                    && username.equals(k.username)
+                    && clientId.equals(k.clientId);
+        }
+        @Override public int hashCode() {
+            return Objects.hash(draftId, username, clientId);
+        }
+    }
+
+    // helper to parse a JSON string into an ObjectNode
+    public static ObjectNode parseNode(ObjectMapper objectMapper, String json) {
+        try {
+            return (ObjectNode) objectMapper.readTree(json);
+        } catch (JsonProcessingException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    public static class UserClientKey {
+        public final String userId;
+        public final String clientId;
+        public UserClientKey(String userId, String clientId) {
+            this.userId   = userId;
+            this.clientId = clientId;
+        }
+        @Override public boolean equals(Object o) {
+            if (!(o instanceof UserClientKey)) return false;
+            UserClientKey k = (UserClientKey)o;
+            return userId.equals(k.userId) && clientId.equals(k.clientId);
+        }
+        @Override public int hashCode() {
+            return Objects.hash(userId, clientId);
+        }
+        @Override public String toString() {
+            return "(" + userId + "," + clientId + ")";
+        }
     }
 }
 

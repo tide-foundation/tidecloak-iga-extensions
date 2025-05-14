@@ -20,6 +20,7 @@ import org.keycloak.models.cache.UserCache;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.services.resources.admin.AdminAuth;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.*;
@@ -29,6 +30,8 @@ import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
+import org.tidecloak.iga.changesetsigner.ChangeSetSigner;
+import org.tidecloak.iga.changesetsigner.ChangeSetSignerFactory;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -179,226 +182,21 @@ public class IGARealmResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign")
     public Response signChangeset(ChangeSetRequest changeSet) throws Exception {
-        ObjectMapper objectMapper = new ObjectMapper();
+        auth.realm().requireManageRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        var tideIdp = session.identityProviders().getByAlias("tide");
+        RealmModel realm = session.getContext().getRealm();
         Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, changeSet.getType(), changeSet.getChangeSetId());
-        ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
-
-        // check is admin has signed this already.
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
-        if (changesetRequestEntity == null){
-            throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
-        }
-
-        // Check if this request is assigning TIDE-REALM-ADMIN role to a user. User to be assigned this role required a tide account linked.
-        if(changeSet.getType().equals(ChangeSetType.USER_ROLE)){
-            TideUserRoleMappingDraftEntity entity = em.find(TideUserRoleMappingDraftEntity.class, changeSet.getChangeSetId());
-            if (entity != null) {
-                RoleEntity role = em.find(RoleEntity.class, entity.getRoleId());
-                if(role != null &&
-                        role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN) &&
-                        entity.getUser().getAttributes().stream().noneMatch(a -> a.getName().equalsIgnoreCase("vuid") || a.getName().equalsIgnoreCase("tideuserkey")))
-                {
-                    return Response.status(Response.Status.BAD_REQUEST).entity("User needs a tide account linked for the tide-realm-admin role").build();
-                }
-            }
-        }
-
-        AdminAuthorizationEntity adminAuthorizationEntity = changesetRequestEntity
-                .getAdminAuthorizations()
-                .stream()
-                .filter(a -> Objects.equals(a.getUserId(), auth.adminAuth().getUser().getId()))
-                .findFirst()
-                .orElse(null);
-
-        if(adminAuthorizationEntity != null) {
-            if(adminAuthorizationEntity.getIsApproval()){
-                return Response.status(Response.Status.BAD_REQUEST).entity("This user account has already signed this request. User ID: " + auth.adminAuth().getUser().getId()).build();
-
-            }else {
-                return Response.status(Response.Status.BAD_REQUEST).entity("This user account has already denied this request. User ID: " + auth.adminAuth().getUser().getId()).build();
-            }
-        }
-
-        // Fetch the draft record entity and proof details based on the change set type
-        List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, IGAUtils.getEntityId(draftRecordEntity), changeSet.getType());;
-
         if (draftRecordEntity == null) {
             return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
         }
-        ComponentModel componentModel = realm.getComponentsStream()
-                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
-                .findFirst()
-                .orElse(null);
+        ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
+        Response response = signer.sign(changeSet, em, session, realm, draftRecordEntity, auth.adminAuth());
 
-        // Check if IGA is enabled with no tide idp and key.
-        if(IGAUtils.isIGAEnabled(realm) && componentModel == null){
-            // If no IDP, we just get "approval" from users with REALM_ADMIN role
-            IGAUtils.approveChangeRequest(session, auth.adminAuth().getUser(), proofDetails, em, changeSet);
-            IGAUtils.updateDraftStatus(session, changeSet.getType(), changeSet.getChangeSetId(), changeSet.getActionType(), draftRecordEntity);
-            em.flush();
-            return buildResponse(200, "approved");
+        if (response != null) {
+            return response;
         }
 
-        try {
-
-            // Check if changeset is for adding a tide realm admin.
-            MultivaluedHashMap<String, String> config = componentModel.getConfig();
-            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)
-                    .setParameter("ID", componentModel.getId())
-                    .setParameter("types", List.of("firstAdmin", "multiAdmin"))
-                    .getResultList();
-
-            boolean isAssigningTideRealmAdminRole;
-            if(draftRecordEntity instanceof TideUserRoleMappingDraftEntity){
-                RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-                isAssigningTideRealmAdminRole = ((TideUserRoleMappingDraftEntity) draftRecordEntity).getRoleId().equals(tideRole.getId());
-            } else {
-                isAssigningTideRealmAdminRole = false;
-            }
-
-            if (realmAuthorizers.isEmpty()){
-                throw new Exception("Authorizer not found for this realm.");
-            }
-
-            if(!auth.adminAuth().hasAppRole(realmManagement, org.tidecloak.shared.Constants.TIDE_REALM_ADMIN) && !realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")) {
-                return Response.status(Response.Status.BAD_REQUEST).entity("Current user account does not have permission to sign change requests.").build();
-            }
-
-            List<UserContext> userContexts = new ArrayList<>();
-            proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
-            proofDetails.forEach(p -> {
-                userContexts.add(new UserContext(p.getProofDraft()));
-            });
-            Stream<UserContext> adminContexts = userContexts.stream().filter(x -> x.getInitCertHash() != null);
-            Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
-            List<UserContext> orderedContext = Stream.concat(adminContexts, normalUserContext).toList();
-
-            RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-            RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
-            TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                    .setParameter("role", role).getSingleResult();
-
-            InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
-            //signRequestWithVRK
-            if (IGAUtils.isIGAEnabled(realm) && tideIdp != null && realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") &&  realmAuthorizers.size() == 1) {
-                if (isAssigningTideRealmAdminRole ) {
-                    List<String> signatures = IGAUtils.signInitialTideAdmin(config, orderedContext.toArray(new UserContext[0]), cert, realmAuthorizers.get(0), changesetRequestEntity);
-                    Stream<AccessProofDetailEntity> adminproofs = proofDetails.stream().filter(x -> {
-                        UserContext userContext = new UserContext(x.getProofDraft());
-                        if(userContext.getInitCertHash() != null) {
-                            return true;
-                        }
-                        return false;
-                    });
-                    Stream<AccessProofDetailEntity> normalProofs = proofDetails.stream().filter(x -> {
-                        UserContext userContext = new UserContext(x.getProofDraft());
-                        if(userContext.getInitCertHash() == null) {
-                            return true;
-                        }
-                        return false;
-                    });
-
-                    List<AccessProofDetailEntity> orderedProofDetails = Stream.concat(adminproofs, normalProofs).toList();
-                    tideRoleEntity.setInitCertSig(signatures.get(0));
-                    for(int i = 0; i < orderedProofDetails.size(); i++){
-                        orderedProofDetails.get(i).setSignature(signatures.get(i + 1));
-                    }
-                    em.flush();
-                } else {
-                    List<String> signatures = IGAUtils.signContextsWithVrk(config, orderedContext.toArray(new UserContext[0]), realmAuthorizers.get(0), changesetRequestEntity);
-                    for(int i = 0; i < userContexts.size(); i++){
-                        proofDetails.get(i).setSignature(signatures.get(i));
-                    }
-                    em.flush();
-                }
-            }
-
-            if (!realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") && IGAUtils.isIGAEnabled(realm) && tideIdp != null) {
-                String defaultAdminUiDomain = tideIdp.getConfig().get("changeSetEndpoint");
-                String customAdminUiDomain = tideIdp.getConfig().get("CustomAdminUIDomain");
-                String redirectUrlSig = tideIdp.getConfig().get("changeSetURLSig");
-
-                URI redirectURI = new URI(defaultAdminUiDomain);
-                UserSessionModel userSession = session.sessions().getUserSession(realm, auth.adminAuth().getToken().getSessionId());
-                String port = redirectURI.getPort() == -1 ? "" : ":" + redirectURI.getPort();
-                String voucherURL = redirectURI.getScheme() + "://" + redirectURI.getHost() + port + "/realms/" +
-                session.getContext().getRealm().getName() + "/tidevouchers/fromUserSession?sessionId=" +userSession.getId();
-
-                URI uri = Midgard.CreateURL(
-                        auth.adminAuth().getToken().getSessionId(),
-                        redirectURI.toString(),//userSession.getNote("redirectUri"),
-                        redirectUrlSig,
-                        tideIdp.getConfig().get("homeORKurl"),
-                        config.getFirst("clientId"),
-                        config.getFirst("gVRK"),
-                        config.getFirst("gVRKCertificate"),
-                        realm.isRegistrationAllowed(),
-                        Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
-                        tideIdp.getConfig().get("LogoURL"),
-                        tideIdp.getConfig().get("ImageURL"),
-                        "approval",
-                        tideIdp.getConfig().get("settingsSig"),
-                        voucherURL, //voucherURL,
-                        ""
-                );
-
-                URI customDomainUri = null;
-                if(customAdminUiDomain != null) {
-                    customDomainUri = Midgard.CreateURL(
-                            auth.adminAuth().getToken().getSessionId(),
-                            customAdminUiDomain,//userSession.getNote("redirectUri"),
-                            tideIdp.getConfig().get("customAdminUIDomainSig"),
-                            tideIdp.getConfig().get("homeORKurl"),
-                            config.getFirst("clientId"),
-                            config.getFirst("gVRK"),
-                            config.getFirst("gVRKCertificate"),
-                            realm.isRegistrationAllowed(),
-                            Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
-                            tideIdp.getConfig().get("LogoURL"),
-                            tideIdp.getConfig().get("ImageURL"),
-                            "approval",
-                            tideIdp.getConfig().get("settingsSig"),
-                            voucherURL, //voucherURL,
-                            ""
-                    );
-                }
-
-                Map<String, String> response = new HashMap<>();
-                response.put("message", "Opening Enclave to request approval.");
-                response.put("uri", String.valueOf(uri));
-                response.put("changeSetRequests", changesetRequestEntity.getDraftRequest());
-                response.put("requiresApprovalPopup", "true");
-                response.put("expiry", String.valueOf(changesetRequestEntity.getTimestamp() + 2628000)); // month expiry
-                if(customAdminUiDomain != null) {
-                    response.put("customDomainUri", String.valueOf(customDomainUri));
-                }
-
-                return buildResponse(200, objectMapper.writeValueAsString(response));
-            }
-
-            // Update the draft status
-            IGAUtils.updateDraftStatus(changeSet.getType(), changeSet.getActionType(), draftRecordEntity);
-
-            em.flush();
-
-            Map<String, String> response = new HashMap<>();
-            response.put("message", "Change set signed successfully.");
-            response.put("uri", "");
-            response.put("changeSetRequests", "");
-            response.put("requiresApprovalPopup", "false");
-
-            return buildResponse(200, objectMapper.writeValueAsString(response));
-        }
-        catch (NumberFormatException e) {
-            throw new RuntimeException("Environment variables THRESHOLD_T or THRESHOLD_N is invalid: " + e.getMessage());
-        }
-        catch (JsonProcessingException ex) {
-            return buildResponse(Response.Status.BAD_REQUEST.getStatusCode(), ex.toString());
-        } catch (Exception ex) {
-            return buildResponse(Response.Status.INTERNAL_SERVER_ERROR.getStatusCode(), ex.toString());
-        }
+        return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported signing method").build();
     }
 
     @GET
@@ -678,11 +476,16 @@ public static void commitChange(KeycloakSession session, ChangeSetRequest change
     }
 }
     public static List<RequestedChanges> processClientDraftRecords(EntityManager em, RealmModel realm) {
+        // Get all pending changes, records that do not have an active delete status or active draft status
+        return processClientDraftRecords(em, realm, DraftStatus.ACTIVE);
+    }
+    public static List<RequestedChanges> processClientDraftRecords(EntityManager em, RealmModel realm, DraftStatus draftStatus ) {
         List<RequestedChanges> changes = new ArrayList<>();
         List<TideClientDraftEntity> mappings = em.createNamedQuery("getClientFullScopeStatusDraftThatDoesNotHaveStatus", TideClientDraftEntity.class)
-                .setParameter("status", DraftStatus.ACTIVE)
+                .setParameter("status", draftStatus)
                 .setParameter("status2", DraftStatus.NULL)
                 .getResultList();
+
 
         for (TideClientDraftEntity c : mappings) {
             em.lock(c, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
@@ -739,16 +542,18 @@ public static void commitChange(KeycloakSession session, ChangeSetRequest change
         }
         return changes;
     }
-
     public static List<RequestedChanges> processUserRoleMappings(EntityManager em, RealmModel realm) {
-        List<RequestedChanges> changes = new ArrayList<>();
+        // Get all pending changes, records that do not have an active delete status or active draft status
+        return processUserRoleMappings(em, realm, DraftStatus.ACTIVE);
+    }
 
-        // Get all pending changes
+    public static List<RequestedChanges> processUserRoleMappings(EntityManager em, RealmModel realm, DraftStatus status) {
+        List<RequestedChanges> changes = new ArrayList<>();
         List<TideUserRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllPendingUserRoleMappingsByRealm", TideUserRoleMappingDraftEntity.class)
-                .setParameter("draftStatus", DraftStatus.ACTIVE)
-                .setParameter("deleteStatus", DraftStatus.ACTIVE)
-                .setParameter("realmId", realm.getId())
-                .getResultList();
+            .setParameter("draftStatus", status)
+            .setParameter("deleteStatus", status)
+            .setParameter("realmId", realm.getId())
+            .getResultList();
 
         for (TideUserRoleMappingDraftEntity m : mappings) {
             em.lock(m, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
@@ -779,10 +584,15 @@ public static void commitChange(KeycloakSession session, ChangeSetRequest change
     }
 
     public static List<RequestedChanges> processCompositeRoleMappings(EntityManager em, RealmModel realm) {
+        // Get all pending changes, records that do not have an active delete status or active draft status
+        return processCompositeRoleMappings(em, realm, DraftStatus.ACTIVE);
+    }
+
+        public static List<RequestedChanges> processCompositeRoleMappings(EntityManager em, RealmModel realm, DraftStatus status) {
         List<RequestedChanges> changes = new ArrayList<>();
         List<TideCompositeRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllCompositeRoleMappingsByRealm", TideCompositeRoleMappingDraftEntity.class)
-                .setParameter("draftStatus", DraftStatus.ACTIVE)
-                .setParameter("deleteStatus", DraftStatus.ACTIVE)
+                .setParameter("draftStatus", status)
+                .setParameter("deleteStatus", status)
                 .setParameter("realmId", realm.getId())
                 .getResultList();
 
@@ -818,12 +628,15 @@ public static void commitChange(KeycloakSession session, ChangeSetRequest change
 
         return changes;
     }
-
     public static List<RequestedChanges> processRoleMappings(EntityManager em, RealmModel realm) {
+        // Get all pending changes, records that do not have an active delete status or active draft status
+        return  processRoleMappings(em, realm, DraftStatus.ACTIVE);
+    }
+    public static List<RequestedChanges> processRoleMappings(EntityManager em, RealmModel realm, DraftStatus status) {
         List<RequestedChanges> changes = new ArrayList<>();
         List<TideRoleDraftEntity> mappings = em.createNamedQuery("getAllRoleDraft", TideRoleDraftEntity.class)
-                .setParameter("draftStatus", DraftStatus.ACTIVE)
-                .setParameter("deleteStatus", DraftStatus.ACTIVE)
+                .setParameter("draftStatus", status)
+                .setParameter("deleteStatus", status)
                 .setParameter("realmId", realm.getId())
                 .getResultList();
 
