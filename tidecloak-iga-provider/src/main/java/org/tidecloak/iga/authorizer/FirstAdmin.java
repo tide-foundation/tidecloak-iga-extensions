@@ -1,4 +1,4 @@
-package org.tidecloak.iga.changesetsigner.authorizer;
+package org.tidecloak.iga.authorizer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.core.Response;
@@ -8,10 +8,10 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.jpa.entities.RoleEntity;
-import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
+import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.utils.IGAUtils;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
@@ -19,6 +19,8 @@ import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
+import org.tidecloak.shared.enums.WorkflowType;
+import org.tidecloak.shared.enums.models.WorkflowParams;
 
 import java.util.*;
 import java.util.stream.Stream;
@@ -100,6 +102,17 @@ public class FirstAdmin implements Authorizer {
         IGAUtils.updateDraftStatus(changeSet.getType(), changeSet.getActionType(), draftEntity);
 
         return Response.ok(objectMapper.writeValueAsString(response)).build();
+    }
+
+    @Override
+    public Response commitWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, Object draftEntity, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
+        ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
+
+        WorkflowParams workflowParams = new WorkflowParams(null, false, null, changeSet.getType());
+        processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, draftEntity, em, WorkflowType.COMMIT, workflowParams, null);
+
+        em.flush();
+        return Response.ok("Change set approved and committed with authorizer type:  " + authorizer.getType()).build();
     }
 
     private boolean isAssigningTideRealmAdminRole(Object draftEntity, KeycloakSession session){

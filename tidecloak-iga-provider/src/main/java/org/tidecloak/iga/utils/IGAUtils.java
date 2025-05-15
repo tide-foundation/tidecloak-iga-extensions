@@ -21,6 +21,7 @@ import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
+import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.shared.Constants;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -28,10 +29,6 @@ import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
-import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
@@ -43,9 +40,40 @@ import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
 import static io.vertx.core.json.impl.JsonUtil.asStream;
+import static org.tidecloak.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
 import static org.tidecloak.iga.interfaces.ChangesetRequestAdapter.getChangeSetStatus;
 
 public class IGAUtils {
+
+    public static List<AccessProofDetailEntity> sortAccessProof (List<AccessProofDetailEntity> accessProofDetailEntities) {
+        Stream<AccessProofDetailEntity> adminProofs = accessProofDetailEntities.stream().filter(x -> {
+            UserContext userContext = new UserContext(x.getProofDraft());
+            if(userContext.getInitCertHash() != null) {
+                return true;
+            }
+            return false;
+
+        });
+        Stream<AccessProofDetailEntity> userProofs = accessProofDetailEntities.stream().filter(x -> {
+            UserContext userContext = new UserContext(x.getProofDraft());
+            if(userContext.getInitCertHash() == null) {
+                return true;
+            }
+            return false;
+
+        });
+        return Stream.concat(adminProofs, userProofs).toList();
+    }
+
+    public static boolean isAuthorityAssignment(KeycloakSession session, Object mapping, EntityManager em){
+        if ( mapping instanceof  TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
+            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, tideUserRoleMappingDraftEntity.getId());
+
+            return roleInitCert != null;
+        }
+        return false;
+    }
+
     public static boolean isIGAEnabled(RealmModel realm) {
         String isIGAEnabled = realm.getAttribute("isIGAEnabled");
         return isIGAEnabled != null && !isIGAEnabled.isEmpty() && isIGAEnabled.equalsIgnoreCase("true");
@@ -236,9 +264,10 @@ public class IGAUtils {
     public static Object fetchDraftRecordEntity(EntityManager em, ChangeSetType type, String changeSetId) {
         return switch (type) {
             case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, changeSetId);
+            case COMPOSITE_ROLE, DEFAULT_ROLES -> em.find(TideCompositeRoleMappingDraftEntity.class, changeSetId);
             case ROLE -> em.find(TideRoleDraftEntity.class, changeSetId);
-            case COMPOSITE_ROLE -> em.find(TideCompositeRoleMappingDraftEntity.class, changeSetId);
-            case CLIENT_DEFAULT_USER_CONTEXT, CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, changeSetId);
+            case USER -> em.find(TideUserDraftEntity.class, changeSetId);
+            case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, changeSetId);
             default -> null;
         };
     }

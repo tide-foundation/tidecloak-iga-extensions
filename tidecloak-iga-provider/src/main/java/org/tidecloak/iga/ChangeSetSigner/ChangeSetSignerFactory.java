@@ -1,10 +1,8 @@
-package org.tidecloak.iga.changesetsigner;
+package org.tidecloak.iga.ChangeSetSigner;
 
 import org.keycloak.component.ComponentModel;
-import org.keycloak.models.IdentityProviderModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
-import org.keycloak.services.resources.admin.AdminAuth;
 import org.tidecloak.iga.utils.IGAUtils;
 import org.tidecloak.shared.Constants;
 

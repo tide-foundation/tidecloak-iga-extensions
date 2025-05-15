@@ -1,4 +1,4 @@
-package org.tidecloak.iga.changesetsigner;
+package org.tidecloak.iga.ChangeSetSigner;
 
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.core.Response;

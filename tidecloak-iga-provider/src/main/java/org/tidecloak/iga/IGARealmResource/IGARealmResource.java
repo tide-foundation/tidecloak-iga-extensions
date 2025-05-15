@@ -1,8 +1,5 @@
 package org.tidecloak.iga.IGARealmResource;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
@@ -11,7 +8,6 @@ import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.eclipse.microprofile.openapi.annotations.parameters.Parameter;
-import org.eclipse.microprofile.openapi.annotations.parameters.RequestBody;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
@@ -20,34 +16,31 @@ import org.keycloak.models.cache.UserCache;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
-import org.keycloak.services.resources.admin.AdminAuth;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.*;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
+import org.tidecloak.iga.ChangeSetCommitter.ChangeSetCommitter;
+import org.tidecloak.iga.ChangeSetCommitter.ChangeSetCommitterFactory;
 import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
 import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
-import org.tidecloak.iga.changesetsigner.ChangeSetSigner;
-import org.tidecloak.iga.changesetsigner.ChangeSetSignerFactory;
+import org.tidecloak.iga.ChangeSetSigner.ChangeSetSigner;
+import org.tidecloak.iga.ChangeSetSigner.ChangeSetSignerFactory;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.shared.enums.WorkflowType;
-import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
 import org.tidecloak.iga.interfaces.models.*;
 import org.tidecloak.iga.utils.IGAUtils;
 import org.tidecloak.jpa.entities.*;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
-import twitter4j.v1.User;
 
-import java.net.URI;
 import java.util.*;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.*;
@@ -243,15 +236,32 @@ public class IGARealmResource {
     @Path("change-set/commit")
     public Response commitChangeSet(ChangeSetRequest change) throws Exception {
         auth.realm().requireManageRealm();
-
-        try{
-            commitChange(session, change);
-            return buildResponse(200, "Change set approved");
-
-
-        } catch(Exception e) {
-            return buildResponse(500, "There was an error commiting this change set request. " + e.getMessage());
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        RealmModel realm = session.getContext().getRealm();
+        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, change.getType(), change.getChangeSetId());
+        if (draftRecordEntity == null) {
+            return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
         }
+
+        ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
+        Response response = committer.commit(change, em, session, realm, draftRecordEntity, auth.adminAuth());
+
+        if (response != null) {
+            return response;
+        }
+
+        return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported committing method").build();
+
+
+//        try{
+//            commitChange(session, change);
+//            return buildResponse(200, "Change set approved");
+//
+//
+//
+//        } catch(Exception e) {
+//            return buildResponse(500, "There was an error commiting this change set request. " + e.getMessage());
+//        }
     }
 
     @POST
@@ -670,30 +680,30 @@ public static void commitChange(KeycloakSession session, ChangeSetRequest change
         };
     }
 
-    public static List<?> getMappings(EntityManager em, ChangeSetRequest change, ChangeSetType type, ActionType action, RealmModel realm) {
-        return switch (type) {
-            case USER_ROLE -> getUserRoleMappings(em, change, action, realm);
-            case GROUP, USER_GROUP_MEMBERSHIP, GROUP_ROLE -> null;
-            case COMPOSITE_ROLE, DEFAULT_ROLES -> getCompositeRoleMappings(em, change, action, realm);
-            case ROLE -> getRoleMappings(em, change, action);
-            case USER -> getUserMappings(em, change, action);
-            case CLIENT_FULLSCOPE -> getClientMappings(em, change, action);
-            case CLIENT -> getClientEntity(em, change);
-            default -> Collections.emptyList();
-        };
-    }
+//    public static List<?> getMappings(EntityManager em, ChangeSetRequest change, ChangeSetType type, ActionType action, RealmModel realm) {
+//        return switch (type) {
+//            case USER_ROLE -> getUserRoleMappings(em, change, action, realm);
+//            case GROUP, USER_GROUP_MEMBERSHIP, GROUP_ROLE -> null;
+//            case COMPOSITE_ROLE, DEFAULT_ROLES -> getCompositeRoleMappings(em, change, action, realm);
+//            case ROLE -> getRoleMappings(em, change, action);
+//            case USER -> getUserMappings(em, change, action);
+//            case CLIENT_FULLSCOPE -> getClientMappings(em, change, action);
+//            case CLIENT -> getClientEntity(em, change);
+//            default -> Collections.emptyList();
+//        };
+//    }
 
-    private Object getMappings(EntityManager em, ChangeSetRequest change, ChangeSetType type) {
-        return switch (type) {
-            case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, change.getChangeSetId());
-            case GROUP, USER_GROUP_MEMBERSHIP, GROUP_ROLE -> null;
-            case COMPOSITE_ROLE, DEFAULT_ROLES -> em.find(TideCompositeRoleMappingDraftEntity.class, change.getChangeSetId());
-            case ROLE -> em.find(TideRoleDraftEntity.class, change.getChangeSetId());
-            case USER -> em.find(TideUserDraftEntity.class, change.getChangeSetId());
-            case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, change.getChangeSetId());
-            default -> null;
-        };
-    }
+//    private Object getMappings(EntityManager em, ChangeSetRequest change, ChangeSetType type) {
+//        return switch (type) {
+//            case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, change.getChangeSetId());
+//            case GROUP, USER_GROUP_MEMBERSHIP, GROUP_ROLE -> null;
+//            case COMPOSITE_ROLE, DEFAULT_ROLES -> em.find(TideCompositeRoleMappingDraftEntity.class, change.getChangeSetId());
+//            case ROLE -> em.find(TideRoleDraftEntity.class, change.getChangeSetId());
+//            case USER -> em.find(TideUserDraftEntity.class, change.getChangeSetId());
+//            case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, change.getChangeSetId());
+//            default -> null;
+//        };
+//    }
 
     // Helper methods for retrieving specific mappings
     public static List<?> getUserRoleMappings(EntityManager em, ChangeSetRequest change, ActionType action, RealmModel realm) {
