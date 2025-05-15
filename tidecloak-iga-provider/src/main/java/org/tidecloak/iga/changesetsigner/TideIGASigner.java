@@ -45,9 +45,6 @@ public class TideIGASigner implements ChangeSetSigner{
             throw new Exception("Authorizer not found for this realm.");
         }
 
-
-
-
         AuthorizerEntity primaryAuthorizer = realmAuthorizers.get(0);
         String authorizerType = primaryAuthorizer.getType();
 
@@ -55,44 +52,9 @@ public class TideIGASigner implements ChangeSetSigner{
         Authorizer authorizerSigner = AuthorizerFactory.getSigner(authorizerType);
         if (authorizerSigner != null) {
             Response resp = authorizerSigner.signWithAuthorizer(changeSet, em, session, realm, draftEntity, auth, primaryAuthorizer, componentModel);
-            IGAUtils.updateDraftStatus(changeSet.getType(), changeSet.getActionType(), draftEntity);
             return  resp;
         }
 
         return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported authorizer type").build();
-
-//        boolean isFirstAdmin = "firstAdmin".equalsIgnoreCase(primaryAuthorizer.getType());
-//        boolean isMultiAdmin = "multiAdmin".equalsIgnoreCase(primaryAuthorizer.getType());
-//
-//        // Fetch user contexts
-//        List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, IGAUtils.getEntityId(changeSet), changeSet.getType());
-//        List<UserContext> userContexts = new ArrayList<>();
-//        proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
-//        proofDetails.forEach(p -> userContexts.add(new UserContext(p.getProofDraft())));
-//
-//        // Sign based on authorizer type
-//        if (isFirstAdmin && realmAuthorizers.size() == 1) {
-//            List<String> signatures = IGAUtils.signInitialTideAdmin(componentModel.getConfig(), userContexts.toArray(new UserContext[0]), primaryAuthorizer, changeSet);
-//            for (int i = 0; i < proofDetails.size(); i++) {
-//                proofDetails.get(i).setSignature(signatures.get(i));
-//            }
-//            em.flush();
-//            return Response.ok("FirstAdmin signing completed").build();
-//        }
-//
-//        if (isMultiAdmin) {
-//            ClientModel realmMgmt = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
-//            if(!auth.hasAppRole(realmMgmt, org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
-//                return Response.status(Response.Status.BAD_REQUEST).entity("Current user account does not have permission to sign change requests.").build();
-//            }
-//            List<String> signatures = IGAUtils.signContextsWithVrk(componentModel.getConfig(), userContexts.toArray(new UserContext[0]), primaryAuthorizer, changeSet);
-//            for (int i = 0; i < proofDetails.size(); i++) {
-//                proofDetails.get(i).setSignature(signatures.get(i));
-//            }
-//            em.flush();
-//            return Response.ok("MultiAdmin signing completed").build();
-//        }
-//
-//        return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported IGA configuration").build();
     }
 }

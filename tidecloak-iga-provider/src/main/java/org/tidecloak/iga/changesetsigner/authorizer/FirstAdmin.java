@@ -1,4 +1,4 @@
-package org.tidecloak.iga.changesetsigner.authorizer;// FirstAdminSigner.java
+package org.tidecloak.iga.changesetsigner.authorizer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.core.Response;
@@ -8,6 +8,7 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.jpa.entities.RoleEntity;
+import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
@@ -32,7 +33,7 @@ public class FirstAdmin implements Authorizer {
             throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
         }
         // Fetch proof details
-        List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, IGAUtils.getEntityId(changeSet), changeSet.getType());
+        List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, changeSet.getChangeSetId(), changeSet.getType());
 
         List<UserContext> userContexts = new ArrayList<>();
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
@@ -50,7 +51,16 @@ public class FirstAdmin implements Authorizer {
 
         InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
 
-        if(isAssigningTideRealmAdminRole(draftEntity, session)){
+        if(isAssigningTideRealmAdminRole(draftEntity, session)) {
+
+            // Check if the user to be assigned the Tide Realm Admin role is a tide user
+            TideUserRoleMappingDraftEntity userRoleMappingDraft = (TideUserRoleMappingDraftEntity) draftEntity;
+            if(userRoleMappingDraft.getUser().getAttributes().stream().noneMatch(a -> a.getName().equalsIgnoreCase("vuid")
+                    || a.getName().equalsIgnoreCase("tideuserkey"))) {
+                return Response.status(Response.Status.BAD_REQUEST).entity("User needs a tide account linked for the tide-realm-admin role").build();
+
+            }
+
             List<String> signatures = IGAUtils.signInitialTideAdmin(componentModel.getConfig(), orderedContext.toArray(new UserContext[0]), cert, authorizer, changesetRequestEntity);
             Stream<AccessProofDetailEntity> adminproofs = proofDetails.stream().filter(x -> {
                 UserContext userContext = new UserContext(x.getProofDraft());
@@ -72,14 +82,13 @@ public class FirstAdmin implements Authorizer {
             for(int i = 0; i < orderedProofDetails.size(); i++){
                 orderedProofDetails.get(i).setSignature(signatures.get(i + 1));
             }
-            em.flush();
         } else {
             List<String> signatures = IGAUtils.signContextsWithVrk(componentModel.getConfig(), orderedContext.toArray(new UserContext[0]), authorizer, changesetRequestEntity);
             for(int i = 0; i < userContexts.size(); i++){
                 proofDetails.get(i).setSignature(signatures.get(i));
             }
-            em.flush();
         }
+        em.flush();
 
         Map<String, String> response = new HashMap<>();
         response.put("message", "Change set signed successfully.");
