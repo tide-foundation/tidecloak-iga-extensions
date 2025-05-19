@@ -6,7 +6,7 @@ import org.keycloak.component.ComponentModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.services.resources.admin.AdminAuth;
-import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
+import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 
 public interface Authorizer {

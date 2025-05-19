@@ -1,4 +1,4 @@
-package org.tidecloak.iga.changesetprocessors.models;
+package org.tidecloak.iga.ChangeSetProcessors.models;
 import org.tidecloak.shared.enums.ActionType;
 
 import com.fasterxml.jackson.annotation.JsonProperty;

@@ -1,35 +1,28 @@
-package org.tidecloak.iga.changesetprocessors.processors;
+package org.tidecloak.iga.ChangeSetProcessors.processors;
 
 import jakarta.persistence.EntityManager;
 import org.jboss.logging.Logger;
 import org.keycloak.Config;
 import org.keycloak.models.*;
-import org.keycloak.models.cache.CacheRealmProvider;
-import org.keycloak.models.jpa.entities.ClientEntity;
-import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
-import org.keycloak.provider.InvalidationHandler;
 import org.keycloak.representations.AccessToken;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
-import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
-import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
-import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
-import org.tidecloak.iga.interfaces.TideRoleAdapter;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
+import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
+import org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
-import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.iga.interfaces.TideUserAdapter;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.iga.interfaces.TideClientAdapter;
 
 import java.util.*;
 
-import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
-import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.*;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils.*;
 
 public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDraftEntity> {
     protected static final Logger logger = Logger.getLogger(ClientFullScopeProcessor.class);

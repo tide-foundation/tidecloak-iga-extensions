@@ -1,15 +1,14 @@
-package org.tidecloak.iga.changesetprocessors.processors;
+package org.tidecloak.iga.ChangeSetProcessors.processors;
 
 import jakarta.persistence.EntityManager;
 import org.jboss.logging.Logger;
 import org.keycloak.models.*;
 import org.keycloak.representations.AccessToken;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
-import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
-import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
-import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
+import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
+import org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
-import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -22,10 +21,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
 
-import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
-import static org.tidecloak.iga.changesetprocessors.utils.ClientUtils.getUniqueClientList;
-import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.addRoleToAccessToken;
-import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.removeRoleFromAccessToken;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.ClientUtils.getUniqueClientList;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils.addRoleToAccessToken;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils.removeRoleFromAccessToken;
 
 public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
 

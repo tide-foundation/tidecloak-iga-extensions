@@ -58,7 +58,7 @@ public class UserContextUtilBase {
     public static UserContextUtilBase getUserContextUtil() {
         try {
             // Attempt to load the real implementation dynamically
-            return (UserContextUtilBase) Class.forName("org.tidecloak.iga.changesetprocessors.utils.UserContextUtils")
+            return (UserContextUtilBase) Class.forName("org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils")
                     .getDeclaredConstructor()
                     .newInstance();
         } catch (ClassNotFoundException e) {

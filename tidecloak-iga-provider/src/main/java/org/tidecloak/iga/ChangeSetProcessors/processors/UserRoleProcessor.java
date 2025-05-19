@@ -1,4 +1,4 @@
-package org.tidecloak.iga.changesetprocessors.processors;
+package org.tidecloak.iga.ChangeSetProcessors.processors;
 
 import jakarta.persistence.EntityManager;
 import org.jboss.logging.Logger;
@@ -9,11 +9,11 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.representations.AccessToken;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
-import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
-import org.tidecloak.iga.changesetprocessors.utils.ClientUtils;
-import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
-import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
+import org.tidecloak.iga.ChangeSetProcessors.utils.ClientUtils;
+import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
+import org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
@@ -30,11 +30,10 @@ import org.tidecloak.shared.enums.ActionType;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import static org.tidecloak.iga.TideRequests.TideRoleRequests.commitRoleInitCert;
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRoleInitCertDraft;
-import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
-import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.addRoleToAccessToken;
-import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.removeRoleFromAccessToken;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils.addRoleToAccessToken;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils.removeRoleFromAccessToken;
 
 public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMappingDraftEntity> {
 

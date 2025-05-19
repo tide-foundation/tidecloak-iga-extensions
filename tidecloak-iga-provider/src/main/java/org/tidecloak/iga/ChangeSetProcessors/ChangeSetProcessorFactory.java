@@ -1,6 +1,5 @@
-package org.tidecloak.iga.changesetprocessors;
+package org.tidecloak.iga.ChangeSetProcessors;
 
-import org.tidecloak.iga.changesetprocessors.processors.*;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.iga.interfaces.models.ChangeSetTypeEntity;
 

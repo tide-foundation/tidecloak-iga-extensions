@@ -29,7 +29,7 @@ import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RuleDefinition;
 import org.midgard.models.UserContext.UserContext;
 import org.midgard.models.VendorData;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;

@@ -1,4 +1,4 @@
-package org.tidecloak.iga.changesetprocessors;
+package org.tidecloak.iga.ChangeSetProcessors;
 
 import com.fasterxml.jackson.annotation.JsonAutoDetect;
 import com.fasterxml.jackson.annotation.JsonInclude;
@@ -27,10 +27,10 @@ import org.midgard.Serialization.JsonSorter;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
-import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
+import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.keycloak.representations.AccessToken;
-import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
-import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
+import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
+import org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils;
 import org.tidecloak.iga.utils.IGAUtils;
 import org.tidecloak.jpa.entities.*;
 import org.tidecloak.shared.enums.WorkflowType;
@@ -56,9 +56,8 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
-import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
-import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.*;
-import static org.tidecloak.iga.utils.IGAUtils.fetchDraftRecordEntity;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils.*;
 
 public interface ChangeSetProcessor<T> {
 

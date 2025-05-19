@@ -3,7 +3,6 @@ package org.tidecloak.iga.interfaces;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
 import org.keycloak.Config;
-import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.UserAdapter;
@@ -11,15 +10,12 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.jpa.entities.UserGroupMembershipEntity;
 
 import org.keycloak.models.utils.KeycloakModelUtils;
-import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 
-import org.tidecloak.iga.changesetprocessors.utils.ClientUtils;
-import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
+import org.tidecloak.iga.ChangeSetProcessors.utils.ClientUtils;
+import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
-import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
@@ -34,8 +30,7 @@ import java.util.stream.Stream;
 
 import static org.keycloak.utils.StreamsUtil.closing;
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRoleInitCertDraft;
-import static org.tidecloak.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
-import static org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils.wrapRoleModel;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils.wrapRoleModel;
 
 
 public class TideUserAdapter extends UserAdapter {

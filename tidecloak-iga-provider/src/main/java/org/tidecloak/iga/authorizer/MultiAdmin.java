@@ -15,23 +15,20 @@ import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
 import org.midgard.models.UserContext.UserContext;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
-import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.iga.utils.IGAUtils;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
-import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
 
 import java.net.URI;
 import java.util.*;
-import java.util.stream.Stream;
 
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.commitRoleInitCert;
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;

@@ -8,7 +8,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.services.resources.admin.AdminAuth;
 import org.tidecloak.iga.authorizer.Authorizer;
 import org.tidecloak.iga.authorizer.AuthorizerFactory;
-import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
+import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.shared.Constants;
 
@@ -44,8 +44,7 @@ public class TideIGACommitter implements  ChangeSetCommitter {
         // Delegate to the appropriate sub-strategy
         Authorizer authorizerSigner = AuthorizerFactory.getCommitter(authorizerType);
         if (authorizerSigner != null) {
-            Response resp = authorizerSigner.signWithAuthorizer(changeSet, em, session, realm, draftEntity, auth, primaryAuthorizer, componentModel);
-            return  resp;
+            return authorizerSigner.commitWithAuthorizer(changeSet, em, session, realm, draftEntity, auth, primaryAuthorizer, componentModel);
         }
         return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported authorizer type").build();
     }

@@ -9,9 +9,9 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
-import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
-import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
+import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.shared.Constants;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -24,8 +24,7 @@ import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import java.util.*;
 import java.util.stream.Stream;
 
-import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
-import static org.tidecloak.iga.changesetprocessors.utils.RoleUtils.commitDefaultRolesOnInitiation;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 
 public class TideRoleAdapter extends RoleAdapter {
     private final KeycloakSession session;

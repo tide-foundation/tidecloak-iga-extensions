@@ -24,9 +24,9 @@ import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.iga.ChangeSetCommitter.ChangeSetCommitter;
 import org.tidecloak.iga.ChangeSetCommitter.ChangeSetCommitterFactory;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
-import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
-import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
+import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.iga.ChangeSetSigner.ChangeSetSigner;
 import org.tidecloak.iga.ChangeSetSigner.ChangeSetSignerFactory;
 import org.tidecloak.shared.enums.ActionType;
@@ -144,7 +144,7 @@ public class IGARealmResource {
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
             ChangeSetType type = changeSet.getType();
 
-            Object mapping = getMappings(em, changeSet, type);
+            Object mapping = IGAUtils.fetchDraftRecordEntity(em, type, changeSet.getChangeSetId());
             if (mapping == null) {
                 return Response.status(Response.Status.NOT_FOUND).entity("Change request was not found.").build();
             }
@@ -318,173 +318,173 @@ public class IGARealmResource {
         }
     }
 
-public static void commitChange(KeycloakSession session, ChangeSetRequest change) throws Exception {
-    try{
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        RealmModel realm = session.getContext().getRealm();
-        List<AuthorizerEntity> realmAuthorizers = null;
-        ComponentModel componentModel = realm.getComponentsStream()
-                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
-                .findFirst()
-                .orElse(null);
-
-        var tideIdp = session.identityProviders().getByAlias("tide");
-        ActionType action = change.getActionType();
-        ChangeSetType type = change.getType();
-
-
-        List<?> mappings = getMappings(em, change, type, action, realm);
-        if (mappings == null || mappings.isEmpty()) {
-            throw  new Exception("Change request was not found.");
-        }
-        Object mapping = mappings.get(0);
-        em.lock(mapping, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
-
-        if (tideIdp != null && componentModel != null) {
-            realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
-                    .setParameter("ID", componentModel.getId()).getResultList();
-
-            if (realmAuthorizers.isEmpty()){
-                throw new Exception("Authorizer not found for this realm.");
-            }
-
-            if ( !realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")) {
-
-                // Fetch the draft record entity and proof details based on the change set type
-                Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, change.getType(), change.getChangeSetId());
-                List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, IGAUtils.getEntityId(draftRecordEntity), change.getType());;
-                proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
-
-                List<UserContext> userContexts = new ArrayList<>();
-                for (AccessProofDetailEntity p : proofDetails) {
-                    UserContext userContext = new UserContext(p.getProofDraft());
-                    userContexts.add(userContext);
-                }
-
-                List<UserContext> orderedContext;
-                List<AccessProofDetailEntity> orderedProofDetails;
-                if(isAuthorityAssignment(session, mapping, em) && change.getActionType().equals(ActionType.DELETE)){
-                    Stream<UserContext> adminContexts = userContexts.stream().filter(x -> x.getInitCertHash() != null);
-                    Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
-                    orderedContext = Stream.concat(adminContexts, normalUserContext).toList();
-                    Stream<AccessProofDetailEntity> adminproofs = proofDetails.stream().filter(x -> {
-                        UserContext userContext = new UserContext(x.getProofDraft());
-                        if(userContext.getInitCertHash() != null) {
-                            return true;
-                        }
-                        return false;
-
-                    });
-                    Stream<AccessProofDetailEntity> normalProofs = proofDetails.stream().filter(x -> {
-                        UserContext userContext = new UserContext(x.getProofDraft());
-                        if(userContext.getInitCertHash() == null) {
-                            return true;
-                        }
-                        return false;
-                    });
-
-                    orderedProofDetails = Stream.concat(adminproofs, normalProofs).toList();
-
-
-                } else {
-                    orderedContext = userContexts;
-                    orderedProofDetails = proofDetails;
-
-                }
-
-                ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
-                if (changesetRequestEntity == null){
-                    throw new Exception("No change-set request entity found with this recordId " + change.getChangeSetId());
-                }
-
-                // Check if changeset is for adding a tide realm admin.
-                MultivaluedHashMap<String, String> config = componentModel.getConfig();
-
-                RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-                RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
-                TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                        .setParameter("role", role).getSingleResult();
-
-                InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
-
-                UserContextSignRequest req = new UserContextSignRequest("Admin:1");
-
-                req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
-                req.SetUserContexts(orderedContext.toArray(new UserContext[0]));
-                req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000); // expiry in 1 month
-                AdminAuthorizerBuilder authorizerBuilder = new AdminAuthorizerBuilder();
-                authorizerBuilder.AddInitCert(cert);
-                authorizerBuilder.AddInitCertSignature(tideRoleEntity.getInitCertSig());
-
-                changesetRequestEntity.getAdminAuthorizations().forEach(auth -> {
-                    authorizerBuilder.AddAdminAuthorization(AdminAuthorization.FromString(auth.getAdminAuthorization()));
-                });
-
-                int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
-                int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
-
-                if ( threshold == 0 || max == 0){
-                    throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
-                }
-
-                String currentSecretKeys = config.getFirst("clientSecret");
-                ObjectMapper objectMapper = new ObjectMapper();
-                SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
-
-                SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
-                settings.VVKId = config.getFirst("vvkId");
-                settings.HomeOrkUrl = config.getFirst("systemHomeOrk");
-                settings.PayerPublicKey = config.getFirst("payerPublic");
-                settings.ObfuscatedVendorPublicKey = config.getFirst("obfGVVK");
-                settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
-                settings.Threshold_T = threshold;
-                settings.Threshold_N = max;
-
-                authorizerBuilder.AddAuthorizationToSignRequest(req);
-
-                if(isAuthorityAssignment(session, mapping, em)) {
-                    RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, change.getChangeSetId());
-                    if(roleInitCert == null) {
-                        throw new Exception("Role Init Cert draft not found for changeSet, " + change.getChangeSetId());
-                    }
-                    req.SetInitializationCertificate(InitializerCertifcate.FromString(roleInitCert.getInitCert()));
-                    SignatureResponse response = Midgard.SignModel(settings, req);
-
-                    for ( int i = 0; i < userContexts.size(); i++){
-                        orderedProofDetails.get(i).setSignature(response.Signatures[i + 1]);
-                    }
-                    commitRoleInitCert(session, change.getChangeSetId(), mapping, response.Signatures[0]);
-
-                } else {
-                    SignatureResponse response = Midgard.SignModel(settings, req);
-
-                    for ( int i = 0; i < userContexts.size(); i++){
-                        orderedProofDetails.get(i).setSignature(response.Signatures[i]);
-                    }
-                }
-
-
-            }
-        }
-
-        ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
-
-        WorkflowParams workflowParams = new WorkflowParams(null, false, null, change.getType());
-        processorFactory.getProcessor(type).executeWorkflow(session, mapping, em, WorkflowType.COMMIT, workflowParams, null);
-
-        if (type.equals(ChangeSetType.USER_ROLE) && realmAuthorizers != null){
-            RoleModel role = realm.getRoleById(((TideUserRoleMappingDraftEntity) mapping).getRoleId());
-            if (role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
-                realmAuthorizers.get(0).setType("multiAdmin");
-            }
-        }
-
-        em.flush(); // Persist changes to the database
-
-    } catch(Exception ex) {
-        throw ex;
-    }
-}
+//public static void commitChange(KeycloakSession session, ChangeSetRequest change) throws Exception {
+//    try{
+//        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+//        RealmModel realm = session.getContext().getRealm();
+//        List<AuthorizerEntity> realmAuthorizers = null;
+//        ComponentModel componentModel = realm.getComponentsStream()
+//                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+//                .findFirst()
+//                .orElse(null);
+//
+//        var tideIdp = session.identityProviders().getByAlias("tide");
+//        ActionType action = change.getActionType();
+//        ChangeSetType type = change.getType();
+//
+//
+//        List<?> mappings = getMappings(em, change, type, action, realm);
+//        if (mappings == null || mappings.isEmpty()) {
+//            throw  new Exception("Change request was not found.");
+//        }
+//        Object mapping = mappings.get(0);
+//        em.lock(mapping, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
+//
+//        if (tideIdp != null && componentModel != null) {
+//            realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
+//                    .setParameter("ID", componentModel.getId()).getResultList();
+//
+//            if (realmAuthorizers.isEmpty()){
+//                throw new Exception("Authorizer not found for this realm.");
+//            }
+//
+//            if ( !realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin")) {
+//
+//                // Fetch the draft record entity and proof details based on the change set type
+//                Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, change.getType(), change.getChangeSetId());
+//                List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, IGAUtils.getEntityId(draftRecordEntity), change.getType());;
+//                proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
+//
+//                List<UserContext> userContexts = new ArrayList<>();
+//                for (AccessProofDetailEntity p : proofDetails) {
+//                    UserContext userContext = new UserContext(p.getProofDraft());
+//                    userContexts.add(userContext);
+//                }
+//
+//                List<UserContext> orderedContext;
+//                List<AccessProofDetailEntity> orderedProofDetails;
+//                if(isAuthorityAssignment(session, mapping, em) && change.getActionType().equals(ActionType.DELETE)){
+//                    Stream<UserContext> adminContexts = userContexts.stream().filter(x -> x.getInitCertHash() != null);
+//                    Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
+//                    orderedContext = Stream.concat(adminContexts, normalUserContext).toList();
+//                    Stream<AccessProofDetailEntity> adminproofs = proofDetails.stream().filter(x -> {
+//                        UserContext userContext = new UserContext(x.getProofDraft());
+//                        if(userContext.getInitCertHash() != null) {
+//                            return true;
+//                        }
+//                        return false;
+//
+//                    });
+//                    Stream<AccessProofDetailEntity> normalProofs = proofDetails.stream().filter(x -> {
+//                        UserContext userContext = new UserContext(x.getProofDraft());
+//                        if(userContext.getInitCertHash() == null) {
+//                            return true;
+//                        }
+//                        return false;
+//                    });
+//
+//                    orderedProofDetails = Stream.concat(adminproofs, normalProofs).toList();
+//
+//
+//                } else {
+//                    orderedContext = userContexts;
+//                    orderedProofDetails = proofDetails;
+//
+//                }
+//
+//                ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
+//                if (changesetRequestEntity == null){
+//                    throw new Exception("No change-set request entity found with this recordId " + change.getChangeSetId());
+//                }
+//
+//                // Check if changeset is for adding a tide realm admin.
+//                MultivaluedHashMap<String, String> config = componentModel.getConfig();
+//
+//                RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+//                RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
+//                TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+//                        .setParameter("role", role).getSingleResult();
+//
+//                InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
+//
+//                UserContextSignRequest req = new UserContextSignRequest("Admin:1");
+//
+//                req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
+//                req.SetUserContexts(orderedContext.toArray(new UserContext[0]));
+//                req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000); // expiry in 1 month
+//                AdminAuthorizerBuilder authorizerBuilder = new AdminAuthorizerBuilder();
+//                authorizerBuilder.AddInitCert(cert);
+//                authorizerBuilder.AddInitCertSignature(tideRoleEntity.getInitCertSig());
+//
+//                changesetRequestEntity.getAdminAuthorizations().forEach(auth -> {
+//                    authorizerBuilder.AddAdminAuthorization(AdminAuthorization.FromString(auth.getAdminAuthorization()));
+//                });
+//
+//                int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
+//                int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
+//
+//                if ( threshold == 0 || max == 0){
+//                    throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
+//                }
+//
+//                String currentSecretKeys = config.getFirst("clientSecret");
+//                ObjectMapper objectMapper = new ObjectMapper();
+//                SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
+//
+//                SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
+//                settings.VVKId = config.getFirst("vvkId");
+//                settings.HomeOrkUrl = config.getFirst("systemHomeOrk");
+//                settings.PayerPublicKey = config.getFirst("payerPublic");
+//                settings.ObfuscatedVendorPublicKey = config.getFirst("obfGVVK");
+//                settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
+//                settings.Threshold_T = threshold;
+//                settings.Threshold_N = max;
+//
+//                authorizerBuilder.AddAuthorizationToSignRequest(req);
+//
+//                if(isAuthorityAssignment(session, mapping, em)) {
+//                    RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, change.getChangeSetId());
+//                    if(roleInitCert == null) {
+//                        throw new Exception("Role Init Cert draft not found for changeSet, " + change.getChangeSetId());
+//                    }
+//                    req.SetInitializationCertificate(InitializerCertifcate.FromString(roleInitCert.getInitCert()));
+//                    SignatureResponse response = Midgard.SignModel(settings, req);
+//
+//                    for ( int i = 0; i < userContexts.size(); i++){
+//                        orderedProofDetails.get(i).setSignature(response.Signatures[i + 1]);
+//                    }
+//                    commitRoleInitCert(session, change.getChangeSetId(), mapping, response.Signatures[0]);
+//
+//                } else {
+//                    SignatureResponse response = Midgard.SignModel(settings, req);
+//
+//                    for ( int i = 0; i < userContexts.size(); i++){
+//                        orderedProofDetails.get(i).setSignature(response.Signatures[i]);
+//                    }
+//                }
+//
+//
+//            }
+//        }
+//
+//        ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
+//
+//        WorkflowParams workflowParams = new WorkflowParams(null, false, null, change.getType());
+//        processorFactory.getProcessor(type).executeWorkflow(session, mapping, em, WorkflowType.COMMIT, workflowParams, null);
+//
+//        if (type.equals(ChangeSetType.USER_ROLE) && realmAuthorizers != null){
+//            RoleModel role = realm.getRoleById(((TideUserRoleMappingDraftEntity) mapping).getRoleId());
+//            if (role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
+//                realmAuthorizers.get(0).setType("multiAdmin");
+//            }
+//        }
+//
+//        em.flush(); // Persist changes to the database
+//
+//    } catch(Exception ex) {
+//        throw ex;
+//    }
+//}
     public static List<RequestedChanges> processClientDraftRecords(EntityManager em, RealmModel realm) {
         // Get all pending changes, records that do not have an active delete status or active draft status
         return processClientDraftRecords(em, realm, DraftStatus.ACTIVE);

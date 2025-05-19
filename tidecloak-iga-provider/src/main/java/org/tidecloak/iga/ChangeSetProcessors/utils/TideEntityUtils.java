@@ -1,4 +1,4 @@
-package org.tidecloak.iga.changesetprocessors.utils;
+package org.tidecloak.iga.ChangeSetProcessors.utils;
 
 import jakarta.persistence.EntityManager;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
