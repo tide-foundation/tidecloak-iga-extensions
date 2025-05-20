@@ -508,6 +508,8 @@ public interface ChangeSetProcessor<T> {
         return token;
     }
 
+
+
     /**
      * Generates a user context draft for a specific entity.
      * This method includes claims specific to the user, such as tideUserKey and vuid, and transforms the token
@@ -522,13 +524,17 @@ public interface ChangeSetProcessor<T> {
      * @return A serialized JSON string of the user context draft.
      * @throws JsonProcessingException If an error occurs during JSON serialization.
      */
+
     default String generateTransformedUserContext(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, T entity) throws Exception {
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        AccessToken token = this.generateAccessToken(session, realm, client, user);
+        return this.generateTransformedUserContext(session, realm, client, user, scopeParam, entity, token);
+    }
+
+    default String generateTransformedUserContext(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, T entity, AccessToken token) throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();
         objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
         objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
         ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
-        AccessToken token = this.generateAccessToken(session, realm, client, user);
 
         String tideUserKey = user.getFirstAttribute("tideUserKey");
         String vuid = user.getFirstAttribute("vuid");

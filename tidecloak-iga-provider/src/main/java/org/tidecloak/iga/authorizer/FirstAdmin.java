@@ -111,6 +111,12 @@ public class FirstAdmin implements Authorizer {
         WorkflowParams workflowParams = new WorkflowParams(null, false, null, changeSet.getType());
         processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, draftEntity, em, WorkflowType.COMMIT, workflowParams, null);
 
+        if (draftEntity instanceof TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
+            RoleModel role = realm.getRoleById(tideUserRoleMappingDraftEntity.getRoleId());
+            if (role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
+                authorizer.setType("multiAdmin");
+            }
+        }
         em.flush();
         return Response.ok("Change set approved and committed with authorizer type:  " + authorizer.getType()).build();
     }
