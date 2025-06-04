@@ -25,11 +25,6 @@
                 <constraints nullable="true"/>
             </column>
         </addColumn>
-        <addColumn tableName="KEYCLOAK_GROUP_DRAFT">
-            <column name="CHANGE_REQUEST_ID" type="VARCHAR(50)">
-                <constraints nullable="true"/>
-            </column>
-        </addColumn>
         <addColumn tableName="GROUP_ROLE_MAPPING_DRAFT">
             <column name="CHANGE_REQUEST_ID" type="VARCHAR(50)">
                 <constraints nullable="true"/>
@@ -58,7 +53,6 @@
         <sql>UPDATE CLIENT_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
         <sql>UPDATE COMPOSITE_ROLE_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
         <sql>UPDATE COMPOSITE_ROLE_MAPPING_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
-        <sql>UPDATE KEYCLOAK_GROUP_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
         <sql>UPDATE GROUP_ROLE_MAPPING_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
         <sql>UPDATE ROLE_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
         <sql>UPDATE USER_ENTITY_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
