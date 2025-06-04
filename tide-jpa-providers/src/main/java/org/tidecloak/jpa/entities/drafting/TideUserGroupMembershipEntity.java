@@ -16,6 +16,9 @@ public class TideUserGroupMembershipEntity {
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     protected String id;
 
+    @Column(name="CHANGE_REQUEST_ID", length = 36)
+    protected String changeRequestId;
+
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="USER_ID")
     @JsonIgnoreProperties({"credentials", "federatedIdentities", "attributes"})
@@ -41,6 +44,14 @@ public class TideUserGroupMembershipEntity {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getChangeRequestId() {
+        return changeRequestId;
+    }
+
+    public void setChangeRequestId(String changeRequestId) {
+        this.changeRequestId = changeRequestId;
     }
 
     public UserEntity getUser() {

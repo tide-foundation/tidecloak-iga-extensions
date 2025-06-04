@@ -9,9 +9,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
+import jakarta.ws.rs.core.Response;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.component.ComponentModel;
-import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
@@ -27,6 +27,7 @@ import org.midgard.Serialization.JsonSorter;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
+import org.tidecloak.iga.ChangeSetProcessors.keys.UserClientKey;
 import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.keycloak.representations.AccessToken;
 import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
@@ -51,6 +52,7 @@ import org.tidecloak.shared.enums.ActionType;
 import java.net.URI;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -508,6 +510,18 @@ public interface ChangeSetProcessor<T> {
         return token;
     }
 
+    default void combineChangeRequests(
+            KeycloakSession session,
+            T entity,
+            UserModel user,
+            ClientModel clientModel,
+            EntityManager em
+
+    ) {
+        throw new UnsupportedOperationException("Combine Change Requests has no default implementation");
+    }
+
+
 
 
     /**
@@ -529,6 +543,75 @@ public interface ChangeSetProcessor<T> {
         AccessToken token = this.generateAccessToken(session, realm, client, user);
         return this.generateTransformedUserContext(session, realm, client, user, scopeParam, entity, token);
     }
+
+//    default Map<UserClientKey, List<AccessProofDetailEntity>> groupChangeRequests(List<T> entities, EntityManager em ){
+//        ObjectMapper objectMapper = new ObjectMapper();
+//
+//        // Get a list of entities
+//        List<AccessProofDetailEntity> proofs = entities.stream().map(entity -> {
+//            return IGAUtils.getAccessProofsFromEntity(em, entity);
+//        }).filter(Objects::nonNull).flatMap(List::stream).toList();
+//
+//        // group access proofs by user and client
+//        Map<UserClientKey, List<AccessProofDetailEntity>> grouped =
+//                proofs.stream().collect(Collectors.groupingBy(
+//                        proof -> new UserClientKey(proof.getUser().getId(), proof.getClientId())
+//                ));
+//
+//        return grouped;
+//
+//        // combine for each user
+//        // loop through user + client access proof and combine, update id ??? record id??? and save new proof in a new accessproofentity with this record id and remove the others.
+////        grouped.forEach((userClientAccess, accessProofs) -> {
+////
+////            AtomicReference<String> trackTokenString = new AtomicReference<>("");
+////            // generate a new ID
+////            accessProofs.forEach(proof -> {
+////                try {
+////                    T entity =  (T) IGAUtils.fetchDraftRecordEntity(em, proof.getChangesetType(), proof.getRecordId());
+////                    AccessToken accessToken = objectMapper.readValue(proof.getProofDraft(), AccessToken.class);
+////                    trackTokenString.set(this.generateTransformedUserContext(session, realm, client, user, scopeParam, entity));
+////
+////                } catch (Exception e) {
+////                    throw new RuntimeException(e);
+////                }
+////            });
+////
+////        });
+//
+//        // commit
+//        // update affected
+//
+//    }
+
+//    default String combineChangeSets(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, T entity, AccessToken token) throws Exception {
+//        ObjectMapper objectMapper = new ObjectMapper();
+//        objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+//        objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
+//        ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
+//
+//        String tideUserKey = user.getFirstAttribute("tideUserKey");
+//        String vuid = user.getFirstAttribute("vuid");
+//
+//        if (tideUserKey != null) {
+//            token.getOtherClaims().put("tideuserkey", tideUserKey);
+//        }
+//        if (vuid != null) {
+//            token.getOtherClaims().put("vuid", vuid);
+//        }
+//
+//        ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);
+//        AccessToken userContextToken = processorFactory.getProcessor(changeSetRequest.getType()).combineUserContexts(token, session, entity, user, client);
+//
+//        boolean isFullScopeAllowed = client.isFullScopeAllowed();
+//        if( entity instanceof TideClientDraftEntity) {
+//            isFullScopeAllowed = changeSetRequest.getActionType().equals(ActionType.CREATE);
+//        }
+//
+//        return this.cleanAccessToken(userContextToken, null, isFullScopeAllowed);
+//
+//    }
+
 
     default String generateTransformedUserContext(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, T entity, AccessToken token) throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();

@@ -58,6 +58,9 @@ public class TideClientDraftEntity {
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     private String id;
 
+    @Column(name="CHANGE_REQUEST_ID", length = 36)
+    protected String changeRequestId;
+
     @OneToOne(fetch = FetchType.LAZY)  // Defining the relationship
     @JoinColumn(name = "CLIENT", referencedColumnName = "ID")  // Ensure 'ID' is the correct primary key field name in ClientEntity
     @JsonIgnore
@@ -93,6 +96,14 @@ public class TideClientDraftEntity {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getChangeRequestId() {
+        return changeRequestId;
+    }
+
+    public void setChangeRequestId(String changeRequestId) {
+        this.changeRequestId = changeRequestId;
     }
 
     public ClientEntity getClient() {

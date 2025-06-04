@@ -25,6 +25,9 @@ public class TideGroupRoleMappingEntity {
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     protected String id;
 
+    @Column(name="CHANGE_REQUEST_ID", length = 36)
+    protected String changeRequestId;
+
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="GROUP_ID")
     protected GroupEntity group;
@@ -49,6 +52,14 @@ public class TideGroupRoleMappingEntity {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getChangeRequestId() {
+        return changeRequestId;
+    }
+
+    public void setChangeRequestId(String changeRequestId) {
+        this.changeRequestId = changeRequestId;
     }
 
     public GroupEntity getGroup() {

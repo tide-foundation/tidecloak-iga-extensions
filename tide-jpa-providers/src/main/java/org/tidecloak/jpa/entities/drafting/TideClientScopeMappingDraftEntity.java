@@ -24,6 +24,9 @@ public class TideClientScopeMappingDraftEntity {
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     protected String id;
 
+    @Column(name="CHANGE_REQUEST_ID", length = 36)
+    protected String changeRequestId;
+
     @Column(name = "SCOPE_ID")
     protected String clientScopeId;
 
@@ -54,6 +57,14 @@ public class TideClientScopeMappingDraftEntity {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getChangeRequestId() {
+        return changeRequestId;
+    }
+
+    public void setChangeRequestId(String changeRequestId) {
+        this.changeRequestId = changeRequestId;
     }
 
     public String getClientScopeId() {

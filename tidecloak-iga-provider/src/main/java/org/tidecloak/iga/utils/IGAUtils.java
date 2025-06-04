@@ -256,6 +256,19 @@ public class IGAUtils {
 
 
 
+    public static List<AccessProofDetailEntity> getAccessProofsFromEntity(EntityManager em, Object entity) {
+        if (entity instanceof TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity) {
+            return getAccessProofs(em, tideUserRoleMappingDraftEntity.getId(), ChangeSetType.USER_ROLE);
+        } else if (entity instanceof TideRoleDraftEntity tideRoleDraftEntity) {
+            return getAccessProofs(em, tideRoleDraftEntity.getId(), ChangeSetType.ROLE);
+        } else if (entity instanceof TideCompositeRoleMappingDraftEntity tideCompositeRoleMappingDraftEntity) {
+            return getAccessProofs(em, tideCompositeRoleMappingDraftEntity.getId(), ChangeSetType.COMPOSITE_ROLE);
+        } else if (entity instanceof TideClientDraftEntity tideClientDraftEntity) {
+            return getAccessProofs(em, tideClientDraftEntity.getId(), ChangeSetType.CLIENT_FULLSCOPE);
+        }
+        return null;
+    }
+
     public static Object fetchDraftRecordEntity(EntityManager em, ChangeSetType type, String changeSetId) {
         return switch (type) {
             case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, changeSetId);
@@ -440,26 +453,6 @@ public class IGAUtils {
             return (ObjectNode) objectMapper.readTree(json);
         } catch (JsonProcessingException e) {
             throw new UncheckedIOException(e);
-        }
-    }
-
-    public static class UserClientKey {
-        public final String userId;
-        public final String clientId;
-        public UserClientKey(String userId, String clientId) {
-            this.userId   = userId;
-            this.clientId = clientId;
-        }
-        @Override public boolean equals(Object o) {
-            if (!(o instanceof UserClientKey)) return false;
-            UserClientKey k = (UserClientKey)o;
-            return userId.equals(k.userId) && clientId.equals(k.clientId);
-        }
-        @Override public int hashCode() {
-            return Objects.hash(userId, clientId);
-        }
-        @Override public String toString() {
-            return "(" + userId + "," + clientId + ")";
         }
     }
 }

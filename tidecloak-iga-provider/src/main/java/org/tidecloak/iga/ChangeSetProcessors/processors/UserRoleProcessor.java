@@ -1,21 +1,27 @@
 package org.tidecloak.iga.ChangeSetProcessors.processors;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import org.jboss.logging.Logger;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.models.jpa.entities.UserRoleMappingEntity;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.representations.AccessToken;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.iga.ChangeSetProcessors.keys.UserClientKey;
 import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.iga.ChangeSetProcessors.utils.ClientUtils;
 import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils;
+import org.tidecloak.iga.utils.IGAUtils;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
+import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -28,6 +34,7 @@ import org.tidecloak.shared.enums.ActionType;
 
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRoleInitCertDraft;
@@ -283,10 +290,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             affectedUserRoleEntity.setDraftStatus(DraftStatus.DRAFT);
         }
 
-        UserEntity userEntity = affectedUserContextDraft.getUser();
-        TideUserAdapter affectedUser = TideEntityUtils.toTideUserAdapter(userEntity, session, realm);
-
-        String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, affectedUser, "openId", affectedUserRoleEntity);
+        String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, userChangesMadeTo, "openId", affectedUserRoleEntity);
 
         RoleEntity roleEntity = em.find(RoleEntity.class, affectedUserRoleEntity.getRoleId());
         List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
@@ -336,6 +340,34 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         userContextUtils.normalizeAccessToken(token, clientModel.isFullScopeAllowed());
         return token;
     }
+
+//    @Override
+//    public void combineChangeRequests(KeycloakSession session, List<TideUserRoleMappingDraftEntity> userRoleEntities, UserModel user, ClientModel client, EntityManager em) {
+//        RealmModel realm = session.getContext().getRealm();
+//        Map<UserClientKey, List<AccessProofDetailEntity>> groupedChangeRequests =  ChangeSetProcessor.super.groupChangeRequests(userRoleEntities,em);
+//        ObjectMapper objectMapper = new ObjectMapper();
+//
+//        // combine for each user
+//        // loop through user + client access proof and combine, update id ??? record id??? and save new proof in a new accessproofentity with this record id and remove the others.
+//        groupedChangeRequests.forEach((userClientAccess, accessProofs) -> {
+//
+//            String changeRequestId = KeycloakModelUtils.generateId();
+//            AtomicReference<String> trackTokenString = new AtomicReference<>("");
+//            // generate a new ID
+//            accessProofs.forEach(proof -> {
+//                try {
+//                    TideUserRoleMappingDraftEntity entity =  em.find(TideUserRoleMappingDraftEntity.class, proof.getRecordId());
+//                    AccessToken accessToken = objectMapper.readValue(proof.getProofDraft(), AccessToken.class);
+//                    trackTokenString.set(this.generateTransformedUserContext(session, realm, client, user, "openId", entity));
+//                    entity.setRe
+//                } catch (Exception e) {
+//                    throw new RuntimeException(e);
+//                }
+//            });
+//
+//
+//        });
+//    }
 
     // Helper Methods
     private void commitUserRoleChangeRequest(UserModel user, RealmModel realm, TideUserRoleMappingDraftEntity entity, ChangeSetRequest change) {;

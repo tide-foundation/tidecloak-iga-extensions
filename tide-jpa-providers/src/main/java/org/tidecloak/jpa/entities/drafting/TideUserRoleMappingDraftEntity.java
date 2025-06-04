@@ -79,6 +79,9 @@ public class TideUserRoleMappingDraftEntity {
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     protected String id;
 
+    @Column(name="CHANGE_REQUEST_ID", length = 36)
+    protected String changeRequestId;
+
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="USER_ID")
     @JsonIgnoreProperties({"credentials", "federatedIdentities", "attributes"})
@@ -101,16 +104,20 @@ public class TideUserRoleMappingDraftEntity {
     @Column(name = "TIMESTAMP")
     protected Long timestamp = System.currentTimeMillis();
 
-
-//    @Column(name = "CHECKSUM")
-//    protected String checksum;
-
     public String getId() {
         return id;
     }
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getChangeRequestId() {
+        return changeRequestId;
+    }
+
+    public void setChangeRequestId(String changeRequestId) {
+        this.changeRequestId = changeRequestId;
     }
 
     public UserEntity getUser() {
@@ -161,16 +168,6 @@ public class TideUserRoleMappingDraftEntity {
     public void setTimestamp(Long timestamp) {
         this.timestamp = timestamp;
     }
-
-//    public String getChecksum() {
-//        return checksum;
-//    }
-//
-//    public void setChecksum(String checksum) {
-//        this.checksum = checksum;
-//    }
-
-
 
     @Override
     public boolean equals(Object o) {
