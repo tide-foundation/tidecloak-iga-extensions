@@ -65,7 +65,6 @@
         <addNotNullConstraint tableName="CLIENT_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
         <addNotNullConstraint tableName="COMPOSITE_ROLE_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
         <addNotNullConstraint tableName="COMPOSITE_ROLE_MAPPING_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
-        <addNotNullConstraint tableName="KEYCLOAK_GROUP_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
         <addNotNullConstraint tableName="GROUP_ROLE_MAPPING_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
         <addNotNullConstraint tableName="ROLE_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
         <addNotNullConstraint tableName="USER_ENTITY_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
