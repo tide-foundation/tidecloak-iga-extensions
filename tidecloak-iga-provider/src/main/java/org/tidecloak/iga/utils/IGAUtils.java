@@ -20,6 +20,8 @@ import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
 import org.midgard.models.UserContext.UserContext;
+import org.tidecloak.iga.ChangeSetCommitter.ChangeSetCommitter;
+import org.tidecloak.iga.ChangeSetCommitter.ChangeSetCommitterFactory;
 import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.iga.ChangeSetSigner.ChangeSetSigner;
@@ -304,23 +306,23 @@ public class IGAUtils {
             return switch (type) {
                 case USER_ROLE -> em.createNamedQuery("GetUserRoleMappingDraftEntityByRequestId", TideUserRoleMappingDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getSingleResult();
+                        .getResultList().getFirst();
 
                 case COMPOSITE_ROLE, DEFAULT_ROLES -> em.createNamedQuery("GetCompositeRoleMappingDraftEntityByRequestId", TideCompositeRoleMappingDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getSingleResult();
+                        .getResultList().getFirst();
 
                 case ROLE -> em.createNamedQuery("GetRoleDraftEntityByRequestId", TideRoleDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getSingleResult();
+                        .getResultList().getFirst();
 
                 case USER -> em.createNamedQuery("GetUserEntityByRequestId", TideUserDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getSingleResult();
+                        .getResultList().getFirst();
 
                 case CLIENT, CLIENT_FULLSCOPE -> em.createNamedQuery("GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getSingleResult();
+                        .getResultList().getFirst();
 
                 default -> null;
             };
@@ -527,8 +529,26 @@ public class IGAUtils {
 
             // Process grouped entities
             ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
+            ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
+            ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
             requests.forEach((requestType, entities) -> {
-                processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
+                try {
+                    List<AccessProofDetailEntity> proofsToSignAndCommit = processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
+
+
+                    proofsToSignAndCommit.forEach(p -> {
+                        try {
+                            Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, p.getChangesetType(), p.getRecordId());
+                            signer.sign(new ChangeSetRequest(p.getRecordId(), p.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
+                            Response response = committer.commit(new ChangeSetRequest(p.getRecordId(), p.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+
             });
         } else {
             // Single item path

@@ -510,7 +510,7 @@ public interface ChangeSetProcessor<T> {
         return token;
     }
 
-    default void combineChangeRequests(
+    default List<AccessProofDetailEntity> combineChangeRequests(
             KeycloakSession session,
             List<T> entity,
             EntityManager em
@@ -556,7 +556,10 @@ public interface ChangeSetProcessor<T> {
         // group access proofs by user and client
         Map<UserClientKey, List<AccessProofDetailEntity>> grouped =
                 proofs.stream().collect(Collectors.groupingBy(
-                        proof -> new UserClientKey(proof.getUser().getId(), proof.getClientId())
+                        proof -> {
+                            return new UserClientKey(proof.getUser().getId(), proof.getClientId());
+
+                        }
                 ));
 
         return grouped;

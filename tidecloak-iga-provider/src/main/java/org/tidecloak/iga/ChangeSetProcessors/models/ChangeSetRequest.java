@@ -1,8 +1,11 @@
 package org.tidecloak.iga.ChangeSetProcessors.models;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.shared.enums.ActionType;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.tidecloak.shared.enums.ChangeSetType;
+
+import java.util.function.Supplier;
 
 public class ChangeSetRequest {
 
@@ -12,6 +15,14 @@ public class ChangeSetRequest {
     protected ChangeSetType changeSetType;
     @JsonProperty("actionType")
     protected ActionType actionType;
+
+    public ChangeSetRequest() {}
+
+    public ChangeSetRequest(String changeSetId, ChangeSetType changeSetType, ActionType actionType) {
+        this.changeSetId = changeSetId;
+        this.changeSetType = changeSetType;
+        this.actionType = actionType;
+    }
 
     public ChangeSetType getType() {
         return changeSetType;

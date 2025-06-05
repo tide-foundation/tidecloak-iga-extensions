@@ -299,7 +299,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
     }
 
     @Override
-    public void combineChangeRequests(KeycloakSession session, List<TideCompositeRoleMappingDraftEntity> compositeRoleEntities, EntityManager em) {
+    public List<AccessProofDetailEntity> combineChangeRequests(KeycloakSession session, List<TideCompositeRoleMappingDraftEntity> compositeRoleEntities, EntityManager em) {
         RealmModel realm = session.getContext().getRealm();
         ObjectMapper objectMapper = new ObjectMapper();
 
@@ -385,6 +385,8 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
         toRemoveChangeRequests.forEach(em::remove);
 
         em.flush();
+
+        return newCombinedProofs;
     }
 
     private void commitCallback(RealmModel realm, ChangeSetRequest change, TideCompositeRoleMappingDraftEntity entity){

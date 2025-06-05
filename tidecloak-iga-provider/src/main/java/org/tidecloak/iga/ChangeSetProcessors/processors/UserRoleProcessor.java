@@ -348,7 +348,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     @Override
-    public void combineChangeRequests(KeycloakSession session, List<TideUserRoleMappingDraftEntity> userRoleEntities, EntityManager em) {
+    public List<AccessProofDetailEntity> combineChangeRequests(KeycloakSession session, List<TideUserRoleMappingDraftEntity> userRoleEntities, EntityManager em) {
         RealmModel realm = session.getContext().getRealm();
         ObjectMapper objectMapper = new ObjectMapper();
 
@@ -434,6 +434,8 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         toRemoveChangeRequests.forEach(em::remove);
 
         em.flush();
+
+        return newCombinedProofs;
     }
 
 

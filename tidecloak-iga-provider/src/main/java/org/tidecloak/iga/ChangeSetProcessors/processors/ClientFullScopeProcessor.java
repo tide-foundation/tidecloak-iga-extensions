@@ -308,7 +308,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
     }
 
     @Override
-    public void combineChangeRequests(KeycloakSession session, List<TideClientDraftEntity> clientDraftEntities, EntityManager em) {
+    public List<AccessProofDetailEntity> combineChangeRequests(KeycloakSession session, List<TideClientDraftEntity> clientDraftEntities, EntityManager em) {
         RealmModel realm = session.getContext().getRealm();
         ObjectMapper objectMapper = new ObjectMapper();
 
@@ -394,6 +394,8 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
         toRemoveChangeRequests.forEach(em::remove);
 
         em.flush();
+
+        return newCombinedProofs;
     }
 
     private void commitCallback(ChangeSetRequest change, TideClientDraftEntity entity, ClientModel clientModel, EntityManager em){

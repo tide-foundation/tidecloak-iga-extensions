@@ -212,7 +212,7 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
     }
 
     @Override
-    public void combineChangeRequests(KeycloakSession session, List<TideRoleDraftEntity> roleEntities, EntityManager em) {
+    public List<AccessProofDetailEntity> combineChangeRequests(KeycloakSession session, List<TideRoleDraftEntity> roleEntities, EntityManager em) {
         RealmModel realm = session.getContext().getRealm();
         ObjectMapper objectMapper = new ObjectMapper();
 
@@ -298,6 +298,7 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
         toRemoveChangeRequests.forEach(em::remove);
 
         em.flush();
+        return newCombinedProofs;
     }
 
 
