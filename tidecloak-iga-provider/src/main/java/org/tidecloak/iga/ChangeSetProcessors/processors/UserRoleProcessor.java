@@ -23,6 +23,7 @@ import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -72,10 +73,11 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     @Override
     public void commit(KeycloakSession session, ChangeSetRequest change, TideUserRoleMappingDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {
         logger.debug(String.format(
-                "Starting workflow: COMMIT. Processor: %s, Action: %s, Entity ID: %s",
+                "Starting workflow: COMMIT. Processor: %s, Action: %s, Entity ID: %s, Change Request ID: %s",
                 this.getClass().getSimpleName(),
                 change.getActionType(),
-                entity.getId()
+                entity.getId(),
+                entity.getChangeRequestId()
         ));
 
         RealmModel realm = session.getContext().getRealm();
@@ -119,7 +121,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             tideAdminRealmRoleRequests.forEach(request -> {
                 try {
                     UserModel u = session.users().getUserById(realm, request.getUser().getId());
-                    List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", request.getId()).getResultList();
+                    List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", request.getChangeRequestId()).getResultList();
                     if(!changesetRequestEntity.isEmpty()) {
                         changesetRequestEntity.forEach(em::remove);
                     }
@@ -130,7 +132,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                         em.remove(p);
                         em.flush();
                     });
-                    List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", request.getId()).getResultList();
+                    List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", request.getChangeRequestId()).getResultList();
                     if(!roleInitializerCertificateDraftEntity.isEmpty()){
                         em.remove(roleInitializerCertificateDraftEntity.get(0));
                         em.flush();
@@ -145,12 +147,12 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             });
         }
 
-
         // Log successful completion
         logger.debug(String.format(
-                "Successfully processed workflow: COMMIT. Processor: %s, Mapping ID: %s",
+                "Successfully processed workflow: COMMIT. Processor: %s, Mapping ID: %s, Change Requests ID: %s",
                 this.getClass().getSimpleName(),
-                entity.getId()
+                entity.getId(),
+                entity.getChangeRequestId()
         ));
     }
 
@@ -159,38 +161,41 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         try {
             // Log the start of the request with detailed context
             logger.debug(String.format(
-                    "Starting workflow: REQUEST. Processor: %s, Action: %s, Entity ID: %s",
+                    "Starting workflow: REQUEST. Processor: %s, Action: %s, Entity ID: %s, Change Requests ID: %s",
                     this.getClass().getSimpleName(),
                     action,
-                    entity.getId()
+                    entity.getId(),
+                    entity.getChangeRequestId()
             ));
-            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getId(), changeSetType);
+            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
             switch (action) {
                 case CREATE:
-                    logger.debug(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
+                    logger.debug(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", entity.getId(), entity.getChangeRequestId()));
                     handleCreateRequest(session, entity, em, callback);
                     break;
                 case DELETE:
-                    logger.debug(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
+                    logger.debug(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", entity.getId(), entity.getChangeRequestId()));
                     handleDeleteRequest(session, entity, em, callback);
                     break;
                 default:
-                    logger.warn(String.format("Unsupported action type: %s for Mapping ID: %s in workflow: REQUEST", action, entity.getId()));
+                    logger.warn(String.format("Unsupported action type: %s for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", action, entity.getId(), entity.getChangeRequestId()));
                     throw new IllegalArgumentException("Unsupported action: " + action);
             }
 
             // Log successful completion
             logger.debug(String.format(
-                    "Successfully processed workflow: REQUEST. Processor: %s, Mapping ID: %s",
+                    "Successfully processed workflow: REQUEST. Processor: %s, Mapping ID: %s, Change Request ID: %s",
                     this.getClass().getSimpleName(),
-                    entity.getId()
+                    entity.getId(),
+                    entity.getChangeRequestId()
             ));
 
         } catch (Exception e) {
             logger.error(String.format(
-                    "Error in workflow: REQUEST. Processor: %s, Mapping ID: %s, Action: %s. Error: %s",
+                    "Error in workflow: REQUEST. Processor: %s, Mapping ID: %s, Change Request ID: %s, Action: %s. Error: %s",
                     this.getClass().getSimpleName(),
                     entity.getId(),
+                    entity.getChangeRequestId(),
                     action,
                     e.getMessage()
             ), e);
@@ -260,7 +265,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                     try {
                         UserEntity u = em.find(UserEntity.class, user.getId());
                         UserModel wrappedUser = TideEntityUtils.toTideUserAdapter(u, session, realm);
-                        ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, userRoleMapping.getId(),
+                        ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, userRoleMapping.getChangeRequestId(),
                             ChangeSetType.USER_ROLE, userRoleMapping);
                     } catch (Exception e) {
                         throw new RuntimeException(e);
@@ -317,6 +322,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         affectedUserContextDraft.setProofDraft(userContextDraft);
     }
 
+
     @Override
     public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideUserRoleMappingDraftEntity entity, UserModel user, ClientModel clientModel){
         RealmModel realm = session.getContext().getRealm();
@@ -341,33 +347,48 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         return token;
     }
 
-//    @Override
-//    public void combineChangeRequests(KeycloakSession session, List<TideUserRoleMappingDraftEntity> userRoleEntities, UserModel user, ClientModel client, EntityManager em) {
-//        RealmModel realm = session.getContext().getRealm();
-//        Map<UserClientKey, List<AccessProofDetailEntity>> groupedChangeRequests =  ChangeSetProcessor.super.groupChangeRequests(userRoleEntities,em);
-//        ObjectMapper objectMapper = new ObjectMapper();
-//
-//        // combine for each user
-//        // loop through user + client access proof and combine, update id ??? record id??? and save new proof in a new accessproofentity with this record id and remove the others.
-//        groupedChangeRequests.forEach((userClientAccess, accessProofs) -> {
-//
-//            String changeRequestId = KeycloakModelUtils.generateId();
-//            AtomicReference<String> trackTokenString = new AtomicReference<>("");
-//            // generate a new ID
-//            accessProofs.forEach(proof -> {
-//                try {
-//                    TideUserRoleMappingDraftEntity entity =  em.find(TideUserRoleMappingDraftEntity.class, proof.getRecordId());
-//                    AccessToken accessToken = objectMapper.readValue(proof.getProofDraft(), AccessToken.class);
-//                    trackTokenString.set(this.generateTransformedUserContext(session, realm, client, user, "openId", entity));
-//                    entity.setRe
-//                } catch (Exception e) {
-//                    throw new RuntimeException(e);
-//                }
-//            });
-//
-//
-//        });
-//    }
+    @Override
+    public void combineChangeRequests(KeycloakSession session, List<TideUserRoleMappingDraftEntity> userRoleEntities, UserModel user, ClientModel client, EntityManager em) {
+        RealmModel realm = session.getContext().getRealm();
+        UserEntity userEntity = em.find(UserEntity.class, user.getId());
+        Map<UserClientKey, List<AccessProofDetailEntity>> groupedChangeRequests =  ChangeSetProcessor.super.groupChangeRequests(userRoleEntities,em);
+        ObjectMapper objectMapper = new ObjectMapper();
+
+        // combine for each user
+        // loop through user + client access proof and combine, update id ??? record id??? and save new proof in a new accessproofentity with this record id and remove the others.
+        groupedChangeRequests.forEach((userClientAccess, accessProofs) -> {
+
+            String changeRequestId = KeycloakModelUtils.generateId();
+            AtomicReference<String> trackTokenString = new AtomicReference<>("");
+            // generate a new ID
+            accessProofs.forEach(proof -> {
+                try {
+                    TideUserRoleMappingDraftEntity entity = (TideUserRoleMappingDraftEntity) IGAUtils.fetchDraftRecordEntityByRequestId(em, proof.getChangesetType(), proof.getRecordId());
+                    if(entity == null){
+                        throw new Exception("Could not find entity with change request id " + proof.getRecordId());
+                    }
+
+                    AccessToken accessToken = objectMapper.readValue(proof.getProofDraft(), AccessToken.class);
+                    trackTokenString.set(this.combinedTransformedUserContext(session, realm, client, user, "openId", entity, accessToken));
+                    entity.setChangeRequestId(changeRequestId);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            AccessProofDetailEntity combinedProof = new AccessProofDetailEntity();
+            combinedProof.setUser(userEntity);
+            combinedProof.setProofDraft(String.valueOf(trackTokenString));
+            combinedProof.setId(KeycloakModelUtils.generateId());
+            combinedProof.setClientId(client.getId());
+            combinedProof.setChangesetType(ChangeSetType.USER_ROLE);
+            combinedProof.setRealmId(realm.getId());
+            combinedProof.setRecordId(changeRequestId);
+
+            // remove once we have merged
+            accessProofs.forEach(em::remove);
+        });
+    }
 
     // Helper Methods
     private void commitUserRoleChangeRequest(UserModel user, RealmModel realm, TideUserRoleMappingDraftEntity entity, ChangeSetRequest change) {;
@@ -417,10 +438,10 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                     try {
                         if (isAdminClient){
                             // Create empty user contexts for ADMIN-CLI and SECURITY-ADMIN-CONSOLE
-                            ChangeSetProcessor.super.generateAndSaveDefaultUserContextDraft(session, em, realm, client, u, entity.getId(),
+                            ChangeSetProcessor.super.generateAndSaveDefaultUserContextDraft(session, em, realm, client, u, entity.getChangeRequestId(),
                                     ChangeSetType.USER_ROLE);
                         } else {
-                            ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, u, entity.getId(),
+                            ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, u, entity.getChangeRequestId(),
                                     ChangeSetType.USER_ROLE, entity);
                         }
                     }catch (Exception e) {
@@ -440,7 +461,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 if (isAdminClient(client)) {
                     return;
                 }
-                ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, userModel, entity.getId(),
+                ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, userModel, entity.getChangeRequestId(),
                         ChangeSetType.USER_ROLE, entity);
             } catch (Exception e) {
                 throw new RuntimeException("Error processing client: " + client.getClientId(), e);

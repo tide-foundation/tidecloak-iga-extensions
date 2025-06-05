@@ -62,6 +62,7 @@ public class TideUserAdapter extends UserAdapter {
 
         //TODO: !!!! CHECK IF THIS EXISTS BEFORE ADDING
         entity.setId(KeycloakModelUtils.generateId());
+        entity.setChangeRequestId(KeycloakModelUtils.generateId());
         entity.setUser(getEntity());
         entity.setGroupId(group.getId());
         entity.setDraftStatus(DraftStatus.DRAFT);
@@ -108,6 +109,7 @@ public class TideUserAdapter extends UserAdapter {
                 if(entities.isEmpty()){
                     TideUserRoleMappingDraftEntity draftUserRole = new TideUserRoleMappingDraftEntity();
                     draftUserRole.setId(KeycloakModelUtils.generateId());
+                    draftUserRole.setChangeRequestId(KeycloakModelUtils.generateId());
                     draftUserRole.setRoleId(role.getId());
                     draftUserRole.setUser(this.getEntity());
                     draftUserRole.setAction(ActionType.CREATE);
@@ -150,6 +152,7 @@ public class TideUserAdapter extends UserAdapter {
                     if(affectedClients.isEmpty() || role.equals(realm.getDefaultRole())){
                         TideUserRoleMappingDraftEntity draftUserRole = new TideUserRoleMappingDraftEntity();
                         draftUserRole.setId(KeycloakModelUtils.generateId());
+                        draftUserRole.setChangeRequestId(KeycloakModelUtils.generateId());
                         draftUserRole.setRoleId(role.getId());
                         draftUserRole.setUser(this.getEntity());
                         draftUserRole.setAction(ActionType.CREATE);
@@ -163,6 +166,7 @@ public class TideUserAdapter extends UserAdapter {
                 // Create a draft record for new user role mapping
                 TideUserRoleMappingDraftEntity draftUserRole = new TideUserRoleMappingDraftEntity();
                 draftUserRole.setId(KeycloakModelUtils.generateId());
+                draftUserRole.setChangeRequestId(KeycloakModelUtils.generateId());
                 draftUserRole.setRoleId(role.getId());
                 draftUserRole.setUser(this.getEntity());
                 draftUserRole.setAction(ActionType.CREATE);

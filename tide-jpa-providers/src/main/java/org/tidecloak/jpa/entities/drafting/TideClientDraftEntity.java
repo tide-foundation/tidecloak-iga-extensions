@@ -44,8 +44,8 @@ import org.tidecloak.shared.enums.ActionType;
         @NamedQuery(
                 name = "getClientDraftsWithNullScopes",
                 query = "SELECT t FROM TideClientDraftEntity t WHERE t.fullScopeEnabled IS NULL OR t.fullScopeDisabled IS NULL"
-        )
-
+        ),
+        @NamedQuery(name="GetClientDraftEntityByRequestId", query="SELECT m FROM TideClientDraftEntity m where m.changeRequestId = :requestId")
 })
 
 

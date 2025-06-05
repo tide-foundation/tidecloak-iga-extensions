@@ -15,7 +15,9 @@ import org.tidecloak.shared.enums.DraftStatus;
         @NamedQuery(name="DeleteAllCompositeRoleDraftsByRole",
                 query = "DELETE FROM TideCompositeRoleDraftEntity r " +
                         "WHERE r.composite.id = :roleId"
-        )
+        ),
+        @NamedQuery(name="GetCompositeRoleDraftEntityByRequestId", query="SELECT m FROM TideCompositeRoleDraftEntity m where m.changeRequestId = :requestId")
+
 })
 
 @Entity

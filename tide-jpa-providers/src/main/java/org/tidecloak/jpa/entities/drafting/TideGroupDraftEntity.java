@@ -9,6 +9,8 @@ import org.tidecloak.shared.enums.DraftStatus;
 @NamedQueries({
         @NamedQuery(name="getGroupByStatus", query="select m from TideGroupDraftEntity m where m.group = :group and m.draftStatus = :draftStatus"),
         @NamedQuery(name="deleteGroupDraftByRole", query="delete from TideGroupDraftEntity m where m.id = :roleId"),
+        @NamedQuery(name="GetGroupDraftEntityByRequestId", query="SELECT m FROM TideGroupDraftEntity m where m.changeRequestId = :requestId")
+
 })
 
 @Entity

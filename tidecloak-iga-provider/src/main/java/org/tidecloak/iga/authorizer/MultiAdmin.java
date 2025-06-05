@@ -122,7 +122,7 @@ public class MultiAdmin implements Authorizer{
         }
 
         var config = componentModel.getConfig();
-        List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, IGAUtils.getEntityId(draftEntity), changeSet.getType());
+        List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, IGAUtils.getEntityChangeRequestId(draftEntity), changeSet.getType());
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
 
         List<AccessProofDetailEntity> orderedProofDetails = sortAccessProof(proofDetails);

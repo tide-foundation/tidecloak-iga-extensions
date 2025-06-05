@@ -512,7 +512,7 @@ public interface ChangeSetProcessor<T> {
 
     default void combineChangeRequests(
             KeycloakSession session,
-            T entity,
+            List<T> entity,
             UserModel user,
             ClientModel clientModel,
             EntityManager em
@@ -544,45 +544,50 @@ public interface ChangeSetProcessor<T> {
         return this.generateTransformedUserContext(session, realm, client, user, scopeParam, entity, token);
     }
 
-//    default Map<UserClientKey, List<AccessProofDetailEntity>> groupChangeRequests(List<T> entities, EntityManager em ){
-//        ObjectMapper objectMapper = new ObjectMapper();
+    default String combinedTransformedUserContext(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, T entity, AccessToken token) throws Exception {
+        return this.generateTransformedUserContext(session, realm, client, user, scopeParam, entity, token);
+    }
+
+
+    default Map<UserClientKey, List<AccessProofDetailEntity>> groupChangeRequests(List<T> entities, EntityManager em ){
+        ObjectMapper objectMapper = new ObjectMapper();
+
+        // Get a list of entities
+        List<AccessProofDetailEntity> proofs = entities.stream().map(entity -> {
+            return IGAUtils.getAccessProofsFromEntity(em, entity);
+        }).filter(Objects::nonNull).flatMap(List::stream).toList();
+
+        // group access proofs by user and client
+        Map<UserClientKey, List<AccessProofDetailEntity>> grouped =
+                proofs.stream().collect(Collectors.groupingBy(
+                        proof -> new UserClientKey(proof.getUser().getId(), proof.getClientId())
+                ));
+
+        return grouped;
+
+        // combine for each user
+        // loop through user + client access proof and combine, update id ??? record id??? and save new proof in a new accessproofentity with this record id and remove the others.
+//        grouped.forEach((userClientAccess, accessProofs) -> {
 //
-//        // Get a list of entities
-//        List<AccessProofDetailEntity> proofs = entities.stream().map(entity -> {
-//            return IGAUtils.getAccessProofsFromEntity(em, entity);
-//        }).filter(Objects::nonNull).flatMap(List::stream).toList();
+//            AtomicReference<String> trackTokenString = new AtomicReference<>("");
+//            // generate a new ID
+//            accessProofs.forEach(proof -> {
+//                try {
+//                    T entity =  (T) IGAUtils.fetchDraftRecordEntity(em, proof.getChangesetType(), proof.getRecordId());
+//                    AccessToken accessToken = objectMapper.readValue(proof.getProofDraft(), AccessToken.class);
+//                    trackTokenString.set(this.generateTransformedUserContext(session, realm, client, user, scopeParam, entity));
 //
-//        // group access proofs by user and client
-//        Map<UserClientKey, List<AccessProofDetailEntity>> grouped =
-//                proofs.stream().collect(Collectors.groupingBy(
-//                        proof -> new UserClientKey(proof.getUser().getId(), proof.getClientId())
-//                ));
+//                } catch (Exception e) {
+//                    throw new RuntimeException(e);
+//                }
+//            });
 //
-//        return grouped;
-//
-//        // combine for each user
-//        // loop through user + client access proof and combine, update id ??? record id??? and save new proof in a new accessproofentity with this record id and remove the others.
-////        grouped.forEach((userClientAccess, accessProofs) -> {
-////
-////            AtomicReference<String> trackTokenString = new AtomicReference<>("");
-////            // generate a new ID
-////            accessProofs.forEach(proof -> {
-////                try {
-////                    T entity =  (T) IGAUtils.fetchDraftRecordEntity(em, proof.getChangesetType(), proof.getRecordId());
-////                    AccessToken accessToken = objectMapper.readValue(proof.getProofDraft(), AccessToken.class);
-////                    trackTokenString.set(this.generateTransformedUserContext(session, realm, client, user, scopeParam, entity));
-////
-////                } catch (Exception e) {
-////                    throw new RuntimeException(e);
-////                }
-////            });
-////
-////        });
-//
-//        // commit
-//        // update affected
-//
-//    }
+//        });
+
+        // commit
+        // update affected
+
+    }
 
 //    default String combineChangeSets(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, T entity, AccessToken token) throws Exception {
 //        ObjectMapper objectMapper = new ObjectMapper();
@@ -612,12 +617,10 @@ public interface ChangeSetProcessor<T> {
 //
 //    }
 
-
-    default String generateTransformedUserContext(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, T entity, AccessToken token) throws Exception {
+    default AccessToken transformedToken(AccessToken token, UserModel user) throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();
         objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
         objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
-        ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
 
         String tideUserKey = user.getFirstAttribute("tideUserKey");
         String vuid = user.getFirstAttribute("vuid");
@@ -629,8 +632,16 @@ public interface ChangeSetProcessor<T> {
             token.getOtherClaims().put("vuid", vuid);
         }
 
+        return token;
+    }
+
+
+    default String generateTransformedUserContext(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, T entity, AccessToken token) throws Exception {
+        ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
+        AccessToken accessToken = this.transformedToken(token, user);
+
         ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);
-        AccessToken userContextToken = processorFactory.getProcessor(changeSetRequest.getType()).transformUserContext(token, session, entity, user, client);
+        AccessToken userContextToken = processorFactory.getProcessor(changeSetRequest.getType()).transformUserContext(accessToken, session, entity, user, client);
 
         boolean isFullScopeAllowed = client.isFullScopeAllowed();
         if( entity instanceof TideClientDraftEntity) {
@@ -736,7 +747,7 @@ public interface ChangeSetProcessor<T> {
         byte[] certHash = new byte[0];
 
         if (type.equals(ChangeSetType.USER_ROLE)) {
-            TideUserRoleMappingDraftEntity roleMapping = em.find(TideUserRoleMappingDraftEntity.class, recordId);
+            TideUserRoleMappingDraftEntity roleMapping = (TideUserRoleMappingDraftEntity)IGAUtils.fetchDraftRecordEntityByRequestId(em, type, recordId);
             if (roleMapping == null) {
                 throw new Exception("Invalid request, no user role mapping draft entity found for this record ID: " + recordId);
             }

@@ -25,6 +25,8 @@ import org.tidecloak.shared.enums.ActionType;
         ),
         @NamedQuery(name="DeleteRoleDraftByRealm", query = "DELETE FROM TideRoleDraftEntity r WHERE r.role IN (SELECT u FROM RoleEntity u WHERE u.realmId = :realmId)"
         ),
+        @NamedQuery(name="GetRoleDraftEntityByRequestId", query="SELECT m FROM TideRoleDraftEntity m where m.changeRequestId = :requestId")
+
 })
 
 @Entity

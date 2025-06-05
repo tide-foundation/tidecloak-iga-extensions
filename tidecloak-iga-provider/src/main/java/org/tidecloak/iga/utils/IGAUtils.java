@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.NoResultException;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
@@ -243,6 +244,19 @@ public class IGAUtils {
         return null;
     }
 
+    public static String getEntityChangeRequestId(Object entity) {
+        if (entity instanceof TideUserRoleMappingDraftEntity) {
+            return ((TideUserRoleMappingDraftEntity) entity).getChangeRequestId();
+        } else if (entity instanceof TideRoleDraftEntity) {
+            return ((TideRoleDraftEntity) entity).getChangeRequestId();
+        } else if (entity instanceof TideCompositeRoleMappingDraftEntity) {
+            return ((TideCompositeRoleMappingDraftEntity) entity).getChangeRequestId();
+        } else if (entity instanceof TideClientDraftEntity) {
+            return ((TideClientDraftEntity) entity).getChangeRequestId();
+        }
+        return null;
+    }
+
     public static String getRoleIdFromEntity(Object entity) {
         if (entity instanceof TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity) {
             return tideUserRoleMappingDraftEntity.getRoleId();
@@ -258,27 +272,62 @@ public class IGAUtils {
 
     public static List<AccessProofDetailEntity> getAccessProofsFromEntity(EntityManager em, Object entity) {
         if (entity instanceof TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity) {
-            return getAccessProofs(em, tideUserRoleMappingDraftEntity.getId(), ChangeSetType.USER_ROLE);
+            return getAccessProofs(em, tideUserRoleMappingDraftEntity.getChangeRequestId(), ChangeSetType.USER_ROLE);
         } else if (entity instanceof TideRoleDraftEntity tideRoleDraftEntity) {
-            return getAccessProofs(em, tideRoleDraftEntity.getId(), ChangeSetType.ROLE);
+            return getAccessProofs(em, tideRoleDraftEntity.getChangeRequestId(), ChangeSetType.ROLE);
         } else if (entity instanceof TideCompositeRoleMappingDraftEntity tideCompositeRoleMappingDraftEntity) {
-            return getAccessProofs(em, tideCompositeRoleMappingDraftEntity.getId(), ChangeSetType.COMPOSITE_ROLE);
+            return getAccessProofs(em, tideCompositeRoleMappingDraftEntity.getChangeRequestId(), ChangeSetType.COMPOSITE_ROLE);
         } else if (entity instanceof TideClientDraftEntity tideClientDraftEntity) {
-            return getAccessProofs(em, tideClientDraftEntity.getId(), ChangeSetType.CLIENT_FULLSCOPE);
+            return getAccessProofs(em, tideClientDraftEntity.getChangeRequestId(), ChangeSetType.CLIENT_FULLSCOPE);
         }
         return null;
     }
 
-    public static Object fetchDraftRecordEntity(EntityManager em, ChangeSetType type, String changeSetId) {
+    public static Object fetchDraftRecordEntity(EntityManager em, ChangeSetType type, String entityId) {
         return switch (type) {
-            case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, changeSetId);
-            case COMPOSITE_ROLE, DEFAULT_ROLES -> em.find(TideCompositeRoleMappingDraftEntity.class, changeSetId);
-            case ROLE -> em.find(TideRoleDraftEntity.class, changeSetId);
-            case USER -> em.find(TideUserDraftEntity.class, changeSetId);
-            case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, changeSetId);
+            case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, entityId);
+            case COMPOSITE_ROLE, DEFAULT_ROLES -> em.find(TideCompositeRoleMappingDraftEntity.class, entityId);
+            case ROLE -> em.find(TideRoleDraftEntity.class, entityId);
+            case USER -> em.find(TideUserDraftEntity.class, entityId);
+            case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, entityId);
             default -> null;
         };
     }
+
+    public static Object fetchDraftRecordEntityByRequestId(EntityManager em, ChangeSetType type, String changeSetId) {
+        try {
+            return switch (type) {
+                case USER_ROLE -> em.createNamedQuery("GetUserRoleMappingDraftEntityByRequestId", TideUserRoleMappingDraftEntity.class)
+                        .setParameter("requestId", changeSetId)
+                        .getSingleResult();
+
+                case COMPOSITE_ROLE -> em.createNamedQuery("GetCompositeRoleMappingDraftEntityByRequestId", TideCompositeRoleMappingDraftEntity.class)
+                        .setParameter("requestId", changeSetId)
+                        .getSingleResult();
+
+                case DEFAULT_ROLES -> em.createNamedQuery("GetCompositeRoleMappingDraftEntityByRequestId", TideCompositeRoleMappingDraftEntity.class)
+                        .setParameter("requestId", changeSetId)
+                        .getSingleResult();
+
+                case ROLE -> em.createNamedQuery("GetRoleDraftEntityByRequestId", TideRoleDraftEntity.class)
+                        .setParameter("requestId", changeSetId)
+                        .getSingleResult();
+
+                case USER -> em.createNamedQuery("GetUserEntityByRequestId", TideUserDraftEntity.class)
+                        .setParameter("requestId", changeSetId)
+                        .getSingleResult();
+
+                case CLIENT, CLIENT_FULLSCOPE -> em.createNamedQuery("GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
+                        .setParameter("requestId", changeSetId)
+                        .getSingleResult();
+
+                default -> null;
+            };
+        } catch (NoResultException e) {
+            return null;
+        }
+    }
+
 
     public static void updateDraftStatus(ChangeSetType changeSetType, ActionType changeSetAction, Object draftRecordEntity) {
         switch (changeSetType) {

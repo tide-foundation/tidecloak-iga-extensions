@@ -48,7 +48,7 @@ public class ChangesetRequestAdapter {
             AdminAuthorization adminAuthorization = new AdminAuthorization(json.getBytes(),  json.getBytes(), json.getBytes(), json.getBytes(), json.getBytes());
             AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), adminAuthorization, adminUser.getId(), em);
             changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
-            Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
+            Object draftRecordEntity= IGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
             IGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), draftRecordEntity);
             return;
         }
@@ -66,7 +66,7 @@ public class ChangesetRequestAdapter {
         AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), adminAuthorization, adminUser.getId(), em);
         changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
 
-        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
+        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
         IGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), draftRecordEntity);
     }
 
@@ -91,7 +91,7 @@ public class ChangesetRequestAdapter {
         changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
 
         // Check if change request is no longer valid and process it
-        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
+        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
         IGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), draftRecordEntity);
     }
 

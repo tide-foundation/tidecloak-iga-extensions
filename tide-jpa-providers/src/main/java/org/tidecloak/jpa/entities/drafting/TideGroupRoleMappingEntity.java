@@ -12,7 +12,9 @@ import org.tidecloak.shared.enums.DraftStatus;
         @NamedQuery(name="groupRoleMappingDraftIdsByStatusAndAction", query="select m.roleId from TideGroupRoleMappingEntity m where m.group = :group and m.draftStatus = :draftStatus and m.actionType = :actionType"),
         @NamedQuery(name="deleteGroupRoleMappingDraftsByRealm", query="delete from  TideGroupRoleMappingEntity mapping where mapping.group IN (select u from GroupEntity u where u.realm=:realm)"),
         @NamedQuery(name="deleteGroupRoleMappingDraftsByRole", query="delete from TideGroupRoleMappingEntity m where m.roleId = :roleId"),
-        @NamedQuery(name="deleteGroupRoleMappingDraftsByGroup", query="delete from TideGroupRoleMappingEntity m where m.group = :group")
+        @NamedQuery(name="deleteGroupRoleMappingDraftsByGroup", query="delete from TideGroupRoleMappingEntity m where m.group = :group"),
+        @NamedQuery(name="GetGroupRoleDraftEntityByRequestId", query="SELECT m FROM TideGroupRoleMappingEntity m where m.changeRequestId = :requestId")
+
 
 })
 

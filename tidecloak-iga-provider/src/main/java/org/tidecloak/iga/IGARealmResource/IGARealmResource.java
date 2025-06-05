@@ -144,7 +144,7 @@ public class IGARealmResource {
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
             ChangeSetType type = changeSet.getType();
 
-            Object mapping = IGAUtils.fetchDraftRecordEntity(em, type, changeSet.getChangeSetId());
+            Object mapping = IGAUtils.fetchDraftRecordEntityByRequestId(em, type, changeSet.getChangeSetId());
             if (mapping == null) {
                 return Response.status(Response.Status.NOT_FOUND).entity("Change request was not found.").build();
             }
@@ -178,7 +178,7 @@ public class IGARealmResource {
         auth.realm().requireManageRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
-        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, changeSet.getType(), changeSet.getChangeSetId());
+        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
         if (draftRecordEntity == null) {
             return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
         }
@@ -238,7 +238,7 @@ public class IGARealmResource {
         auth.realm().requireManageRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
-        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntity(em, change.getType(), change.getChangeSetId());
+        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntityByRequestId(em, change.getType(), change.getChangeSetId());
         if (draftRecordEntity == null) {
             return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
         }
@@ -277,11 +277,11 @@ public class IGARealmResource {
 
                     // Remove existing Access Proofs
                     List<AccessProofDetailEntity> accessProof = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                            .setParameter("recordId", draft.getId()).getResultList();
+                            .setParameter("recordId", draft.getChangeRequestId()).getResultList();
                     accessProof.clear();
                     // Remove existing ChangeSetRequestEntity
                     ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class,
-                            new ChangesetRequestEntity.Key(draft.getId(), ChangeSetType.CLIENT));
+                            new ChangesetRequestEntity.Key(draft.getChangeRequestId(), ChangeSetType.CLIENT));
                     if (changesetRequestEntity != null) {
                         changesetRequestEntity.getAdminAuthorizations().clear();
                         em.remove(changesetRequestEntity);
@@ -327,11 +327,11 @@ public class IGARealmResource {
             }
 
             List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                    .setParameter("recordId", c.getId())
+                    .setParameter("recordId", c.getChangeRequestId())
                     .getResultList();
 
 
-            RequestedChanges requestChange = new RequestedChanges("",ChangeSetType.CLIENT_FULLSCOPE, RequestType.CLIENT, client.getClientId(), realm.getName(), c.getAction(), c.getId(), new ArrayList<>(), DraftStatus.DRAFT, DraftStatus.NULL);
+            RequestedChanges requestChange = new RequestedChanges("",ChangeSetType.CLIENT_FULLSCOPE, RequestType.CLIENT, client.getClientId(), realm.getName(), c.getAction(), c.getChangeRequestId(), new ArrayList<>(), DraftStatus.DRAFT, DraftStatus.NULL);
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
 
@@ -365,7 +365,7 @@ public class IGARealmResource {
                 .getResultList();
         if (!proofs.isEmpty()) {
             proofs.forEach(p -> {
-                TideClientDraftEntity tideClientDraftEntity = em.find(TideClientDraftEntity.class, p.getRecordId());
+                TideClientDraftEntity tideClientDraftEntity = (TideClientDraftEntity) IGAUtils.fetchDraftRecordEntityByRequestId(em, p.getChangesetType(), p.getRecordId());
                 ClientModel client = realm.getClientById(p.getClientId());
                 RequestedChanges requestChange = new RequestedChanges("New Client Created",ChangeSetType.CLIENT, RequestType.CLIENT, client.getClientId(), realm.getName(), ActionType.CREATE, p.getRecordId(), new ArrayList<>(), tideClientDraftEntity.getDraftStatus(), DraftStatus.NULL);
                 requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context for all USERS", p.getId(), client.getClientId(), p.getProofDraft()));
@@ -395,7 +395,7 @@ public class IGARealmResource {
             }
             String clientId = role.isClientRole() ? realm.getClientById(role.getContainerId()).getClientId() : null;
             List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                    .setParameter("recordId", m.getId())
+                    .setParameter("recordId", m.getChangeRequestId())
                     .getResultList();
 
             if(proofs.isEmpty()){
@@ -405,7 +405,7 @@ public class IGARealmResource {
             boolean isDeleteRequest = m.getDraftStatus() == DraftStatus.ACTIVE && (m.getDeleteStatus() != DraftStatus.ACTIVE || m.getDeleteStatus() != null);
             String actionDescription = isDeleteRequest ? "Unassigning Role from User" : "Granting Role to User";
             ActionType action = isDeleteRequest ? ActionType.DELETE : ActionType.CREATE;
-            RequestedChanges requestChange = new RoleChangeRequest(realm.getRoleById(m.getRoleId()).getName(), actionDescription, ChangeSetType.USER_ROLE, RequestType.USER, clientId, realm.getName(), action, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
+            RequestedChanges requestChange = new RoleChangeRequest(realm.getRoleById(m.getRoleId()).getName(), actionDescription, ChangeSetType.USER_ROLE, RequestType.USER, clientId, realm.getName(), action, m.getChangeRequestId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
                 requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
@@ -433,7 +433,7 @@ public class IGARealmResource {
                 continue;
             }
             List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                    .setParameter("recordId", m.getId())
+                    .setParameter("recordId", m.getChangeRequestId())
                     .setLockMode(LockModeType.PESSIMISTIC_WRITE)
                     .getResultList();
             if(proofs.isEmpty()){
@@ -444,7 +444,7 @@ public class IGARealmResource {
             ActionType action = isDeleteRequest ? ActionType.DELETE : ActionType.CREATE;
 
             String clientId = m.getComposite().isClientRole() ? realm.getClientById(m.getComposite().getClientId()).getClientId() : "" ;
-            RequestedChanges requestChange = new CompositeRoleChangeRequest(m.getChildRole().getName(), m.getComposite().getName(), actionDescription, ChangeSetType.COMPOSITE_ROLE, RequestType.ROLE, clientId, realm.getName(), action, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
+            RequestedChanges requestChange = new CompositeRoleChangeRequest(m.getChildRole().getName(), m.getComposite().getName(), actionDescription, ChangeSetType.COMPOSITE_ROLE, RequestType.ROLE, clientId, realm.getName(), action, m.getChangeRequestId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
 
             proofs.forEach(p -> {
                 if ( p.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES)){
@@ -475,14 +475,14 @@ public class IGARealmResource {
         for (TideRoleDraftEntity m : mappings) {
             String clientId = m.getRole().isClientRole() ? m.getRole().getClientId() : null;
             List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                    .setParameter("recordId", m.getId())
+                    .setParameter("recordId", m.getChangeRequestId())
                     .getResultList();
             if(proofs.isEmpty()){
                 continue;
             }
 
             String action = clientId != null ? "Deleting Role from Client" : "Deleting Role from Realm" ;
-            RequestedChanges requestChange = new RoleChangeRequest(m.getRole().getName(), action, ChangeSetType.ROLE, RequestType.ROLE, clientId, realm.getName(), ActionType.DELETE, m.getId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
+            RequestedChanges requestChange = new RoleChangeRequest(m.getRole().getName(), action, ChangeSetType.ROLE, RequestType.ROLE, clientId, realm.getName(), ActionType.DELETE, m.getChangeRequestId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
             proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft())));
             changes.add(requestChange);
         }

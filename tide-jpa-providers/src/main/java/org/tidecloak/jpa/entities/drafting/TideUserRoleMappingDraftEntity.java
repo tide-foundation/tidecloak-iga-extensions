@@ -66,6 +66,7 @@ import org.tidecloak.shared.enums.DraftStatus;
                 query = "DELETE FROM TideUserRoleMappingDraftEntity r " +
                         "WHERE r.roleId = :roleId"
         ),
+        @NamedQuery(name="GetUserRoleMappingDraftEntityByRequestId", query="SELECT m FROM TideUserRoleMappingDraftEntity m where m.changeRequestId = :requestId")
 
 
 })

@@ -21,18 +21,18 @@ public class ChangeRequestUtils {
 
         if (entity instanceof TideUserRoleMappingDraftEntity userRoleEntity) {
             ActionType actionType = userRoleEntity.getDeleteStatus() != null ? ActionType.DELETE : ActionType.CREATE;
-            changeSetRequest.setChangeSetId(userRoleEntity.getId());
+            changeSetRequest.setChangeSetId(userRoleEntity.getChangeRequestId());
             changeSetRequest.setType(ChangeSetType.USER_ROLE);
             changeSetRequest.setActionType(actionType);
 
         } else if (entity instanceof TideCompositeRoleMappingDraftEntity compositeRoleEntity) {
             ActionType actionType = compositeRoleEntity.getDeleteStatus() != null ? ActionType.DELETE : ActionType.CREATE;
-            changeSetRequest.setChangeSetId(compositeRoleEntity.getId());
+            changeSetRequest.setChangeSetId(compositeRoleEntity.getChangeRequestId());
             changeSetRequest.setType(ChangeSetType.COMPOSITE_ROLE);
             changeSetRequest.setActionType(actionType);
         } else if (entity instanceof TideRoleDraftEntity roleEntity) {
             ActionType actionType = roleEntity.getDeleteStatus() != null ? ActionType.DELETE : ActionType.CREATE;
-            changeSetRequest.setChangeSetId(roleEntity.getId());
+            changeSetRequest.setChangeSetId(roleEntity.getChangeRequestId());
             changeSetRequest.setType(ChangeSetType.ROLE);
             changeSetRequest.setActionType(actionType);
         } else if (entity instanceof TideClientDraftEntity draftEntity) {
@@ -47,7 +47,7 @@ public class ChangeRequestUtils {
             }
 
             if((isFullScopeDisabledActive && draftEntity.getFullScopeEnabled().equals(DraftStatus.NULL)) || isFullScopeEnabledActive && draftEntity.getFullScopeDisabled().equals(DraftStatus.NULL)){
-                changeSetRequest.setChangeSetId(draftEntity.getId());
+                changeSetRequest.setChangeSetId(draftEntity.getChangeRequestId());
                 changeSetRequest.setType(ChangeSetType.CLIENT);
                 changeSetRequest.setActionType(ActionType.CREATE);
                 return changeSetRequest;
@@ -64,7 +64,7 @@ public class ChangeRequestUtils {
             }
 
             // Set the change set request
-            changeSetRequest.setChangeSetId(draftEntity.getId());
+            changeSetRequest.setChangeSetId(draftEntity.getChangeRequestId());
             changeSetRequest.setType(ChangeSetType.CLIENT_FULLSCOPE);
             changeSetRequest.setActionType(actionType);
         }
@@ -81,23 +81,23 @@ public class ChangeRequestUtils {
 
         if (entity instanceof TideUserRoleMappingDraftEntity userRoleEntity) {
             ActionType actionType = userRoleEntity.getDeleteStatus() != null ? ActionType.DELETE : ActionType.CREATE;
-            changeSetRequest.setChangeSetId(userRoleEntity.getId());
+            changeSetRequest.setChangeSetId(userRoleEntity.getChangeRequestId());
             changeSetRequest.setType(ChangeSetType.USER_ROLE);
             changeSetRequest.setActionType(actionType);
 
         } else if (entity instanceof TideCompositeRoleMappingDraftEntity compositeRoleEntity) {
             ActionType actionType = compositeRoleEntity.getDeleteStatus() != null ? ActionType.DELETE : ActionType.CREATE;
-            changeSetRequest.setChangeSetId(compositeRoleEntity.getId());
+            changeSetRequest.setChangeSetId(compositeRoleEntity.getChangeRequestId());
             changeSetRequest.setType(ChangeSetType.COMPOSITE_ROLE);
             changeSetRequest.setActionType(actionType);
         } else if (entity instanceof TideRoleDraftEntity roleEntity) {
             ActionType actionType = roleEntity.getDeleteStatus() != null ? ActionType.DELETE : ActionType.CREATE;
-            changeSetRequest.setChangeSetId(roleEntity.getId());
+            changeSetRequest.setChangeSetId(roleEntity.getChangeRequestId());
             changeSetRequest.setType(ChangeSetType.ROLE);
             changeSetRequest.setActionType(actionType);
         } else if (entity instanceof TideClientDraftEntity draftEntity) {
             if(type.equals(ChangeSetType.CLIENT)){
-                changeSetRequest.setChangeSetId(draftEntity.getId());
+                changeSetRequest.setChangeSetId(draftEntity.getChangeRequestId());
                 changeSetRequest.setType(ChangeSetType.CLIENT);
                 changeSetRequest.setActionType(ActionType.CREATE);
                 return changeSetRequest;
@@ -124,7 +124,7 @@ public class ChangeRequestUtils {
             }
 
             // Set the change set request
-            changeSetRequest.setChangeSetId(draftEntity.getId());
+            changeSetRequest.setChangeSetId(draftEntity.getChangeRequestId());
             changeSetRequest.setType(ChangeSetType.CLIENT_FULLSCOPE);
             changeSetRequest.setActionType(actionType);
         }

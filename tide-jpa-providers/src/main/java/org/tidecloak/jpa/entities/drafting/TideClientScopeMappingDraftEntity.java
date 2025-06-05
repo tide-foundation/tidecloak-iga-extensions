@@ -13,6 +13,8 @@ import org.tidecloak.shared.enums.DraftStatus;
                 query = "DELETE FROM TideClientScopeMappingDraftEntity r " +
                         "WHERE r.clientId IN (SELECT c.id FROM ClientEntity c WHERE c.realmId = :realmId)"
         ),
+        @NamedQuery(name="GetClientScopeMappingDraftEntityByRequestId", query="SELECT m FROM TideClientScopeMappingDraftEntity m where m.changeRequestId = :requestId")
+
 })
 
 @Entity

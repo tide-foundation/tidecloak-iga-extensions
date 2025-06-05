@@ -16,6 +16,8 @@ import org.tidecloak.shared.enums.DraftStatus;
                 query = "DELETE FROM TideUserDraftEntity r " +
                         "WHERE r.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
         ),
+        @NamedQuery(name="GetUserEntityByRequestId", query="SELECT m FROM TideUserDraftEntity m where m.changeRequestId = :requestId")
+
 })
 
 @Entity

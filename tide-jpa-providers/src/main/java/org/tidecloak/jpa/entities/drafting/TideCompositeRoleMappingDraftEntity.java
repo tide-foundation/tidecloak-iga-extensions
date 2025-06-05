@@ -56,6 +56,8 @@ import org.tidecloak.shared.enums.ActionType;
                 name = "getCompositeRoleMappingDraftByDeleteStatuses",
                 query = "select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole AND r.deleteStatus IN :draftStatuses"
         ),
+        @NamedQuery(name="GetCompositeRoleMappingDraftEntityByRequestId", query="SELECT m FROM TideCompositeRoleMappingDraftEntity m where m.changeRequestId = :requestId")
+
 
 })
 
