@@ -308,55 +308,92 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
     }
 
     @Override
-    public void combineChangeRequests(KeycloakSession session, List<TideClientDraftEntity> userRoleEntities, EntityManager em) {
+    public void combineChangeRequests(KeycloakSession session, List<TideClientDraftEntity> clientDraftEntities, EntityManager em) {
         RealmModel realm = session.getContext().getRealm();
-        Map<UserClientKey, List<AccessProofDetailEntity>> groupedChangeRequests =  ChangeSetProcessor.super.groupChangeRequests(userRoleEntities,em);
         ObjectMapper objectMapper = new ObjectMapper();
 
-        // combine for each user
-        // loop through user + client access proof and combine, update id ??? record id??? and save new proof in a new accessproofentity with this record id and remove the others.
+        // Group the change requests
+        Map<UserClientKey, List<AccessProofDetailEntity>> groupedChangeRequests =
+                ChangeSetProcessor.super.groupChangeRequests(clientDraftEntities, em);
+
+        // Prepare lists to defer persistence/removal
+        List<TideClientDraftEntity> modifiedEntities = new ArrayList<>();
+        List<AccessProofDetailEntity> newCombinedProofs = new ArrayList<>();
+        List<AccessProofDetailEntity> toRemoveProofs = new ArrayList<>();
+        List<ChangesetRequestEntity> toRemoveChangeRequests = new ArrayList<>();
+        String changeRequestId = KeycloakModelUtils.generateId();
+
         groupedChangeRequests.forEach((userClientAccess, accessProofs) -> {
             UserEntity userEntity = em.find(UserEntity.class, userClientAccess.getUserId());
             UserModel user = session.users().getUserById(realm, userClientAccess.getUserId());
             ClientModel client = realm.getClientById(userClientAccess.getClientId());
+            AtomicReference<String> trackTokenString = new AtomicReference<>();
 
-            String changeRequestId = KeycloakModelUtils.generateId();
-            AtomicReference<String> trackTokenString = new AtomicReference<>("");
-            // generate a new ID
             accessProofs.forEach(proof -> {
                 try {
-                    TideClientDraftEntity entity = (TideClientDraftEntity) IGAUtils.fetchDraftRecordEntityByRequestId(em, proof.getChangesetType(), proof.getRecordId());
-                    if(entity == null){
-                        throw new Exception("Could not find entity with change request id " + proof.getRecordId());
-                    }                        AccessToken accessToken = objectMapper.readValue(proof.getProofDraft(), AccessToken.class);
-                    trackTokenString.set(this.combinedTransformedUserContext(session, realm, client, user, "openId", entity, accessToken));
+                    // Initialize the first token only once
+                    if (trackTokenString.get() == null || trackTokenString.get().isBlank()) {
+                        trackTokenString.set(proof.getProofDraft());
+                    }
+
+                    // Fetch and detach the draft record entity
+                    TideClientDraftEntity entity =
+                            (TideClientDraftEntity) IGAUtils.fetchDraftRecordEntityByRequestId(
+                                    em, proof.getChangesetType(), proof.getRecordId());
+
+                    if (entity == null) {
+                        throw new RuntimeException("Could not find entity with change request id " + proof.getRecordId());
+                    }
+
+                    em.detach(entity); // Prevent auto-flushing
                     entity.setChangeRequestId(changeRequestId);
+                    modifiedEntities.add(entity);
+
+                    // Parse token and re-combine into new context
+                    AccessToken accessToken = objectMapper.readValue(trackTokenString.get(), AccessToken.class);
+                    String combinedToken = this.combinedTransformedUserContext(
+                            session, realm, client, user, "openId", entity, accessToken);
+                    trackTokenString.set(combinedToken);
+
+                    // Queue for removal
+                    List<ChangesetRequestEntity> crEntities = em
+                            .createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                            .setParameter("changesetRequestId", proof.getRecordId())
+                            .getResultList();
+
+                    toRemoveChangeRequests.addAll(crEntities);
+                    toRemoveProofs.add(proof);
+
                 } catch (Exception e) {
-                    throw new RuntimeException(e);
+                    throw new RuntimeException("Failed processing access proof: " + proof.getRecordId(), e);
                 }
             });
 
-
-            String test = KeycloakModelUtils.generateId();
-            System.out.println(" PROOF ID!!! " + test);
-            System.out.println(" NEW RECORD ID!!! " + changeRequestId);
-            System.out.println(" COMBINED TOKEN!!!  " + String.valueOf(trackTokenString));
-
+            // After processing all proofs for this group, create the combined proof entity
             AccessProofDetailEntity combinedProof = new AccessProofDetailEntity();
             combinedProof.setUser(userEntity);
-            combinedProof.setProofDraft(String.valueOf(trackTokenString));
-            combinedProof.setId(test);
+            combinedProof.setProofDraft(trackTokenString.get());
+            combinedProof.setId(KeycloakModelUtils.generateId());
             combinedProof.setClientId(client.getId());
             combinedProof.setChangesetType(ChangeSetType.USER_ROLE);
             combinedProof.setRealmId(realm.getId());
             combinedProof.setRecordId(changeRequestId);
-            em.persist(combinedProof);
-
-            // remove once we have merged
-            accessProofs.forEach(em::remove);
-
-            em.flush();
+            newCombinedProofs.add(combinedProof);
         });
+
+        // Persist all collected changes at once
+        for (TideClientDraftEntity entity : modifiedEntities) {
+            em.merge(entity);
+        }
+
+        for (AccessProofDetailEntity combinedProof : newCombinedProofs) {
+            em.persist(combinedProof);
+        }
+
+        toRemoveProofs.forEach(em::remove);
+        toRemoveChangeRequests.forEach(em::remove);
+
+        em.flush();
     }
 
     private void commitCallback(ChangeSetRequest change, TideClientDraftEntity entity, ClientModel clientModel, EntityManager em){

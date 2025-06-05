@@ -361,12 +361,12 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         List<AccessProofDetailEntity> newCombinedProofs = new ArrayList<>();
         List<AccessProofDetailEntity> toRemoveProofs = new ArrayList<>();
         List<ChangesetRequestEntity> toRemoveChangeRequests = new ArrayList<>();
+        String changeRequestId = KeycloakModelUtils.generateId();
 
         groupedChangeRequests.forEach((userClientAccess, accessProofs) -> {
             UserEntity userEntity = em.find(UserEntity.class, userClientAccess.getUserId());
             UserModel user = session.users().getUserById(realm, userClientAccess.getUserId());
             ClientModel client = realm.getClientById(userClientAccess.getClientId());
-            String changeRequestId = KeycloakModelUtils.generateId();
             AtomicReference<String> trackTokenString = new AtomicReference<>();
 
             accessProofs.forEach(proof -> {
