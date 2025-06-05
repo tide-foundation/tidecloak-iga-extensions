@@ -513,15 +513,11 @@ public interface ChangeSetProcessor<T> {
     default void combineChangeRequests(
             KeycloakSession session,
             List<T> entity,
-            UserModel user,
-            ClientModel clientModel,
             EntityManager em
 
     ) {
         throw new UnsupportedOperationException("Combine Change Requests has no default implementation");
     }
-
-
 
 
     /**

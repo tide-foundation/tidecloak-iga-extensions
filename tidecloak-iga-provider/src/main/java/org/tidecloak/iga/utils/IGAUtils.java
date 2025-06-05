@@ -8,17 +8,22 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.NoResultException;
+import jakarta.ws.rs.core.Response;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.services.resources.admin.AdminAuth;
 import org.midgard.Midgard;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
 import org.midgard.models.UserContext.UserContext;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
+import org.tidecloak.iga.ChangeSetSigner.ChangeSetSigner;
+import org.tidecloak.iga.ChangeSetSigner.ChangeSetSignerFactory;
 import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.shared.Constants;
@@ -301,11 +306,7 @@ public class IGAUtils {
                         .setParameter("requestId", changeSetId)
                         .getSingleResult();
 
-                case COMPOSITE_ROLE -> em.createNamedQuery("GetCompositeRoleMappingDraftEntityByRequestId", TideCompositeRoleMappingDraftEntity.class)
-                        .setParameter("requestId", changeSetId)
-                        .getSingleResult();
-
-                case DEFAULT_ROLES -> em.createNamedQuery("GetCompositeRoleMappingDraftEntityByRequestId", TideCompositeRoleMappingDraftEntity.class)
+                case COMPOSITE_ROLE, DEFAULT_ROLES -> em.createNamedQuery("GetCompositeRoleMappingDraftEntityByRequestId", TideCompositeRoleMappingDraftEntity.class)
                         .setParameter("requestId", changeSetId)
                         .getSingleResult();
 
@@ -504,5 +505,51 @@ public class IGAUtils {
             throw new UncheckedIOException(e);
         }
     }
+
+
+    public static void processChangeSetsForSigning(List<ChangeSetRequest> changeSets, KeycloakSession session, AdminAuth auth) throws Exception {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        RealmModel realm = session.getContext().getRealm();
+
+        if (changeSets == null || changeSets.isEmpty()) {
+            throw new IllegalArgumentException("No change sets provided for signing.");
+        }
+
+        if (changeSets.size() > 1) {
+            // Group by type and map to draft entities
+            Map<ChangeSetType, List<Object>> requests = changeSets.stream()
+                    .map(c -> Map.entry(c.getType(), Objects.requireNonNull(IGAUtils.fetchDraftRecordEntityByRequestId(em, c.getType(), c.getChangeSetId()))))
+                    .filter(entry -> entry.getValue() != null) // filter out nulls
+                    .collect(Collectors.groupingBy(
+                            Map.Entry::getKey,
+                            Collectors.mapping(Map.Entry::getValue, Collectors.toList())
+                    ));
+
+            // Process grouped entities
+            ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
+            requests.forEach((requestType, entities) -> {
+                processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
+            });
+        } else {
+            // Single item path
+            ChangeSetRequest changeSet = changeSets.get(0);
+            Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
+
+            if (draftRecordEntity == null) {
+                throw new Exception("Unsupported change set type for ID: " + changeSet.getChangeSetId());
+            }
+
+            ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
+            Response response = signer.sign(changeSet, em, session, realm, draftRecordEntity, auth);
+
+            if (response != null && response.getStatus() != Response.Status.OK.getStatusCode()) {
+                throw new Exception("Signing failed for change set ID: " + changeSet.getChangeSetId() +
+                        ", status: " + response.getStatus());
+            }
+        }
+    }
+
+
+
 }
 

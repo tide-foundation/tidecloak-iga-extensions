@@ -212,15 +212,17 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
     }
 
     @Override
-    public void combineChangeRequests(KeycloakSession session, List<TideRoleDraftEntity> userRoleEntities, UserModel user, ClientModel client, EntityManager em) {
+    public void combineChangeRequests(KeycloakSession session, List<TideRoleDraftEntity> userRoleEntities, EntityManager em) {
         RealmModel realm = session.getContext().getRealm();
-        UserEntity userEntity = em.find(UserEntity.class, user.getId());
         Map<UserClientKey, List<AccessProofDetailEntity>> groupedChangeRequests =  ChangeSetProcessor.super.groupChangeRequests(userRoleEntities,em);
         ObjectMapper objectMapper = new ObjectMapper();
 
         // combine for each user
         // loop through user + client access proof and combine, update id ??? record id??? and save new proof in a new accessproofentity with this record id and remove the others.
         groupedChangeRequests.forEach((userClientAccess, accessProofs) -> {
+            UserEntity userEntity = em.find(UserEntity.class, userClientAccess.getUserId());
+            UserModel user = session.users().getUserById(realm, userClientAccess.getUserId());
+            ClientModel client = realm.getClientById(userClientAccess.getClientId());
 
             String changeRequestId = KeycloakModelUtils.generateId();
             AtomicReference<String> trackTokenString = new AtomicReference<>("");
@@ -240,18 +242,28 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
                 }
             });
 
+            String test = KeycloakModelUtils.generateId();
+            System.out.println(" PROOF ID!!! " + test);
+            System.out.println(" NEW RECORD ID!!! " + changeRequestId);
+            System.out.println(" COMBINED TOKEN!!!  " + String.valueOf(trackTokenString));
+
+
             AccessProofDetailEntity combinedProof = new AccessProofDetailEntity();
             combinedProof.setUser(userEntity);
             combinedProof.setProofDraft(String.valueOf(trackTokenString));
-            combinedProof.setId(KeycloakModelUtils.generateId());
+            combinedProof.setId(test);
             combinedProof.setClientId(client.getId());
             combinedProof.setChangesetType(ChangeSetType.USER_ROLE);
             combinedProof.setRealmId(realm.getId());
             combinedProof.setRecordId(changeRequestId);
+            em.persist(combinedProof);
 
             // remove once we have merged
             accessProofs.forEach(em::remove);
+            em.flush();
+
         });
+
     }
 
 

@@ -24,7 +24,9 @@ import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.iga.ChangeSetCommitter.ChangeSetCommitter;
 import org.tidecloak.iga.ChangeSetCommitter.ChangeSetCommitterFactory;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.iga.ChangeSetProcessors.keys.UserClientKey;
 import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.iga.ChangeSetSigner.ChangeSetSigner;
@@ -41,6 +43,7 @@ import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
 
 import java.util.*;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.*;
@@ -175,22 +178,16 @@ public class IGARealmResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign")
     public Response signChangeset(ChangeSetRequest changeSet) throws Exception {
-        auth.realm().requireManageRealm();
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        RealmModel realm = session.getContext().getRealm();
-        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
-        if (draftRecordEntity == null) {
-            return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
-        }
-        ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
-        Response response = signer.sign(changeSet, em, session, realm, draftRecordEntity, auth.adminAuth());
-
-        if (response != null) {
-            return response;
-        }
-
-        return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported signing method").build();
+        return signChangeSets(Collections.singletonList(changeSet));
     }
+
+    @POST
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Path("change-set/sign/batch")
+    public Response signMultipleChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
+        return signChangeSets(changeSets);
+    }
+
 
     @GET
     @Path("change-set/users/requests")
@@ -235,22 +232,14 @@ public class IGARealmResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/commit")
     public Response commitChangeSet(ChangeSetRequest change) throws Exception {
-        auth.realm().requireManageRealm();
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        RealmModel realm = session.getContext().getRealm();
-        Object draftRecordEntity= IGAUtils.fetchDraftRecordEntityByRequestId(em, change.getType(), change.getChangeSetId());
-        if (draftRecordEntity == null) {
-            return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
-        }
+        return commitChangeSets(Collections.singletonList(change));
+    }
 
-        ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
-        Response response = committer.commit(change, em, session, realm, draftRecordEntity, auth.adminAuth());
-
-        if (response != null) {
-            return response;
-        }
-
-        return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported committing method").build();
+    @POST
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Path("change-set/commit/batch")
+    public Response commitMultipleChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
+        return signChangeSets(changeSets);
     }
 
     @POST
@@ -555,4 +544,68 @@ public class IGARealmResource {
                 .type(MediaType.TEXT_PLAIN)
                 .build();
     }
+
+    public Response signChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
+        auth.realm().requireManageRealm();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        RealmModel realm = session.getContext().getRealm();
+
+        if (changeSets.size() > 1) {
+            Map<ChangeSetType, List<Object>> requests = changeSets.stream()
+                    .collect(Collectors.groupingBy(
+                            ChangeSetRequest::getType,
+                            Collectors.mapping(
+                                    c -> IGAUtils.fetchDraftRecordEntityByRequestId(em, c.getType(), c.getChangeSetId()),
+                                    Collectors.toList()
+                            )
+                    ));
+
+            requests.forEach((requestType, entities) -> {
+                ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
+                processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
+            });
+
+        }
+        else {
+            for (ChangeSetRequest changeSet : changeSets) {
+                Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
+                if (draftRecordEntity == null) {
+                    return Response.status(Response.Status.BAD_REQUEST)
+                            .entity("Unsupported change set type for ID: " + changeSet.getChangeSetId())
+                            .build();
+                }
+
+                ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
+                Response response = signer.sign(changeSet, em, session, realm, draftRecordEntity, auth.adminAuth());
+
+                if (response != null && response.getStatus() != Response.Status.OK.getStatusCode()) {
+                    return response;
+                }
+            }
+        }
+        return Response.ok("All change sets signed successfully").build();
+    }
+
+    private Response commitChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
+        auth.realm().requireManageRealm();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        RealmModel realm = session.getContext().getRealm();
+
+        for (ChangeSetRequest changeSet: changeSets){
+            Object draftRecordEntity= IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
+            if (draftRecordEntity == null) {
+                return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
+            }
+
+            ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
+            Response response = committer.commit(changeSet, em, session, realm, draftRecordEntity, auth.adminAuth());
+
+            if (response != null) {
+                return response;
+            }
+        }
+
+        return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported committing method").build();
+    }
+
 }
