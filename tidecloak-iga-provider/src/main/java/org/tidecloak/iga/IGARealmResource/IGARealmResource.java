@@ -562,7 +562,11 @@ public class IGARealmResource {
 
             requests.forEach((requestType, entities) -> {
                 ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
-                processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
+                try {
+                    processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
             });
 
         }

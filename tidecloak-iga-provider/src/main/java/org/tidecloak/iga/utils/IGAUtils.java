@@ -306,23 +306,23 @@ public class IGAUtils {
             return switch (type) {
                 case USER_ROLE -> em.createNamedQuery("GetUserRoleMappingDraftEntityByRequestId", TideUserRoleMappingDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getResultList().getFirst();
+                        .getResultList().get(0);
 
                 case COMPOSITE_ROLE, DEFAULT_ROLES -> em.createNamedQuery("GetCompositeRoleMappingDraftEntityByRequestId", TideCompositeRoleMappingDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getResultList().getFirst();
+                        .getResultList().get(0);
 
                 case ROLE -> em.createNamedQuery("GetRoleDraftEntityByRequestId", TideRoleDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getResultList().getFirst();
+                        .getResultList().get(0);
 
                 case USER -> em.createNamedQuery("GetUserEntityByRequestId", TideUserDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getResultList().getFirst();
+                        .getResultList().get(0);
 
                 case CLIENT, CLIENT_FULLSCOPE -> em.createNamedQuery("GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getResultList().getFirst();
+                        .getResultList().get(0);
 
                 default -> null;
             };
@@ -533,18 +533,18 @@ public class IGAUtils {
             ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
             requests.forEach((requestType, entities) -> {
                 try {
-                    List<AccessProofDetailEntity> proofsToSignAndCommit = processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
+                    List<ChangesetRequestEntity> changeRequests =  processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
 
 
-                    proofsToSignAndCommit.forEach(p -> {
-                        try {
-                            Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, p.getChangesetType(), p.getRecordId());
-                            signer.sign(new ChangeSetRequest(p.getRecordId(), p.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
-                            Response response = committer.commit(new ChangeSetRequest(p.getRecordId(), p.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
-                        }
-                    });
+//                    changeRequests.forEach(cre -> {
+//                        try {
+//                            Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, cre.getChangesetType(), cre.getChangesetRequestId());
+//                            signer.sign(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
+//                            Response response = committer.commit(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
+//                        } catch (Exception e) {
+//                            throw new RuntimeException(e);
+//                        }
+//                    });
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }

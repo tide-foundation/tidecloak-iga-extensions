@@ -510,12 +510,12 @@ public interface ChangeSetProcessor<T> {
         return token;
     }
 
-    default List<AccessProofDetailEntity> combineChangeRequests(
+    default List<ChangesetRequestEntity> combineChangeRequests(
             KeycloakSession session,
             List<T> entity,
             EntityManager em
 
-    ) {
+    ) throws Exception {
         throw new UnsupportedOperationException("Combine Change Requests has no default implementation");
     }
 
@@ -733,6 +733,7 @@ public interface ChangeSetProcessor<T> {
 
 
         List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, recordId, type);
+        proofDetails.forEach(x -> System.out.println(x.getProofDraft() + "\n"));
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
         RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
