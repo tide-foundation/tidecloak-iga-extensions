@@ -557,51 +557,72 @@ public class IGARealmResource {
         auth.realm().requireManageRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
+        ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
+        List<String> signedJsonList = new ArrayList<>();
+        ObjectMapper objectMapper = new ObjectMapper();
 
         if (changeSets.size() > 1) {
-            Map<ChangeSetType, List<Object>> requests = changeSets.stream()
-                    .collect(Collectors.groupingBy(
-                            ChangeSetRequest::getType,
-                            Collectors.flatMapping(
-                                    c -> ((List<?>) Objects.requireNonNull(IGAUtils.fetchDraftRecordEntityByRequestId(em, c.getType(), c.getChangeSetId())))
-                                            .stream(),
-                                    Collectors.toList()
-                            )
-                    ));
+            Map<ChangeSetType, List<Object>> requests =
+                    changeSets.stream()
+                            .collect(Collectors.groupingBy(
+                                    ChangeSetRequest::getType,
+                                    Collectors.flatMapping(
+                                            req -> IGAUtils
+                                                    .fetchDraftRecordEntityByRequestId(
+                                                            em, req.getType(), req.getChangeSetId()
+                                                    )
+                                                    .stream(),
+                                            Collectors.toList()
+                                    )
+                            ));
+            ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
             requests.forEach((requestType, entities) -> {
-                ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
                 try {
-                    processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
+                    System.out.println(requestType.name());
+                    List<ChangesetRequestEntity> changeRequests =  processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
+
+                    for (ChangesetRequestEntity changeSet : changeRequests) {
+                        try {
+                            Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getChangesetType(), changeSet.getChangesetRequestId()).get(0);
+                            Response singleResp = signer.sign(new ChangeSetRequest(changeSet.getChangesetRequestId(), changeSet.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth.adminAuth());
+                            // extract that JSON payload
+                            String jsonBody = singleResp.readEntity(String.class);
+
+                            // collect it
+                            signedJsonList.add(jsonBody);
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
+                    };
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
-            });
 
+            });
         }
         else {
             for (ChangeSetRequest changeSet : changeSets) {
-                List<?> draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
-                if (draftRecordEntity == null || draftRecordEntity.isEmpty()) {
+                Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId()).get(0);
+                if (draftRecordEntity == null) {
                     return Response.status(Response.Status.BAD_REQUEST)
                             .entity("Unsupported change set type for ID: " + changeSet.getChangeSetId())
                             .build();
                 }
+                try {
+                    Response singleResp = signer.sign(changeSet, em, session, realm, draftRecordEntity, auth.adminAuth());
+                    // extract that JSON payload
+                    String jsonBody = singleResp.readEntity(String.class);
 
-                ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
-                draftRecordEntity.forEach(d -> {
-                    try {
-                        Response response = signer.sign(changeSet, em, session, realm, d, auth.adminAuth());
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    }
-                });
-
-//                if (response != null && response.getStatus() != Response.Status.OK.getStatusCode()) {
-//                    return response;
-//                }
+                    // collect it
+                    signedJsonList.add(jsonBody);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
             }
         }
-        return Response.ok("All change sets signed successfully").build();
+
+        String finalPayload = signedJsonList.size() == 1 ? signedJsonList.get(0) :objectMapper.writeValueAsString(signedJsonList);
+        return Response.ok(finalPayload).build();
     }
 
     private Response commitChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
