@@ -156,7 +156,7 @@ public interface ChangeSetProcessor<T> {
 
             List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, client)
                     .stream()
-                    .filter(proof -> !Objects.equals(proof.getRecordId(), change.getChangeSetId()))
+                    .filter(proof -> !Objects.equals(proof.getChangeRequestKey().getChangeRequestId(), change.getChangeSetId()))
                     .toList();
 
 
@@ -182,7 +182,7 @@ public interface ChangeSetProcessor<T> {
                 var uniqRoles = roleSet.stream().distinct().filter(Objects::nonNull).collect(Collectors.toSet());
 
                 processorFactory.getProcessor(userContextDraft.getChangesetType()).updateAffectedUserContextDrafts(session, userContextDraft, uniqRoles, client, user, em);
-                ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, userContextDraft.getRecordId(), userContextDraft.getChangesetType());
+                ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, userContextDraft.getChangeRequestKey().getChangeRequestId(), userContextDraft.getChangesetType());
                 if (changesetRequestEntity != null){
                     changesetRequestEntity.getAdminAuthorizations().clear(); // empty sigs!
                 }
@@ -191,17 +191,17 @@ public interface ChangeSetProcessor<T> {
         em.flush();
 
         // Group proofDetails by changeRequestId
-        Map<String, List<AccessProofDetailEntity>> groupedProofDetails = getUserContextDraftsForRealm(em, realm.getId()).stream()
-                .filter(proof -> !Objects.equals(proof.getRecordId(), change.getChangeSetId()))
+        Map<ChangeRequestKey, List<AccessProofDetailEntity>> groupedProofDetails = getUserContextDraftsForRealm(em, realm.getId()).stream()
+                .filter(proof -> !Objects.equals(proof.getChangeRequestKey().getChangeRequestId(), change.getChangeSetId()))
                 .sorted(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed())
-                .collect(Collectors.groupingBy(AccessProofDetailEntity::getRecordId));
+                .collect(Collectors.groupingBy(AccessProofDetailEntity::getChangeRequestKey));
 
         // Process each group
-        groupedProofDetails.forEach((changeRequestId, details) -> {
+        groupedProofDetails.forEach((changeRequestKey, details) -> {
             try {
                 // Create a list of UserContext for the current changeRequestId
                 List<UserContext>  userContexts = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                        .setParameter("recordId", changeRequestId).getResultStream().map(p -> new UserContext(p.getProofDraft())).collect(Collectors.toList());
+                        .setParameter("recordId", changeRequestKey.getChangeRequestId()).getResultStream().map(p -> new UserContext(p.getProofDraft())).collect(Collectors.toList());
 
                 if(userContexts.isEmpty()){
                     return;
@@ -232,7 +232,7 @@ public interface ChangeSetProcessor<T> {
                     changeSetType = details.get(0).getChangesetType();
                 }
 
-                ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeRequestId, changeSetType);
+                ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeRequestKey.getChangeRequestId(), changeSetType);
                 if(changesetRequestEntity != null){
                     changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(updatedReq.GetDraft()));
                 }
@@ -375,13 +375,13 @@ public interface ChangeSetProcessor<T> {
      * @param realm     RealmModel representing the current realm.
      * @param clientModel ClientModel representing the client.
      * @param userModel UserModel representing the user.
-     * @param recordId  Record ID for the change set.
+     * @param changeRequestKey  Record ID for the change set.
      * @param type      ChangeSetType representing the type of the change set.
      * @param entity    The entity that triggers the transformation.
      * @throws Exception If any error occurs during the generation or saving of the user context draft.
      */
     default void generateAndSaveTransformedUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm,
-                                                            ClientModel clientModel, UserModel userModel, String recordId,
+                                                            ClientModel clientModel, UserModel userModel, ChangeRequestKey changeRequestKey,
                                                             ChangeSetType type, T entity) throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();
         objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
@@ -390,7 +390,7 @@ public interface ChangeSetProcessor<T> {
         // Generate a transformed user context using entity-specific logic
         String userContextDraft = this.generateTransformedUserContext(session, realm, clientModel, userModel, "openid", entity);
         UserEntity user = TideEntityUtils.toUserEntity(userModel, em);
-        saveUserContextDraft(session, em, realm, clientModel, user, recordId, type, userContextDraft);
+        saveUserContextDraft(session, em, realm, clientModel, user, changeRequestKey, type, userContextDraft);
     }
 
 
@@ -403,12 +403,12 @@ public interface ChangeSetProcessor<T> {
      * @param realm     RealmModel representing the current realm.
      * @param clientModel ClientModel representing the client.
      * @param userModel UserModel representing the user.
-     * @param recordId  Record ID for the change set.
+     * @param changeRequestKey  Record ID for the change set.
      * @param type      ChangeSetType representing the type of the change set.
      * @throws Exception If any error occurs during the generation or saving of the user context draft.
      */
     default void generateAndSaveDefaultUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm,
-                                                        ClientModel clientModel, UserModel userModel, String recordId,
+                                                        ClientModel clientModel, UserModel userModel, ChangeRequestKey changeRequestKey,
                                                         ChangeSetType type) throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();
         objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
@@ -419,7 +419,7 @@ public interface ChangeSetProcessor<T> {
 
         UserEntity user = TideEntityUtils.toUserEntity(userModel, em);
 
-        saveUserContextDraft(session, em, realm, clientModel, user, recordId, type, userContextDraft);
+        saveUserContextDraft(session, em, realm, clientModel, user, changeRequestKey, type, userContextDraft);
     }
 
     /**
@@ -555,13 +555,15 @@ public interface ChangeSetProcessor<T> {
 
         // group access proofs by user and client
         Map<UserClientKey, List<AccessProofDetailEntity>> grouped =
-                proofs.stream().collect(Collectors.groupingBy(
-                        proof -> {
-                            return new UserClientKey(proof.getUser().getId(), proof.getClientId());
-
-                        }
-                ));
-
+                proofs.stream()
+                        // skip any proof where getUser() is null
+                        .filter(proof -> proof.getUser() != null)
+                        .collect(Collectors.groupingBy(
+                                proof -> new UserClientKey(
+                                        proof.getUser().getId(),
+                                        proof.getClientId()
+                                )
+                        ));
         return grouped;
 
         // combine for each user
@@ -713,18 +715,18 @@ public interface ChangeSetProcessor<T> {
      * @param realm      The realm associated with the operation.
      * @param clientModel The client model for which the draft is being saved.
      * @param user       The user entity associated with the draft.
-     * @param recordId   The record ID of the change set.
+     * @param changeRequestKey   The record ID of the change set.
      * @param type       The type of the change set.
      * @param proofDraft The serialized proof draft as a JSON string.
      * @throws Exception If an error occurs during the save operation.
      */
-    default void saveUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm, ClientModel clientModel, UserEntity user, String recordId, ChangeSetType type, String proofDraft) throws Exception {
+    default void saveUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm, ClientModel clientModel, UserEntity user, ChangeRequestKey changeRequestKey, ChangeSetType type, String proofDraft) throws Exception {
         String clientId = clientModel != null ? clientModel.getId() : null;
         AccessProofDetailEntity newDetail = new AccessProofDetailEntity();
         newDetail.setId(KeycloakModelUtils.generateId());
         newDetail.setClientId(clientId);
         newDetail.setUser(user);
-        newDetail.setRecordId(recordId);
+        newDetail.setChangeRequestKey(changeRequestKey);
         newDetail.setProofDraft(proofDraft);
         newDetail.setChangesetType(type);
         newDetail.setRealmId(realm.getId());
@@ -732,7 +734,7 @@ public interface ChangeSetProcessor<T> {
         em.flush();
 
 
-        List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, recordId, type);
+        List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, changeRequestKey.getChangeRequestId(), type);
         proofDetails.forEach(x -> System.out.println(x.getProofDraft() + "\n"));
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
@@ -747,9 +749,9 @@ public interface ChangeSetProcessor<T> {
         byte[] certHash = new byte[0];
 
         if (type.equals(ChangeSetType.USER_ROLE)) {
-            TideUserRoleMappingDraftEntity roleMapping = (TideUserRoleMappingDraftEntity)IGAUtils.fetchDraftRecordEntityByRequestId(em, type, recordId);
+            TideUserRoleMappingDraftEntity roleMapping = (TideUserRoleMappingDraftEntity)IGAUtils.fetchDraftRecordEntity(em, type, changeRequestKey.getMappingId());
             if (roleMapping == null) {
-                throw new Exception("Invalid request, no user role mapping draft entity found for this record ID: " + recordId);
+                throw new Exception("Invalid request, no user role mapping draft entity found for this record ID: " + changeRequestKey.getChangeRequestId());
             }
             List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
                     .setParameter("roleId", roleMapping.getRoleId()).getResultList();
@@ -759,7 +761,7 @@ public interface ChangeSetProcessor<T> {
 
             isTideAdminRole = tideRole != null && roleMapping.getRoleId().equals(tideRole.getId());
 
-            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, recordId);
+            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, changeRequestKey.getMappingId());
 
             hasInitCert = roleInitCert != null;
             ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, roleMapping);
@@ -861,15 +863,21 @@ public interface ChangeSetProcessor<T> {
             changeSetType = type;
         }
 
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(recordId, changeSetType));
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeRequestKey.getChangeRequestId(), changeSetType));
         if (changesetRequestEntity == null) {
+            System.out.println("Req is null so adding with reqId " + changeRequestKey.getChangeRequestId());
+
+            System.out.println("and type " + type);
+
             ChangesetRequestEntity entity = new ChangesetRequestEntity();
-            entity.setChangesetRequestId(recordId);
+            entity.setChangesetRequestId(changeRequestKey.getChangeRequestId());
             entity.setDraftRequest(draft);
             entity.setChangesetType(type);
             em.persist(entity);
             em.flush();
         } else {
+            System.out.println("updating existing req");
+
             changesetRequestEntity.setDraftRequest(draft);
             em.flush();
         }

@@ -13,6 +13,7 @@ import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils;
 import org.tidecloak.iga.utils.IGAUtils;
+import org.tidecloak.jpa.entities.ChangeRequestKey;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -23,6 +24,7 @@ import org.tidecloak.iga.interfaces.TideUserAdapter;
 
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -158,7 +160,7 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
             users.forEach(user -> {
                 UserModel wrappedUser = TideEntityUtils.wrapUserModel(user, session, realm);
                 try {
-                    ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, entity.getChangeRequestId(), ChangeSetType.ROLE, entity);
+                    ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, new ChangeRequestKey(entity.getId(), entity.getChangeRequestId()), ChangeSetType.ROLE, entity);
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
@@ -170,7 +172,7 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
     @Override
     public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> uniqRoles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
         RealmModel realm = session.getContext().getRealm();
-        TideRoleDraftEntity affectedRoleEntity = em.find(TideRoleDraftEntity.class, affectedUserContextDraft.getRecordId());
+        TideRoleDraftEntity affectedRoleEntity = em.find(TideRoleDraftEntity.class, affectedUserContextDraft.getChangeRequestKey().getMappingId());
         if (affectedRoleEntity == null || (affectedRoleEntity.getDraftStatus() == DraftStatus.ACTIVE && (affectedRoleEntity.getDeleteStatus() == null || affectedRoleEntity.getDeleteStatus().equals(DraftStatus.NULL))))
         {
             return;
@@ -217,8 +219,7 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
     public List<ChangesetRequestEntity> combineChangeRequests(
             KeycloakSession session,
             List<TideRoleDraftEntity> userRoleEntities,
-            EntityManager em) throws Exception {
-
+            EntityManager em) throws IOException, Exception {
         ObjectMapper objectMapper = new ObjectMapper();
 
         RealmModel realm = session.getContext().getRealm();
@@ -264,24 +265,30 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
             UserModel um = session.users().getUserById(realm, userId);
 
             String combinedRequestId = KeycloakModelUtils.generateId();
-            String combinedProofDraft = null;
 
             List<AccessProofDetailEntity> toRemoveProofs = new ArrayList<>();
             List<ChangesetRequestEntity> toRemoveRequests = new ArrayList<>();
 
+
             // Merge proofs across clients into a single JSON draft
             for (var clientEntry : userEntry.getValue().entrySet()) {
                 ClientModel cm = clientById.get(clientEntry.getKey());
+                AtomicReference<String> mappingId = new AtomicReference<>();
+                AtomicBoolean isFirstRun = new AtomicBoolean();
+                isFirstRun.set(true);
+
                 if (cm == null) continue;
+                String combinedProofDraft = null;
+
 
                 for (var proof : clientEntry.getValue()) {
-                    TideRoleDraftEntity draft =
-                            (TideRoleDraftEntity) IGAUtils
-                                    .fetchDraftRecordEntityByRequestId(
-                                            em, proof.getChangesetType(), proof.getRecordId());
+                    mappingId.set(proof.getChangeRequestKey().getMappingId());
+                    TideRoleDraftEntity draft = (TideRoleDraftEntity) IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.ROLE, proof.getChangeRequestKey().getMappingId());
+
+
                     if (draft == null) {
                         throw new IllegalStateException(
-                                "Missing draft for request " + proof.getRecordId());
+                                "Missing draft for request " + proof.getChangeRequestKey().getMappingId());
                     }
 
                     draft.setChangeRequestId(combinedRequestId);
@@ -299,31 +306,22 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
                     toRemoveRequests.addAll(em.createNamedQuery(
                                     "getAllChangeRequestsByRecordId",
                                     ChangesetRequestEntity.class)
-                            .setParameter("changesetRequestId", proof.getRecordId())
+                            .setParameter("changesetRequestId", proof.getChangeRequestKey().getChangeRequestId())
                             .getResultList());
+
+                    if(isFirstRun.get()) {
+                        isFirstRun.set(false);
+                    }
                 }
+
+                ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, cm, ue, new ChangeRequestKey(mappingId.get(), combinedRequestId), ChangeSetType.ROLE, combinedProofDraft);
+
             }
 
             // Remove outdated proofs and their change-request entities
             toRemoveProofs.forEach(em::remove);
             toRemoveRequests.forEach(em::remove);
 
-            // Persist combined AccessProofDetailEntity for each client
-            for (String clientId : userEntry.getValue().keySet()) {
-                ClientModel cm = clientById.get(clientId);
-                if (cm == null) continue;
-
-                AccessProofDetailEntity combinedProof = new AccessProofDetailEntity();
-                combinedProof.setId(KeycloakModelUtils.generateId());
-                combinedProof.setUser(ue);
-                combinedProof.setClientId(cm.getId());
-                combinedProof.setRealmId(realm.getId());
-                combinedProof.setChangesetType(ChangeSetType.ROLE);
-                combinedProof.setRecordId(combinedRequestId);
-                combinedProof.setProofDraft(combinedProofDraft);
-
-                em.persist(combinedProof);
-            }
 
             // Retrieve the recreated ChangeRequestEntity(ies) for this combinedRequestId
             List<ChangesetRequestEntity> created = em.createNamedQuery(
@@ -338,7 +336,6 @@ public class RoleProcessor implements ChangeSetProcessor<TideRoleDraftEntity> {
 
         return results;
     }
-
 
     private void commitRoleChangeRequest(RealmModel realm, TideRoleDraftEntity entity, ChangeSetRequest change, EntityManager em) {;
         RoleModel role = realm.getRoleById(entity.getRole().getId());

@@ -7,67 +7,237 @@ import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.DraftStatus;
 
 @NamedQueries({
+
         @NamedQuery(
                 name = "getUserRoleAssignmentDraftEntityByStatuses",
-                query = "SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user AND t.roleId = :roleId AND t.draftStatus IN :draftStatuses"
+                query = "SELECT t FROM TideUserRoleMappingDraftEntity t " +
+                        "WHERE t.user = :user " +
+                        "AND t.roleId = :roleId " +
+                        "AND t.draftStatus IN :draftStatuses"
         ),
+
         @NamedQuery(
                 name = "getUserRoleAssignmentDraftEntityByDeleteStatuses",
-                query = "SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user AND t.roleId = :roleId AND t.deleteStatus IN :draftStatuses"
+                query = "SELECT t FROM TideUserRoleMappingDraftEntity t " +
+                        "WHERE t.user = :user " +
+                        "AND t.roleId = :roleId " +
+                        "AND t.deleteStatus IN :deleteStatuses"
         ),
-        @NamedQuery(name="getUserRoleAssignmentDraftEntityByStatusAndUserId", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user.id = :userId and t.roleId = :roleId and draftStatus = :draftStatus"),
-        @NamedQuery(name="getUserRoleMappingsByStatusAndRole", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.roleId = : roleId"),
-        @NamedQuery(name="getUserRoleMappingsByStatusAndRealmAndRecordId", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.id = :changesetId AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
-        @NamedQuery(name="getUserRoleMappingsByDeleteStatusAndRealmAndRecordId", query="select m from TideUserRoleMappingDraftEntity m where m.deleteStatus = :deleteStatus AND m.id = :changesetId AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
-        @NamedQuery(name="getAllUserRoleMappingsByStatusAndRealm", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
-        @NamedQuery(name="getAllUserRoleMappingsByRealmAndStatusNotEqualTo", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus != :draftStatus AND m.user IN (select u from UserEntity u where u.realmId= :realmId)"),
-        @NamedQuery(name="getAllUserRoleMappingsByStatus", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus = :draftStatus"),
-        @NamedQuery(name="getAllUserRoleMappingsByStatusNotEqualTo", query="select m from TideUserRoleMappingDraftEntity m where m.draftStatus != :draftStatus"),
-        @NamedQuery(name="getUserRoleMappingStatus", query="select m from TideUserRoleMappingDraftEntity m where m.user = :user"),
-        @NamedQuery(name="getUserRoleAssignmentDraftEntity", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId"),
-        @NamedQuery(name="getUserRoleMappingDraftEntityByAction", query="SELECT m.roleId  FROM TideUserRoleMappingDraftEntity m WHERE m.user = :user and m.actionType = :actionType"),
-        @NamedQuery(name="getUserRoleAssignmentDraftEntityByStatusNotEqualTo", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId and draftStatus != :draftStatus"),
-        @NamedQuery(name="getUserRoleAssignmentDraftEntityByStatus", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId and draftStatus = :draftStatus"),
-        @NamedQuery(name="getUserRoleAssignmentDraftEntityByStatusAndAction", query="SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and t.roleId = :roleId and draftStatus = :draftStatus and actionType = :actionType"),
-        @NamedQuery(name="getUserRoleMappingDraftEntityIdsByStatusAndAction", query="SELECT t.roleId FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and draftStatus = :draftStatus and actionType = :actionType"),
-        @NamedQuery(name="getUserRoleMappingDraftEntityIdsByStatus", query="SELECT t.roleId FROM TideUserRoleMappingDraftEntity t WHERE t.user = :user and draftStatus = :draftStatus"),
-        @NamedQuery(name="filterUserRoleMappings", query="select m.roleId from TideUserRoleMappingDraftEntity m where m.user = :user and m.draftStatus = :draftStatus"),
-        @NamedQuery(name="deleteUserRoleMappingDraftsByRealm", query="delete from TideUserRoleMappingDraftEntity mapping where mapping.user IN (select u from UserEntity u where u.realmId=:realmId)"),
-        @NamedQuery(name="deleteUserRoleMappingDraftsByRealmAndLink", query="delete from TideUserRoleMappingDraftEntity mapping where mapping.user IN (select u from UserEntity u where u.realmId=:realmId and u.federationLink=:link)"),
-        @NamedQuery(name="deleteUserRoleMappingDraftsByRole", query="delete from TideUserRoleMappingDraftEntity m where m.roleId = :roleId"),
-        @NamedQuery(name="deleteUserRoleMappingDraftsByRoleAndUser", query="delete from TideUserRoleMappingDraftEntity m where m.roleId = :roleId and m.user = :user"),
-        @NamedQuery(name="deleteUserRoleMappingDraftsByUser", query="delete from TideUserRoleMappingDraftEntity m where m.user = :user"),
-        @NamedQuery(name="getUserRoleMappingDraftsByRole", query="SELECT t.id FROM TideUserRoleMappingDraftEntity t WHERE t.roleId = :roleId"),
+
         @NamedQuery(
-                name = "getUserRoleMappingDraftsByRoleAndStatusNotEqualTo",
-                query = "SELECT t FROM TideUserRoleMappingDraftEntity t WHERE t.roleId = :roleId AND t.draftStatus != :draftStatus"
+                name = "getUserRoleAssignmentDraftEntityByStatusAndUserId",
+                query = "SELECT t FROM TideUserRoleMappingDraftEntity t " +
+                        "WHERE t.user.id = :userId " +
+                        "AND t.roleId = :roleId " +
+                        "AND t.draftStatus = :draftStatus"
         ),
+
         @NamedQuery(
-                name = "getUserRoleMappingsByUserAndClientId",
+                name = "getUserRoleMappingsByStatusAndRole",
                 query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
-                        "WHERE m.user =:user AND m.roleId IN (" +
-                        "   SELECT r.id FROM RoleEntity r " +
-                        "   WHERE r.clientRole = true AND r.clientId = :clientId" +
-                        ")"
+                        "WHERE m.draftStatus = :draftStatus " +
+                        "AND m.roleId = :roleId"
         ),
-        @NamedQuery(name="getAllPendingUserRoleMappingsByRealm",
+
+        @NamedQuery(
+                name = "getUserRoleMappingsByStatusAndRealmAndRequestId",
                 query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
-                        "WHERE (m.draftStatus != :draftStatus OR " +
-                        "(m.draftStatus = :draftStatus AND m.deleteStatus != :deleteStatus)) " +
+                        "WHERE m.draftStatus = :draftStatus " +
+                        "AND m.changeRequestId = :changeRequestId " +
                         "AND m.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
         ),
 
-        @NamedQuery(name="DeleteAllUserRoleMappingDraftsByRealm",
-                query = "DELETE FROM TideUserRoleMappingDraftEntity r " +
-                        "WHERE r.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
+        @NamedQuery(
+                name = "getUserRoleMappingsByDeleteStatusAndRealmAndRequestId",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.deleteStatus = :deleteStatus " +
+                        "AND m.changeRequestId = :changeRequestId " +
+                        "AND m.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
         ),
 
-        @NamedQuery(name="DeleteAllUserRoleMappingDraftsByRole",
-                query = "DELETE FROM TideUserRoleMappingDraftEntity r " +
-                        "WHERE r.roleId = :roleId"
+        @NamedQuery(
+                name = "getAllUserRoleMappingsByStatusAndRealm",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.draftStatus = :draftStatus " +
+                        "AND m.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
         ),
-        @NamedQuery(name="GetUserRoleMappingDraftEntityByRequestId", query="SELECT m FROM TideUserRoleMappingDraftEntity m where m.changeRequestId = :requestId")
 
+        @NamedQuery(
+                name = "getAllUserRoleMappingsByRealmAndStatusNotEqualTo",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.draftStatus <> :draftStatus " +
+                        "AND m.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
+        ),
+
+        @NamedQuery(
+                name = "getAllUserRoleMappingsByStatus",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.draftStatus = :draftStatus"
+        ),
+
+        @NamedQuery(
+                name = "getAllUserRoleMappingsByStatusNotEqualTo",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.draftStatus <> :draftStatus"
+        ),
+
+        @NamedQuery(
+                name = "getUserRoleMappingStatus",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.user = :user"
+        ),
+
+        @NamedQuery(
+                name = "getUserRoleAssignmentDraftEntity",
+                query = "SELECT t FROM TideUserRoleMappingDraftEntity t " +
+                        "WHERE t.user = :user " +
+                        "AND t.roleId = :roleId"
+        ),
+
+        @NamedQuery(
+                name = "getUserRoleMappingDraftEntityByAction",
+                query = "SELECT m.roleId FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.user = :user " +
+                        "AND m.actionType = :actionType"
+        ),
+
+        @NamedQuery(
+                name = "getUserRoleAssignmentDraftEntityByStatusNotEqualTo",
+                query = "SELECT t FROM TideUserRoleMappingDraftEntity t " +
+                        "WHERE t.user = :user " +
+                        "AND t.roleId = :roleId " +
+                        "AND t.draftStatus <> :draftStatus"
+        ),
+
+        @NamedQuery(
+                name = "getUserRoleAssignmentDraftEntityByStatus",
+                query = "SELECT t FROM TideUserRoleMappingDraftEntity t " +
+                        "WHERE t.user = :user " +
+                        "AND t.roleId = :roleId " +
+                        "AND t.draftStatus = :draftStatus"
+        ),
+
+        @NamedQuery(
+                name = "getUserRoleAssignmentDraftEntityByStatusAndAction",
+                query = "SELECT t FROM TideUserRoleMappingDraftEntity t " +
+                        "WHERE t.user = :user " +
+                        "AND t.roleId = :roleId " +
+                        "AND t.draftStatus = :draftStatus " +
+                        "AND t.actionType = :actionType"
+        ),
+
+        @NamedQuery(
+                name = "getUserRoleMappingDraftEntityIdsByStatusAndAction",
+                query = "SELECT t.roleId FROM TideUserRoleMappingDraftEntity t " +
+                        "WHERE t.user = :user " +
+                        "AND t.draftStatus = :draftStatus " +
+                        "AND t.actionType = :actionType"
+        ),
+
+        @NamedQuery(
+                name = "getUserRoleMappingDraftEntityIdsByStatus",
+                query = "SELECT t.roleId FROM TideUserRoleMappingDraftEntity t " +
+                        "WHERE t.user = :user " +
+                        "AND t.draftStatus = :draftStatus"
+        ),
+
+        @NamedQuery(
+                name = "filterUserRoleMappings",
+                query = "SELECT m.roleId FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.user = :user " +
+                        "AND m.draftStatus = :draftStatus"
+        ),
+
+        @NamedQuery(
+                name = "deleteUserRoleMappingDraftsByRealm",
+                query = "DELETE FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
+        ),
+
+        @NamedQuery(
+                name = "deleteUserRoleMappingDraftsByRealmAndLink",
+                query = "DELETE FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId AND u.federationLink = :link)"
+        ),
+
+        @NamedQuery(
+                name = "deleteUserRoleMappingDraftsByRole",
+                query = "DELETE FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.roleId = :roleId"
+        ),
+
+        @NamedQuery(
+                name = "deleteUserRoleMappingDraftsByRoleAndUser",
+                query = "DELETE FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.roleId = :roleId " +
+                        "AND m.user = :user"
+        ),
+
+        @NamedQuery(
+                name = "deleteUserRoleMappingDraftsByUser",
+                query = "DELETE FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.user = :user"
+        ),
+
+        @NamedQuery(
+                name = "getUserRoleMappingDraftsByRole",
+                query = "SELECT t.id FROM TideUserRoleMappingDraftEntity t " +
+                        "WHERE t.roleId = :roleId"
+        ),
+
+        @NamedQuery(
+                name = "getUserRoleMappingDraftsByRoleAndStatusNotEqualTo",
+                query = "SELECT t FROM TideUserRoleMappingDraftEntity t " +
+                        "WHERE t.roleId = :roleId " +
+                        "AND t.draftStatus <> :draftStatus"
+        ),
+
+        @NamedQuery(
+                name = "getUserRoleMappingsByUserAndClientId",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.user = :user " +
+                        "AND m.roleId IN (" +
+                        "SELECT r.id FROM RoleEntity r " +
+                        "WHERE r.clientRole = true AND r.clientId = :clientId" +
+                        ")"
+        ),
+
+        @NamedQuery(
+                name = "getAllPendingUserRoleMappingsByRealm",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE (m.draftStatus <> :draftStatus OR " +
+                        "(m.draftStatus = :draftStatus AND m.deleteStatus <> :deleteStatus)) " +
+                        "AND m.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
+        ),
+
+        @NamedQuery(
+                name = "DeleteAllUserRoleMappingDraftsByRealm",
+                query = "DELETE FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
+        ),
+
+        @NamedQuery(
+                name = "DeleteAllUserRoleMappingDraftsByRole",
+                query = "DELETE FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.roleId = :roleId"
+        ),
+
+        @NamedQuery(
+                name = "GetUserRoleMappingDraftEntityByRequestId",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.changeRequestId = :requestId"
+        ),
+
+        @NamedQuery(
+                name = "getUserRoleMappingsByUserAndClientIdAndRequestId",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE m.changeRequestId = :requestId " +
+                        "AND m.user = :user " +
+                        "AND m.roleId IN (" +
+                        "SELECT r.id FROM RoleEntity r " +
+                        "WHERE r.clientRole = true AND r.clientId = :clientId" +
+                        ")"
+        )
 
 })
 //where mapping.user IN (select u from UserEntity u where u.realmId=:realmId)")

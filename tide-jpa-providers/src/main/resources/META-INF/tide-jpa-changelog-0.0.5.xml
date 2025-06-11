@@ -45,6 +45,10 @@
                 <constraints nullable="true"/>
             </column>
         </addColumn>
+        <addColumn tableName="ACCESS_PROOF_DETAIL">
+            <column name="MAPPING_ID"        type="VARCHAR(36)"><constraints nullable="true"/></column>
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(36)"><constraints nullable="true"/></column>
+        </addColumn>
     </changeSet>
 
     <!-- Step 2: Populate columns -->
@@ -57,6 +61,10 @@
         <sql>UPDATE ROLE_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
         <sql>UPDATE USER_ENTITY_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
         <sql>UPDATE USER_GROUP_MEMBERSHIP_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
+        <sql>UPDATE ACCESS_PROOF_DETAIL
+            SET MAPPING_ID = RECORD_ID,
+            CHANGE_REQUEST_ID = RECORD_ID;
+        </sql>
     </changeSet>
 
     <!-- Step 3: Make columns NOT NULL -->
@@ -69,6 +77,10 @@
         <addNotNullConstraint tableName="ROLE_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
         <addNotNullConstraint tableName="USER_ENTITY_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
         <addNotNullConstraint tableName="USER_GROUP_MEMBERSHIP_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
+        <!-- now lock down your new AccessProofDetailEntity columns -->
+        <addNotNullConstraint tableName="ACCESS_PROOF_DETAIL" columnName="MAPPING_ID"        columnDataType="VARCHAR(36)"/>
+        <addNotNullConstraint tableName="ACCESS_PROOF_DETAIL" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(36)"/>
+        <dropColumn tableName="ACCESS_PROOF_DETAIL" columnName="RECORD_ID"/>
     </changeSet>
 
 </databaseChangeLog>

@@ -32,7 +32,7 @@ public class FirstAdmin implements Authorizer {
         ObjectMapper objectMapper = new ObjectMapper();
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
         if (changesetRequestEntity == null){
-            throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
+            throw new Exception("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
         }
         // Fetch proof details
         List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, changeSet.getChangeSetId(), changeSet.getType());

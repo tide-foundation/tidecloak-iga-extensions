@@ -147,15 +147,22 @@ public class IGARealmResource {
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
             ChangeSetType type = changeSet.getType();
 
-            Object mapping = IGAUtils.fetchDraftRecordEntityByRequestId(em, type, changeSet.getChangeSetId());
-            if (mapping == null) {
+            List<?> mapping = IGAUtils.fetchDraftRecordEntityByRequestId(em, type, changeSet.getChangeSetId());
+            if (mapping.isEmpty()) {
                 return Response.status(Response.Status.NOT_FOUND).entity("Change request was not found.").build();
             }
 
-            em.lock(mapping, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
-            ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
-            WorkflowParams params = new WorkflowParams(null, false, changeSet.getActionType(), changeSet.getType());
-            processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, mapping, em, WorkflowType.CANCEL, params, null);
+            mapping.forEach(m -> {
+                em.lock(m, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
+                ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
+                WorkflowParams params = new WorkflowParams(null, false, changeSet.getActionType(), changeSet.getType());
+                try {
+                    processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, m, em, WorkflowType.CANCEL, params, null);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
             ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
             if(changesetRequestEntity != null ) {
                 changesetRequestEntity.getAdminAuthorizations().clear();
@@ -164,6 +171,7 @@ public class IGARealmResource {
             em.flush();
             UserCache userCache = session.getProvider(UserCache.class);
             userCache.clear();
+
             // Return success message after approving the change sets
             return Response.ok("Change set request has been canceled").build();
 
@@ -354,9 +362,9 @@ public class IGARealmResource {
                 .getResultList();
         if (!proofs.isEmpty()) {
             proofs.forEach(p -> {
-                TideClientDraftEntity tideClientDraftEntity = (TideClientDraftEntity) IGAUtils.fetchDraftRecordEntityByRequestId(em, p.getChangesetType(), p.getRecordId());
+                TideClientDraftEntity tideClientDraftEntity = (TideClientDraftEntity) IGAUtils.fetchDraftRecordEntity(em, p.getChangesetType(), p.getChangeRequestKey().getMappingId());
                 ClientModel client = realm.getClientById(p.getClientId());
-                RequestedChanges requestChange = new RequestedChanges("New Client Created",ChangeSetType.CLIENT, RequestType.CLIENT, client.getClientId(), realm.getName(), ActionType.CREATE, p.getRecordId(), new ArrayList<>(), tideClientDraftEntity.getDraftStatus(), DraftStatus.NULL);
+                RequestedChanges requestChange = new RequestedChanges("New Client Created",ChangeSetType.CLIENT, RequestType.CLIENT, client.getClientId(), realm.getName(), ActionType.CREATE, p.getChangeRequestKey().getChangeRequestId(), new ArrayList<>(), tideClientDraftEntity.getDraftStatus(), DraftStatus.NULL);
                 requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context for all USERS", p.getId(), client.getClientId(), p.getProofDraft()));
                 changes.add(requestChange);
             });
@@ -554,12 +562,12 @@ public class IGARealmResource {
             Map<ChangeSetType, List<Object>> requests = changeSets.stream()
                     .collect(Collectors.groupingBy(
                             ChangeSetRequest::getType,
-                            Collectors.mapping(
-                                    c -> IGAUtils.fetchDraftRecordEntityByRequestId(em, c.getType(), c.getChangeSetId()),
+                            Collectors.flatMapping(
+                                    c -> ((List<?>) Objects.requireNonNull(IGAUtils.fetchDraftRecordEntityByRequestId(em, c.getType(), c.getChangeSetId())))
+                                            .stream(),
                                     Collectors.toList()
                             )
                     ));
-
             requests.forEach((requestType, entities) -> {
                 ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
                 try {
@@ -572,19 +580,25 @@ public class IGARealmResource {
         }
         else {
             for (ChangeSetRequest changeSet : changeSets) {
-                Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
-                if (draftRecordEntity == null) {
+                List<?> draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
+                if (draftRecordEntity == null || draftRecordEntity.isEmpty()) {
                     return Response.status(Response.Status.BAD_REQUEST)
                             .entity("Unsupported change set type for ID: " + changeSet.getChangeSetId())
                             .build();
                 }
 
                 ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
-                Response response = signer.sign(changeSet, em, session, realm, draftRecordEntity, auth.adminAuth());
+                draftRecordEntity.forEach(d -> {
+                    try {
+                        Response response = signer.sign(changeSet, em, session, realm, d, auth.adminAuth());
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
 
-                if (response != null && response.getStatus() != Response.Status.OK.getStatusCode()) {
-                    return response;
-                }
+//                if (response != null && response.getStatus() != Response.Status.OK.getStatusCode()) {
+//                    return response;
+//                }
             }
         }
         return Response.ok("All change sets signed successfully").build();
@@ -596,17 +610,23 @@ public class IGARealmResource {
         RealmModel realm = session.getContext().getRealm();
 
         for (ChangeSetRequest changeSet: changeSets){
-            Object draftRecordEntity= IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
-            if (draftRecordEntity == null) {
+            List<?> draftRecordEntity= IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
+            if (draftRecordEntity ==  null || draftRecordEntity.isEmpty()) {
                 return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
             }
 
             ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
-            Response response = committer.commit(changeSet, em, session, realm, draftRecordEntity, auth.adminAuth());
+            draftRecordEntity.forEach(d -> {
+                try {
+                    committer.commit(changeSet, em, session, realm, d, auth.adminAuth());
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
 
-            if (response != null) {
-                return response;
-            }
+            return Response.ok("Change sets approved and committed").build();
+
+
         }
 
         return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported committing method").build();

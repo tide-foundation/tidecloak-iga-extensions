@@ -44,7 +44,7 @@ public class MultiAdmin implements Authorizer{
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
 
         if (changesetRequestEntity == null){
-            throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
+            throw new Exception("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
         }
 
         var config = componentModel.getConfig();
@@ -118,7 +118,7 @@ public class MultiAdmin implements Authorizer{
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
 
         if (changesetRequestEntity == null){
-            throw new Exception("No change-set request entity found with this recordId " + changeSet.getChangeSetId());
+            throw new Exception("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
         }
 
         var config = componentModel.getConfig();

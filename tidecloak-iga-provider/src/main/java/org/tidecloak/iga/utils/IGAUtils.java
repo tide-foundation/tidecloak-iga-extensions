@@ -13,6 +13,8 @@ import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.jpa.entities.RoleEntity;
+import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
 import org.midgard.Midgard;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
@@ -301,28 +303,59 @@ public class IGAUtils {
         };
     }
 
-    public static Object fetchDraftRecordEntityByRequestId(EntityManager em, ChangeSetType type, String changeSetId) {
+    public static List<?> fetchDraftRecordEntityByRequestId(EntityManager em, ChangeSetType type, String changeSetId) {
         try {
             return switch (type) {
                 case USER_ROLE -> em.createNamedQuery("GetUserRoleMappingDraftEntityByRequestId", TideUserRoleMappingDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getResultList().get(0);
+                        .getResultList();
 
                 case COMPOSITE_ROLE, DEFAULT_ROLES -> em.createNamedQuery("GetCompositeRoleMappingDraftEntityByRequestId", TideCompositeRoleMappingDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getResultList().get(0);
+                        .getResultList();
 
                 case ROLE -> em.createNamedQuery("GetRoleDraftEntityByRequestId", TideRoleDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getResultList().get(0);
+                        .getResultList();
 
                 case USER -> em.createNamedQuery("GetUserEntityByRequestId", TideUserDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getResultList().get(0);
+                        .getResultList();
 
                 case CLIENT, CLIENT_FULLSCOPE -> em.createNamedQuery("GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
                         .setParameter("requestId", changeSetId)
-                        .getResultList().get(0);
+                        .getResultList();
+
+                default -> null;
+            };
+        } catch (NoResultException e) {
+            return null;
+        }
+    }
+    public static Object fetchDraftRecordEntitiesByRequestIdAndClientAndUser(EntityManager em, ChangeSetType type, String changeSetId, UserEntity user, String clientId) {
+        try {
+            return switch (type) {
+                case USER_ROLE -> em.createNamedQuery("getUserRoleMappingsByUserAndClientIdAndRequestId", TideUserRoleMappingDraftEntity.class)
+                        .setParameter("requestId", changeSetId)
+                        .setParameter("user", user)
+                        .setParameter("clientId", clientId)
+                        .getResultList();
+
+                case COMPOSITE_ROLE, DEFAULT_ROLES -> em.createNamedQuery("GetCompositeRoleMappingDraftEntityByRequestId", TideCompositeRoleMappingDraftEntity.class)
+                        .setParameter("requestId", changeSetId)
+                        .getResultList();
+
+                case ROLE -> em.createNamedQuery("GetRoleDraftEntityByRequestId", TideRoleDraftEntity.class)
+                        .setParameter("requestId", changeSetId)
+                        .getResultList();
+
+                case USER -> em.createNamedQuery("GetUserEntityByRequestId", TideUserDraftEntity.class)
+                        .setParameter("requestId", changeSetId)
+                        .getResultList();
+
+                case CLIENT, CLIENT_FULLSCOPE -> em.createNamedQuery("GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
+                        .setParameter("requestId", changeSetId)
+                        .getResultList();
 
                 default -> null;
             };
@@ -519,32 +552,40 @@ public class IGAUtils {
 
         if (changeSets.size() > 1) {
             // Group by type and map to draft entities
-            Map<ChangeSetType, List<Object>> requests = changeSets.stream()
-                    .map(c -> Map.entry(c.getType(), Objects.requireNonNull(IGAUtils.fetchDraftRecordEntityByRequestId(em, c.getType(), c.getChangeSetId()))))
-                    .filter(entry -> entry.getValue() != null) // filter out nulls
-                    .collect(Collectors.groupingBy(
-                            Map.Entry::getKey,
-                            Collectors.mapping(Map.Entry::getValue, Collectors.toList())
-                    ));
+            Map<ChangeSetType, List<Object>> requests =
+                    changeSets.stream()
+                            .collect(Collectors.groupingBy(
+                                    ChangeSetRequest::getType,
+                                    Collectors.flatMapping(
+                                            req -> IGAUtils
+                                                    .fetchDraftRecordEntityByRequestId(
+                                                            em, req.getType(), req.getChangeSetId()
+                                                    )
+                                                    .stream(),
+                                            Collectors.toList()
+                                    )
+                            ));
+
 
             // Process grouped entities
             ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
             ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
             ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
+
             requests.forEach((requestType, entities) -> {
                 try {
+                    System.out.println(requestType.name());
                     List<ChangesetRequestEntity> changeRequests =  processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
 
-
-//                    changeRequests.forEach(cre -> {
-//                        try {
-//                            Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, cre.getChangesetType(), cre.getChangesetRequestId());
-//                            signer.sign(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
-//                            Response response = committer.commit(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
-//                        } catch (Exception e) {
-//                            throw new RuntimeException(e);
-//                        }
-//                    });
+                    changeRequests.forEach(cre -> {
+                        try {
+                            Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, cre.getChangesetType(), cre.getChangesetRequestId()).get(0);
+                            signer.sign(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
+                            committer.commit(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
@@ -553,19 +594,23 @@ public class IGAUtils {
         } else {
             // Single item path
             ChangeSetRequest changeSet = changeSets.get(0);
-            Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
+            Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId()).get(0);
 
             if (draftRecordEntity == null) {
                 throw new Exception("Unsupported change set type for ID: " + changeSet.getChangeSetId());
             }
 
             ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
-            Response response = signer.sign(changeSet, em, session, realm, draftRecordEntity, auth);
-
-            if (response != null && response.getStatus() != Response.Status.OK.getStatusCode()) {
-                throw new Exception("Signing failed for change set ID: " + changeSet.getChangeSetId() +
-                        ", status: " + response.getStatus());
+            try {
+                Response response = signer.sign(changeSet, em, session, realm, draftRecordEntity, auth);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
             }
+
+//            if (response != null && response.getStatus() != Response.Status.OK.getStatusCode()) {
+//                throw new Exception("Signing failed for change set ID: " + changeSet.getChangeSetId() +
+//                        ", status: " + response.getStatus());
+//            }
         }
     }
 

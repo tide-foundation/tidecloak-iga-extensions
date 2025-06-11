@@ -7,6 +7,7 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.RoleUtils;
 import org.keycloak.representations.AccessToken;
+import org.tidecloak.jpa.entities.ChangeRequestKey;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.shared.enums.ActionType;
@@ -38,13 +39,13 @@ public class UserContextUtils extends UserContextUtilBase {
                 .getResultStream()
                 .toList();
 
-        Map<String, List<AccessProofDetailEntity>> groupedProofDetails = userAccessDrafts.stream()
-                .collect(Collectors.groupingBy(AccessProofDetailEntity::getRecordId));
+        Map<ChangeRequestKey, List<AccessProofDetailEntity>> groupedProofDetails = userAccessDrafts.stream()
+                .collect(Collectors.groupingBy(AccessProofDetailEntity::getChangeRequestKey));
 
-        groupedProofDetails.forEach((changeRequestId, details)  -> {
+        groupedProofDetails.forEach((changeRequestKey, details)  -> {
             try {
                 // remove old request, then we recreate
-                List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", changeRequestId).getResultList();
+                List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", changeRequestKey.getChangeRequestId()).getResultList();
                 if(!changesetRequestEntity.isEmpty()) {
                     changesetRequestEntity.forEach(c -> {
                         c.getAdminAuthorizations().clear();
@@ -57,7 +58,7 @@ public class UserContextUtils extends UserContextUtilBase {
                 ChangeSetType changeSetType = details.get(0).getChangesetType();
                 ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
                 WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, changeSetType);
-                Object mapping = getMappings(em, changeRequestId, changeSetType);
+                Object mapping = getMappings(em, changeRequestKey.getMappingId(), changeSetType);
                 changeSetProcessorFactory.getProcessor(changeSetType).executeWorkflow(session, mapping, em, WorkflowType.REQUEST, params, null);
 
             } catch (Exception e) {
