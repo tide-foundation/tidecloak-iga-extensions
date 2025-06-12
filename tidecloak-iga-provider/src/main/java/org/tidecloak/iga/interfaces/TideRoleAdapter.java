@@ -123,7 +123,6 @@ public class TideRoleAdapter extends RoleAdapter {
             RoleEntity childEntity = toRoleEntity(childRole);
             TideCompositeRoleMappingDraftEntity draft = new TideCompositeRoleMappingDraftEntity();
             draft.setId(KeycloakModelUtils.generateId());
-            draft.setChangeRequestId(KeycloakModelUtils.generateId());
             draft.setComposite(getEntity());
             draft.setChildRole(childEntity);
             draft.setDraftStatus(DraftStatus.DRAFT);

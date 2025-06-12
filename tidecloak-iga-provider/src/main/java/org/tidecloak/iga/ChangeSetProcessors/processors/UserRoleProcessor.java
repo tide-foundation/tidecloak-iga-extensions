@@ -85,7 +85,9 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
         Runnable callback = () -> {
             try {
-                commitUserRoleChangeRequest(user, realm, entity, change);
+                List<TideUserRoleMappingDraftEntity> entities = em.createNamedQuery("GetUserRoleMappingDraftEntityByRequestId", TideUserRoleMappingDraftEntity.class)
+                        .setParameter("requestId", change.getChangeSetId()).getResultList();
+                commitUserRoleChangeRequest(user, realm, entities, change);
             } catch (Exception e) {
                 throw new RuntimeException("Error during commit callback", e);
             }
@@ -167,15 +169,16 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                     entity.getId(),
                     entity.getChangeRequestId()
             ));
-            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
             switch (action) {
                 case CREATE:
                     logger.debug(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", entity.getId(), entity.getChangeRequestId()));
                     handleCreateRequest(session, entity, em, callback);
+                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
                     break;
                 case DELETE:
                     logger.debug(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", entity.getId(), entity.getChangeRequestId()));
                     handleDeleteRequest(session, entity, em, callback);
+                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
                     break;
                 default:
                     logger.warn(String.format("Unsupported action type: %s for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", action, entity.getId(), entity.getChangeRequestId()));
@@ -209,6 +212,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         RealmModel realm = session.getContext().getRealm();
         RoleModel role = realm.getRoleById(mapping.getRoleId());
         UserModel userModel = TideEntityUtils.toTideUserAdapter(mapping.getUser(), session, realm);
+        mapping.setChangeRequestId(KeycloakModelUtils.generateId());
 
         Set<RoleModel> roleMappings = Collections.singleton(role);
         List<ClientModel> clientList = ClientUtils.getUniqueClientList(session, realm, role, em);
@@ -227,6 +231,8 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         RealmModel realm = session.getContext().getRealm();
         RoleEntity roleEntity = em.find(RoleEntity.class, entity.getRoleId());
         UserModel affectedUser = session.users().getUserById(realm, entity.getUser().getId());
+        entity.setChangeRequestId(KeycloakModelUtils.generateId());
+
         Set<UserModel> users = new TreeSet<>(Comparator.comparing(UserModel::getId));
         users.add(affectedUser);
         if(roleEntity != null && roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
@@ -468,26 +474,29 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     // Helper Methods
-    private void commitUserRoleChangeRequest(UserModel user, RealmModel realm, TideUserRoleMappingDraftEntity entity, ChangeSetRequest change) {;
-        RoleModel role = realm.getRoleById(entity.getRoleId());
-        if (role == null) return;
+    private void commitUserRoleChangeRequest(UserModel user, RealmModel realm, List<TideUserRoleMappingDraftEntity> entities, ChangeSetRequest change) {
 
-        if (change.getActionType() == ActionType.CREATE) {
-            // If already active, then early return
-            if(entity.getDraftStatus().equals(DraftStatus.ACTIVE)) return;
+        entities.forEach(entity -> {
+            RoleModel role = realm.getRoleById(entity.getRoleId());
+            if (role == null) return;
 
-            if(!entity.getDraftStatus().equals(DraftStatus.APPROVED)){
-                throw new RuntimeException("Draft record has not been approved by all admins.");
+            if (change.getActionType() == ActionType.CREATE) {
+                // If already active, then early return
+                if(entity.getDraftStatus().equals(DraftStatus.ACTIVE)) return;
+
+                if(!entity.getDraftStatus().equals(DraftStatus.APPROVED)){
+                    throw new RuntimeException("Draft record has not been approved by all admins.");
+                }
+                entity.setDraftStatus(DraftStatus.ACTIVE);
+
+            } else if (change.getActionType() == ActionType.DELETE) {
+                if(!entity.getDeleteStatus().equals(DraftStatus.APPROVED) && !entity.getDeleteStatus().equals(DraftStatus.ACTIVE) ){
+                    throw new RuntimeException("Deletion has not been approved by all admins.");
+                }
+                entity.setDeleteStatus(DraftStatus.ACTIVE);
+                user.deleteRoleMapping(role);
             }
-            entity.setDraftStatus(DraftStatus.ACTIVE);
-
-        } else if (change.getActionType() == ActionType.DELETE) {
-            if(!entity.getDeleteStatus().equals(DraftStatus.APPROVED) || !entity.getDeleteStatus().equals(DraftStatus.ACTIVE) ){
-                throw new RuntimeException("Deletion has not been approved by all admins.");
-            }
-            entity.setDeleteStatus(DraftStatus.ACTIVE);
-            user.deleteRoleMapping(role);
-        }
+        });
     }
 
     private boolean isRealmManagementClient(RoleModel role) {

@@ -72,7 +72,7 @@ import org.tidecloak.shared.enums.ChangeSetType;
         ),
         @NamedQuery(
                 name  = "deleteProofRecords",
-                query = "DELETE FROM AccessProofDetailEntity a WHERE a.changeRequestKey.changeRequestId = :recordId"
+                query = "DELETE FROM AccessProofDetailEntity a WHERE a.changeRequestKey.mappingId = :recordId"
         ),
         @NamedQuery(
                 name  = "deleteAllDraftProofRecordsForUser",

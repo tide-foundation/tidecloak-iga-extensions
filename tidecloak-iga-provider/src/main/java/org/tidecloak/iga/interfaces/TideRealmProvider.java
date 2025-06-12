@@ -57,7 +57,6 @@ public class TideRealmProvider extends JpaRealmProvider {
 
             TideClientDraftEntity clientDraftEntity = new TideClientDraftEntity();
             clientDraftEntity.setId(KeycloakModelUtils.generateId());
-            clientDraftEntity.setChangeRequestId(KeycloakModelUtils.generateId());
             clientDraftEntity.setClient(clientEntity);
 
             if(usersInRealm.isEmpty()) {
@@ -209,7 +208,6 @@ public class TideRealmProvider extends JpaRealmProvider {
         // Create Draft
         TideRoleDraftEntity clientRoleDraft = new TideRoleDraftEntity();
         clientRoleDraft.setId(KeycloakModelUtils.generateId());
-        clientRoleDraft.setChangeRequestId(KeycloakModelUtils.generateId());
         clientRoleDraft.setRole(TideEntityUtils.toRoleEntity(role, em));
         clientRoleDraft.setDraftStatus(DraftStatus.ACTIVE);
         em.persist(clientRoleDraft);
@@ -242,7 +240,6 @@ public class TideRealmProvider extends JpaRealmProvider {
         // Create Draft
         TideRoleDraftEntity realmRoleDraft = new TideRoleDraftEntity();
         realmRoleDraft.setId(KeycloakModelUtils.generateId());
-        realmRoleDraft.setChangeRequestId(KeycloakModelUtils.generateId());
         realmRoleDraft.setRole(TideEntityUtils.toRoleEntity(role, em));
         realmRoleDraft.setDraftStatus(DraftStatus.ACTIVE);
         em.persist(realmRoleDraft);

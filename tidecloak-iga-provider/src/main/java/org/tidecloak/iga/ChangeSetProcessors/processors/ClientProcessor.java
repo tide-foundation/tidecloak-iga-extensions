@@ -79,7 +79,10 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
         RealmModel realm = session.getContext().getRealm();
         Runnable callback = () -> {
             try {
-                commitDefaultUserContext(realm, entity, change);
+                List<TideClientDraftEntity> entities = em.createNamedQuery("GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
+                        .setParameter("requestId", change.getChangeSetId()).getResultList();
+
+                commitDefaultUserContext(realm, entities, change);
             } catch (Exception e) {
                 throw new RuntimeException("Error during commit callback", e);
             }
@@ -108,14 +111,15 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
                     entity.getId(),
                     entity.getChangeRequestId()
             ));
-            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
             switch (action) {
                 case CREATE:
                     logger.debug(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", entity.getId(), entity.getChangeRequestId()));
                     handleCreateRequest(session, entity, em, callback);
+                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
                     break;
                 case DELETE:
                     logger.debug("Client Processor has no implementation for DELETE.");
+                    //ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
                     break;
                 default:
                     logger.warn(String.format("Unsupported action type: %s for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", action, entity.getId(), entity.getChangeRequestId()));
@@ -145,6 +149,7 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
 
     @Override
     public void handleCreateRequest(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
+        entity.setChangeRequestId(KeycloakModelUtils.generateId());
         RealmModel realm = session.realms().getRealm(entity.getClient().getRealmId());
         ClientModel client = realm.getClientById(entity.getClient().getId());
         String defaultFullScopeUserContext = generateRealmDefaultUserContext(session, realm, client, em);
@@ -153,6 +158,7 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
 
     @Override
     public void handleDeleteRequest(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
+        entity.setChangeRequestId(KeycloakModelUtils.generateId());
 
     }
 
@@ -169,20 +175,22 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
         return null;
     }
 
-    private void commitDefaultUserContext(RealmModel realm, TideClientDraftEntity entity, ChangeSetRequest change) {;
-        ClientModel clientModel = realm.getClientByClientId(entity.getClient().getClientId());
-        if (clientModel == null) return;
+    private void commitDefaultUserContext(RealmModel realm, List<TideClientDraftEntity> entities, ChangeSetRequest change) {
+        entities.forEach(entity -> {
+            ClientModel clientModel = realm.getClientByClientId(entity.getClient().getClientId());
+            if (clientModel == null) return;
 
-        if (change.getActionType() == ActionType.CREATE) {
-            if(entity.getDraftStatus() != DraftStatus.APPROVED){
-                throw new RuntimeException("Draft record has not been approved by all admins.");
+            if (change.getActionType() == ActionType.CREATE) {
+                if(entity.getDraftStatus() != DraftStatus.APPROVED){
+                    throw new RuntimeException("Draft record has not been approved by all admins.");
+                }
+                entity.setDraftStatus(DraftStatus.ACTIVE);
+
+            } else if (change.getActionType() == ActionType.DELETE) {
+                throw new RuntimeException("CLIENT has no implementation for DELETE");
+
             }
-            entity.setDraftStatus(DraftStatus.ACTIVE);
-
-        } else if (change.getActionType() == ActionType.DELETE) {
-            throw new RuntimeException("CLIENT has no implementation for DELETE");
-
-        }
+        });
     }
 
     @Override

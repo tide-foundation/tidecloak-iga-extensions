@@ -103,7 +103,6 @@ public class TideClientAdapter extends ClientAdapter {
             } else {
                 TideClientDraftEntity clientDraftEntity = new TideClientDraftEntity();
                 clientDraftEntity.setId(KeycloakModelUtils.generateId());
-                clientDraftEntity.setChangeRequestId(KeycloakModelUtils.generateId());
                 clientDraftEntity.setClient(entity);
 
                 if(usersInRealm.isEmpty()) {

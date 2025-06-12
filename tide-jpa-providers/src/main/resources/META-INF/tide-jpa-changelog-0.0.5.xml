@@ -69,14 +69,6 @@
 
     <!-- Step 3: Make columns NOT NULL -->
     <changeSet id="26.1.4-06032025-make-not-null" author="tidecloak">
-        <addNotNullConstraint tableName="USER_ROLE_MAPPING_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
-        <addNotNullConstraint tableName="CLIENT_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
-        <addNotNullConstraint tableName="COMPOSITE_ROLE_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
-        <addNotNullConstraint tableName="COMPOSITE_ROLE_MAPPING_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
-        <addNotNullConstraint tableName="GROUP_ROLE_MAPPING_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
-        <addNotNullConstraint tableName="ROLE_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
-        <addNotNullConstraint tableName="USER_ENTITY_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
-        <addNotNullConstraint tableName="USER_GROUP_MEMBERSHIP_DRAFT" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(50)"/>
         <!-- now lock down your new AccessProofDetailEntity columns -->
         <addNotNullConstraint tableName="ACCESS_PROOF_DETAIL" columnName="MAPPING_ID"        columnDataType="VARCHAR(36)"/>
         <addNotNullConstraint tableName="ACCESS_PROOF_DETAIL" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(36)"/>

@@ -70,15 +70,16 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
                     entity.getId(),
                     entity.getChangeRequestId()
             ));
-            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
             switch (action) {
                 case CREATE:
                     logger.debug(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", entity.getId(), entity.getChangeRequestId()));
                     handleCreateRequest(session, entity, em, callback);
+                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
                     break;
                 case DELETE:
                     logger.debug(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", entity.getId(), entity.getChangeRequestId()));
                     handleDeleteRequest(session, entity, em, callback);
+                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
                     break;
                 default:
                     logger.warn(String.format("Unsupported action type: %s for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", action, entity.getId(), entity.getChangeRequestId()));
@@ -120,7 +121,10 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
         RealmModel realm = session.getContext().getRealm();
         Runnable callback = () -> {
             try {
-                commitCallback(realm, change, entity);
+                List<TideCompositeRoleMappingDraftEntity> entities = em.createNamedQuery("GetCompositeRoleMappingDraftEntityByRequestId", TideCompositeRoleMappingDraftEntity.class)
+                        .setParameter("requestId", change.getChangeSetId()).getResultList();
+
+                commitCallback(realm, change, entities);
             } catch (Exception e) {
                 throw new RuntimeException("Error during commit callback", e);
             }
@@ -140,6 +144,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
 
     @Override
     public void handleCreateRequest(KeycloakSession session, TideCompositeRoleMappingDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
+        entity.setChangeRequestId(KeycloakModelUtils.generateId());
         RoleEntity parentEntity = entity.getComposite();
         RoleEntity childEntity = entity.getChildRole();
         RealmModel realm = session.realms().getRealm(parentEntity.getRealmId());
@@ -219,6 +224,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
 
     @Override
     public void handleDeleteRequest(KeycloakSession session, TideCompositeRoleMappingDraftEntity mapping, EntityManager em, Runnable callback) {
+        mapping.setChangeRequestId(KeycloakModelUtils.generateId());
         mapping.setDeleteStatus(DraftStatus.DRAFT);
         mapping.setTimestamp(System.currentTimeMillis());
         processExistingRequest(session, em, session.getContext().getRealm(), mapping, ActionType.DELETE );
@@ -424,22 +430,26 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
         return results;
     }
 
-    private void commitCallback(RealmModel realm, ChangeSetRequest change, TideCompositeRoleMappingDraftEntity entity){
-        if (change.getActionType() == ActionType.CREATE) {
-            if(entity.getDraftStatus() != DraftStatus.APPROVED){
-                throw new RuntimeException("Draft record has not been approved by all admins.");
+    private void commitCallback(RealmModel realm, ChangeSetRequest change, List<TideCompositeRoleMappingDraftEntity> entities){
+        entities.forEach(entity -> {
+            if (change.getActionType() == ActionType.CREATE) {
+                if(entity.getDraftStatus() == DraftStatus.ACTIVE) return;
+                if(entity.getDraftStatus() != DraftStatus.APPROVED){
+                    throw new RuntimeException("Draft record has not been approved by all admins.");
+                }
+                entity.setDraftStatus(DraftStatus.ACTIVE);
+            } else if (change.getActionType() == ActionType.DELETE) {
+                if(entity.getDeleteStatus() != DraftStatus.APPROVED && entity.getDeleteStatus() != DraftStatus.ACTIVE){
+                    throw new RuntimeException("Deletion has not been approved by all admins.");
+                }
+                entity.setDeleteStatus(DraftStatus.ACTIVE);
+                RoleModel composite = realm.getRoleById(entity.getComposite().getId());
+                RoleModel child = realm.getRoleById(entity.getChildRole().getId());
+                composite.removeCompositeRole(child);
             }
-            entity.setDraftStatus(DraftStatus.ACTIVE);
-        } else if (change.getActionType() == ActionType.DELETE) {
-            if(entity.getDeleteStatus() != DraftStatus.APPROVED){
-                throw new RuntimeException("Deletion has not been approved by all admins.");
-            }
-            entity.setDeleteStatus(DraftStatus.ACTIVE);
-            RoleModel composite = realm.getRoleById(entity.getComposite().getId());
-            RoleModel child = realm.getRoleById(entity.getChildRole().getId());
-            composite.removeCompositeRole(child);
-        }
+        });
     }
+
     private void processExistingRequest(KeycloakSession session, EntityManager em, RealmModel realm, TideCompositeRoleMappingDraftEntity compositeRoleEntity, ActionType action) {
             RoleEntity parentEntity = compositeRoleEntity.getComposite();
             RoleEntity childEntity = compositeRoleEntity.getChildRole();

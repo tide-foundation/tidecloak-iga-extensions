@@ -78,7 +78,10 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
 
         Runnable callback = () -> {
             try {
-                commitCallback(change, entity, client, em);
+                List<TideClientDraftEntity> entities = em.createNamedQuery("GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
+                        .setParameter("requestId", change.getChangeSetId()).getResultList();
+
+                commitCallback(change, entities, client, em);
                 em.flush();
 
             } catch (Exception e) {
@@ -114,6 +117,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
                 case CREATE:
                     logger.debug(String.format("Initiating CREATE (enable) action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleCreateRequest(session, entity, em, callback);
+                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
                     if (!isIGAEnabled){
                         if (entity.getFullScopeEnabled().equals(DraftStatus.ACTIVE)){
                             entity.setFullScopeDisabled(DraftStatus.NULL);
@@ -124,6 +128,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
                 case DELETE:
                     logger.debug(String.format("Initiating DELETE (disable) action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleDeleteRequest(session, entity, em, callback);
+                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
                     if (!isIGAEnabled){
                         if (entity.getFullScopeDisabled().equals(DraftStatus.ACTIVE)){
                             entity.setFullScopeEnabled(DraftStatus.NULL);
@@ -152,6 +157,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
 
     @Override
     public void handleCreateRequest(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
+        entity.setChangeRequestId(KeycloakModelUtils.generateId());
         RealmModel realm = session.getContext().getRealm();
         ClientModel client = realm.getClientByClientId(entity.getClient().getClientId());
         entity.setFullScopeEnabled(DraftStatus.DRAFT);
@@ -193,6 +199,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
 
     @Override
     public void handleDeleteRequest(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
+        entity.setChangeRequestId(KeycloakModelUtils.generateId());
         RealmModel realm = session.getContext().getRealm();
         ClientModel client = realm.getClientByClientId(entity.getClient().getClientId());
         List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
@@ -433,35 +440,37 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
         return results;
     }
 
-    private void commitCallback(ChangeSetRequest change, TideClientDraftEntity entity, ClientModel clientModel, EntityManager em){
-        if (change.getActionType() == ActionType.CREATE) {
-            if(entity.getFullScopeEnabled() != DraftStatus.APPROVED){
-                throw new RuntimeException("Draft record has not been approved by all admins.");
+    private void commitCallback(ChangeSetRequest change, List<TideClientDraftEntity> entities, ClientModel clientModel, EntityManager em){
+        entities.forEach(entity -> {
+            if (change.getActionType() == ActionType.CREATE) {
+                if(entity.getFullScopeEnabled() != DraftStatus.APPROVED && entity.getFullScopeEnabled() != DraftStatus.ACTIVE){
+                    throw new RuntimeException("Draft record has not been approved by all admins.");
+                }
+                entity.setFullScopeEnabled(DraftStatus.ACTIVE);
+                entity.setFullScopeDisabled(DraftStatus.NULL);
+                clientModel.setFullScopeAllowed(true);
+            } else if (change.getActionType() == ActionType.DELETE) {
+                if(entity.getFullScopeDisabled() != DraftStatus.APPROVED && entity.getFullScopeDisabled() != DraftStatus.ACTIVE){
+                    throw new RuntimeException("Deletion has not been approved by all admins.");
+                }
+                entity.setFullScopeDisabled(DraftStatus.ACTIVE);
+                entity.setFullScopeEnabled(DraftStatus.NULL);
+                clientModel.setFullScopeAllowed(false);
             }
-            entity.setFullScopeEnabled(DraftStatus.ACTIVE);
-            entity.setFullScopeDisabled(DraftStatus.NULL);
-            clientModel.setFullScopeAllowed(true);
-        } else if (change.getActionType() == ActionType.DELETE) {
-            if(entity.getFullScopeDisabled() != DraftStatus.APPROVED){
-                throw new RuntimeException("Deletion has not been approved by all admins.");
+
+            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT));
+            if(entity.getDraftStatus().equals(DraftStatus.DRAFT) && changesetRequestEntity != null){
+                entity.setDraftStatus(DraftStatus.ACTIVE);
+                // Find any pending changes
+                List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
+                        .setParameter("recordId", entity.getId())
+                        .setParameter("changesetTypes", List.of(ChangeSetType.CLIENT))
+                        .getResultList();
+                pendingChanges.forEach(em::remove);
+                em.remove(changesetRequestEntity);
+
             }
-            entity.setFullScopeDisabled(DraftStatus.ACTIVE);
-            entity.setFullScopeEnabled(DraftStatus.NULL);
-            clientModel.setFullScopeAllowed(false);
-        }
-
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT));
-        if(entity.getDraftStatus().equals(DraftStatus.DRAFT) && changesetRequestEntity != null){
-            entity.setDraftStatus(DraftStatus.ACTIVE);
-            // Find any pending changes
-            List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
-                    .setParameter("recordId", entity.getId())
-                    .setParameter("changesetTypes", List.of(ChangeSetType.CLIENT))
-                    .getResultList();
-            pendingChanges.forEach(em::remove);
-            em.remove(changesetRequestEntity);
-
-        }
+        });
     }
 
     private void approveFullScope(TideClientDraftEntity clientFullScopeStatuses, boolean isEnabled) {

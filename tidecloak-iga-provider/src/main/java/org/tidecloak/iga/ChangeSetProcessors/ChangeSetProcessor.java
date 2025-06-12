@@ -303,27 +303,46 @@ public interface ChangeSetProcessor<T> {
         }
 
         // Regenerate for client full scope change request.
-        List<ChangesetRequestEntity> clientFullScopeChangeRequests = em.createNamedQuery("getAllChangeRequestsByChangeSetType", ChangesetRequestEntity.class)
-                .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE)
-                .getResultStream()
-                .filter(x -> {
-                    TideClientDraftEntity tideClientDraftEntity = em.find(TideClientDraftEntity.class, x.getChangesetRequestId());
-                    if (tideClientDraftEntity == null) {
-                        em.remove(x); // Remove empty change request
-                        return false;
-                    }
-                    return tideClientDraftEntity.getClient().getRealmId().equalsIgnoreCase(realmId);
-                })
-                .toList();
+        // Regenerate for client full scope change request.
+        List<Map.Entry<ChangesetRequestEntity,TideClientDraftEntity>> reqAndDrafts =
+                em.createNamedQuery("getAllChangeRequestsByChangeSetType", ChangesetRequestEntity.class)
+                        .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE)
+                        .getResultStream()
+                        .flatMap(cr -> {
+                            // load drafts for this change-request
+                            List<TideClientDraftEntity> drafts = em.createNamedQuery(
+                                            "GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
+                                    .setParameter("changeRequestId", cr.getChangesetRequestId())
+                                    .getResultList();
+
+                            // keep only those in our realm
+                            List<TideClientDraftEntity> valid = drafts.stream()
+                                    .filter(d -> d.getClient()
+                                            .getRealmId()
+                                            .equalsIgnoreCase(realmId))
+                                    .collect(Collectors.toList());
+
+                            // if none were valid, delete the CR & emit nothing
+                            if (valid.isEmpty()) {
+                                em.remove(cr);
+                                return Stream.empty();
+                            }
+
+                            // otherwise emit a (request, draft) entry for each valid draft
+                            return valid.stream()
+                                    .map(d -> new AbstractMap.SimpleEntry<>(cr, d));
+                        })
+                        .collect(Collectors.toList());
 
         ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
 
-        clientFullScopeChangeRequests.forEach(req -> {
-            TideClientDraftEntity tideClientDraftEntity = em.find(TideClientDraftEntity.class, req.getChangesetRequestId());
+        reqAndDrafts.forEach(entry -> {
+            ChangesetRequestEntity req   = entry.getKey();
+            TideClientDraftEntity  draft = entry.getValue();
 
-            if (tideClientDraftEntity == null) return; // Skip if draft entity is missing
+            if (draft == null) return; // Skip if draft entity is missing
 
-            ChangeSetRequest c = getChangeSetRequestFromEntity(session, tideClientDraftEntity, ChangeSetType.CLIENT_FULLSCOPE);
+            ChangeSetRequest c = getChangeSetRequestFromEntity(session, draft, ChangeSetType.CLIENT_FULLSCOPE);
 
             // Remove associated admin authorizations
             req.getAdminAuthorizations().clear();
@@ -341,7 +360,7 @@ public interface ChangeSetProcessor<T> {
             WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, c.getActionType().equals(ActionType.DELETE), c.getActionType(), ChangeSetType.CLIENT_FULLSCOPE);
             try {
                 changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT_FULLSCOPE)
-                        .executeWorkflow(session, tideClientDraftEntity, em, WorkflowType.REQUEST, params, null);
+                        .executeWorkflow(session, draft, em, WorkflowType.REQUEST, params, null);
             } catch (Exception e) {
                 throw new RuntimeException("Error executing workflow for request ID: " + req.getChangesetRequestId(), e);
             }

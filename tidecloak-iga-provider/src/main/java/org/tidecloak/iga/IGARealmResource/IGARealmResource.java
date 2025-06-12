@@ -631,19 +631,16 @@ public class IGARealmResource {
         RealmModel realm = session.getContext().getRealm();
 
         for (ChangeSetRequest changeSet: changeSets){
-            List<?> draftRecordEntity= IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
-            if (draftRecordEntity ==  null || draftRecordEntity.isEmpty()) {
+            Object draftRecordEntity= IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId()).get(0);
+            if (draftRecordEntity ==  null) {
                 return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
             }
-
-            ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
-            draftRecordEntity.forEach(d -> {
-                try {
-                    committer.commit(changeSet, em, session, realm, d, auth.adminAuth());
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-            });
+            try {
+                ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
+                committer.commit(changeSet, em, session, realm, draftRecordEntity, auth.adminAuth());
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
 
             return Response.ok("Change sets approved and committed").build();
 
