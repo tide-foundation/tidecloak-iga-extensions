@@ -28,6 +28,7 @@ import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.ChangeSetProcessors.keys.UserClientKey;
 import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
+import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequestList;
 import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.iga.ChangeSetSigner.ChangeSetSigner;
 import org.tidecloak.iga.ChangeSetSigner.ChangeSetSignerFactory;
@@ -192,8 +193,8 @@ public class IGARealmResource {
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign/batch")
-    public Response signMultipleChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
-        return signChangeSets(changeSets);
+    public Response signMultipleChangeSets(ChangeSetRequestList changeSets) throws Exception {
+        return signChangeSets(changeSets.getChangeSets());
     }
 
 
@@ -246,8 +247,8 @@ public class IGARealmResource {
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/commit/batch")
-    public Response commitMultipleChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
-        return signChangeSets(changeSets);
+    public Response commitMultipleChangeSets(ChangeSetRequestList changeSets) throws Exception {
+        return commitChangeSets(changeSets.getChangeSets());
     }
 
     @POST
@@ -576,29 +577,35 @@ public class IGARealmResource {
                                     )
                             ));
             ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
-            requests.forEach((requestType, entities) -> {
-                try {
-                    System.out.println(requestType.name());
-                    List<ChangesetRequestEntity> changeRequests =  processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
 
-                    for (ChangesetRequestEntity changeSet : changeRequests) {
+            List<ChangesetRequestEntity> changeRequests = requests.entrySet().stream()
+                    .flatMap(entry -> {
+                        ChangeSetType requestType = entry.getKey();
+                        List<Object> entities = entry.getValue();
                         try {
-                            Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getChangesetType(), changeSet.getChangesetRequestId()).get(0);
-                            Response singleResp = signer.sign(new ChangeSetRequest(changeSet.getChangesetRequestId(), changeSet.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth.adminAuth());
-                            // extract that JSON payload
-                            String jsonBody = singleResp.readEntity(String.class);
-
-                            // collect it
-                            signedJsonList.add(jsonBody);
+                            // Return a stream of results from each processor
+                            return processorFactory.getProcessor(requestType)
+                                    .combineChangeRequests(session, entities, em)
+                                    .stream();
                         } catch (Exception e) {
                             throw new RuntimeException(e);
                         }
-                    };
+                    })
+                    .collect(Collectors.toList());
+
+            for (ChangesetRequestEntity changeSet : changeRequests) {
+                try {
+                    Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getChangesetType(), changeSet.getChangesetRequestId()).get(0);
+                    Response singleResp = signer.sign(new ChangeSetRequest(changeSet.getChangesetRequestId(), changeSet.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth.adminAuth());
+                    // extract that JSON payload
+                    String jsonBody = singleResp.readEntity(String.class);
+
+                    // collect it
+                    signedJsonList.add(jsonBody);
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
-
-            });
+            };
         }
         else {
             for (ChangeSetRequest changeSet : changeSets) {
@@ -621,8 +628,7 @@ public class IGARealmResource {
             }
         }
 
-        String finalPayload = signedJsonList.size() == 1 ? signedJsonList.get(0) :objectMapper.writeValueAsString(signedJsonList);
-        return Response.ok(finalPayload).build();
+        return Response.ok(objectMapper.writeValueAsString(signedJsonList)).build();
     }
 
     private Response commitChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
@@ -642,12 +648,8 @@ public class IGARealmResource {
                 throw new RuntimeException(e);
             }
 
-            return Response.ok("Change sets approved and committed").build();
-
-
         }
-
-        return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported committing method").build();
+        return Response.ok("Change sets approved and committed").build();
     }
 
 }
