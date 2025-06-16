@@ -600,16 +600,14 @@ public class IGAUtils {
             }
 
             ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
+            ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
+
             try {
-                Response response = signer.sign(changeSet, em, session, realm, draftRecordEntity, auth);
+                signer.sign(changeSet, em, session, realm, draftRecordEntity, auth);
+                committer.commit(changeSet, em, session, realm, draftRecordEntity, auth);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
-
-//            if (response != null && response.getStatus() != Response.Status.OK.getStatusCode()) {
-//                throw new Exception("Signing failed for change set ID: " + changeSet.getChangeSetId() +
-//                        ", status: " + response.getStatus());
-//            }
         }
     }
 
