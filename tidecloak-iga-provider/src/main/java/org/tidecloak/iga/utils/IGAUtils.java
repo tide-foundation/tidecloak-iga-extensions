@@ -574,7 +574,6 @@ public class IGAUtils {
 
             requests.forEach((requestType, entities) -> {
                 try {
-                    System.out.println(requestType.name());
                     List<ChangesetRequestEntity> changeRequests =  processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
 
                     changeRequests.forEach(cre -> {

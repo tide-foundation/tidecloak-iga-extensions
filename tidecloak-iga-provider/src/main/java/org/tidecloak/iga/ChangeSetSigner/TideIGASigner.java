@@ -44,8 +44,7 @@ public class TideIGASigner implements ChangeSetSigner{
         // Delegate to the appropriate sub-strategy
         Authorizer authorizerSigner = AuthorizerFactory.getSigner(authorizerType);
         if (authorizerSigner != null) {
-            Response resp = authorizerSigner.signWithAuthorizer(changeSet, em, session, realm, draftEntity, auth, primaryAuthorizer, componentModel);
-            return  resp;
+            return authorizerSigner.signWithAuthorizer(changeSet, em, session, realm, draftEntity, auth, primaryAuthorizer, componentModel);
         }
 
         return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported authorizer type").build();

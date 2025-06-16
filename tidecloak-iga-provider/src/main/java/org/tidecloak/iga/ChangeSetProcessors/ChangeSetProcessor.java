@@ -754,7 +754,6 @@ public interface ChangeSetProcessor<T> {
 
 
         List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, changeRequestKey.getChangeRequestId(), type);
-        proofDetails.forEach(x -> System.out.println(x.getProofDraft() + "\n"));
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
         RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
@@ -884,10 +883,6 @@ public interface ChangeSetProcessor<T> {
 
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeRequestKey.getChangeRequestId(), changeSetType));
         if (changesetRequestEntity == null) {
-            System.out.println("Req is null so adding with reqId " + changeRequestKey.getChangeRequestId());
-
-            System.out.println("and type " + type);
-
             ChangesetRequestEntity entity = new ChangesetRequestEntity();
             entity.setChangesetRequestId(changeRequestKey.getChangeRequestId());
             entity.setDraftRequest(draft);
@@ -895,8 +890,6 @@ public interface ChangeSetProcessor<T> {
             em.persist(entity);
             em.flush();
         } else {
-            System.out.println("updating existing req");
-
             changesetRequestEntity.setDraftRequest(draft);
             em.flush();
         }

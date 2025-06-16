@@ -187,14 +187,22 @@ public class IGARealmResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign")
     public Response signChangeset(ChangeSetRequest changeSet) throws Exception {
-        return signChangeSets(Collections.singletonList(changeSet));
+        try{
+            return signChangeSets(Collections.singletonList(changeSet));
+        }catch (Exception ex) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
+        }
     }
 
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign/batch")
     public Response signMultipleChangeSets(ChangeSetRequestList changeSets) throws Exception {
-        return signChangeSets(changeSets.getChangeSets());
+        try{
+            return signChangeSets(changeSets.getChangeSets());
+        }catch (Exception ex) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
+        }
     }
 
 
@@ -241,14 +249,23 @@ public class IGARealmResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/commit")
     public Response commitChangeSet(ChangeSetRequest change) throws Exception {
-        return commitChangeSets(Collections.singletonList(change));
+        try{
+            return commitChangeSets(Collections.singletonList(change));
+        }catch (Exception ex) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
+        }
     }
 
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/commit/batch")
     public Response commitMultipleChangeSets(ChangeSetRequestList changeSets) throws Exception {
-        return commitChangeSets(changeSets.getChangeSets());
+        try{
+            return commitChangeSets(changeSets.getChangeSets());
+        }
+        catch (Exception ex) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
+        }
     }
 
     @POST

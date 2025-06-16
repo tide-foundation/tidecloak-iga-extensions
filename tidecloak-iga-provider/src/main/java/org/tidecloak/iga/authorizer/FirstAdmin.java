@@ -1,6 +1,7 @@
 package org.tidecloak.iga.authorizer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
+import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.core.Response;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.Constants;
@@ -32,7 +33,7 @@ public class FirstAdmin implements Authorizer {
         ObjectMapper objectMapper = new ObjectMapper();
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
         if (changesetRequestEntity == null){
-            throw new Exception("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
+            throw new BadRequestException("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
         }
         // Fetch proof details
         List<AccessProofDetailEntity> proofDetails = IGAUtils.getAccessProofs(em, changeSet.getChangeSetId(), changeSet.getType());
@@ -59,7 +60,7 @@ public class FirstAdmin implements Authorizer {
             TideUserRoleMappingDraftEntity userRoleMappingDraft = (TideUserRoleMappingDraftEntity) draftEntity;
             if(userRoleMappingDraft.getUser().getAttributes().stream().noneMatch(a -> a.getName().equalsIgnoreCase("vuid")
                     || a.getName().equalsIgnoreCase("tideuserkey"))) {
-                return Response.status(Response.Status.BAD_REQUEST).entity("User needs a tide account linked for the tide-realm-admin role").build();
+                throw new BadRequestException("User needs a tide account linked for the tide-realm-admin role");
 
             }
 

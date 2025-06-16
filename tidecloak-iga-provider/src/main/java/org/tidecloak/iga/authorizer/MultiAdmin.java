@@ -2,6 +2,7 @@ package org.tidecloak.iga.authorizer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
+import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.core.Response;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
@@ -44,7 +45,7 @@ public class MultiAdmin implements Authorizer{
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
 
         if (changesetRequestEntity == null){
-            throw new Exception("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
+            throw new BadRequestException("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
         }
 
         var config = componentModel.getConfig();
@@ -118,7 +119,7 @@ public class MultiAdmin implements Authorizer{
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
 
         if (changesetRequestEntity == null){
-            throw new Exception("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
+            throw new BadRequestException("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
         }
 
         var config = componentModel.getConfig();
@@ -172,7 +173,7 @@ public class MultiAdmin implements Authorizer{
         if(isAuthorityAssignment) {
             RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, changeSet.getChangeSetId());
             if(roleInitCert == null) {
-                throw new Exception("Role Init Cert draft not found for changeSet, " + changeSet.getChangeSetId());
+                throw new BadRequestException("Role Init Cert draft not found for changeSet, " + changeSet.getChangeSetId());
             }
             req.SetInitializationCertificate(InitializerCertifcate.FromString(roleInitCert.getInitCert()));
             SignatureResponse response = Midgard.SignModel(settings, req);

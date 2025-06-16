@@ -20,6 +20,6 @@ public class BasicIGASigner implements ChangeSetSigner{
         IGAUtils.approveChangeRequest(session, adminAuth.getUser(), proofDetails, em, changeSet);
         IGAUtils.updateDraftStatus(session, changeSet.getType(), changeSet.getChangeSetId(), changeSet.getActionType(), draftEntity);
         em.flush();
-        return Response.ok("Approved without IGA").build();
+        return Response.ok("Change set approved by realm admin").build();
     }
 }
