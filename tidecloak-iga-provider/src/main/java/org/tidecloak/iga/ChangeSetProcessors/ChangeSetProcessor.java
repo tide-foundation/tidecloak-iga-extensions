@@ -565,8 +565,6 @@ public interface ChangeSetProcessor<T> {
 
 
     default Map<UserClientKey, List<AccessProofDetailEntity>> groupChangeRequests(List<T> entities, EntityManager em ){
-        ObjectMapper objectMapper = new ObjectMapper();
-
         // Get a list of entities
         List<AccessProofDetailEntity> proofs = entities.stream().map(entity -> {
             return IGAUtils.getAccessProofsFromEntity(em, entity);
@@ -584,58 +582,7 @@ public interface ChangeSetProcessor<T> {
                                 )
                         ));
         return grouped;
-
-        // combine for each user
-        // loop through user + client access proof and combine, update id ??? record id??? and save new proof in a new accessproofentity with this record id and remove the others.
-//        grouped.forEach((userClientAccess, accessProofs) -> {
-//
-//            AtomicReference<String> trackTokenString = new AtomicReference<>("");
-//            // generate a new ID
-//            accessProofs.forEach(proof -> {
-//                try {
-//                    T entity =  (T) IGAUtils.fetchDraftRecordEntity(em, proof.getChangesetType(), proof.getRecordId());
-//                    AccessToken accessToken = objectMapper.readValue(proof.getProofDraft(), AccessToken.class);
-//                    trackTokenString.set(this.generateTransformedUserContext(session, realm, client, user, scopeParam, entity));
-//
-//                } catch (Exception e) {
-//                    throw new RuntimeException(e);
-//                }
-//            });
-//
-//        });
-
-        // commit
-        // update affected
-
     }
-
-//    default String combineChangeSets(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, T entity, AccessToken token) throws Exception {
-//        ObjectMapper objectMapper = new ObjectMapper();
-//        objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
-//        objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.PUBLIC_ONLY);
-//        ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
-//
-//        String tideUserKey = user.getFirstAttribute("tideUserKey");
-//        String vuid = user.getFirstAttribute("vuid");
-//
-//        if (tideUserKey != null) {
-//            token.getOtherClaims().put("tideuserkey", tideUserKey);
-//        }
-//        if (vuid != null) {
-//            token.getOtherClaims().put("vuid", vuid);
-//        }
-//
-//        ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);
-//        AccessToken userContextToken = processorFactory.getProcessor(changeSetRequest.getType()).combineUserContexts(token, session, entity, user, client);
-//
-//        boolean isFullScopeAllowed = client.isFullScopeAllowed();
-//        if( entity instanceof TideClientDraftEntity) {
-//            isFullScopeAllowed = changeSetRequest.getActionType().equals(ActionType.CREATE);
-//        }
-//
-//        return this.cleanAccessToken(userContextToken, null, isFullScopeAllowed);
-//
-//    }
 
     default AccessToken transformedToken(AccessToken token, UserModel user) throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();

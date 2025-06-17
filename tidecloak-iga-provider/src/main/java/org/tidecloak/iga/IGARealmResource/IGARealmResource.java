@@ -144,40 +144,22 @@ public class IGARealmResource {
     @Path("change-set/cancel")
     public Response cancelChangeSet(ChangeSetRequest changeSet) throws Exception {
         try{
-            auth.realm().requireManageRealm();
-            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-            ChangeSetType type = changeSet.getType();
-
-            List<?> mapping = IGAUtils.fetchDraftRecordEntityByRequestId(em, type, changeSet.getChangeSetId());
-            if (mapping.isEmpty()) {
-                return Response.status(Response.Status.NOT_FOUND).entity("Change request was not found.").build();
-            }
-
-            mapping.forEach(m -> {
-                em.lock(m, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
-                ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
-                WorkflowParams params = new WorkflowParams(null, false, changeSet.getActionType(), changeSet.getType());
-                try {
-                    processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, m, em, WorkflowType.CANCEL, params, null);
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-            });
-
-            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
-            if(changesetRequestEntity != null ) {
-                changesetRequestEntity.getAdminAuthorizations().clear();
-                em.remove(changesetRequestEntity);
-            }
-            em.flush();
-            UserCache userCache = session.getProvider(UserCache.class);
-            userCache.clear();
-
-            // Return success message after approving the change sets
-            return Response.ok("Change set request has been canceled").build();
+            return cancelChangeSets(Collections.singletonList(changeSet));
 
         } catch(Exception e) {
-            return buildResponse(500, "There was an error commiting this change set request. " + e.getMessage());
+            return buildResponse(500, "There was an error cancelling this change set request. " + e.getMessage());
+
+        }
+    }
+
+    @POST
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Path("change-set/cancel/batch")
+    public Response cancelChangeSets(ChangeSetRequestList changeSets) throws Exception {
+        try{
+            return cancelChangeSets(changeSets.getChangeSets());
+        } catch(Exception e) {
+            return buildResponse(500, "There was an error cancelling these change set requests. " + e.getMessage());
 
         }
     }
@@ -716,6 +698,45 @@ public class IGARealmResource {
 
         }
         return Response.ok("Change sets approved and committed").build();
+    }
+
+    private Response cancelChangeSets(List<ChangeSetRequest> changeSets){
+            auth.realm().requireManageRealm();
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+            changeSets.forEach(changeSet -> {
+
+                ChangeSetType type = changeSet.getType();
+
+                List<?> mapping = IGAUtils.fetchDraftRecordEntityByRequestId(em, type, changeSet.getChangeSetId());
+                if (mapping != null && mapping.isEmpty()) {
+                    return;
+                }
+
+                mapping.forEach(m -> {
+                    em.lock(m, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
+                    ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
+                    WorkflowParams params = new WorkflowParams(null, false, changeSet.getActionType(), changeSet.getType());
+                    try {
+                        processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, m, em, WorkflowType.CANCEL, params, null);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+
+                ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
+                if(changesetRequestEntity != null ) {
+                    changesetRequestEntity.getAdminAuthorizations().clear();
+                    em.remove(changesetRequestEntity);
+                }
+                em.flush();
+                UserCache userCache = session.getProvider(UserCache.class);
+                userCache.clear();
+
+            });
+
+        // Return success message after approving the change sets
+        return Response.ok("Change set request has been canceled").build();
     }
 
 }
