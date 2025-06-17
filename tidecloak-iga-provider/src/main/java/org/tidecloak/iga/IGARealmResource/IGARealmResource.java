@@ -324,15 +324,28 @@ public class IGARealmResource {
 
     public static List<RequestedChanges> processClientDraftRecords(EntityManager em, RealmModel realm) {
         // Get all pending changes, records that do not have an active delete status or active draft status
-        return processClientDraftRecords(em, realm, DraftStatus.ACTIVE);
-    }
-    public static List<RequestedChanges> processClientDraftRecords(EntityManager em, RealmModel realm, DraftStatus draftStatus ) {
-        List<RequestedChanges> changes = new ArrayList<>();
         List<TideClientDraftEntity> mappings = em.createNamedQuery("getClientFullScopeStatusDraftThatDoesNotHaveStatus", TideClientDraftEntity.class)
-                .setParameter("status", draftStatus)
+                .setParameter("status", DraftStatus.ACTIVE)
                 .setParameter("status2", DraftStatus.NULL)
                 .getResultList();
 
+
+        return processClientDraftRecords(em, realm, mappings);
+    }
+
+    public static List<RequestedChanges> processPreApprovedClientDraftRecords(EntityManager em, RealmModel realm, List<DraftStatus> statuses) {
+
+        List<TideClientDraftEntity> mappings = em.createNamedQuery("getPreApprovedClientFullScopeStatusDraftThatDoesNotHaveStatus", TideClientDraftEntity.class)
+                .setParameter("status", statuses)
+                .setParameter("activeStatus", DraftStatus.ACTIVE)
+                .setParameter("status2", DraftStatus.NULL)
+                .getResultList();
+
+        return processClientDraftRecords(em, realm, mappings);
+    }
+
+    public static List<RequestedChanges> processClientDraftRecords(EntityManager em, RealmModel realm, List<TideClientDraftEntity> mappings ) {
+        List<RequestedChanges> changes = new ArrayList<>();
 
         for (TideClientDraftEntity c : mappings) {
             em.lock(c, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
@@ -391,16 +404,27 @@ public class IGARealmResource {
     }
     public static List<RequestedChanges> processUserRoleMappings(EntityManager em, RealmModel realm) {
         // Get all pending changes, records that do not have an active delete status or active draft status
-        return processUserRoleMappings(em, realm, DraftStatus.ACTIVE);
+        List<TideUserRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllPendingUserRoleMappingsByRealm", TideUserRoleMappingDraftEntity.class)
+                .setParameter("draftStatus", DraftStatus.ACTIVE)
+                .setParameter("deleteStatus", DraftStatus.ACTIVE)
+                .setParameter("realmId", realm.getId())
+                .getResultList();
+        return processUserRoleMappings(em, realm, mappings);
     }
 
-    public static List<RequestedChanges> processUserRoleMappings(EntityManager em, RealmModel realm, DraftStatus status) {
+    public static List<RequestedChanges> processPreApprovedUserRoleMappings(EntityManager em, RealmModel realm, List<DraftStatus> statuses) {
+
+        List<TideUserRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllPreApprovedUserRoleMappingsByRealm", TideUserRoleMappingDraftEntity.class)
+                .setParameter("draftStatus", statuses)
+                .setParameter("activeStatus", DraftStatus.ACTIVE)
+                .setParameter("realmId", realm.getId())
+                .getResultList();
+
+        return processUserRoleMappings(em, realm, mappings);
+    }
+
+    public static List<RequestedChanges> processUserRoleMappings(EntityManager em, RealmModel realm, List<TideUserRoleMappingDraftEntity> mappings) {
         List<RequestedChanges> changes = new ArrayList<>();
-        List<TideUserRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllPendingUserRoleMappingsByRealm", TideUserRoleMappingDraftEntity.class)
-            .setParameter("draftStatus", status)
-            .setParameter("deleteStatus", status)
-            .setParameter("realmId", realm.getId())
-            .getResultList();
 
         for (TideUserRoleMappingDraftEntity m : mappings) {
             em.lock(m, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
@@ -432,17 +456,28 @@ public class IGARealmResource {
 
     public static List<RequestedChanges> processCompositeRoleMappings(EntityManager em, RealmModel realm) {
         // Get all pending changes, records that do not have an active delete status or active draft status
-        return processCompositeRoleMappings(em, realm, DraftStatus.ACTIVE);
-    }
-
-        public static List<RequestedChanges> processCompositeRoleMappings(EntityManager em, RealmModel realm, DraftStatus status) {
-        List<RequestedChanges> changes = new ArrayList<>();
         List<TideCompositeRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllCompositeRoleMappingsByRealm", TideCompositeRoleMappingDraftEntity.class)
-                .setParameter("draftStatus", status)
-                .setParameter("deleteStatus", status)
+                .setParameter("draftStatus", DraftStatus.ACTIVE)
+                .setParameter("deleteStatus", DraftStatus.ACTIVE)
                 .setParameter("realmId", realm.getId())
                 .getResultList();
 
+        return processCompositeRoleMappings(em, realm, mappings);
+    }
+
+    public static List<RequestedChanges> processPreApprovedCompositeRoleMappings(EntityManager em, RealmModel realm, List<DraftStatus> statuses) {
+
+        List<TideCompositeRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllPreApprovedCompositeRoleMappingsByRealm", TideCompositeRoleMappingDraftEntity.class)
+                .setParameter("draftStatus", statuses)
+                .setParameter("activeStatus", DraftStatus.ACTIVE)
+                .setParameter("realmId", realm.getId())
+                .getResultList();
+
+        return processCompositeRoleMappings(em, realm, mappings);
+    }
+
+        public static List<RequestedChanges> processCompositeRoleMappings(EntityManager em, RealmModel realm, List<TideCompositeRoleMappingDraftEntity> mappings ) {
+        List<RequestedChanges> changes = new ArrayList<>();
         for (TideCompositeRoleMappingDraftEntity m : mappings) {
             if (m.getComposite() == null) {
                 continue;
@@ -477,15 +512,29 @@ public class IGARealmResource {
     }
     public static List<RequestedChanges> processRoleMappings(EntityManager em, RealmModel realm) {
         // Get all pending changes, records that do not have an active delete status or active draft status
-        return  processRoleMappings(em, realm, DraftStatus.ACTIVE);
-    }
-    public static List<RequestedChanges> processRoleMappings(EntityManager em, RealmModel realm, DraftStatus status) {
-        List<RequestedChanges> changes = new ArrayList<>();
         List<TideRoleDraftEntity> mappings = em.createNamedQuery("getAllRoleDraft", TideRoleDraftEntity.class)
-                .setParameter("draftStatus", status)
-                .setParameter("deleteStatus", status)
+                .setParameter("draftStatus", DraftStatus.ACTIVE)
+                .setParameter("deleteStatus", DraftStatus.ACTIVE)
                 .setParameter("realmId", realm.getId())
                 .getResultList();
+
+        return  processRoleMappings(em, realm, mappings);
+    }
+
+    public static List<RequestedChanges> processPreApprovedRoleMappings(EntityManager em, RealmModel realm, List<DraftStatus> statuses) {
+
+        List<TideRoleDraftEntity> mappings = em.createNamedQuery("getAllPreApprovedRoleDraft", TideRoleDraftEntity.class)
+                .setParameter("draftStatus", statuses)
+                .setParameter("activeStatus", DraftStatus.ACTIVE)
+                .setParameter("realmId", realm.getId())
+                .getResultList();
+
+        return processRoleMappings(em, realm, mappings);
+    }
+
+    public static List<RequestedChanges> processRoleMappings(EntityManager em, RealmModel realm, List<TideRoleDraftEntity> mappings) {
+        List<RequestedChanges> changes = new ArrayList<>();
+
 
         for (TideRoleDraftEntity m : mappings) {
             String clientId = m.getRole().isClientRole() ? m.getRole().getClientId() : null;

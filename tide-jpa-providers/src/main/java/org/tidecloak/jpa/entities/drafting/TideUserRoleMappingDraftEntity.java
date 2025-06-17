@@ -66,7 +66,13 @@ import org.tidecloak.shared.enums.DraftStatus;
                 query = "DELETE FROM TideUserRoleMappingDraftEntity r " +
                         "WHERE r.roleId = :roleId"
         ),
-        @NamedQuery(name="GetUserRoleMappingDraftEntityByRequestId", query="SELECT m FROM TideUserRoleMappingDraftEntity m where m.changeRequestId = :requestId")
+        @NamedQuery(name="GetUserRoleMappingDraftEntityByRequestId", query="SELECT m FROM TideUserRoleMappingDraftEntity m where m.changeRequestId = :requestId"),
+        @NamedQuery(name="getAllPreApprovedUserRoleMappingsByRealm",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE (m.draftStatus NOT IN :draftStatus OR " +
+                        "(m.draftStatus = :activeStatus AND m.deleteStatus NOT IN :draftStatus)) " +
+                        "AND m.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
+        ),
 
 
 })

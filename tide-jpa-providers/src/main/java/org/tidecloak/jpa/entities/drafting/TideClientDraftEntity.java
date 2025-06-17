@@ -16,6 +16,14 @@ import org.tidecloak.shared.enums.ActionType;
                         "OR ((t.fullScopeDisabled = :status) " +
                         "AND (t.fullScopeEnabled != : status2 AND t.fullScopeEnabled != :status))"
         ),
+        @NamedQuery(
+                name = "getPreApprovedClientFullScopeStatusDraftThatDoesNotHaveStatus",
+                query = "SELECT t FROM TideClientDraftEntity t " +
+                        "WHERE ((t.fullScopeEnabled = :activeStatus) " +
+                        "AND (t.fullScopeDisabled != : status2 AND t.fullScopeDisabled NOT IN :status)) " +
+                        "OR ((t.fullScopeDisabled = :activeStatus) " +
+                        "AND (t.fullScopeEnabled != : status2 AND t.fullScopeEnabled NOT IN :status))"
+        ),
         @NamedQuery(name="getClientFullScopeStatusDraftByIdAndFullScopeEnabled", query="SELECT t FROM TideClientDraftEntity t WHERE t.id = :changesetId AND t.fullScopeEnabled = :fullScopeEnabled"),
         @NamedQuery(name="getClientFullScopeStatusDraftByIdAndFullScopeDisabled", query="SELECT t FROM TideClientDraftEntity t WHERE t.id = :changesetId AND t.fullScopeDisabled = :fullScopeDisabled"),
         @NamedQuery(name="getClientFullScopeStatus", query="SELECT t FROM TideClientDraftEntity t WHERE t.client = :client"),

@@ -13,6 +13,12 @@ import org.tidecloak.shared.enums.ActionType;
                         "(r.draftStatus = :draftStatus AND r.deleteStatus != :deleteStatus)) " +
                         "AND r.role IN ( SELECT u from RoleEntity u where u.realmId =:realmId )"
         ),
+        @NamedQuery(name="getAllPreApprovedRoleDraft",
+                query = "SELECT r FROM TideRoleDraftEntity r " +
+                        "WHERE (r.draftStatus NOT IN :draftStatus OR " +
+                        "(r.draftStatus = :activeStatus AND r.deleteStatus NOT IN :draftStatus)) " +
+                        "AND r.role IN ( SELECT u from RoleEntity u where u.realmId =:realmId )"
+        ),
         @NamedQuery(name="getRoleDraftByRole", query="SELECT r FROM TideRoleDraftEntity r WHERE r.role = :role"),
         @NamedQuery(name="getRoleDraftByRoleId", query="SELECT r FROM TideRoleDraftEntity r WHERE r.role.id = :roleId"),
         @NamedQuery(name="getRoleDraftByRoleEntityAndDeleteStatus", query="SELECT r FROM TideRoleDraftEntity r WHERE r.role = :role And r.deleteStatus = :deleteStatus"),

@@ -37,6 +37,12 @@ import org.tidecloak.shared.enums.ActionType;
                         "(r.draftStatus = :draftStatus AND r.deleteStatus != :deleteStatus)) " +
                         "AND r.composite IN (SELECT u FROM RoleEntity u WHERE u.realmId = :realmId)"
         ),
+        @NamedQuery(name="getAllPreApprovedCompositeRoleMappingsByRealm",
+        query = "SELECT r FROM TideCompositeRoleMappingDraftEntity r " +
+                "WHERE (r.draftStatus NOT IN :draftStatus OR " +
+                "(r.draftStatus = :activeStatus AND r.deleteStatus NOT IN :draftStatus)) " +
+                "AND r.composite IN (SELECT u FROM RoleEntity u WHERE u.realmId = :realmId)"
+),
         @NamedQuery(
                 name = "DeleteAllCompositeRoleMappingsByRealm",
                 query = "DELETE FROM TideCompositeRoleMappingDraftEntity r " +
