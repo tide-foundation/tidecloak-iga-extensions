@@ -158,8 +158,6 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
 
     @Override
     public void handleDeleteRequest(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
-        entity.setChangeRequestId(KeycloakModelUtils.generateId());
-
     }
 
     @Override

@@ -112,7 +112,6 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
             RealmModel realm = session.realms().getRealm(entity.getClient().getRealmId());
             String igaAttribute = realm.getAttribute("isIGAEnabled");
             boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
-            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
             switch (action) {
                 case CREATE:
                     logger.debug(String.format("Initiating CREATE (enable) action for Mapping ID: %s in workflow: REQUEST", entity.getId()));

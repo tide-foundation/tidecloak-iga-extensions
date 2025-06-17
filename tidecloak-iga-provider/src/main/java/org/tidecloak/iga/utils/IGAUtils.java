@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.NoResultException;
+import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.core.Response;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
@@ -116,14 +117,14 @@ public class IGAUtils {
                 .orElse(null);
 
         if(componentModel != null) {
-            throw new Exception("This method can only be run without Tide keys.");
+            throw new BadRequestException("This method can only be run without Tide keys.");
         }
         // if approver is temp admin, check if there are users with realm-admin role. IF a realm-admin user exists, temp admin is not allowed to approve a request.
         if(isTemporaryAdmin && adminCount > 0){
-            throw new Exception("Temporary admin is not allowed to approve change request, contact a realm-admin to approve. User ID: " + adminUser.getId());
+            throw new BadRequestException("Temporary admin is not allowed to approve change request, contact a realm-admin to approve. User ID: " + adminUser.getId());
         }
         else if(!isTemporaryAdmin && !adminUser.hasRole(realmAdminRole)) {
-            throw new Exception("User is not authorized to approve requests.");
+            throw new BadRequestException("User is not authorized to approve requests.");
         }
 
         for(int i = 0; i < proofDetails.size(); i++){

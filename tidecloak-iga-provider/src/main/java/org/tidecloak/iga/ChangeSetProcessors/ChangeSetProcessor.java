@@ -312,7 +312,7 @@ public interface ChangeSetProcessor<T> {
                             // load drafts for this change-request
                             List<TideClientDraftEntity> drafts = em.createNamedQuery(
                                             "GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
-                                    .setParameter("changeRequestId", cr.getChangesetRequestId())
+                                    .setParameter("requestId", cr.getChangesetRequestId())
                                     .getResultList();
 
                             // keep only those in our realm

@@ -275,7 +275,7 @@ public class IGARealmResource {
                     // Remove existing Access Proofs
                     List<AccessProofDetailEntity> accessProof = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                             .setParameter("recordId", draft.getChangeRequestId()).getResultList();
-                    accessProof.clear();
+                    accessProof.forEach(em::remove);
                     // Remove existing ChangeSetRequestEntity
                     ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class,
                             new ChangesetRequestEntity.Key(draft.getChangeRequestId(), ChangeSetType.CLIENT));
