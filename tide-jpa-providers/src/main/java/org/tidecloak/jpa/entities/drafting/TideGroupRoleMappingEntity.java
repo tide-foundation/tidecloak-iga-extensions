@@ -12,7 +12,9 @@ import org.tidecloak.shared.enums.DraftStatus;
         @NamedQuery(name="groupRoleMappingDraftIdsByStatusAndAction", query="select m.roleId from TideGroupRoleMappingEntity m where m.group = :group and m.draftStatus = :draftStatus and m.actionType = :actionType"),
         @NamedQuery(name="deleteGroupRoleMappingDraftsByRealm", query="delete from  TideGroupRoleMappingEntity mapping where mapping.group IN (select u from GroupEntity u where u.realm=:realm)"),
         @NamedQuery(name="deleteGroupRoleMappingDraftsByRole", query="delete from TideGroupRoleMappingEntity m where m.roleId = :roleId"),
-        @NamedQuery(name="deleteGroupRoleMappingDraftsByGroup", query="delete from TideGroupRoleMappingEntity m where m.group = :group")
+        @NamedQuery(name="deleteGroupRoleMappingDraftsByGroup", query="delete from TideGroupRoleMappingEntity m where m.group = :group"),
+        @NamedQuery(name="GetGroupRoleDraftEntityByRequestId", query="SELECT m FROM TideGroupRoleMappingEntity m where m.changeRequestId = :requestId")
+
 
 })
 
@@ -24,6 +26,9 @@ public class TideGroupRoleMappingEntity {
     @Column(name="ID", length = 36)
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     protected String id;
+
+    @Column(name="CHANGE_REQUEST_ID", length = 36)
+    protected String changeRequestId;
 
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="GROUP_ID")
@@ -49,6 +54,14 @@ public class TideGroupRoleMappingEntity {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getChangeRequestId() {
+        return changeRequestId;
+    }
+
+    public void setChangeRequestId(String changeRequestId) {
+        this.changeRequestId = changeRequestId;
     }
 
     public GroupEntity getGroup() {

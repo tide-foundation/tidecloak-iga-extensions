@@ -9,6 +9,8 @@ import org.tidecloak.shared.enums.DraftStatus;
 @NamedQueries({
         @NamedQuery(name="getGroupByStatus", query="select m from TideGroupDraftEntity m where m.group = :group and m.draftStatus = :draftStatus"),
         @NamedQuery(name="deleteGroupDraftByRole", query="delete from TideGroupDraftEntity m where m.id = :roleId"),
+        @NamedQuery(name="GetGroupDraftEntityByRequestId", query="SELECT m FROM TideGroupDraftEntity m where m.changeRequestId = :requestId")
+
 })
 
 @Entity
@@ -21,6 +23,9 @@ public class TideGroupDraftEntity {
     @Column(name="ID", length = 36)
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     protected String id;
+
+    @Column(name="CHANGE_REQUEST_ID", length = 36)
+    protected String changeRequestId;
 
     @Nationalized
     @Column(name = "NAME")
@@ -49,6 +54,14 @@ public class TideGroupDraftEntity {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getChangeRequestId() {
+        return changeRequestId;
+    }
+
+    public void setChangeRequestId(String changeRequestId) {
+        this.changeRequestId = changeRequestId;
     }
 
     public String getName() {

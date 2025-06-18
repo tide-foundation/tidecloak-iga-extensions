@@ -1,40 +1,47 @@
-package org.tidecloak.iga.changesetprocessors.processors;
+package org.tidecloak.iga.ChangeSetProcessors.processors;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import org.jboss.logging.Logger;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.models.jpa.entities.UserRoleMappingEntity;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.representations.AccessToken;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
-import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
-import org.tidecloak.iga.changesetprocessors.utils.ClientUtils;
-import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
-import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
-import org.tidecloak.jpa.entities.AuthorizerEntity;
-import org.tidecloak.jpa.entities.ChangesetRequestEntity;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.iga.ChangeSetProcessors.keys.UserClientKey;
+import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
+import org.tidecloak.iga.ChangeSetProcessors.utils.ClientUtils;
+import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
+import org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils;
+import org.tidecloak.iga.utils.IGAUtils;
+import org.tidecloak.jpa.entities.*;
 import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.iga.interfaces.TideRoleAdapter;
 import org.tidecloak.iga.interfaces.TideUserAdapter;
-import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 
 
+import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
-import static org.tidecloak.iga.TideRequests.TideRoleRequests.commitRoleInitCert;
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRoleInitCertDraft;
-import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
-import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.addRoleToAccessToken;
-import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.removeRoleFromAccessToken;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils.addRoleToAccessToken;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils.removeRoleFromAccessToken;
 
 public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMappingDraftEntity> {
 
@@ -66,10 +73,11 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     @Override
     public void commit(KeycloakSession session, ChangeSetRequest change, TideUserRoleMappingDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {
         logger.debug(String.format(
-                "Starting workflow: COMMIT. Processor: %s, Action: %s, Entity ID: %s",
+                "Starting workflow: COMMIT. Processor: %s, Action: %s, Entity ID: %s, Change Request ID: %s",
                 this.getClass().getSimpleName(),
                 change.getActionType(),
-                entity.getId()
+                entity.getId(),
+                entity.getChangeRequestId()
         ));
 
         RealmModel realm = session.getContext().getRealm();
@@ -77,7 +85,9 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
         Runnable callback = () -> {
             try {
-                commitUserRoleChangeRequest(user, realm, entity, change);
+                List<TideUserRoleMappingDraftEntity> entities = em.createNamedQuery("GetUserRoleMappingDraftEntityByRequestId", TideUserRoleMappingDraftEntity.class)
+                        .setParameter("requestId", change.getChangeSetId()).getResultList();
+                commitUserRoleChangeRequest(user, realm, entities, change);
             } catch (Exception e) {
                 throw new RuntimeException("Error during commit callback", e);
             }
@@ -113,7 +123,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             tideAdminRealmRoleRequests.forEach(request -> {
                 try {
                     UserModel u = session.users().getUserById(realm, request.getUser().getId());
-                    List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", request.getId()).getResultList();
+                    List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", request.getChangeRequestId()).getResultList();
                     if(!changesetRequestEntity.isEmpty()) {
                         changesetRequestEntity.forEach(em::remove);
                     }
@@ -124,7 +134,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                         em.remove(p);
                         em.flush();
                     });
-                    List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", request.getId()).getResultList();
+                    List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", request.getChangeRequestId()).getResultList();
                     if(!roleInitializerCertificateDraftEntity.isEmpty()){
                         em.remove(roleInitializerCertificateDraftEntity.get(0));
                         em.flush();
@@ -139,12 +149,12 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             });
         }
 
-
         // Log successful completion
         logger.debug(String.format(
-                "Successfully processed workflow: COMMIT. Processor: %s, Mapping ID: %s",
+                "Successfully processed workflow: COMMIT. Processor: %s, Mapping ID: %s, Change Requests ID: %s",
                 this.getClass().getSimpleName(),
-                entity.getId()
+                entity.getId(),
+                entity.getChangeRequestId()
         ));
     }
 
@@ -153,38 +163,42 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         try {
             // Log the start of the request with detailed context
             logger.debug(String.format(
-                    "Starting workflow: REQUEST. Processor: %s, Action: %s, Entity ID: %s",
+                    "Starting workflow: REQUEST. Processor: %s, Action: %s, Entity ID: %s, Change Requests ID: %s",
                     this.getClass().getSimpleName(),
                     action,
-                    entity.getId()
+                    entity.getId(),
+                    entity.getChangeRequestId()
             ));
-            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getId(), changeSetType);
             switch (action) {
                 case CREATE:
-                    logger.debug(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
+                    logger.debug(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", entity.getId(), entity.getChangeRequestId()));
                     handleCreateRequest(session, entity, em, callback);
+                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
                     break;
                 case DELETE:
-                    logger.debug(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
+                    logger.debug(String.format("Initiating DELETE action for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", entity.getId(), entity.getChangeRequestId()));
                     handleDeleteRequest(session, entity, em, callback);
+                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
                     break;
                 default:
-                    logger.warn(String.format("Unsupported action type: %s for Mapping ID: %s in workflow: REQUEST", action, entity.getId()));
+                    logger.warn(String.format("Unsupported action type: %s for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", action, entity.getId(), entity.getChangeRequestId()));
                     throw new IllegalArgumentException("Unsupported action: " + action);
             }
 
             // Log successful completion
             logger.debug(String.format(
-                    "Successfully processed workflow: REQUEST. Processor: %s, Mapping ID: %s",
+                    "Successfully processed workflow: REQUEST. Processor: %s, Mapping ID: %s, Change Request ID: %s",
                     this.getClass().getSimpleName(),
-                    entity.getId()
+                    entity.getId(),
+                    entity.getChangeRequestId()
             ));
 
         } catch (Exception e) {
             logger.error(String.format(
-                    "Error in workflow: REQUEST. Processor: %s, Mapping ID: %s, Action: %s. Error: %s",
+                    "Error in workflow: REQUEST. Processor: %s, Mapping ID: %s, Change Request ID: %s, Action: %s. Error: %s",
                     this.getClass().getSimpleName(),
                     entity.getId(),
+                    entity.getChangeRequestId(),
                     action,
                     e.getMessage()
             ), e);
@@ -194,10 +208,31 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
 
     @Override
-    public void handleCreateRequest(KeycloakSession session, TideUserRoleMappingDraftEntity mapping, EntityManager em, Runnable callback) {
+    public void handleCreateRequest(KeycloakSession session, TideUserRoleMappingDraftEntity mapping, EntityManager em, Runnable callback) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         RoleModel role = realm.getRoleById(mapping.getRoleId());
         UserModel userModel = TideEntityUtils.toTideUserAdapter(mapping.getUser(), session, realm);
+        String changeSetId = KeycloakModelUtils.generateId();
+        mapping.setChangeRequestId(changeSetId);
+
+        if(role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+            ComponentModel componentModel = realm.getComponentsStream()
+                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
+
+            if(componentModel == null) {
+                throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+            }
+            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
+                    .setParameter("ID", componentModel.getId()).getResultList();
+            if (realmAuthorizers.isEmpty()){
+                throw new Exception("Authorizer not found for this realm.");
+            }
+            if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
+                createRoleInitCertDraft(session, changeSetId, "1", 0.7, 1, role);
+            }
+        }
 
         Set<RoleModel> roleMappings = Collections.singleton(role);
         List<ClientModel> clientList = ClientUtils.getUniqueClientList(session, realm, role, em);
@@ -212,10 +247,36 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     @Override
-    public void handleDeleteRequest(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em, Runnable callback) {
+    public void handleDeleteRequest(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         RoleEntity roleEntity = em.find(RoleEntity.class, entity.getRoleId());
+        RoleModel role = realm.getRoleById(entity.getRoleId());
+
         UserModel affectedUser = session.users().getUserById(realm, entity.getUser().getId());
+        String changeSetId = KeycloakModelUtils.generateId();
+
+        entity.setChangeRequestId(changeSetId);
+
+        if(roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+            ComponentModel componentModel = realm.getComponentsStream()
+                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
+
+            if(componentModel == null) {
+                throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+            }
+            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
+                    .setParameter("ID", componentModel.getId()).getResultList();
+            if (realmAuthorizers.isEmpty()){
+                throw new Exception("Authorizer not found for this realm.");
+            }
+            if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
+                createRoleInitCertDraft(session, changeSetId, "1", 0.7, -1, role);
+            }
+        }
+
+
         Set<UserModel> users = new TreeSet<>(Comparator.comparing(UserModel::getId));
         users.add(affectedUser);
         if(roleEntity != null && roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
@@ -254,7 +315,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                     try {
                         UserEntity u = em.find(UserEntity.class, user.getId());
                         UserModel wrappedUser = TideEntityUtils.toTideUserAdapter(u, session, realm);
-                        ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, userRoleMapping.getId(),
+                        ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, new ChangeRequestKey(userRoleMapping.getId(), userRoleMapping.getChangeRequestId()),
                             ChangeSetType.USER_ROLE, userRoleMapping);
                     } catch (Exception e) {
                         throw new RuntimeException(e);
@@ -271,7 +332,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     @Override
     public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> roles, ClientModel client, TideUserAdapter userChangesMadeTo, EntityManager em) throws Exception {
         RealmModel realm = session.getContext().getRealm();
-        TideUserRoleMappingDraftEntity affectedUserRoleEntity = em.find(TideUserRoleMappingDraftEntity.class, affectedUserContextDraft.getRecordId());
+        TideUserRoleMappingDraftEntity affectedUserRoleEntity = em.find(TideUserRoleMappingDraftEntity.class, affectedUserContextDraft.getChangeRequestKey().getMappingId());
         if (affectedUserRoleEntity == null || (affectedUserRoleEntity.getDraftStatus() == DraftStatus.ACTIVE && (affectedUserRoleEntity.getDeleteStatus() == null || affectedUserRoleEntity.getDeleteStatus().equals(DraftStatus.NULL)))){
             return;
         }
@@ -284,33 +345,12 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             affectedUserRoleEntity.setDraftStatus(DraftStatus.DRAFT);
         }
 
-        UserEntity userEntity = affectedUserContextDraft.getUser();
-        TideUserAdapter affectedUser = TideEntityUtils.toTideUserAdapter(userEntity, session, realm);
-
-        String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, affectedUser, "openId", affectedUserRoleEntity);
+        String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, userChangesMadeTo, "openId", affectedUserRoleEntity);
 
         RoleEntity roleEntity = em.find(RoleEntity.class, affectedUserRoleEntity.getRoleId());
         List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", roleEntity).getResultList();
 
-//        if(client.getClientId().equals(Constants.REALM_MANAGEMENT_CLIENT_ID)) {
-//            if(roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
-//                if(tideRoleDraftEntity.isEmpty()){
-//                    throw new RuntimeException("Tide realm admin role doesnt exist");
-//                }
-//                UserContext userContext = new UserContext(userContextDraft);
-//                InitializerCertifcate initializerCertifcate = InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
-//                userContext.setInitCertHash(initializerCertifcate.hash());
-//
-//                UserContext oldUserContext = new UserContext(affectedUserContextDraft.getProofDraft());
-//                if(oldUserContext.getInitCertHash() != null || oldUserContext.getThreshold() != 0){
-//                    userContext.setThreshold(initializerCertifcate.getPayload().getThreshold());
-//                    affectedUserContextDraft.setProofDraft(userContext.ToString());
-//                }
-//
-//                return;
-//            }
-//        }
         if(!tideRoleDraftEntity.isEmpty()){
             //check if this role has an init cert hash
             String initCert = tideRoleDraftEntity.get(0).getInitCert();
@@ -331,6 +371,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
         affectedUserContextDraft.setProofDraft(userContextDraft);
     }
+
 
     @Override
     public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideUserRoleMappingDraftEntity entity, UserModel user, ClientModel clientModel){
@@ -356,24 +397,150 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         return token;
     }
 
-    // Helper Methods
-    private void commitUserRoleChangeRequest(UserModel user, RealmModel realm, TideUserRoleMappingDraftEntity entity, ChangeSetRequest change) {;
-        RoleModel role = realm.getRoleById(entity.getRoleId());
-        if (role == null) return;
+    @Override
+    public List<ChangesetRequestEntity> combineChangeRequests(
+            KeycloakSession session,
+            List<TideUserRoleMappingDraftEntity> userRoleEntities,
+            EntityManager em) throws IOException, Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
 
-        if (change.getActionType() == ActionType.CREATE) {
-            if(entity.getDraftStatus() != DraftStatus.APPROVED){
-                throw new RuntimeException("Draft record has not been approved by all admins.");
-            }
-            entity.setDraftStatus(DraftStatus.ACTIVE);
+        RealmModel realm = session.getContext().getRealm();
 
-        } else if (change.getActionType() == ActionType.DELETE) {
-            if(entity.getDeleteStatus() != DraftStatus.APPROVED){
-                throw new RuntimeException("Deletion has not been approved by all admins.");
+        // Group raw AccessProofDetailEntity items by userId and clientId
+        Map<UserClientKey, List<AccessProofDetailEntity>> rawMap =
+                ChangeSetProcessor.super.groupChangeRequests(userRoleEntities, em);
+
+        Map<String, Map<String, List<AccessProofDetailEntity>>> byUserClient =
+                rawMap.entrySet().stream()
+                        .flatMap(e -> e.getValue().stream()
+                                .map(proof -> Map.entry(e.getKey(), proof)))
+                        .collect(Collectors.groupingBy(
+                                e -> e.getKey().getUserId(),
+                                Collectors.groupingBy(
+                                        e -> e.getKey().getClientId(),
+                                        Collectors.mapping(Map.Entry::getValue, Collectors.toList())
+                                )));
+
+        // Prefetch all UserEntity instances in one query
+        List<String> userIds = new ArrayList<>(byUserClient.keySet());
+        Map<String, UserEntity> userById = em.createQuery(
+                        "SELECT u FROM UserEntity u WHERE u.id IN :ids", UserEntity.class)
+                .setParameter("ids", userIds)
+                .getResultList().stream()
+                .collect(Collectors.toMap(UserEntity::getId, Function.identity()));
+
+        // Cache ClientModel lookups to avoid repeated realm.getClientById() calls
+        Set<String> clientIds = byUserClient.values().stream()
+                .flatMap(m -> m.keySet().stream())
+                .collect(Collectors.toSet());
+        Map<String, ClientModel> clientById = clientIds.stream()
+                .map(cid -> Map.entry(cid, realm.getClientById(cid)))
+                .filter(e -> e.getValue() != null)
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+        List<ChangesetRequestEntity> results = new ArrayList<>(byUserClient.size());
+
+        // Iterate over each user group to merge proofs and retrieve change requests
+        for (var userEntry : byUserClient.entrySet()) {
+            String userId = userEntry.getKey();
+            UserEntity ue = userById.get(userId);
+            UserModel um = session.users().getUserById(realm, userId);
+
+            String combinedRequestId = KeycloakModelUtils.generateId();
+
+            List<AccessProofDetailEntity> toRemoveProofs = new ArrayList<>();
+            List<ChangesetRequestEntity> toRemoveRequests = new ArrayList<>();
+
+
+            // Merge proofs across clients into a single JSON draft
+            for (var clientEntry : userEntry.getValue().entrySet()) {
+                ClientModel cm = clientById.get(clientEntry.getKey());
+                AtomicReference<String> mappingId = new AtomicReference<>();
+                AtomicBoolean isFirstRun = new AtomicBoolean();
+                isFirstRun.set(true);
+
+                if (cm == null) continue;
+                String combinedProofDraft = null;
+
+
+                for (var proof : clientEntry.getValue()) {
+                    mappingId.set(proof.getChangeRequestKey().getMappingId());
+                    TideUserRoleMappingDraftEntity draft = (TideUserRoleMappingDraftEntity) IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.USER_ROLE, proof.getChangeRequestKey().getMappingId());
+                    if (draft == null) {
+                        throw new IllegalStateException(
+                                "Missing draft for request " + proof.getChangeRequestKey().getMappingId());
+                    }
+
+                    draft.setChangeRequestId(combinedRequestId);
+                    em.persist(draft);
+
+                    if (combinedProofDraft == null) {
+                        combinedProofDraft = proof.getProofDraft();
+                    }
+                    AccessToken token = objectMapper.readValue(
+                            combinedProofDraft, AccessToken.class);
+                    combinedProofDraft = combinedTransformedUserContext(
+                            session, realm, cm, um, "openId", draft, token);
+
+                    toRemoveProofs.add(proof);
+                    toRemoveRequests.addAll(em.createNamedQuery(
+                                    "getAllChangeRequestsByRecordId",
+                                    ChangesetRequestEntity.class)
+                            .setParameter("changesetRequestId", proof.getChangeRequestKey().getChangeRequestId())
+                            .getResultList());
+
+                    if(isFirstRun.get()) {
+                        isFirstRun.set(false);
+                    }
+                }
+
+                ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, cm, ue, new ChangeRequestKey(mappingId.get(), combinedRequestId), ChangeSetType.USER_ROLE, combinedProofDraft);
+
             }
-            entity.setDeleteStatus(DraftStatus.ACTIVE);
-            user.deleteRoleMapping(role);
+
+            // Remove outdated proofs and their change-request entities
+            toRemoveProofs.forEach(em::remove);
+            toRemoveRequests.forEach(em::remove);
+
+
+            // Retrieve the recreated ChangeRequestEntity(ies) for this combinedRequestId
+            List<ChangesetRequestEntity> created = em.createNamedQuery(
+                            "getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                    .setParameter("changesetRequestId", combinedRequestId)
+                    .getResultList();
+            results.addAll(created);
         }
+
+        // Flush all pending changes once at the end
+        em.flush();
+
+        return results;
+    }
+
+    // Helper Methods
+    private void commitUserRoleChangeRequest(UserModel user, RealmModel realm, List<TideUserRoleMappingDraftEntity> entities, ChangeSetRequest change) {
+
+        entities.forEach(entity -> {
+            RoleModel role = realm.getRoleById(entity.getRoleId());
+            if (role == null) return;
+
+            if (change.getActionType() == ActionType.CREATE) {
+                // If already active, then early return
+                if(entity.getDraftStatus().equals(DraftStatus.ACTIVE)) return;
+
+                if(!entity.getDraftStatus().equals(DraftStatus.APPROVED)){
+                    throw new RuntimeException("Draft record has not been approved by all admins.");
+                }
+                entity.setDraftStatus(DraftStatus.ACTIVE);
+
+            } else if (change.getActionType() == ActionType.DELETE) {
+                if(!entity.getDeleteStatus().equals(DraftStatus.APPROVED) && !entity.getDeleteStatus().equals(DraftStatus.ACTIVE) ){
+                    throw new RuntimeException("Deletion has not been approved by all admins.");
+                }
+                entity.setDeleteStatus(DraftStatus.ACTIVE);
+                user.deleteRoleMapping(role);
+            }
+        });
     }
 
     private boolean isRealmManagementClient(RoleModel role) {
@@ -404,10 +571,10 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                     try {
                         if (isAdminClient){
                             // Create empty user contexts for ADMIN-CLI and SECURITY-ADMIN-CONSOLE
-                            ChangeSetProcessor.super.generateAndSaveDefaultUserContextDraft(session, em, realm, client, u, entity.getId(),
+                            ChangeSetProcessor.super.generateAndSaveDefaultUserContextDraft(session, em, realm, client, u, new ChangeRequestKey(entity.getId() ,entity.getChangeRequestId()),
                                     ChangeSetType.USER_ROLE);
                         } else {
-                            ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, u, entity.getId(),
+                            ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, u, new ChangeRequestKey(entity.getId() ,entity.getChangeRequestId()),
                                     ChangeSetType.USER_ROLE, entity);
                         }
                     }catch (Exception e) {
@@ -427,7 +594,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 if (isAdminClient(client)) {
                     return;
                 }
-                ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, userModel, entity.getId(),
+                ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, userModel, new ChangeRequestKey(entity.getId() ,entity.getChangeRequestId()),
                         ChangeSetType.USER_ROLE, entity);
             } catch (Exception e) {
                 throw new RuntimeException("Error processing client: " + client.getClientId(), e);

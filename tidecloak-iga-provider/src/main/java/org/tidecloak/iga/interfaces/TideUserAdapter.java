@@ -3,7 +3,6 @@ package org.tidecloak.iga.interfaces;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
 import org.keycloak.Config;
-import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.UserAdapter;
@@ -11,15 +10,12 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.jpa.entities.UserGroupMembershipEntity;
 
 import org.keycloak.models.utils.KeycloakModelUtils;
-import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 
-import org.tidecloak.iga.changesetprocessors.utils.ClientUtils;
-import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
+import org.tidecloak.iga.ChangeSetProcessors.utils.ClientUtils;
+import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
-import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
@@ -34,8 +30,7 @@ import java.util.stream.Stream;
 
 import static org.keycloak.utils.StreamsUtil.closing;
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.createRoleInitCertDraft;
-import static org.tidecloak.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
-import static org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils.wrapRoleModel;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils.wrapRoleModel;
 
 
 public class TideUserAdapter extends UserAdapter {
@@ -175,24 +170,6 @@ public class TideUserAdapter extends UserAdapter {
                 em.persist(draftUserRole);
                 em.flush();
 
-                if(roleModel.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
-                    ComponentModel componentModel = realm.getComponentsStream()
-                            .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
-                            .findFirst()
-                            .orElse(null);
-
-                    if(componentModel == null) {
-                        throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
-                    }
-                    List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
-                            .setParameter("ID", componentModel.getId()).getResultList();
-                    if (realmAuthorizers.isEmpty()){
-                        throw new Exception("Authorizer not found for this realm.");
-                    }
-                    if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                        createRoleInitCertDraft(session, draftUserRole.getId(), "1", 0.7, 1, roleModel);
-                    }
-                }
                 WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.USER_ROLE);
                 processor.executeWorkflow(session, draftUserRole, em, WorkflowType.REQUEST, params, null);
             }
@@ -255,25 +232,6 @@ public class TideUserAdapter extends UserAdapter {
             if (committedEntity.getDeleteStatus() == DraftStatus.ACTIVE) {
                 deleteRoleAndProofRecords(role, activeDraftEntities);
                 return;
-            }
-
-            if(roleModel.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
-                ComponentModel componentModel = realm.getComponentsStream()
-                        .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
-                        .findFirst()
-                        .orElse(null);
-
-                if(componentModel == null) {
-                    throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
-                }
-                List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
-                        .setParameter("ID", componentModel.getId()).getResultList();
-                if (realmAuthorizers.isEmpty()){
-                    throw new Exception("Authorizer not found for this realm.");
-                }
-                if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                    createRoleInitCertDraft(session, committedEntity.getId(), "1", 0.7, -1, roleModel);
-                }
             }
 
             WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.USER_ROLE);

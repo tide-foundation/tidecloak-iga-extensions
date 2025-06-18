@@ -87,7 +87,6 @@ public class TideRoleRequests {
         }
         InitializerCertifcate prevInitializerCertifcate = InitializerCertifcate.FromString(roleDraft.get(0).getInitCert());
 
-
         List<TideUserRoleMappingDraftEntity> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
                 .setParameter("draftStatus", DraftStatus.ACTIVE)
                 .setParameter("roleId", role.getId())

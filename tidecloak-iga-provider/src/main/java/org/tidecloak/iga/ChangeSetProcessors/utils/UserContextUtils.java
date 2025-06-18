@@ -1,20 +1,13 @@
-package org.tidecloak.iga.changesetprocessors.utils;
+package org.tidecloak.iga.ChangeSetProcessors.utils;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
-import org.keycloak.authorization.policy.evaluation.Realm;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.RoleUtils;
 import org.keycloak.representations.AccessToken;
-import org.midgard.Serialization.JsonSorter;
-import org.midgard.models.UserContext.UserContext;
-import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
+import org.tidecloak.jpa.entities.ChangeRequestKey;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.shared.enums.ActionType;
@@ -23,7 +16,7 @@ import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.utils.UserContextUtilBase;
 import org.tidecloak.shared.enums.DraftStatus;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.interfaces.TideRoleAdapter;
 import org.tidecloak.iga.interfaces.TideUserAdapter;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
@@ -46,16 +39,16 @@ public class UserContextUtils extends UserContextUtilBase {
                 .getResultStream()
                 .toList();
 
-        Map<String, List<AccessProofDetailEntity>> groupedProofDetails = userAccessDrafts.stream()
-                .collect(Collectors.groupingBy(AccessProofDetailEntity::getRecordId));
+        Map<ChangeRequestKey, List<AccessProofDetailEntity>> groupedProofDetails = userAccessDrafts.stream()
+                .collect(Collectors.groupingBy(AccessProofDetailEntity::getChangeRequestKey));
 
-        groupedProofDetails.forEach((changeRequestId, details)  -> {
+        groupedProofDetails.forEach((changeRequestKey, details)  -> {
             try {
                 // remove old request, then we recreate
-                List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", changeRequestId).getResultList();
+                List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", changeRequestKey.getChangeRequestId()).getResultList();
                 if(!changesetRequestEntity.isEmpty()) {
                     changesetRequestEntity.forEach(c -> {
-                        c.getAdminAuthorizations().forEach(em::remove);
+                        c.getAdminAuthorizations().clear();
                         em.remove(c);
                     });
                 }
@@ -65,7 +58,7 @@ public class UserContextUtils extends UserContextUtilBase {
                 ChangeSetType changeSetType = details.get(0).getChangesetType();
                 ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
                 WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, changeSetType);
-                Object mapping = getMappings(em, changeRequestId, changeSetType);
+                Object mapping = getMappings(em, changeRequestKey.getMappingId(), changeSetType);
                 changeSetProcessorFactory.getProcessor(changeSetType).executeWorkflow(session, mapping, em, WorkflowType.REQUEST, params, null);
 
             } catch (Exception e) {

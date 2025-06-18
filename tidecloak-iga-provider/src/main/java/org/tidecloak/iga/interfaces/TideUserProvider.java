@@ -40,6 +40,7 @@ public class TideUserProvider extends JpaUserProvider {
         // Add draft record for user
         TideUserDraftEntity draftUser = new TideUserDraftEntity();
         draftUser.setId(KeycloakModelUtils.generateId());
+        draftUser.setChangeRequestId(KeycloakModelUtils.generateId());
         draftUser.setUser(userEntity);
         draftUser.setDraftStatus(DraftStatus.DRAFT);
         draftUser.setAction(ActionType.CREATE);
@@ -48,6 +49,7 @@ public class TideUserProvider extends JpaUserProvider {
         RoleModel defaultRole =  realm.getDefaultRole();
         TideUserRoleMappingDraftEntity draftDefaultRoleUserRole = new TideUserRoleMappingDraftEntity();
         draftDefaultRoleUserRole.setId(KeycloakModelUtils.generateId());
+        draftDefaultRoleUserRole.setChangeRequestId(KeycloakModelUtils.generateId());
         draftDefaultRoleUserRole.setRoleId(defaultRole.getId());
         draftDefaultRoleUserRole.setUser(userEntity);
         draftDefaultRoleUserRole.setAction(ActionType.CREATE);

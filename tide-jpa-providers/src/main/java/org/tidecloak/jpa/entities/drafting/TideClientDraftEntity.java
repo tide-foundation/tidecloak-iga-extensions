@@ -16,6 +16,14 @@ import org.tidecloak.shared.enums.ActionType;
                         "OR ((t.fullScopeDisabled = :status) " +
                         "AND (t.fullScopeEnabled != : status2 AND t.fullScopeEnabled != :status))"
         ),
+        @NamedQuery(
+                name = "getPreApprovedClientFullScopeStatusDraftThatDoesNotHaveStatus",
+                query = "SELECT t FROM TideClientDraftEntity t " +
+                        "WHERE ((t.fullScopeEnabled = :activeStatus) " +
+                        "AND (t.fullScopeDisabled != : status2 AND t.fullScopeDisabled NOT IN :status)) " +
+                        "OR ((t.fullScopeDisabled = :activeStatus) " +
+                        "AND (t.fullScopeEnabled != : status2 AND t.fullScopeEnabled NOT IN :status))"
+        ),
         @NamedQuery(name="getClientFullScopeStatusDraftByIdAndFullScopeEnabled", query="SELECT t FROM TideClientDraftEntity t WHERE t.id = :changesetId AND t.fullScopeEnabled = :fullScopeEnabled"),
         @NamedQuery(name="getClientFullScopeStatusDraftByIdAndFullScopeDisabled", query="SELECT t FROM TideClientDraftEntity t WHERE t.id = :changesetId AND t.fullScopeDisabled = :fullScopeDisabled"),
         @NamedQuery(name="getClientFullScopeStatus", query="SELECT t FROM TideClientDraftEntity t WHERE t.client = :client"),
@@ -38,14 +46,14 @@ import org.tidecloak.shared.enums.ActionType;
                         "AND (t.client.id IN (SELECT c.id FROM ClientEntity c WHERE c.realmId = :realmId)) " +
                         "AND NOT EXISTS ( " +
                         "   SELECT a FROM AccessProofDetailEntity a " +
-                        "   WHERE a.recordId = t.id" +
+                        "   WHERE a.changeRequestKey.mappingId = t.id" +
                         ")"
         ),
         @NamedQuery(
                 name = "getClientDraftsWithNullScopes",
                 query = "SELECT t FROM TideClientDraftEntity t WHERE t.fullScopeEnabled IS NULL OR t.fullScopeDisabled IS NULL"
-        )
-
+        ),
+        @NamedQuery(name="GetClientDraftEntityByRequestId", query="SELECT m FROM TideClientDraftEntity m where m.changeRequestId = :requestId")
 })
 
 
@@ -57,6 +65,9 @@ public class TideClientDraftEntity {
     @Column(name="ID", length = 36)
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     private String id;
+
+    @Column(name="CHANGE_REQUEST_ID", length = 36)
+    protected String changeRequestId;
 
     @OneToOne(fetch = FetchType.LAZY)  // Defining the relationship
     @JoinColumn(name = "CLIENT", referencedColumnName = "ID")  // Ensure 'ID' is the correct primary key field name in ClientEntity
@@ -93,6 +104,14 @@ public class TideClientDraftEntity {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getChangeRequestId() {
+        return changeRequestId;
+    }
+
+    public void setChangeRequestId(String changeRequestId) {
+        this.changeRequestId = changeRequestId;
     }
 
     public ClientEntity getClient() {

@@ -13,6 +13,8 @@ import org.tidecloak.shared.enums.DraftStatus;
                 query = "DELETE FROM TideClientScopeMappingDraftEntity r " +
                         "WHERE r.clientId IN (SELECT c.id FROM ClientEntity c WHERE c.realmId = :realmId)"
         ),
+        @NamedQuery(name="GetClientScopeMappingDraftEntityByRequestId", query="SELECT m FROM TideClientScopeMappingDraftEntity m where m.changeRequestId = :requestId")
+
 })
 
 @Entity
@@ -23,6 +25,9 @@ public class TideClientScopeMappingDraftEntity {
     @Column(name="ID", length = 36)
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     protected String id;
+
+    @Column(name="CHANGE_REQUEST_ID", length = 36)
+    protected String changeRequestId;
 
     @Column(name = "SCOPE_ID")
     protected String clientScopeId;
@@ -54,6 +59,14 @@ public class TideClientScopeMappingDraftEntity {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getChangeRequestId() {
+        return changeRequestId;
+    }
+
+    public void setChangeRequestId(String changeRequestId) {
+        this.changeRequestId = changeRequestId;
     }
 
     public String getClientScopeId() {

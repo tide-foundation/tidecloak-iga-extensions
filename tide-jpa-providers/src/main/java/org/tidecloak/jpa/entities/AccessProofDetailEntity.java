@@ -6,41 +6,86 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 
 @NamedQueries({
-        @NamedQuery(name="getProofDetailsForRealm", query="SELECT a FROM AccessProofDetailEntity a WHERE a.realmId = :realmId ORDER BY a.createdTimestamp DESC"),
-        @NamedQuery(name="getProofDetailsForUser", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user ORDER BY a.createdTimestamp DESC"),
-        @NamedQuery(name="getProofDetailsForDraft", query="SELECT a FROM AccessProofDetailEntity a WHERE a.recordId = :recordId ORDER BY a.createdTimestamp DESC"),
-        @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndRealm", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.realmId = :realmId"),
-        @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndIdAndRealm", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.recordId = :recordId and a.realmId = :realmId"),
-        @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndId", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.recordId = :recordId"),
-        @NamedQuery(name="getProofDetailsForDraftByChangeSetTypeAndIdAndUser", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.recordId = :recordId and user.id = :userId"),
         @NamedQuery(
-                name = "getProofDetailsForDraftByChangeSetTypesAndId",
-                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType IN :changesetTypes AND a.recordId = :recordId ORDER BY a.createdTimestamp DESC"
+                name  = "getProofDetailsForRealm",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.realmId = :realmId ORDER BY a.createdTimestamp DESC"
         ),
-        @NamedQuery(name="getProofDetailsForDraftByChangeSetType", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType"),
-        @NamedQuery(name="getProofDetailsForUserByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user and a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),
-        @NamedQuery(name="getProofDetailsForUserByClientAndRecordId", query="SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user and a.clientId = :clientId and a.recordId = :recordId ORDER BY a.createdTimestamp DESC"),
-        @NamedQuery(name="getProofDetailsByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),
-        @NamedQuery(name="getProofDetailsForCompositeByClient", query="SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType and a.clientId = :clientId ORDER BY a.createdTimestamp DESC"),
         @NamedQuery(
-                name = "FindUserWithCompositeRoleRecord",
-                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user AND a.recordId IN " +
-                        "(SELECT d.id FROM TideCompositeRoleMappingDraftEntity d WHERE d.composite = :composite) " +
-                        "ORDER BY a.createdTimestamp DESC"
+                name  = "getProofDetailsForUser",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user ORDER BY a.createdTimestamp DESC"
         ),
-        @NamedQuery(name="deleteProofRecordForUserAndClient", query="DELETE FROM AccessProofDetailEntity a WHERE a.recordId = :recordId and a.user  = :user AND a.clientId = :clientId"),
-        @NamedQuery(name="deleteProofRecordForUser", query="DELETE FROM AccessProofDetailEntity a WHERE a.recordId = :recordId and a.user  = :user"),
-        @NamedQuery(name="deleteProofRecords", query="DELETE FROM AccessProofDetailEntity a WHERE a.recordId = :recordId"),
-        @NamedQuery(name="deleteAllDraftProofRecordsForUser", query="DELETE FROM AccessProofDetailEntity a WHERE a.user = :user"),
-        @NamedQuery(name="DeleteAllAccessProofsByRealm",
-                query = "DELETE FROM AccessProofDetailEntity r " +
-                        "WHERE r.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
+        @NamedQuery(
+                name  = "getProofDetailsForDraft",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changeRequestKey.changeRequestId = :recordId ORDER BY a.createdTimestamp DESC"
         ),
-        @NamedQuery(name="DeleteAllAccessProofsByClient",
-                query = "DELETE FROM AccessProofDetailEntity r " +
-                        "WHERE r.clientId = :clientId"
+        @NamedQuery(
+                name  = "getProofDetailsForDraftByChangeSetTypeAndRealm",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType AND a.realmId = :realmId"
         ),
-
+        @NamedQuery(
+                name  = "getProofDetailsForDraftByChangeSetTypeAndIdAndRealm",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType AND a.changeRequestKey.changeRequestId = :recordId AND a.realmId = :realmId"
+        ),
+        @NamedQuery(
+                name  = "getProofDetailsForDraftByChangeSetTypeAndId",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType AND a.changeRequestKey.changeRequestId = :recordId"
+        ),
+        @NamedQuery(
+                name  = "getProofDetailsForDraftByChangeSetTypeAndIdAndUser",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType AND a.changeRequestKey.changeRequestId = :recordId AND a.user.id = :userId"
+        ),
+        @NamedQuery(
+                name  = "getProofDetailsForDraftByChangeSetTypesAndId",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType IN :changesetTypes AND a.changeRequestKey.changeRequestId = :recordId ORDER BY a.createdTimestamp DESC"
+        ),
+        @NamedQuery(
+                name  = "getProofDetailsForDraftByChangeSetType",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType"
+        ),
+        @NamedQuery(
+                name  = "getProofDetailsForUserByClient",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user AND a.clientId = :clientId ORDER BY a.createdTimestamp DESC"
+        ),
+        @NamedQuery(
+                name  = "getProofDetailsForUserByClientAndRecordId",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user AND a.clientId = :clientId AND a.changeRequestKey.changeRequestId = :recordId ORDER BY a.createdTimestamp DESC"
+        ),
+        @NamedQuery(
+                name  = "getProofDetailsByClient",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.clientId = :clientId ORDER BY a.createdTimestamp DESC"
+        ),
+        @NamedQuery(
+                name  = "getProofDetailsForCompositeByClient",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changesetType = :changesetType AND a.clientId = :clientId ORDER BY a.createdTimestamp DESC"
+        ),
+        @NamedQuery(
+                name  = "FindUserWithCompositeRoleRecord",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.user = :user AND a.changeRequestKey.changeRequestId IN (SELECT d.id FROM TideCompositeRoleMappingDraftEntity d WHERE d.composite = :composite) ORDER BY a.createdTimestamp DESC"
+        ),
+        @NamedQuery(
+                name  = "deleteProofRecordForUserAndClient",
+                query = "DELETE FROM AccessProofDetailEntity a WHERE a.changeRequestKey.changeRequestId = :recordId AND a.user = :user AND a.clientId = :clientId"
+        ),
+        @NamedQuery(
+                name  = "deleteProofRecordForUser",
+                query = "DELETE FROM AccessProofDetailEntity a WHERE a.changeRequestKey.changeRequestId = :recordId AND a.user = :user"
+        ),
+        @NamedQuery(
+                name  = "deleteProofRecords",
+                query = "DELETE FROM AccessProofDetailEntity a WHERE a.changeRequestKey.mappingId = :recordId"
+        ),
+        @NamedQuery(
+                name  = "deleteAllDraftProofRecordsForUser",
+                query = "DELETE FROM AccessProofDetailEntity a WHERE a.user = :user"
+        ),
+        @NamedQuery(
+                name  = "DeleteAllAccessProofsByRealm",
+                query = "DELETE FROM AccessProofDetailEntity r WHERE r.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
+        ),
+        @NamedQuery(
+                name  = "DeleteAllAccessProofsByClient",
+                query = "DELETE FROM AccessProofDetailEntity r WHERE r.clientId = :clientId"
+        )
 })
 
 @Entity
@@ -52,8 +97,8 @@ public class AccessProofDetailEntity {
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     protected String id;
 
-    @Column(name = "RECORD_ID")
-    protected String recordId;
+    @Embedded
+    private ChangeRequestKey changeRequestKey;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "CHANGE_SET_TYPE")
@@ -111,12 +156,12 @@ public class AccessProofDetailEntity {
         this.realmId = realmId;
     }
 
-    public String getRecordId() {
-        return recordId;
+    public ChangeRequestKey getChangeRequestKey() {
+        return changeRequestKey;
     }
 
-    public void setRecordId(String recordId) {
-        this.recordId = recordId;
+    public void setChangeRequestKey(ChangeRequestKey changeRequestKey) {
+        this.changeRequestKey = changeRequestKey;
     }
 
     public ChangeSetType getChangesetType() {

@@ -25,4 +25,36 @@ public class RequestChangesUserRecord {
         this.accessDraft = accessDraft;
     }
 
+    public String getUsername(){
+        return this.username;
+    }
+
+    public void setUsername(String username) {
+        this.username = username;
+    }
+
+    public String getClientId() {
+        return this.clientId;
+    }
+
+    public void setClientId(String clientId) {
+        this.clientId = clientId;
+    }
+
+    public String getProofDetailId() {
+        return this.proofDetailId;
+    }
+
+    public void setProofDetailId(String proofDetailId) {
+        this.proofDetailId = proofDetailId;
+    }
+
+    public String getAccessDraft() {
+        return this.accessDraft;
+    }
+
+    public void setAccessDraft(String accessDraft) {
+        this.accessDraft = accessDraft;
+    }
+
 }

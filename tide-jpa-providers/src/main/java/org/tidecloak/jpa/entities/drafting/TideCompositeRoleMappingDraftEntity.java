@@ -37,6 +37,12 @@ import org.tidecloak.shared.enums.ActionType;
                         "(r.draftStatus = :draftStatus AND r.deleteStatus != :deleteStatus)) " +
                         "AND r.composite IN (SELECT u FROM RoleEntity u WHERE u.realmId = :realmId)"
         ),
+        @NamedQuery(name="getAllPreApprovedCompositeRoleMappingsByRealm",
+        query = "SELECT r FROM TideCompositeRoleMappingDraftEntity r " +
+                "WHERE (r.draftStatus NOT IN :draftStatus OR " +
+                "(r.draftStatus = :activeStatus AND r.deleteStatus NOT IN :draftStatus)) " +
+                "AND r.composite IN (SELECT u FROM RoleEntity u WHERE u.realmId = :realmId)"
+),
         @NamedQuery(
                 name = "DeleteAllCompositeRoleMappingsByRealm",
                 query = "DELETE FROM TideCompositeRoleMappingDraftEntity r " +
@@ -56,6 +62,8 @@ import org.tidecloak.shared.enums.ActionType;
                 name = "getCompositeRoleMappingDraftByDeleteStatuses",
                 query = "select r from TideCompositeRoleMappingDraftEntity r where r.composite = :composite and r.childRole = :childRole AND r.deleteStatus IN :draftStatuses"
         ),
+        @NamedQuery(name="GetCompositeRoleMappingDraftEntityByRequestId", query="SELECT m FROM TideCompositeRoleMappingDraftEntity m where m.changeRequestId = :requestId")
+
 
 })
 
@@ -68,6 +76,10 @@ public class TideCompositeRoleMappingDraftEntity {
     @Column(name="ID", length = 36)
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     protected String id;
+
+    @Column(name="CHANGE_REQUEST_ID", length = 36)
+    protected String changeRequestId;
+
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "COMPOSITE", referencedColumnName = "ID")  // Ensure 'ID' is the correct primary key field name in RoleEntity
@@ -98,6 +110,14 @@ public class TideCompositeRoleMappingDraftEntity {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getChangeRequestId() {
+        return changeRequestId;
+    }
+
+    public void setChangeRequestId(String changeRequestId) {
+        this.changeRequestId = changeRequestId;
     }
 
     public RoleEntity getComposite() {

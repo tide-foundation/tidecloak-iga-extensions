@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!-- Step 1: Add columns -->
+    <changeSet id="26.1.4-06032025-add-columns" author="tidecloak">
+        <addColumn tableName="USER_ROLE_MAPPING_DRAFT">
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(50)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <addColumn tableName="CLIENT_DRAFT">
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(50)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <addColumn tableName="COMPOSITE_ROLE_DRAFT">
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(50)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <addColumn tableName="COMPOSITE_ROLE_MAPPING_DRAFT">
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(50)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <addColumn tableName="GROUP_ROLE_MAPPING_DRAFT">
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(50)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <addColumn tableName="ROLE_DRAFT">
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(50)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <addColumn tableName="USER_ENTITY_DRAFT">
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(50)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <addColumn tableName="USER_GROUP_MEMBERSHIP_DRAFT">
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(50)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <addColumn tableName="ACCESS_PROOF_DETAIL">
+            <column name="MAPPING_ID"        type="VARCHAR(36)"><constraints nullable="true"/></column>
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(36)"><constraints nullable="true"/></column>
+        </addColumn>
+    </changeSet>
+
+    <!-- Step 2: Populate columns -->
+    <changeSet id="26.1.4-06032025-populate-columns" author="tidecloak">
+        <sql>UPDATE USER_ROLE_MAPPING_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
+        <sql>UPDATE CLIENT_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
+        <sql>UPDATE COMPOSITE_ROLE_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
+        <sql>UPDATE COMPOSITE_ROLE_MAPPING_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
+        <sql>UPDATE GROUP_ROLE_MAPPING_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
+        <sql>UPDATE ROLE_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
+        <sql>UPDATE USER_ENTITY_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
+        <sql>UPDATE USER_GROUP_MEMBERSHIP_DRAFT SET CHANGE_REQUEST_ID = ID;</sql>
+        <sql>UPDATE ACCESS_PROOF_DETAIL
+            SET MAPPING_ID = RECORD_ID,
+            CHANGE_REQUEST_ID = RECORD_ID;
+        </sql>
+    </changeSet>
+
+    <!-- Step 3: Make columns NOT NULL -->
+    <changeSet id="26.1.4-06032025-make-not-null" author="tidecloak">
+        <!-- now lock down your new AccessProofDetailEntity columns -->
+        <addNotNullConstraint tableName="ACCESS_PROOF_DETAIL" columnName="MAPPING_ID"        columnDataType="VARCHAR(36)"/>
+        <addNotNullConstraint tableName="ACCESS_PROOF_DETAIL" columnName="CHANGE_REQUEST_ID" columnDataType="VARCHAR(36)"/>
+        <dropColumn tableName="ACCESS_PROOF_DETAIL" columnName="RECORD_ID"/>
+    </changeSet>
+
+</databaseChangeLog>

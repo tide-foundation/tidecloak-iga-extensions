@@ -29,7 +29,7 @@ import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RuleDefinition;
 import org.midgard.models.UserContext.UserContext;
 import org.midgard.models.VendorData;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessorFactory;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
@@ -46,6 +46,7 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 import static org.tidecloak.iga.TideRequests.TideRoleRequests.*;
+import static org.tidecloak.shared.utils.UserContextDraftUtil.findDraftsNotInAccessProof;
 
 public class TideAdminRealmResource {
 
@@ -189,10 +190,14 @@ public class TideAdminRealmResource {
             session.getContext().getRealm().setAttribute("isIGAEnabled", isEnabled);
             logger.info("IGA has been toggled to : " + isEnabled);
 
-            IdentityProviderModel tideIdp = session.getContext().getRealm().getIdentityProviderByAlias("tide");
+            IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
+            ComponentModel componentModel = realm.getComponentsStream()
+                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
 
             // if IGA is on and tideIdp exists, we need to enable EDDSA as default sig
-            if (tideIdp != null) {
+            if (tideIdp != null && componentModel != null) {
                 String currentAlgorithm = session.getContext().getRealm().getDefaultSignatureAlgorithm();
 
                 if (isEnabled) {
@@ -200,11 +205,6 @@ public class TideAdminRealmResource {
                         session.getContext().getRealm().setDefaultSignatureAlgorithm("EdDSA");
                         logger.info("IGA has been enabled, default signature algorithm updated to EdDSA");
                     }
-                    ClientModel realmManagement = realm.getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
-                    if(session.roles().getClientRole(realmManagement, org.tidecloak.shared.Constants.TIDE_REALM_ADMIN) == null){
-                        createRealmAdminInitCert(session);
-                    }
-
                     // Check the TideClientDraft Table and generate and AccessProofDetails that dont exist.
                     List<TideClientDraftEntity> entities = findDraftsNotInAccessProof(em, realm);
                     entities.forEach(c -> {
@@ -215,13 +215,12 @@ public class TideAdminRealmResource {
                         } catch (Exception e) {
                             throw new RuntimeException(e);
                         }
-
                     });
                 } else {
                     // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA
                     // TODO: Fix error: Uncaught server error: java.lang.RuntimeException: org.keycloak.crypto.SignatureException:
                     // Signing failed. java.security.InvalidKeyException: Unsupported key type (tide eddsa key)
-                    if ("EdDSA".equalsIgnoreCase(currentAlgorithm)) {
+                    if (currentAlgorithm.equalsIgnoreCase("EdDSA")) {
                         session.getContext().getRealm().setDefaultSignatureAlgorithm("RS256");
                         logger.info("IGA has been disabled, default signature algorithm updated to RS256");
                     }
@@ -455,12 +454,5 @@ public class TideAdminRealmResource {
         public void addToHistory(String newEntry) {
             history.add(newEntry);
         }
-    }
-
-    private List<TideClientDraftEntity> findDraftsNotInAccessProof(EntityManager em, RealmModel realm) {
-        return em.createNamedQuery("TideClientDraftEntity.findDraftsNotInAccessProof", TideClientDraftEntity.class)
-                .setParameter("draftStatus", DraftStatus.DRAFT)
-                .setParameter("realmId", realm.getId())
-                .getResultList();
     }
 }

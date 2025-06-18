@@ -66,6 +66,13 @@ import org.tidecloak.shared.enums.DraftStatus;
                 query = "DELETE FROM TideUserRoleMappingDraftEntity r " +
                         "WHERE r.roleId = :roleId"
         ),
+        @NamedQuery(name="GetUserRoleMappingDraftEntityByRequestId", query="SELECT m FROM TideUserRoleMappingDraftEntity m where m.changeRequestId = :requestId"),
+        @NamedQuery(name="getAllPreApprovedUserRoleMappingsByRealm",
+                query = "SELECT m FROM TideUserRoleMappingDraftEntity m " +
+                        "WHERE (m.draftStatus NOT IN :draftStatus OR " +
+                        "(m.draftStatus = :activeStatus AND m.deleteStatus NOT IN :draftStatus)) " +
+                        "AND m.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
+        ),
 
 
 })
@@ -78,6 +85,9 @@ public class TideUserRoleMappingDraftEntity {
     @Column(name="ID", length = 36)
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     protected String id;
+
+    @Column(name="CHANGE_REQUEST_ID", length = 36)
+    protected String changeRequestId;
 
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="USER_ID")
@@ -101,16 +111,20 @@ public class TideUserRoleMappingDraftEntity {
     @Column(name = "TIMESTAMP")
     protected Long timestamp = System.currentTimeMillis();
 
-
-//    @Column(name = "CHECKSUM")
-//    protected String checksum;
-
     public String getId() {
         return id;
     }
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getChangeRequestId() {
+        return changeRequestId;
+    }
+
+    public void setChangeRequestId(String changeRequestId) {
+        this.changeRequestId = changeRequestId;
     }
 
     public UserEntity getUser() {
@@ -162,16 +176,6 @@ public class TideUserRoleMappingDraftEntity {
         this.timestamp = timestamp;
     }
 
-//    public String getChecksum() {
-//        return checksum;
-//    }
-//
-//    public void setChecksum(String checksum) {
-//        this.checksum = checksum;
-//    }
-
-
-
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -194,4 +198,3 @@ public class TideUserRoleMappingDraftEntity {
     }
 
 }
-

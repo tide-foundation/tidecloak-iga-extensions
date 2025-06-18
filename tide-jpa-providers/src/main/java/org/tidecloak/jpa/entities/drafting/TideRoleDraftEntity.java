@@ -13,6 +13,12 @@ import org.tidecloak.shared.enums.ActionType;
                         "(r.draftStatus = :draftStatus AND r.deleteStatus != :deleteStatus)) " +
                         "AND r.role IN ( SELECT u from RoleEntity u where u.realmId =:realmId )"
         ),
+        @NamedQuery(name="getAllPreApprovedRoleDraft",
+                query = "SELECT r FROM TideRoleDraftEntity r " +
+                        "WHERE (r.draftStatus NOT IN :draftStatus OR " +
+                        "(r.draftStatus = :activeStatus AND r.deleteStatus NOT IN :draftStatus)) " +
+                        "AND r.role IN ( SELECT u from RoleEntity u where u.realmId =:realmId )"
+        ),
         @NamedQuery(name="getRoleDraftByRole", query="SELECT r FROM TideRoleDraftEntity r WHERE r.role = :role"),
         @NamedQuery(name="getRoleDraftByRoleId", query="SELECT r FROM TideRoleDraftEntity r WHERE r.role.id = :roleId"),
         @NamedQuery(name="getRoleDraftByRoleEntityAndDeleteStatus", query="SELECT r FROM TideRoleDraftEntity r WHERE r.role = :role And r.deleteStatus = :deleteStatus"),
@@ -25,6 +31,8 @@ import org.tidecloak.shared.enums.ActionType;
         ),
         @NamedQuery(name="DeleteRoleDraftByRealm", query = "DELETE FROM TideRoleDraftEntity r WHERE r.role IN (SELECT u FROM RoleEntity u WHERE u.realmId = :realmId)"
         ),
+        @NamedQuery(name="GetRoleDraftEntityByRequestId", query="SELECT m FROM TideRoleDraftEntity m where m.changeRequestId = :requestId")
+
 })
 
 @Entity
@@ -35,6 +43,9 @@ public class TideRoleDraftEntity {
     @Column(name="ID", length = 36)
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     protected String id;
+
+    @Column(name="CHANGE_REQUEST_ID", length = 36)
+    protected String changeRequestId;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "ROLE", referencedColumnName = "ID")  // Ensure 'ID' is the correct primary key field name in RoleEntity
@@ -68,6 +79,15 @@ public class TideRoleDraftEntity {
     public void setId(String id) {
         this.id = id;
     }
+
+    public String getChangeRequestId() {
+        return changeRequestId;
+    }
+
+    public void setChangeRequestId(String changeRequestId) {
+        this.changeRequestId = changeRequestId;
+    }
+
 
     public RoleEntity getRole() {
         return role;

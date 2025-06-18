@@ -1,7 +1,7 @@
 package org.tidecloak.iga.interfaces.models;
 
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
-import org.tidecloak.iga.changesetprocessors.processors.*;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.iga.ChangeSetProcessors.processors.*;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.jpa.entities.drafting.*;
 

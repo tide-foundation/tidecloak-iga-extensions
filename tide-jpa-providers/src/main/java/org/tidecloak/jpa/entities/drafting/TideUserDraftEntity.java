@@ -16,6 +16,8 @@ import org.tidecloak.shared.enums.DraftStatus;
                 query = "DELETE FROM TideUserDraftEntity r " +
                         "WHERE r.user IN (SELECT u FROM UserEntity u WHERE u.realmId = :realmId)"
         ),
+        @NamedQuery(name="GetUserEntityByRequestId", query="SELECT m FROM TideUserDraftEntity m where m.changeRequestId = :requestId")
+
 })
 
 @Entity
@@ -26,6 +28,9 @@ public class TideUserDraftEntity {
     @Column(name="ID", length = 36)
     @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
     protected String id; // Primary key for TideUserDraftEntity
+
+    @Column(name="CHANGE_REQUEST_ID", length = 36)
+    protected String changeRequestId;
 
     @ManyToOne(fetch= FetchType.LAZY)
     @JoinColumn(name="USER_ID")
@@ -53,6 +58,14 @@ public class TideUserDraftEntity {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getChangeRequestId() {
+        return changeRequestId;
+    }
+
+    public void setChangeRequestId(String changeRequestId) {
+        this.changeRequestId = changeRequestId;
     }
 
     public UserEntity getUser() {

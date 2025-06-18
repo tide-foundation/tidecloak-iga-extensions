@@ -1,35 +1,40 @@
-package org.tidecloak.iga.changesetprocessors.processors;
+package org.tidecloak.iga.ChangeSetProcessors.processors;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import org.jboss.logging.Logger;
 import org.keycloak.Config;
 import org.keycloak.models.*;
-import org.keycloak.models.cache.CacheRealmProvider;
-import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
-import org.keycloak.provider.InvalidationHandler;
 import org.keycloak.representations.AccessToken;
-import org.tidecloak.iga.changesetprocessors.ChangeSetProcessor;
-import org.tidecloak.iga.changesetprocessors.models.ChangeSetRequest;
-import org.tidecloak.iga.changesetprocessors.utils.TideEntityUtils;
-import org.tidecloak.iga.changesetprocessors.utils.UserContextUtils;
-import org.tidecloak.iga.interfaces.TideRoleAdapter;
+import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.iga.ChangeSetProcessors.keys.UserClientKey;
+import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
+import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
+import org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils;
+import org.tidecloak.iga.utils.IGAUtils;
+import org.tidecloak.jpa.entities.ChangeRequestKey;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.iga.interfaces.TideUserAdapter;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.iga.interfaces.TideClientAdapter;
 
+import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
-import static org.tidecloak.iga.changesetprocessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
-import static org.tidecloak.iga.changesetprocessors.utils.UserContextUtils.*;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
+import static org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils.*;
 
 public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDraftEntity> {
     protected static final Logger logger = Logger.getLogger(ClientFullScopeProcessor.class);
@@ -73,7 +78,10 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
 
         Runnable callback = () -> {
             try {
-                commitCallback(change, entity, client, em);
+                List<TideClientDraftEntity> entities = em.createNamedQuery("GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
+                        .setParameter("requestId", change.getChangeSetId()).getResultList();
+
+                commitCallback(change, entities, client, em);
                 em.flush();
 
             } catch (Exception e) {
@@ -104,11 +112,11 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
             RealmModel realm = session.realms().getRealm(entity.getClient().getRealmId());
             String igaAttribute = realm.getAttribute("isIGAEnabled");
             boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
-            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getId(), changeSetType);
             switch (action) {
                 case CREATE:
                     logger.debug(String.format("Initiating CREATE (enable) action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleCreateRequest(session, entity, em, callback);
+                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
                     if (!isIGAEnabled){
                         if (entity.getFullScopeEnabled().equals(DraftStatus.ACTIVE)){
                             entity.setFullScopeDisabled(DraftStatus.NULL);
@@ -119,6 +127,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
                 case DELETE:
                     logger.debug(String.format("Initiating DELETE (disable) action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleDeleteRequest(session, entity, em, callback);
+                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
                     if (!isIGAEnabled){
                         if (entity.getFullScopeDisabled().equals(DraftStatus.ACTIVE)){
                             entity.setFullScopeEnabled(DraftStatus.NULL);
@@ -147,6 +156,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
 
     @Override
     public void handleCreateRequest(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
+        entity.setChangeRequestId(KeycloakModelUtils.generateId());
         RealmModel realm = session.getContext().getRealm();
         ClientModel client = realm.getClientByClientId(entity.getClient().getClientId());
         entity.setFullScopeEnabled(DraftStatus.DRAFT);
@@ -156,7 +166,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
         // Update Default user context for client aswell
         ChangeSetRequest change = getChangeSetRequestFromEntity(session, entity, ChangeSetType.CLIENT_FULLSCOPE);
         String defaultFullScopeUserContext = generateRealmDefaultUserContext(session, realm, client, em, change);
-        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, client, null, entity.getId(), ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT, defaultFullScopeUserContext);
+        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, client, null, new ChangeRequestKey(entity.getId(), entity.getChangeRequestId()), ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT, defaultFullScopeUserContext);
         em.flush();
 
         List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
@@ -175,7 +185,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
 
                 UserModel wrappedUser = TideEntityUtils.wrapUserModel(user, session, realm);
 
-                ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, entity.getId(),
+                ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, new ChangeRequestKey(entity.getId(), entity.getChangeRequestId()),
                         ChangeSetType.CLIENT_FULLSCOPE, entity);
 
             }
@@ -188,6 +198,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
 
     @Override
     public void handleDeleteRequest(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
+        entity.setChangeRequestId(KeycloakModelUtils.generateId());
         RealmModel realm = session.getContext().getRealm();
         ClientModel client = realm.getClientByClientId(entity.getClient().getClientId());
         List<UserModel> usersInRealm = session.users().searchForUserStream(realm, new HashMap<>()).toList();
@@ -209,7 +220,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
         // Update Default user context for client aswell
         ChangeSetRequest change = getChangeSetRequestFromEntity(session, entity);
         String defaultFullScopeUserContext = generateRealmDefaultUserContext(session, realm, client, em, change);
-        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, client, null, entity.getId(), ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT, defaultFullScopeUserContext);
+        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, client, null, new ChangeRequestKey(entity.getId(), entity.getChangeRequestId()), ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT, defaultFullScopeUserContext);
         em.flush();
 
         usersInRealm.forEach(user -> {
@@ -223,7 +234,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
                 return;
             }
             try {
-                ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, user, entity.getId(), ChangeSetType.CLIENT_FULLSCOPE, entity);
+                ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, user, new ChangeRequestKey(entity.getId(), entity.getChangeRequestId()), ChangeSetType.CLIENT_FULLSCOPE, entity);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
@@ -235,7 +246,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
     @Override
     public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> uniqRoles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
         RealmModel realm = session.getContext().getRealm();
-        TideClientDraftEntity affectedClientFullScopeEntity = em.find(TideClientDraftEntity.class, affectedUserContextDraft.getRecordId());
+        TideClientDraftEntity affectedClientFullScopeEntity = em.find(TideClientDraftEntity.class, affectedUserContextDraft.getChangeRequestKey().getMappingId());
         if (affectedClientFullScopeEntity == null ||
                 isValidStatusPair(affectedClientFullScopeEntity.getFullScopeDisabled(), affectedClientFullScopeEntity.getFullScopeEnabled()) ||
                 isValidStatusPair(affectedClientFullScopeEntity.getFullScopeEnabled(), affectedClientFullScopeEntity.getFullScopeDisabled())) {
@@ -306,36 +317,159 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
 
         return token;
     }
+    @Override
+    public List<ChangesetRequestEntity> combineChangeRequests(
+            KeycloakSession session,
+            List<TideClientDraftEntity> userRoleEntities,
+            EntityManager em) throws IOException, Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
 
-    private void commitCallback(ChangeSetRequest change, TideClientDraftEntity entity, ClientModel clientModel, EntityManager em){
-        if (change.getActionType() == ActionType.CREATE) {
-            if(entity.getFullScopeEnabled() != DraftStatus.APPROVED){
-                throw new RuntimeException("Draft record has not been approved by all admins.");
-            }
-            entity.setFullScopeEnabled(DraftStatus.ACTIVE);
-            entity.setFullScopeDisabled(DraftStatus.NULL);
-            clientModel.setFullScopeAllowed(true);
-        } else if (change.getActionType() == ActionType.DELETE) {
-            if(entity.getFullScopeDisabled() != DraftStatus.APPROVED){
-                throw new RuntimeException("Deletion has not been approved by all admins.");
-            }
-            entity.setFullScopeDisabled(DraftStatus.ACTIVE);
-            entity.setFullScopeEnabled(DraftStatus.NULL);
-            clientModel.setFullScopeAllowed(false);
-        }
+        RealmModel realm = session.getContext().getRealm();
 
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT));
-        if(entity.getDraftStatus().equals(DraftStatus.DRAFT) && changesetRequestEntity != null){
-            entity.setDraftStatus(DraftStatus.ACTIVE);
-            // Find any pending changes
-            List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
-                    .setParameter("recordId", entity.getId())
-                    .setParameter("changesetTypes", List.of(ChangeSetType.CLIENT))
+        // Group raw AccessProofDetailEntity items by userId and clientId
+        Map<UserClientKey, List<AccessProofDetailEntity>> rawMap =
+                ChangeSetProcessor.super.groupChangeRequests(userRoleEntities, em);
+
+        Map<String, Map<String, List<AccessProofDetailEntity>>> byUserClient =
+                rawMap.entrySet().stream()
+                        .flatMap(e -> e.getValue().stream()
+                                .map(proof -> Map.entry(e.getKey(), proof)))
+                        .collect(Collectors.groupingBy(
+                                e -> e.getKey().getUserId(),
+                                Collectors.groupingBy(
+                                        e -> e.getKey().getClientId(),
+                                        Collectors.mapping(Map.Entry::getValue, Collectors.toList())
+                                )));
+
+        // Prefetch all UserEntity instances in one query
+        List<String> userIds = new ArrayList<>(byUserClient.keySet());
+        Map<String, UserEntity> userById = em.createQuery(
+                        "SELECT u FROM UserEntity u WHERE u.id IN :ids", UserEntity.class)
+                .setParameter("ids", userIds)
+                .getResultList().stream()
+                .collect(Collectors.toMap(UserEntity::getId, Function.identity()));
+
+        // Cache ClientModel lookups to avoid repeated realm.getClientById() calls
+        Set<String> clientIds = byUserClient.values().stream()
+                .flatMap(m -> m.keySet().stream())
+                .collect(Collectors.toSet());
+        Map<String, ClientModel> clientById = clientIds.stream()
+                .map(cid -> Map.entry(cid, realm.getClientById(cid)))
+                .filter(e -> e.getValue() != null)
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+        List<ChangesetRequestEntity> results = new ArrayList<>(byUserClient.size());
+
+        // Iterate over each user group to merge proofs and retrieve change requests
+        for (var userEntry : byUserClient.entrySet()) {
+            String userId = userEntry.getKey();
+            UserEntity ue = userById.get(userId);
+            UserModel um = session.users().getUserById(realm, userId);
+
+            String combinedRequestId = KeycloakModelUtils.generateId();
+
+            List<AccessProofDetailEntity> toRemoveProofs = new ArrayList<>();
+            List<ChangesetRequestEntity> toRemoveRequests = new ArrayList<>();
+
+
+            // Merge proofs across clients into a single JSON draft
+            for (var clientEntry : userEntry.getValue().entrySet()) {
+                ClientModel cm = clientById.get(clientEntry.getKey());
+                AtomicReference<String> mappingId = new AtomicReference<>();
+                AtomicBoolean isFirstRun = new AtomicBoolean();
+                isFirstRun.set(true);
+
+                if (cm == null) continue;
+                String combinedProofDraft = null;
+
+
+                for (var proof : clientEntry.getValue()) {
+                    mappingId.set(proof.getChangeRequestKey().getMappingId());
+                    TideClientDraftEntity draft = (TideClientDraftEntity) IGAUtils.fetchDraftRecordEntity(em, ChangeSetType.CLIENT_FULLSCOPE, proof.getChangeRequestKey().getMappingId());
+
+
+                    if (draft == null) {
+                        throw new IllegalStateException(
+                                "Missing draft for request " + proof.getChangeRequestKey().getMappingId());
+                    }
+
+                    draft.setChangeRequestId(combinedRequestId);
+                    em.persist(draft);
+
+                    if (combinedProofDraft == null) {
+                        combinedProofDraft = proof.getProofDraft();
+                    }
+                    AccessToken token = objectMapper.readValue(
+                            combinedProofDraft, AccessToken.class);
+                    combinedProofDraft = combinedTransformedUserContext(
+                            session, realm, cm, um, "openId", draft, token);
+
+                    toRemoveProofs.add(proof);
+                    toRemoveRequests.addAll(em.createNamedQuery(
+                                    "getAllChangeRequestsByRecordId",
+                                    ChangesetRequestEntity.class)
+                            .setParameter("changesetRequestId", proof.getChangeRequestKey().getChangeRequestId())
+                            .getResultList());
+
+                    if(isFirstRun.get()) {
+                        isFirstRun.set(false);
+                    }
+                }
+
+                ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, cm, ue, new ChangeRequestKey(mappingId.get(), combinedRequestId), ChangeSetType.CLIENT_FULLSCOPE, combinedProofDraft);
+
+            }
+
+            // Remove outdated proofs and their change-request entities
+            toRemoveProofs.forEach(em::remove);
+            toRemoveRequests.forEach(em::remove);
+
+
+            // Retrieve the recreated ChangeRequestEntity(ies) for this combinedRequestId
+            List<ChangesetRequestEntity> created = em.createNamedQuery(
+                            "getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                    .setParameter("changesetRequestId", combinedRequestId)
                     .getResultList();
-            pendingChanges.forEach(em::remove);
-            em.remove(changesetRequestEntity);
-
+            results.addAll(created);
         }
+
+        // Flush all pending changes once at the end
+        em.flush();
+
+        return results;
+    }
+
+    private void commitCallback(ChangeSetRequest change, List<TideClientDraftEntity> entities, ClientModel clientModel, EntityManager em){
+        entities.forEach(entity -> {
+            if (change.getActionType() == ActionType.CREATE) {
+                if(entity.getFullScopeEnabled() != DraftStatus.APPROVED && entity.getFullScopeEnabled() != DraftStatus.ACTIVE){
+                    throw new RuntimeException("Draft record has not been approved by all admins.");
+                }
+                entity.setFullScopeEnabled(DraftStatus.ACTIVE);
+                entity.setFullScopeDisabled(DraftStatus.NULL);
+                clientModel.setFullScopeAllowed(true);
+            } else if (change.getActionType() == ActionType.DELETE) {
+                if(entity.getFullScopeDisabled() != DraftStatus.APPROVED && entity.getFullScopeDisabled() != DraftStatus.ACTIVE){
+                    throw new RuntimeException("Deletion has not been approved by all admins.");
+                }
+                entity.setFullScopeDisabled(DraftStatus.ACTIVE);
+                entity.setFullScopeEnabled(DraftStatus.NULL);
+                clientModel.setFullScopeAllowed(false);
+            }
+
+            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT));
+            if(entity.getDraftStatus().equals(DraftStatus.DRAFT) && changesetRequestEntity != null){
+                entity.setDraftStatus(DraftStatus.ACTIVE);
+                // Find any pending changes
+                List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
+                        .setParameter("recordId", entity.getId())
+                        .setParameter("changesetTypes", List.of(ChangeSetType.CLIENT))
+                        .getResultList();
+                pendingChanges.forEach(em::remove);
+                em.remove(changesetRequestEntity);
+
+            }
+        });
     }
 
     private void approveFullScope(TideClientDraftEntity clientFullScopeStatuses, boolean isEnabled) {
