@@ -170,7 +170,8 @@ public class IGARealmResource {
     @Path("change-set/sign")
     public Response signChangeset(ChangeSetRequest changeSet) throws Exception {
         try{
-            return signChangeSets(Collections.singletonList(changeSet));
+            List<String> result = signChangeSets(Collections.singletonList(changeSet));
+            return Response.ok(result.get(0)).build();
         }catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
         }
@@ -181,7 +182,9 @@ public class IGARealmResource {
     @Path("change-set/sign/batch")
     public Response signMultipleChangeSets(ChangeSetRequestList changeSets) throws Exception {
         try{
-            return signChangeSets(changeSets.getChangeSets());
+            ObjectMapper objectMapper = new ObjectMapper();
+            List<String> result =  signChangeSets(changeSets.getChangeSets());
+            return Response.ok(objectMapper.writeValueAsString(result)).build();
         }catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
         }
@@ -602,7 +605,7 @@ public class IGARealmResource {
                 .build();
     }
 
-    public Response signChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
+    public List<String> signChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
         auth.realm().requireManageRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
@@ -659,9 +662,7 @@ public class IGARealmResource {
             for (ChangeSetRequest changeSet : changeSets) {
                 Object draftRecordEntity = IGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId()).get(0);
                 if (draftRecordEntity == null) {
-                    return Response.status(Response.Status.BAD_REQUEST)
-                            .entity("Unsupported change set type for ID: " + changeSet.getChangeSetId())
-                            .build();
+                    throw new BadRequestException("Unsupported change set type for ID: " + changeSet.getChangeSetId());
                 }
                 try {
                     Response singleResp = signer.sign(changeSet, em, session, realm, draftRecordEntity, auth.adminAuth());
@@ -676,7 +677,7 @@ public class IGARealmResource {
             }
         }
 
-        return Response.ok(objectMapper.writeValueAsString(signedJsonList)).build();
+        return signedJsonList;
     }
 
     private Response commitChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
