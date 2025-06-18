@@ -208,11 +208,31 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
 
     @Override
-    public void handleCreateRequest(KeycloakSession session, TideUserRoleMappingDraftEntity mapping, EntityManager em, Runnable callback) {
+    public void handleCreateRequest(KeycloakSession session, TideUserRoleMappingDraftEntity mapping, EntityManager em, Runnable callback) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         RoleModel role = realm.getRoleById(mapping.getRoleId());
         UserModel userModel = TideEntityUtils.toTideUserAdapter(mapping.getUser(), session, realm);
-        mapping.setChangeRequestId(KeycloakModelUtils.generateId());
+        String changeSetId = KeycloakModelUtils.generateId();
+        mapping.setChangeRequestId(changeSetId);
+
+        if(role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+            ComponentModel componentModel = realm.getComponentsStream()
+                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
+
+            if(componentModel == null) {
+                throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+            }
+            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
+                    .setParameter("ID", componentModel.getId()).getResultList();
+            if (realmAuthorizers.isEmpty()){
+                throw new Exception("Authorizer not found for this realm.");
+            }
+            if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
+                createRoleInitCertDraft(session, changeSetId, "1", 0.7, 1, role);
+            }
+        }
 
         Set<RoleModel> roleMappings = Collections.singleton(role);
         List<ClientModel> clientList = ClientUtils.getUniqueClientList(session, realm, role, em);
@@ -227,11 +247,35 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     @Override
-    public void handleDeleteRequest(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em, Runnable callback) {
+    public void handleDeleteRequest(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         RoleEntity roleEntity = em.find(RoleEntity.class, entity.getRoleId());
+        RoleModel role = realm.getRoleById(entity.getRoleId());
+
         UserModel affectedUser = session.users().getUserById(realm, entity.getUser().getId());
-        entity.setChangeRequestId(KeycloakModelUtils.generateId());
+        String changeSetId = KeycloakModelUtils.generateId();
+
+        entity.setChangeRequestId(changeSetId);
+
+        if(roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+            ComponentModel componentModel = realm.getComponentsStream()
+                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
+
+            if(componentModel == null) {
+                throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+            }
+            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
+                    .setParameter("ID", componentModel.getId()).getResultList();
+            if (realmAuthorizers.isEmpty()){
+                throw new Exception("Authorizer not found for this realm.");
+            }
+            if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
+                createRoleInitCertDraft(session, changeSetId, "1", 0.7, -1, role);
+            }
+        }
+
 
         Set<UserModel> users = new TreeSet<>(Comparator.comparing(UserModel::getId));
         users.add(affectedUser);

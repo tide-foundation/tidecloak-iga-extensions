@@ -728,7 +728,7 @@ public interface ChangeSetProcessor<T> {
 
             isTideAdminRole = tideRole != null && roleMapping.getRoleId().equals(tideRole.getId());
 
-            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, changeRequestKey.getMappingId());
+            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, changeRequestKey.getChangeRequestId());
 
             hasInitCert = roleInitCert != null;
             ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, roleMapping);

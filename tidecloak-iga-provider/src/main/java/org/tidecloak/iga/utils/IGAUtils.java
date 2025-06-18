@@ -73,7 +73,7 @@ public class IGAUtils {
 
     public static boolean isAuthorityAssignment(KeycloakSession session, Object mapping, EntityManager em){
         if ( mapping instanceof  TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
-            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, tideUserRoleMappingDraftEntity.getId());
+            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, tideUserRoleMappingDraftEntity.getChangeRequestId());
 
             return roleInitCert != null;
         }

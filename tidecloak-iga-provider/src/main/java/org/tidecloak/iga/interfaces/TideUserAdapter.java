@@ -170,24 +170,6 @@ public class TideUserAdapter extends UserAdapter {
                 em.persist(draftUserRole);
                 em.flush();
 
-                if(roleModel.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
-                    ComponentModel componentModel = realm.getComponentsStream()
-                            .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
-                            .findFirst()
-                            .orElse(null);
-
-                    if(componentModel == null) {
-                        throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
-                    }
-                    List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
-                            .setParameter("ID", componentModel.getId()).getResultList();
-                    if (realmAuthorizers.isEmpty()){
-                        throw new Exception("Authorizer not found for this realm.");
-                    }
-                    if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                        createRoleInitCertDraft(session, draftUserRole.getId(), "1", 0.7, 1, roleModel);
-                    }
-                }
                 WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.USER_ROLE);
                 processor.executeWorkflow(session, draftUserRole, em, WorkflowType.REQUEST, params, null);
             }
@@ -250,25 +232,6 @@ public class TideUserAdapter extends UserAdapter {
             if (committedEntity.getDeleteStatus() == DraftStatus.ACTIVE) {
                 deleteRoleAndProofRecords(role, activeDraftEntities);
                 return;
-            }
-
-            if(roleModel.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
-                ComponentModel componentModel = realm.getComponentsStream()
-                        .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
-                        .findFirst()
-                        .orElse(null);
-
-                if(componentModel == null) {
-                    throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
-                }
-                List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
-                        .setParameter("ID", componentModel.getId()).getResultList();
-                if (realmAuthorizers.isEmpty()){
-                    throw new Exception("Authorizer not found for this realm.");
-                }
-                if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                    createRoleInitCertDraft(session, committedEntity.getId(), "1", 0.7, -1, roleModel);
-                }
             }
 
             WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.USER_ROLE);
