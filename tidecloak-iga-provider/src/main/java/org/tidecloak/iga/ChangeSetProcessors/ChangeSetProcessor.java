@@ -173,7 +173,9 @@ public interface ChangeSetProcessor<T> {
                     user = TideEntityUtils.toTideUserAdapter(userEntity, session, realm);
                 } else {
                     UserEntity userEntity = userContextDraft.getUser();
-                    user = TideEntityUtils.toTideUserAdapter(userEntity, session, realm);
+                    if(userEntity != null) {
+                        user = TideEntityUtils.toTideUserAdapter(userEntity, session, realm);
+                    }
                 }
 
 

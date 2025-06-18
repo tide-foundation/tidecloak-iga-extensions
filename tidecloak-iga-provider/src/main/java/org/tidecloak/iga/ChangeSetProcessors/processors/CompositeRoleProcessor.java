@@ -273,7 +273,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
     public void updateAffectedUserContextDrafts(KeycloakSession session , AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> roles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
 
         RealmModel realm = session.getContext().getRealm();
-        TideCompositeRoleMappingDraftEntity affectedCompositeRoleEntity = em.find(TideCompositeRoleMappingDraftEntity.class, affectedUserContextDraft.getChangeRequestKey());
+        TideCompositeRoleMappingDraftEntity affectedCompositeRoleEntity = em.find(TideCompositeRoleMappingDraftEntity.class, affectedUserContextDraft.getChangeRequestKey().getMappingId());
         if (affectedCompositeRoleEntity == null){
             return;
         }
