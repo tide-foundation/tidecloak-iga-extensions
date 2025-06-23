@@ -71,7 +71,7 @@
         </dependency>
         <dependency>
             <groupId>org.tidecloak</groupId>
-            <artifactId>tidecloak-iga-provider</artifactId>
+            <artifactId>tidecloak-basic-iga-provider</artifactId>
             <version>1.0-SNAPSHOT</version>
             <scope>provided</scope>
         </dependency>
