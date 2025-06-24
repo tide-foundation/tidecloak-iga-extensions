@@ -1,7 +1,5 @@
-package org.tidecloak.iga.ChangeSetProcessors;
+package org.tidecloak.tide.iga.ChangeSetProcessors;
 
-import io.quarkus.arc.properties.IfBuildProperty;
-import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.persistence.EntityManager;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
@@ -11,30 +9,35 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
-import org.tidecloak.iga.ChangeSetProcessors.models.ChangeSetRequest;
-import org.tidecloak.iga.ChangeSetProcessors.utils.TideEntityUtils;
-import org.tidecloak.iga.utils.BasicIGAUtils;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
+import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
+import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
+import org.tidecloak.base.iga.interfaces.TideUserAdapter;
+import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.jpa.entities.*;
-import org.tidecloak.shared.enums.WorkflowType;
-import org.tidecloak.shared.enums.models.WorkflowParams;
+import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
+import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
-import org.tidecloak.iga.interfaces.TideUserAdapter;
-import org.tidecloak.jpa.entities.drafting.*;
-import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
-import org.tidecloak.shared.enums.ActionType;
-
+import org.tidecloak.shared.enums.WorkflowType;
+import org.tidecloak.shared.enums.models.WorkflowParams;
 
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import static org.tidecloak.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
-import static org.tidecloak.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
-import static org.tidecloak.iga.ChangeSetProcessors.utils.UserContextUtils.*;
+import static org.tidecloak.base.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
+import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.getUserContextDrafts;
+import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.getUserContextDraftsForRealm;
+import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
 
-public interface TideChangeSetProcessor<T> extends ChangeSetProcessor<T> {
+public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
 
     /**
      * Updates all affected user context drafts triggered by a change request commit.
@@ -49,8 +52,8 @@ public interface TideChangeSetProcessor<T> extends ChangeSetProcessor<T> {
      * @throws Exception If an error occurs during the update process.
      */
     @Override
-    default void updateAffectedUserContexts(KeycloakSession session, RealmModel realm, ChangeSetRequest change, T entity, EntityManager em) throws Exception {
-        ChangeSetProcessor.super.updateAffectedUserContexts(session, realm, change, entity, em);
+    public void updateAffectedUserContexts(KeycloakSession session, RealmModel realm, ChangeSetRequest change, T entity, EntityManager em) throws Exception {
+//        ChangeSetProcessor.super.updateAffectedUserContexts(session, realm, change, entity, em);
 
         // Group proofDetails by changeRequestId
         Map<ChangeRequestKey, List<AccessProofDetailEntity>> groupedProofDetails = getUserContextDraftsForRealm(em, realm.getId()).stream()
@@ -116,7 +119,7 @@ public interface TideChangeSetProcessor<T> extends ChangeSetProcessor<T> {
      * @throws Exception If any error occurs during the commit process.
      */
     @Override
-    default void commit(KeycloakSession session, ChangeSetRequest change, T entity, EntityManager em, Runnable commitCallback) throws Exception {
+    public void commit(KeycloakSession session, ChangeSetRequest change, T entity, EntityManager em, Runnable commitCallback) throws Exception {
         String realmId = session.getContext().getRealm().getId();
         // Retrieve the user context drafts
         List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, change.getChangeSetId(), change.getType());
@@ -234,8 +237,8 @@ public interface TideChangeSetProcessor<T> extends ChangeSetProcessor<T> {
      * @throws Exception If an error occurs during the save operation.
      */
     @Override
-    default void saveUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm, ClientModel clientModel, UserEntity user, ChangeRequestKey changeRequestKey, ChangeSetType type, String proofDraft) throws Exception {
-        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, clientModel, user, changeRequestKey, type, proofDraft);
+    public void saveUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm, ClientModel clientModel, UserEntity user, ChangeRequestKey changeRequestKey, ChangeSetType type, String proofDraft) throws Exception {
+//        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, clientModel, user, changeRequestKey, type, proofDraft);
 
         List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, changeRequestKey.getChangeRequestId(), type);
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
@@ -377,6 +380,25 @@ public interface TideChangeSetProcessor<T> extends ChangeSetProcessor<T> {
             changesetRequestEntity.setDraftRequest(draft);
             em.flush();
         }
+    }
+
+    @Override
+    public void handleCreateRequest(KeycloakSession session, T entity, EntityManager em, Runnable callback) throws Exception {
+    }
+
+    @Override
+    public void handleDeleteRequest(KeycloakSession session, T entity, EntityManager em, Runnable callback) throws Exception {
+
+    }
+
+    @Override
+    public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity userContextDraft, Set<RoleModel> uniqRoles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
+
+    }
+
+    @Override
+    public RoleModel getRoleRequestFromEntity(KeycloakSession session, RealmModel realm, T entity) {
+        return null;
     }
 
 
