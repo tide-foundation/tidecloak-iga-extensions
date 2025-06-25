@@ -657,7 +657,6 @@ public interface ChangeSetProcessor<T> {
 
         } catch (ClassNotFoundException e) {
             // Class not available on classpath
-            System.out.println("TideChangeSetProcessor not available — fallback to default");
             return null;
         } catch (Exception e) {
             throw new RuntimeException("Failed to create TideChangeSetProcessor", e);
