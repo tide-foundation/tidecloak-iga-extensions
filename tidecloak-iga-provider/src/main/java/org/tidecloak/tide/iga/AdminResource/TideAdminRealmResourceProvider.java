@@ -1,4 +1,4 @@
-package org.tidecloak.TideResource;
+package org.tidecloak.tide.iga.AdminResource;
 
 import org.keycloak.Config;
 import org.keycloak.models.KeycloakSession;

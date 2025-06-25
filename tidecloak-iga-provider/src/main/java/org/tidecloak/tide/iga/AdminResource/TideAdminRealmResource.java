@@ -1,4 +1,4 @@
-package org.tidecloak.TideResource;
+package org.tidecloak.tide.iga.AdminResource;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -9,7 +9,6 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriBuilder;
 import org.eclipse.microprofile.openapi.annotations.parameters.Parameter;
 import org.jboss.logging.Logger;
-import org.keycloak.Config;
 import org.keycloak.authentication.actiontoken.execactions.ExecuteActionsActionToken;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.common.util.Time;
@@ -27,22 +26,13 @@ import org.midgard.models.AdminAuthorization;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
 import org.midgard.models.VendorData;
-import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
-import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
-import org.tidecloak.shared.enums.ActionType;
-import org.tidecloak.shared.enums.ChangeSetType;
-import org.tidecloak.shared.enums.DraftStatus;
-import org.tidecloak.shared.enums.WorkflowType;
-import org.tidecloak.shared.enums.models.WorkflowParams;
 
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
-
-import static org.tidecloak.shared.utils.UserContextDraftUtil.findDraftsNotInAccessProof;
 
 public class TideAdminRealmResource {
 
@@ -168,65 +158,6 @@ public class TideAdminRealmResource {
                 vrk);
 
         return response;
-    }
-
-    @POST
-    @Path("toggle-iga")
-    @Produces(MediaType.TEXT_PLAIN)
-
-    public Response toggleIGA(@FormParam("isIGAEnabled") boolean isEnabled) throws Exception {
-        try{
-            RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
-            if(realm.equals(masterRealm)){
-                return buildResponse(400, "Master realm does not support IGA.");
-            }
-
-            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-            auth.realm().requireManageRealm();
-            session.getContext().getRealm().setAttribute("isIGAEnabled", isEnabled);
-            logger.info("IGA has been toggled to : " + isEnabled);
-
-            IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
-            ComponentModel componentModel = realm.getComponentsStream()
-                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
-                    .findFirst()
-                    .orElse(null);
-
-            // if IGA is on and tideIdp exists, we need to enable EDDSA as default sig
-            if (tideIdp != null && componentModel != null) {
-                String currentAlgorithm = session.getContext().getRealm().getDefaultSignatureAlgorithm();
-
-                if (isEnabled) {
-                    if (!"EdDSA".equalsIgnoreCase(currentAlgorithm)) {
-                        session.getContext().getRealm().setDefaultSignatureAlgorithm("EdDSA");
-                        logger.info("IGA has been enabled, default signature algorithm updated to EdDSA");
-                    }
-                    // Check the TideClientDraft Table and generate and AccessProofDetails that dont exist.
-                    List<TideClientDraftEntity> entities = findDraftsNotInAccessProof(em, realm);
-                    entities.forEach(c -> {
-                        try {
-                            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.CLIENT);
-                            ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
-                            changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT).executeWorkflow(session, c, em, WorkflowType.REQUEST, params, null);
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
-                        }
-                    });
-                } else {
-                    // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA
-                    // TODO: Fix error: Uncaught server error: java.lang.RuntimeException: org.keycloak.crypto.SignatureException:
-                    // Signing failed. java.security.InvalidKeyException: Unsupported key type (tide eddsa key)
-                    if (currentAlgorithm.equalsIgnoreCase("EdDSA")) {
-                        session.getContext().getRealm().setDefaultSignatureAlgorithm("RS256");
-                        logger.info("IGA has been disabled, default signature algorithm updated to RS256");
-                    }
-                }
-            }
-            return buildResponse(200, "IGA has been toggled to : " + isEnabled);
-        }catch(Exception e) {
-            logger.error("Error toggling IGA on realm: ", e);
-            throw e;
-        }
     }
 
     @GET

@@ -78,13 +78,36 @@ public class ChangesetRequestAdapter {
 
     public static void saveAdminRejection(KeycloakSession session, String changeSetType, String changeSetRequestID, String changeSetActionType, UserModel adminUser) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        RealmModel realm = session.getContext().getRealm();
 
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSetRequestID, ChangeSetType.valueOf(changeSetType)));
         if(changesetRequestEntity == null){
             throw new Exception("No change set request found with this record id, " + changeSetRequestID);
         }
         UserEntity adminEntity = em.find(UserEntity.class, adminUser.getId());
-        ClientModel client = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
+        ClientModel client = realm.getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
+
+        ComponentModel componentModel = realm.getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .findFirst()
+                .orElse(null);
+
+
+        if(BasicIGAUtils.isIGAEnabled(realm) && componentModel == null) {
+            String json = "{\"id\":\"" + adminUser.getId() + "\"}";
+            AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), null, adminUser.getId(), em);
+            changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
+            List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
+            draftRecordEntity.forEach(d -> {
+                try {
+                    BasicIGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), d);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+            return;
+        }
+
         List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
                 .setParameter("user", adminEntity)
                 .setParameter("clientId", client.getId()).getResultList();
@@ -100,7 +123,7 @@ public class ChangesetRequestAdapter {
         List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
         draftRecordEntity.forEach(d -> {
             try {
-                BasicIGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), draftRecordEntity);
+                BasicIGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), d);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
