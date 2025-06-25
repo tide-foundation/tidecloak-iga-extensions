@@ -88,35 +88,34 @@
             <scope>provided</scope>
         </dependency>
     </dependencies>
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.11.0</version>
-                <configuration>
-                    <!-- Always exclude tide-related sources by default -->
-                    <excludes>
-                        <exclude>org/tidecloak/tide/iga/**/*.java</exclude>
-                    </excludes>
-                </configuration>
-            </plugin>
-        </plugins>
-    </build>
-
     <profiles>
         <profile>
-            <id>with-tide</id>
+            <id>base-iga</id>
             <build>
                 <plugins>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-compiler-plugin</artifactId>
+                        <version>3.11.0</version>
                         <configuration>
-                            <!-- In profile: compile everything, including tide -->
                             <excludes>
-                                <!-- no excludes: include tide/** -->
+                                <exclude>org/tidecloak/tide/iga/**/*.java</exclude>
                             </excludes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>tide-iga</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <version>3.11.0</version>
+                        <configuration>
+                            <excludes/>
                         </configuration>
                     </plugin>
                 </plugins>
