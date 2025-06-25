@@ -17,7 +17,6 @@ import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
-import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.services.ErrorPage;
 import org.keycloak.services.ErrorResponse;
@@ -26,11 +25,10 @@ import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluato
 import org.midgard.Midgard;
 import org.midgard.models.AdminAuthorization;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
-import org.midgard.models.RuleDefinition;
 import org.midgard.models.UserContext.UserContext;
 import org.midgard.models.VendorData;
-import org.tidecloak.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
-import org.tidecloak.iga.interfaces.ChangesetRequestAdapter;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
@@ -43,9 +41,7 @@ import org.tidecloak.shared.enums.models.WorkflowParams;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
-import java.util.stream.Collectors;
 
-import static org.tidecloak.iga.TideRequests.TideRoleRequests.*;
 import static org.tidecloak.shared.utils.UserContextDraftUtil.findDraftsNotInAccessProof;
 
 public class TideAdminRealmResource {

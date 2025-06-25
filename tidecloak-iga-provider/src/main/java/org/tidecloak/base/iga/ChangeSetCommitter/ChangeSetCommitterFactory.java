@@ -10,7 +10,7 @@ public class ChangeSetCommitterFactory {
     public static ChangeSetCommitter getCommitter(KeycloakSession session) throws Exception {
         try {
             // Attempt to dynamically load the override factory
-            Class<?> clazz = Class.forName("org.tidecloak.base.iga.ChangeSetCommitter.TideChangeSetCommitterFactory");
+            Class<?> clazz = Class.forName("org.tidecloak.tide.iga.ChangeSetCommitter.TideChangeSetCommitterFactory");
             return (ChangeSetCommitter) clazz
                     .getMethod("getCommitter", KeycloakSession.class)
                     .invoke(null, session);

@@ -645,7 +645,7 @@ public interface ChangeSetProcessor<T> {
     @SuppressWarnings("unchecked")
     private static <T> ChangeSetProcessor<T> loadTideProcessor() {
         try {
-            Class<?> clazz = Class.forName("org.tidecloak.tide.iga.TideChangeSetProcessor");
+            Class<?> clazz = Class.forName("org.tidecloak.tide.iga.ChangeSetProcessors.TideChangeSetProcessor");
 
             Object instance = clazz.getConstructor().newInstance();
 

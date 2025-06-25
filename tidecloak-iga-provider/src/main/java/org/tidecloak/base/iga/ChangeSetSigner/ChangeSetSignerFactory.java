@@ -11,7 +11,7 @@ public class ChangeSetSignerFactory {
     public static ChangeSetSigner getSigner(KeycloakSession session) throws Exception {
         try {
             // Attempt to dynamically load the override factory
-            Class<?> clazz = Class.forName("org.tidecloak.base.iga.ChangeSetSigner.TideChangeSetSignerFactory");
+            Class<?> clazz = Class.forName("org.tidecloak.tide.iga.ChangeSetSigner.TideChangeSetSignerFactory");
             return (ChangeSetSigner) clazz
                     .getMethod("getSigner", KeycloakSession.class)
                     .invoke(null, session);
