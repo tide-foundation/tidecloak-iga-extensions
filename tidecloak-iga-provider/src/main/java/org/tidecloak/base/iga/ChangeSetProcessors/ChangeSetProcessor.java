@@ -225,6 +225,7 @@ public interface ChangeSetProcessor<T> {
                 changesetRequestEntity.getAdminAuthorizations().clear();
                 em.flush();
             }
+            return;
         }
 
         ChangeSetProcessor<T> processor = loadTideProcessor();
