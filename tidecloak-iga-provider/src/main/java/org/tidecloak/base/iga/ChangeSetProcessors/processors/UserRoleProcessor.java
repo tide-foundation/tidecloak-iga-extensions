@@ -9,8 +9,8 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.representations.AccessToken;
-import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
-import org.midgard.models.UserContext.UserContext;
+import org.tidecloak.shared.models.InitializerCertificateModel.InitializerCertificate;
+import org.tidecloak.shared.models.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.base.iga.ChangeSetProcessors.keys.UserClientKey;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
@@ -354,12 +354,12 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             String initCert = tideRoleDraftEntity.get(0).getInitCert();
             if(initCert != null && !initCert.isEmpty()){
                 UserContext userContext = new UserContext(userContextDraft);
-                InitializerCertifcate initializerCertifcate = InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
-                userContext.setInitCertHash(initializerCertifcate.hash());
+                InitializerCertificate initializerCertificate = InitializerCertificate.FromString(tideRoleDraftEntity.get(0).getInitCert());
+                userContext.setInitCertHash(initializerCertificate.hash());
 
                 UserContext oldUserContext = new UserContext(affectedUserContextDraft.getProofDraft());
                 if(oldUserContext.getInitCertHash() != null || oldUserContext.getThreshold() != 0){
-                    userContext.setThreshold(initializerCertifcate.getPayload().getThreshold());
+                    userContext.setThreshold(initializerCertificate.getPayload().getThreshold());
                     affectedUserContextDraft.setProofDraft(userContext.ToString());
                 }
                 return;

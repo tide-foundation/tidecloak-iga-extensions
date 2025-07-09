@@ -6,8 +6,6 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
-import org.midgard.models.AdminAuthorization;
-import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.jpa.entities.AdminAuthorizationEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
@@ -17,6 +15,8 @@ import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.List;
 
 public class ChangesetRequestAdapter {
@@ -52,28 +52,8 @@ public class ChangesetRequestAdapter {
             });
             return;
         }
+        invokeSaveAdminAuthorizaton(session, changeSetType, changeSetRequestID, changeSetActionType, adminUser, adminTideAuthMsg, adminTideBlindSig, adminSessionApprovalSig);
 
-        List<UserClientAccessProofEntity> adminAccessProof = em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
-            .setParameter("user", adminEntity)
-            .setParameter("clientId", client.getId()).getResultList();
-
-        if ( adminAccessProof == null ){
-            throw new Exception("This admin user does not have any realm management roles, " + adminUser.getId());
-        }
-
-        UserContext adminContext = new UserContext(adminAccessProof.get(0).getAccessProof());
-        AdminAuthorization adminAuthorization = new AdminAuthorization(adminContext.ToString(), adminAccessProof.get(0).getAccessProofSig(), adminTideAuthMsg, adminTideBlindSig, adminSessionApprovalSig);
-        AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), adminAuthorization.ToString(), adminUser.getId(), em);
-        changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
-
-        List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
-        draftRecordEntity.forEach(d -> {
-            try {
-                BasicIGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), d);
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        });
     }
 
     public static void saveAdminRejection(KeycloakSession session, String changeSetType, String changeSetRequestID, String changeSetActionType, UserModel adminUser) throws Exception {
@@ -197,7 +177,7 @@ public class ChangesetRequestAdapter {
         return em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSetId, changeSetType));
     }
 
-    private static AdminAuthorizationEntity createAdminAuthorizationEntity(String changeSetRequestId, ChangeSetType changeSetType, String adminAuthorization, String userId, EntityManager em) throws Exception {
+    public static AdminAuthorizationEntity createAdminAuthorizationEntity(String changeSetRequestId, ChangeSetType changeSetType, String adminAuthorization, String userId, EntityManager em) throws Exception {
 
         ChangesetRequestEntity changesetRequestEntity = em. find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSetRequestId, changeSetType));
         if(changesetRequestEntity == null){
@@ -243,5 +223,66 @@ public class ChangesetRequestAdapter {
                      return !entity.isEmpty();
                  }).count();
 
+    }
+
+    /**
+     * If the Tide adapter class is present **and** it has a static method
+     * `public static void doStaticThing(Request req)`, call it and return true.
+     * Otherwise, return false (or rethrow on other errors).
+     */
+
+    /**
+     * If the TideChangesetRequestAdapter class is present and has the expected
+     * static saveAdminAuthorizaton(...) method, invoke it. Otherwise no-op.
+     */
+    public static void invokeSaveAdminAuthorizaton(
+            KeycloakSession session,
+            String changeSetType,
+            String changeSetRequestID,
+            String changeSetActionType,
+            UserModel adminUser,
+            String adminTideAuthMsg,
+            String adminTideBlindSig,
+            String adminSessionApprovalSig
+    ) {
+        try {
+            // 1) Load the adapter class by name
+            Class<?> clazz = Class.forName("org.tidecloak.tide.iga.interfaces.TideChangesetRequestAdapter");
+
+            // 2) Locate the static method with the exact signature
+            Method m = clazz.getMethod(
+                    "saveAdminAuthorizaton",
+                    KeycloakSession.class,
+                    String.class,
+                    String.class,
+                    String.class,
+                    UserModel.class,
+                    String.class,
+                    String.class,
+                    String.class
+            );
+
+            // 3) Invoke it (null target because it's static)
+            m.invoke(
+                    null,
+                    session,
+                    changeSetType,
+                    changeSetRequestID,
+                    changeSetActionType,
+                    adminUser,
+                    adminTideAuthMsg,
+                    adminTideBlindSig,
+                    adminSessionApprovalSig
+            );
+
+        } catch (ClassNotFoundException e) {
+            // Tide adapter not on classpath → nothing to do
+        } catch (NoSuchMethodException e) {
+            throw new RuntimeException(
+                    "org.tidecloak.tide.iga.interfaces.TideChangesetRequestAdapter is present but missing saveAdminAuthorizaton"+"(...)", e);
+        } catch (IllegalAccessException | InvocationTargetException e) {
+            throw new RuntimeException(
+                    "Failed to invoke saveAdminAuthorizaton on org.tidecloak.tide.iga.interfaces.TideChangesetRequestAdapter", e);
+        }
     }
 }
