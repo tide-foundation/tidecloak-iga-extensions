@@ -354,12 +354,12 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             String initCert = tideRoleDraftEntity.get(0).getInitCert();
             if(initCert != null && !initCert.isEmpty()){
                 UserContext userContext = new UserContext(userContextDraft);
-                InitializerCertifcate initializerCertifcate = InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
-                userContext.setInitCertHash(initializerCertifcate.hash());
+                InitializerCertificate initializerCertificate = InitializerCertificate.FromString(tideRoleDraftEntity.get(0).getInitCert());
+                userContext.setInitCertHash(initializerCertificate.hash());
 
                 UserContext oldUserContext = new UserContext(affectedUserContextDraft.getProofDraft());
                 if(oldUserContext.getInitCertHash() != null || oldUserContext.getThreshold() != 0){
-                    userContext.setThreshold(initializerCertifcate.getPayload().getThreshold());
+                    userContext.setThreshold(initializerCertificate.getPayload().getThreshold());
                     affectedUserContextDraft.setProofDraft(userContext.ToString());
                 }
                 return;
