@@ -53,8 +53,6 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
      */
     @Override
     public void updateAffectedUserContexts(KeycloakSession session, RealmModel realm, ChangeSetRequest change, T entity, EntityManager em) throws Exception {
-//        ChangeSetProcessor.super.updateAffectedUserContexts(session, realm, change, entity, em);
-
         // Group proofDetails by changeRequestId
         Map<ChangeRequestKey, List<AccessProofDetailEntity>> groupedProofDetails = getUserContextDraftsForRealm(em, realm.getId()).stream()
                 .filter(proof -> !Objects.equals(proof.getChangeRequestKey().getChangeRequestId(), change.getChangeSetId()))
@@ -152,7 +150,6 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
         }
 
         // Regenerate for client full scope change request.
-        // Regenerate for client full scope change request.
         List<Map.Entry<ChangesetRequestEntity,TideClientDraftEntity>> reqAndDrafts =
                 em.createNamedQuery("getAllChangeRequestsByChangeSetType", ChangesetRequestEntity.class)
                         .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE)
@@ -217,9 +214,6 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
 
         // Flush once after batch processing
         em.flush();
-
-        // Update affected user contexts
-        updateAffectedUserContexts(session, session.getContext().getRealm(), change, entity, em);
     }
 
     /**
