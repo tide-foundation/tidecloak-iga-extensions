@@ -231,6 +231,7 @@ public interface ChangeSetProcessor<T> {
         if (processor != null) {
             processor.commit(session, change, entity, em, commitCallback);
         }
+        updateAffectedUserContexts(session, session.getContext().getRealm(), change, entity, em);
     }
 
     /**
