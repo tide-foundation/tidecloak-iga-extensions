@@ -20,6 +20,7 @@ import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
+import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.tide.iga.utils.IGAUtils;
@@ -30,8 +31,9 @@ import java.util.stream.Stream;
 public class FirstAdmin implements Authorizer {
 
     @Override
-    public Response signWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, Object draftEntity, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
+    public Response signWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, List<?> draftEntities, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();
+        Object draftEntity = draftEntities.get(0);
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
         if (changesetRequestEntity == null){
             throw new BadRequestException("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
@@ -101,13 +103,17 @@ public class FirstAdmin implements Authorizer {
         response.put("requiresApprovalPopup", "false");
 
 
-        BasicIGAUtils.updateDraftStatus(changeSet.getType(), changeSet.getActionType(), draftEntity);
+        draftEntities.forEach(d -> {
+
+            BasicIGAUtils.updateDraftStatus(BasicIGAUtils.getTypeFromEntity(d), BasicIGAUtils.getActionTypeFromEntity(d), d);
+        });
 
         return Response.ok(objectMapper.writeValueAsString(response)).build();
     }
 
     @Override
     public Response commitWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, Object draftEntity, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
+        if(changeSet.getType().equals(ChangeSetType.RAGNAROK)) throw new BadRequestException("Offboarding requires a minimum of 3 tide-realm-administrators.");
         ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
 
         WorkflowParams workflowParams = new WorkflowParams(null, false, null, changeSet.getType());

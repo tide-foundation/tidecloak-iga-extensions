@@ -13,8 +13,9 @@ import java.util.List;
 
 public class BasicIGASigner implements ChangeSetSigner{
     @Override
-    public Response sign(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, Object draftEntity, AdminAuth adminAuth) throws Exception {
+    public Response sign(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, List<?> draftEntities, AdminAuth adminAuth) throws Exception {
         // Approve directly without cryptographic signing
+        Object draftEntity = draftEntities.get(0);
         List<AccessProofDetailEntity> proofDetails = BasicIGAUtils.getAccessProofs(em, BasicIGAUtils.getEntityChangeRequestId(draftEntity), changeSet.getType());;
         BasicIGAUtils.approveChangeRequest(session, adminAuth.getUser(), proofDetails, em, changeSet);
         BasicIGAUtils.updateDraftStatus(session, changeSet.getType(), changeSet.getChangeSetId(), changeSet.getActionType(), draftEntity);

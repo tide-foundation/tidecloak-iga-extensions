@@ -56,6 +56,7 @@ public class IGAUtils {
         req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
         req.SetInitializationCertificate(initCert);
         req.SetUserContexts(userContexts);
+
         req.SetAuthorization(
                 Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
         );

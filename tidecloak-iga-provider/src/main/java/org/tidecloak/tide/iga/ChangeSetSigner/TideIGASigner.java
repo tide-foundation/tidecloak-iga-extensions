@@ -17,7 +17,7 @@ import java.util.List;
 
 public class TideIGASigner implements ChangeSetSigner {
     @Override
-    public Response sign(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, Object draftEntity, AdminAuth auth) throws Exception {
+    public Response sign(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, List<?> draftEntities, AdminAuth auth) throws Exception {
         // Check for key provider
         ComponentModel componentModel = realm.getComponentsStream()
                 .filter(x -> x.getProviderId().equalsIgnoreCase(Constants.TIDE_VENDOR_KEY))  // Use .equals for string comparison
@@ -45,7 +45,7 @@ public class TideIGASigner implements ChangeSetSigner {
         // Delegate to the appropriate sub-strategy
         Authorizer authorizerSigner = AuthorizerFactory.getSigner(authorizerType);
         if (authorizerSigner != null) {
-            return authorizerSigner.signWithAuthorizer(changeSet, em, session, realm, draftEntity, auth, primaryAuthorizer, componentModel);
+            return authorizerSigner.signWithAuthorizer(changeSet, em, session, realm, draftEntities, auth, primaryAuthorizer, componentModel);
         }
 
         return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported authorizer type").build();

@@ -1,5 +1,6 @@
 package org.tidecloak.tide.iga.authorizer;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.BadRequestException;
@@ -24,6 +25,7 @@ import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
+import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
@@ -39,7 +41,7 @@ import static org.tidecloak.base.iga.utils.BasicIGAUtils.sortAccessProof;
 public class MultiAdmin implements Authorizer{
 
     @Override
-    public Response signWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, Object draftEntity, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
+    public Response signWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, List<?> draftEntities, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
         IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
         ObjectMapper objectMapper = new ObjectMapper();
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
@@ -123,6 +125,8 @@ public class MultiAdmin implements Authorizer{
         }
 
         var config = componentModel.getConfig();
+        String authorizerType = authorizer.getType();
+
         List<AccessProofDetailEntity> proofDetails = BasicIGAUtils.getAccessProofs(em, BasicIGAUtils.getEntityChangeRequestId(draftEntity), changeSet.getType());
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
 
@@ -195,7 +199,6 @@ public class MultiAdmin implements Authorizer{
 
         WorkflowParams workflowParams = new WorkflowParams(null, false, null, changeSet.getType());
         processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, draftEntity, em, WorkflowType.COMMIT, workflowParams, null);
-        String authorizerType = authorizer.getType();
         if (isAuthorityAssignment) {
             if (authorizer.getType().equals(org.tidecloak.shared.Constants.TIDE_INITIAL_AUTHORIZER)){
                 authorizer.setType(org.tidecloak.shared.Constants.TIDE_MULTI_ADMIN_AUTHORIZER);

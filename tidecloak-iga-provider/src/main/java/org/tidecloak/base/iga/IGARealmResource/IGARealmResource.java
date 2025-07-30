@@ -37,6 +37,7 @@ import org.tidecloak.jpa.entities.drafting.*;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 
 import java.util.*;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static org.tidecloak.shared.utils.UserContextDraftUtil.findDraftsNotInAccessProof;
@@ -715,8 +716,19 @@ public class IGARealmResource {
 
             for (ChangesetRequestEntity changeSet : changeRequests) {
                 try {
-                    Object draftRecordEntity = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getChangesetType(), changeSet.getChangesetRequestId()).get(0);
-                    Response singleResp = signer.sign(new ChangeSetRequest(changeSet.getChangesetRequestId(), changeSet.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth.adminAuth());
+                    List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(
+                            em,
+                            changeSet.getChangesetType(),
+                            changeSet.getChangesetRequestId()
+                    );
+
+                    boolean allDelete = draftRecordEntities.stream()
+                            .map(BasicIGAUtils::getActionTypeFromEntity)
+                            .allMatch(actionType -> actionType == ActionType.DELETE);
+
+                    ActionType actionType = allDelete ? ActionType.DELETE : ActionType.CREATE;
+
+                    Response singleResp = signer.sign(new ChangeSetRequest(changeSet.getChangesetRequestId(), changeSet.getChangesetType(), actionType), em, session, realm, draftRecordEntities, auth.adminAuth());
                     // extract that JSON payload
                     String jsonBody = singleResp.readEntity(String.class);
 
@@ -729,12 +741,12 @@ public class IGARealmResource {
         }
         else {
             for (ChangeSetRequest changeSet : changeSets) {
-                Object draftRecordEntity = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId()).get(0);
-                if (draftRecordEntity == null) {
+                List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
+                if (draftRecordEntities == null || draftRecordEntities.isEmpty()) {
                     throw new BadRequestException("Unsupported change set type for ID: " + changeSet.getChangeSetId());
                 }
                 try {
-                    Response singleResp = signer.sign(changeSet, em, session, realm, draftRecordEntity, auth.adminAuth());
+                    Response singleResp = signer.sign(changeSet, em, session, realm, draftRecordEntities, auth.adminAuth());
                     // extract that JSON payload
                     String jsonBody = singleResp.readEntity(String.class);
 
@@ -753,15 +765,22 @@ public class IGARealmResource {
         auth.realm().requireManageRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
+        List<ChangeSetRequest> filtered = new ArrayList<>(changeSets.stream()
+                .collect(Collectors.toMap(
+                        ChangeSetRequest::getChangeSetId,
+                        Function.identity(),
+                        (existing, replacement) -> existing
+                ))
+                .values());
 
-        for (ChangeSetRequest changeSet: changeSets){
-            Object draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId()).get(0);
-            if (draftRecordEntity ==  null) {
+        for (ChangeSetRequest changeSet: filtered){
+            List<?> draftRecordEntities= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
+            if (draftRecordEntities ==  null || draftRecordEntities.isEmpty()) {
                 return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
             }
             try {
                 ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
-                committer.commit(changeSet, em, session, realm, draftRecordEntity, auth.adminAuth());
+                committer.commit(changeSet, em, session, realm, draftRecordEntities.get(0), auth.adminAuth());
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
