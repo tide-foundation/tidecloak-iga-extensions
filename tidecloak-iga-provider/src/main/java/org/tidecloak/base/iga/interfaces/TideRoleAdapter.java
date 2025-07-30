@@ -10,6 +10,7 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.shared.Constants;
@@ -29,7 +30,7 @@ import static org.tidecloak.base.iga.ChangeSetProcessors.utils.ChangeRequestUtil
 public class TideRoleAdapter extends RoleAdapter {
     private final KeycloakSession session;
     private final RealmModel realm;
-    private final ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+    private final ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
 
 
     public TideRoleAdapter(KeycloakSession session, RealmModel realm, EntityManager em, RoleEntity role) {

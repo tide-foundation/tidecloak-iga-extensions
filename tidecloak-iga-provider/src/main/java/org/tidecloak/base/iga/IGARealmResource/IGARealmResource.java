@@ -20,6 +20,7 @@ import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluato
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitter;
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitterFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequestList;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
@@ -93,7 +94,7 @@ public class IGARealmResource {
                     entities.forEach(c -> {
                         try {
                             WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.CLIENT);
-                            ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+                            ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
                             changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT).executeWorkflow(session, c, em, WorkflowType.REQUEST, params, null);
                         } catch (Exception e) {
                             throw new RuntimeException(e);
@@ -327,7 +328,7 @@ public class IGARealmResource {
     @Path("generate-default-user-context")
     public Response generateDefaultUserContext(@Parameter(description = "Clients to generate the default user context for") List<String> clients) {
         auth.realm().requireManageRealm();
-        ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+        ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
         try {
