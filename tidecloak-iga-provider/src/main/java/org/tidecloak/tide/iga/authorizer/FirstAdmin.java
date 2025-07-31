@@ -32,6 +32,7 @@ public class FirstAdmin implements Authorizer {
 
     @Override
     public Response signWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, List<?> draftEntities, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
+        if(changeSet.getType().equals(ChangeSetType.RAGNAROK)) throw new BadRequestException("Only users with the tide-realm-admin role allowed to sign the offboarding request");
         ObjectMapper objectMapper = new ObjectMapper();
         Object draftEntity = draftEntities.get(0);
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
