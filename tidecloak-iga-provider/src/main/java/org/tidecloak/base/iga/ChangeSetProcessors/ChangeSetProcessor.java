@@ -145,7 +145,7 @@ public interface ChangeSetProcessor<T> {
             return;
         }
         List<ClientModel> affectedClients = getAffectedClients(session, realm, entity, em);
-        ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
+        ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();// Initialize the processor factory
 
         for (ClientModel client : affectedClients) {
 
@@ -466,7 +466,7 @@ public interface ChangeSetProcessor<T> {
 
 
     default String generateTransformedUserContext(KeycloakSession session, RealmModel realm, ClientModel client, UserModel user, String scopeParam, T entity, AccessToken token) throws Exception {
-        ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
+        ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();// Initialize the processor factory;
         AccessToken accessToken = this.transformedToken(token, user);
 
         ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);

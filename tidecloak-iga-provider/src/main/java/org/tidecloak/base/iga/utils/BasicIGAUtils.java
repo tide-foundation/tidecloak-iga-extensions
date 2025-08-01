@@ -34,6 +34,7 @@ import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.shared.models.SecretKeys;
 import org.tidecloak.shared.models.UserContext;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 
 import java.io.UncheckedIOException;
 import java.lang.reflect.Method;
@@ -604,7 +605,8 @@ public class BasicIGAUtils {
 
 
             // Process grouped entities
-            ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
+            ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();// Initialize the processor factory
+
             ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
             ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
 

@@ -698,7 +698,7 @@ public class IGARealmResource {
                                             Collectors.toList()
                                     )
                             ));
-            ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
+            ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();
 
             List<ChangesetRequestEntity> changeRequests = requests.entrySet().stream()
                     .flatMap(entry -> {
@@ -805,7 +805,7 @@ public class IGARealmResource {
 
                 mapping.forEach(m -> {
                     em.lock(m, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
-                    ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
+                    ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();// Initialize the processor factory
                     WorkflowParams params = new WorkflowParams(null, false, changeSet.getActionType(), changeSet.getType());
                     try {
                         processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, m, em, WorkflowType.CANCEL, params, null);
