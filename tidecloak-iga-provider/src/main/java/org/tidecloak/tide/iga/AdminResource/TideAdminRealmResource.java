@@ -20,7 +20,7 @@ import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.services.ErrorPage;
 import org.keycloak.services.ErrorResponse;
 import org.keycloak.services.resources.LoginActionsService;
-import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
+import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.AdminAuthorization;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
