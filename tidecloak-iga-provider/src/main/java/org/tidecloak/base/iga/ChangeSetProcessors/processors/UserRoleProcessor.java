@@ -9,6 +9,7 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.representations.AccessToken;
+import org.midgard.models.AuthorizerPolicyModel.AuthorizerPolicy;
 import org.tidecloak.shared.models.InitializerCertificateModel.InitializerCertificate;
 import org.tidecloak.shared.models.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
@@ -354,8 +355,8 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             String initCert = tideRoleDraftEntity.get(0).getInitCert();
             if(initCert != null && !initCert.isEmpty()){
                 UserContext userContext = new UserContext(userContextDraft);
-                InitializerCertificate initializerCertificate = InitializerCertificate.FromString(tideRoleDraftEntity.get(0).getInitCert());
-                userContext.setInitCertHash(initializerCertificate.hash());
+                AuthorizerPolicy authorizerPolicy = AuthorizerPolicy.fromCompactString(tideRoleDraftEntity.get(0).getInitCert());
+                userContext.setInitCertHash(authorizerPolicy.);
 
                 UserContext oldUserContext = new UserContext(affectedUserContextDraft.getProofDraft());
                 if(oldUserContext.getInitCertHash() != null || oldUserContext.getThreshold() != 0){
