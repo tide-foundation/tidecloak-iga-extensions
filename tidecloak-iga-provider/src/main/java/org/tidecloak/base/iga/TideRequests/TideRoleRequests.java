@@ -9,11 +9,13 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
+import org.midgard.models.AuthorizerPolicyModel.AuthorizerPolicy;
 import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.shared.models.InitializerCertificateModel.InitializerCertificate;
+import org.tidecloak.tide.iga.ForsetiPolicyFactory;
 
 import java.util.*;
 
@@ -36,10 +38,12 @@ public class TideRoleRequests {
         ArrayList<String> signModels = new ArrayList<String>();
         signModels.addAll(List.of("UserContext:1", "Rules:1", "Offboard:1", "RotateVRK:1"));
 
-        InitializerCertificate initCert = createRoleInitCert(session, resource, tideRealmAdmin, "1", "EdDSA", signModels);
+        ArrayList<String> authFlows = new ArrayList<String>(List.of("Admin:2"));
 
-        if (initCert == null){
-            throw new Exception("Unable to create initCert for TideRealmAdminRole, tideThreshold needs to be set");
+        AuthorizerPolicy authorizerPolicy = createAdminAuthorizerPolicy(session, resource, tideRealmAdmin, "1", "EdDSA", authFlows, signModels);
+
+        if (authorizerPolicy == null){
+            throw new Exception("Unable to create authorizerPolicy for TideRealmAdminRole, tideThreshold needs to be set");
         }
 
         RoleEntity roleEntity = em.find(RoleEntity.class, tideRealmAdmin.getId());
@@ -48,8 +52,8 @@ public class TideRoleRequests {
                 .getSingleResult();
 
         ObjectMapper objectMapper = new ObjectMapper();
-        String initCertString =  objectMapper.writeValueAsString(initCert);
-        roleDraft.setInitCert(initCertString);
+        String authorizerPolicyString =  objectMapper.writeValueAsString(authorizerPolicy);
+        roleDraft.setInitCert(authorizerPolicyString);
 
         em.flush();
     }
@@ -80,7 +84,7 @@ public class TideRoleRequests {
         if(roleDraft.isEmpty()){
             throw new Exception("This authorizer role does not have an role draft entity, " + role.getName());
         }
-        InitializerCertificate prevInitializerCertifcate = InitializerCertificate.FromString(roleDraft.get(0).getInitCert());
+        AuthorizerPolicy prevAuthorizerPolicy = AuthorizerPolicy.fromCompactString(roleDraft.get(0).getInitCert());
 
         List<TideUserRoleMappingDraftEntity> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
                 .setParameter("draftStatus", DraftStatus.ACTIVE)
@@ -89,7 +93,6 @@ public class TideRoleRequests {
 
         int numberOfActiveAdmins = users.size();
 
-        // TODO: update to be able to change additional admin value when we can approve multiple admins at a time. ATM its one at a time.
         int threshold = Math.max(1, (int) (thresholdPercentage * (numberOfActiveAdmins + numberOfAdditionalAdmins)));
 
         // Grab from tide key provider
@@ -101,11 +104,13 @@ public class TideRoleRequests {
         MultivaluedHashMap<String, String> config = componentModel.getConfig();
         String vvkId = config.getFirst("vvkId");
         String vendor = session.getContext().getRealm().getName();
-        String resource = prevInitializerCertifcate.getPayload().getResource();
-        ArrayList<String> signModels = prevInitializerCertifcate.getPayload().getSignModels();
+        String resource = prevAuthorizerPolicy.payload().resource;
+        ArrayList<String> authFlows = new ArrayList<>(prevAuthorizerPolicy.payload().authFlows);
+        ArrayList<String> signModels = new ArrayList<>(prevAuthorizerPolicy.payload().signmodels);
 
 
-        InitializerCertificate initializerCertifcate = InitializerCertificate.constructInitCert(vvkId, algorithm, certVersion, vendor, resource, threshold,  signModels);
+
+        AuthorizerPolicy authorizerPolicy = ForsetiPolicyFactory.createRoleAuthorizerPolicy(session, resource, role, certVersion, algorithm, authFlows, signModels);
 
         List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", recordId).getResultList();
 
@@ -113,7 +118,7 @@ public class TideRoleRequests {
             throw new Exception("There is already a pending change request with this record ID, " + recordId);
         }
         ObjectMapper objectMapper = new ObjectMapper();
-        String initCertString =  objectMapper.writeValueAsString(initializerCertifcate);
+        String initCertString =  objectMapper.writeValueAsString(authorizerPolicy);
         RoleInitializerCertificateDraftEntity initCertDraft = new RoleInitializerCertificateDraftEntity();
         initCertDraft.setId(KeycloakModelUtils.generateId());
         initCertDraft.setChangesetRequestId(recordId);
@@ -215,6 +220,29 @@ public class TideRoleRequests {
         return InitializerCertificate.constructInitCert(vvkId, algorithm, certVersion, vendor, resource, threshold,  signModels);
 
     }
+
+    public static AuthorizerPolicy createAdminAuthorizerPolicy(KeycloakSession session, String resource, RoleModel role , String certVersion, String algorithm, ArrayList<String> authFlows, ArrayList<String> signModels) throws JsonProcessingException {
+        // Grab from tide key provider
+        ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
+                .filter(x -> x.getProviderId().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_VENDOR_KEY))
+                .findFirst()
+                .orElse(null);
+
+        MultivaluedHashMap<String, String> config = componentModel.getConfig();
+        String vvkId = config.getFirst("vvkId");
+        String vendor = session.getContext().getRealm().getName();
+
+        String tideThreshold = role.getFirstAttribute("tideThreshold");
+        if (tideThreshold == null ) {
+            return null;
+        }
+
+        int threshold = Integer.parseInt(tideThreshold);
+
+        return ForsetiPolicyFactory.createRoleAuthorizerPolicy(session, resource, role, certVersion, algorithm, authFlows, signModels);
+
+    }
+
 
     private static Map<String, Object> expandCompositeRolesAsNestedStructure(RoleModel rootRole) {
         Set<RoleModel> visited = new HashSet<>();
