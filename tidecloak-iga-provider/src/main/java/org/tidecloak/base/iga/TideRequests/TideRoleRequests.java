@@ -46,37 +46,55 @@ public class TideRoleRequests {
      * Admin:2 default (draft AP) into role draft
      * ---------------------------------------------------------------------- */
 
-    /** Create the realm admin role and persist its AP (compact "h.p") in the legacy initCert column. */
+    /**
+     * Create the realm admin role and persist BOTH AP compacts (auth + sign)
+     * as a small JSON bundle in the legacy initCert column:
+     * { "auth": "<h.p>", "sign": "<h.p>" }
+     *
+     * The default C# template is loaded from:
+     *   src/main/resources/policies/DefaultTideAdminPolicy.cs
+     */
     public static void createRealmAdminAuthorizerPolicy(KeycloakSession session) throws Exception {
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-
-        ClientModel realmManagement = session.getContext().getRealm()
+        var em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        ClientModel realmMgmt = session.getContext().getRealm()
                 .getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
 
         String resource = Constants.ADMIN_CONSOLE_CLIENT_ID;
-
-        RoleModel kcRealmAdmin = session.getContext().getRealm()
+        RoleModel realmAdmin = session.getContext().getRealm()
                 .getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID)
                 .getRole(AdminRoles.REALM_ADMIN);
 
-        RoleModel tideRealmAdmin = realmManagement.addRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-        tideRealmAdmin.addCompositeRole(kcRealmAdmin);
+        RoleModel tideRealmAdmin = realmMgmt.addRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        tideRealmAdmin.addCompositeRole(realmAdmin);
         tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
 
-        // signmodels the policy will allow (UserContext signing + optional Rules)
-        List<String> signModels = List.of("UserContext:2", "Rules:1");
+        ArrayList<String> signModels = new ArrayList<>(List.of("UserContext:1", "Rules:1"));
 
-        // Build a DRAFT (unsigned) AP using the default Admin:2 → UserContext:1 template
-        AuthorizerPolicy ap = ForsetiPolicyFactory.createRoleAuthorizerPolicy_DefaultAdminTemplate(
-                session, resource, tideRealmAdmin, signModels, NOOP_CODE_STORE
+        // Compile once, build two APs
+        String policySource = loadDefaultPolicySource();
+        Map<String, AuthorizerPolicy> aps = ForsetiPolicyFactory.createRoleAuthorizerPolicies(
+                session,
+                resource,
+                tideRealmAdmin,
+                signModels,
+                policySource,
+                "Ork.Forseti.Builtins.AuthorizerTemplatePolicy",
+                "1.0.0",
+                NOOP_CODE_STORE
         );
-        if (ap == null) throw new Exception("Unable to create default AuthorizerPolicy for admin role");
 
-        // Persist compact "h.p" (unsigned) in the legacy initCert column
-        RoleEntity roleEntity = session.getProvider(JpaConnectionProvider.class).getEntityManager()
-                .find(RoleEntity.class, tideRealmAdmin.getId());
-        TideRoleDraftEntity roleDraft = requireRoleDraft(em, roleEntity);
-        roleDraft.setInitCert(ap.toCompactString());
+        var roleEntity = em.find(org.keycloak.models.jpa.entities.RoleEntity.class, tideRealmAdmin.getId());
+        var roleDraft = em.createNamedQuery("getRoleDraftByRole", org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity.class)
+                .setParameter("role", roleEntity)
+                .getSingleResult();
+
+        // Store both compacts in one JSON blob
+        String bundle = new ObjectMapper().writeValueAsString(Map.of(
+                "auth", aps.get("auth").toCompactString(),
+                "sign", aps.get("sign").toCompactString()
+        ));
+        roleDraft.setInitCert(bundle);
+
         em.flush();
     }
 
@@ -87,6 +105,8 @@ public class TideRoleRequests {
     /**
      * Build a new draft AP for a role, copying routing/signmodels from the current draft,
      * but recomputing threshold based on users and "additional admins".
+     * (For now, this path builds a single AP; if you also need the two-AP bundle in drafts,
+     * duplicate the storage approach used above.)
      */
     public static void createRoleAuthorizerPolicyDraft(
             KeycloakSession session,
@@ -98,10 +118,22 @@ public class TideRoleRequests {
     ) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
-        // Load existing role draft → get previous AP (compact "h.p")
+        // Load existing role draft → get previous AP or bundle
         RoleEntity roleEntity = em.find(RoleEntity.class, role.getId());
         TideRoleDraftEntity roleDraft = requireRoleDraft(em, roleEntity);
-        AuthorizerPolicy prev = AuthorizerPolicy.fromCompact(roleDraft.getInitCert());
+
+        // If a bundle was stored, prefer the "auth" AP as a base
+        String compactBase;
+        String stored = roleDraft.getInitCert();
+        if (stored != null && stored.trim().startsWith("{")) {
+            @SuppressWarnings("unchecked")
+            Map<String, String> m = new ObjectMapper().readValue(stored, Map.class);
+            compactBase = m.getOrDefault("auth", m.values().stream().findFirst().orElseThrow());
+        } else {
+            compactBase = stored;
+        }
+
+        AuthorizerPolicy prev = AuthorizerPolicy.fromCompact(compactBase);
 
         // Compute new threshold: ceil(percentage * (#existing + N new))
         List<TideUserRoleMappingDraftEntity> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
@@ -112,7 +144,7 @@ public class TideRoleRequests {
         int population = users.size() + Math.max(0, numberOfAdditionalAdmins);
         int newThreshold = Math.max(1, (int) Math.ceil(thresholdPercentage * population));
 
-        // Keep previous resource/signmodels; ensure Admin:2 routing
+        // Keep previous resource/signmodels
         String resource = prev.payload().resource;
         List<String> signModels = new ArrayList<>(prev.payload().signmodels == null ? List.of("UserContext:1") : prev.payload().signmodels);
 
@@ -122,7 +154,6 @@ public class TideRoleRequests {
         );
         if (ap == null) throw new Exception("Failed to create AuthorizerPolicy draft");
 
-        // Override threshold with the newly computed one
         ap.payload().threshold = newThreshold;
 
         // Ensure no duplicate pending draft for this record
@@ -168,15 +199,25 @@ public class TideRoleRequests {
         RoleInitializerCertificateDraftEntity draft = getDraftRoleInitCert(session, recordId);
         if (draft == null) return; // nothing to commit
 
-        // Move compact AP into the role draft, and store vendor signature if you have it
-        tideDrafts.get(0).setInitCert(draft.getInitCert());   // compact "h.p"
-        tideDrafts.get(0).setInitCertSig(signature);          // optional vendor sig blob
+        // Move compact AP (or bundle string) into the role draft, and store vendor signature
+        tideDrafts.get(0).setInitCert(draft.getInitCert());
+        tideDrafts.get(0).setInitCertSig(signature);
 
-        // Mirror threshold into role attribute for compatibility
-        AuthorizerPolicy ap = AuthorizerPolicy.fromCompact(draft.getInitCert());
-        if (ap.payload().threshold != null) {
-            roleModel.setSingleAttribute("tideThreshold", Integer.toString(ap.payload().threshold));
-        }
+        // Try to read threshold from the AP we stored (if single compact)
+        try {
+            String stored = draft.getInitCert();
+            String compact = stored;
+            if (stored != null && stored.trim().startsWith("{")) {
+                @SuppressWarnings("unchecked")
+                Map<String, String> m = new ObjectMapper().readValue(stored, Map.class);
+                compact = m.getOrDefault("auth", m.values().stream().findFirst().orElseThrow());
+            }
+            AuthorizerPolicy ap = AuthorizerPolicy.fromCompact(compact);
+            if (ap.payload().threshold != null) {
+                roleModel.setSingleAttribute("tideThreshold", Integer.toString(ap.payload().threshold));
+            }
+        } catch (Exception ignore) { /* bundle-only or malformed; silently skip threshold mirror */ }
+
         roleModel.removeAttribute("InitCertDraftId");
 
         em.remove(draft);
@@ -187,16 +228,12 @@ public class TideRoleRequests {
      * Legacy InitCert creation paths (unchanged)
      * ---------------------------------------------------------------------- */
 
-    // Creates a Realm Admin role for current realm. The role has full access to manage the current realm.
     public static void createRealmAdminInitCert(KeycloakSession session) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         ClientModel realmManagement = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
 
         String resource = Constants.ADMIN_CONSOLE_CLIENT_ID;
-        RoleModel realmAdmin = session.getContext().getRealm()
-                .getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID)
-                .getRole(AdminRoles.REALM_ADMIN);
-
+        RoleModel realmAdmin = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(AdminRoles.REALM_ADMIN);
         RoleModel tideRealmAdmin = realmManagement.addRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
         tideRealmAdmin.addCompositeRole(realmAdmin);
         tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
@@ -219,7 +256,6 @@ public class TideRoleRequests {
         RoleEntity roleEntity = em.find(RoleEntity.class, tideRealmAdmin.getId());
         TideRoleDraftEntity roleDraft = requireRoleDraft(em, roleEntity);
 
-        // Store compact "h.p" (not JSON of the object)
         roleDraft.setInitCert(authorizerPolicy.toCompactString());
         em.flush();
     }
@@ -229,7 +265,6 @@ public class TideRoleRequests {
         List<RoleInitializerCertificateDraftEntity> existing = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class)
                 .setParameter("changesetId", recordId).getResultList();
 
-        // Validates format; throws on error
         InitializerCertificate.FromString(initCertString);
 
         if(!existing.isEmpty()){
@@ -263,7 +298,6 @@ public class TideRoleRequests {
 
         roleDraftEntity.get(0).setInitCert(roleInitCertDraft.getInitCert());
         roleDraftEntity.get(0).setInitCertSig(signature);
-
         InitializerCertificate initCert = InitializerCertificate.FromString(roleInitCertDraft.getInitCert());
         roleModel.setSingleAttribute("tideThreshold", Integer.toString(initCert.getPayload().getThreshold()));
         roleModel.removeAttribute("InitCertDraftId");
@@ -271,10 +305,6 @@ public class TideRoleRequests {
         em.remove(roleInitCertDraft);
         em.flush();
     }
-
-    /* -------------------------------------------------------------------------
-     * New helper to create a role AP draft for arbitrary role/resource
-     * ---------------------------------------------------------------------- */
 
     /**
      * Creates a role AuthorizerPolicy draft using the default Admin:2 template and persists
@@ -310,43 +340,6 @@ public class TideRoleRequests {
         draft.setChangesetRequestId(recordId);
         draft.setInitCert(ap.toCompactString());
         em.persist(draft);
-        em.flush();
-    }
-
-    /* -------------------------------------------------------------------------
-     * Existing InitCert builders (leave as-is for compatibility)
-     * ---------------------------------------------------------------------- */
-
-    public static void createRoleInitCert(KeycloakSession session, String recordId, String resource, String certVersion, String algorithm, ArrayList<String> signModels, String threshold) throws Exception {
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-
-        // Grab from tide key provider
-        ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
-                .filter(x -> x.getProviderId().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_VENDOR_KEY))
-                .findFirst()
-                .orElse(null);
-
-        MultivaluedHashMap<String, String> config = componentModel.getConfig();
-        String vvkId = config.getFirst("vvkId");
-        String vendor = session.getContext().getRealm().getName();
-
-        InitializerCertificate initializerCertifcate = InitializerCertificate.constructInitCert(
-                vvkId, algorithm, certVersion, vendor, resource, Integer.parseInt(threshold), signModels
-        );
-
-        List<RoleInitializerCertificateDraftEntity> existing = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class)
-                .setParameter("changesetId", recordId).getResultList();
-
-        if(!existing.isEmpty()){
-            throw new Exception("There is already a pending change request with this record ID, " + recordId);
-        }
-        ObjectMapper objectMapper = new ObjectMapper();
-        String initCertString = objectMapper.writeValueAsString(initializerCertifcate);
-        RoleInitializerCertificateDraftEntity initCertDraft = new RoleInitializerCertificateDraftEntity();
-        initCertDraft.setId(KeycloakModelUtils.generateId());
-        initCertDraft.setChangesetRequestId(recordId);
-        initCertDraft.setInitCert(initCertString);
-        em.persist(initCertDraft);
         em.flush();
     }
 
@@ -395,50 +388,17 @@ public class TideRoleRequests {
     }
 
     /* -------------------------------------------------------------------------
-     * Role tree helpers (unchanged)
+     * Helpers
      * ---------------------------------------------------------------------- */
 
-    private static Map<String, Object> expandCompositeRolesAsNestedStructure(RoleModel rootRole) {
-        Set<RoleModel> visited = new HashSet<>();
-        return expandCompositeRolesToNestedJson(rootRole, visited);
-    }
-
-    private static Map<String, Object> expandCompositeRolesToNestedJson(RoleModel role, Set<RoleModel> visited) {
-        if (visited.contains(role)) return null;
-        visited.add(role);
-
-        Map<String, Object> currentRole = new LinkedHashMap<>();
-        Map<String, Object> attributesMap = new HashMap<>();
-
-        role.getAttributes().forEach((key, values) -> {
-            if (key.startsWith("tide")) {
-                attributesMap.put(key, values.size() > 1 ? values : values.get(0));
-            }
-        });
-
-        if (!attributesMap.isEmpty()) {
-            currentRole.put("attributes", attributesMap);
+    private static String loadDefaultPolicySource() {
+        // classpath resource at src/main/resources/policies/DefaultTideAdminPolicy.cs
+        try (var is = Thread.currentThread().getContextClassLoader()
+                .getResourceAsStream("policies/DefaultTideAdminPolicy.cs")) {
+            if (is == null) throw new IllegalStateException("Default policy not found at resources/policies/DefaultTideAdminPolicy.cs");
+            return new String(is.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to read DefaultTideAdminPolicy.cs", e);
         }
-
-        if (role.isComposite()) {
-            role.getCompositesStream()
-                    .filter(childRole -> !visited.contains(childRole))
-                    .forEach(childRole -> {
-                        Map<String, Object> childJson = expandCompositeRolesToNestedJson(childRole, visited);
-                        if (childJson != null && !childJson.isEmpty()) {
-                            currentRole.put(childRole.getName(), childJson.get(childRole.getName()));
-                        }
-                    });
-        }
-
-        return currentRole.isEmpty() ? null : Map.of(role.getName(), currentRole);
-    }
-
-    public static class Pair<K, V> {
-        private final K key;
-        private final V value;
-        public Pair(K key, V value) { this.key = key; this.value = value; }
-        public K getKey() { return key; }
-        public V getValue() { return value; }
     }
 }
