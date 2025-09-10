@@ -37,6 +37,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.createRoleAuthorizerPolicyDraft;
 import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.createRoleInitCertDraft;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.addRoleToAccessToken;
@@ -205,7 +206,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         }
     }
 
-
     @Override
     public void handleCreateRequest(KeycloakSession session, TideUserRoleMappingDraftEntity mapping, EntityManager em, Runnable callback) throws Exception {
         RealmModel realm = session.getContext().getRealm();
@@ -214,22 +214,20 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         String changeSetId = KeycloakModelUtils.generateId();
         mapping.setChangeRequestId(changeSetId);
 
-        if(role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+        if (role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
             ComponentModel componentModel = realm.getComponentsStream()
-                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))
                     .findFirst()
                     .orElse(null);
+            if (componentModel == null) throw new Exception("Missing tide-vendor-key component for " + realm.getName());
 
-            if(componentModel == null) {
-                throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
-            }
             List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
                     .setParameter("ID", componentModel.getId()).getResultList();
-            if (realmAuthorizers.isEmpty()){
-                throw new Exception("Authorizer not found for this realm.");
-            }
+            if (realmAuthorizers.isEmpty()) throw new Exception("Authorizer not found for this realm.");
+
             if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                createRoleInitCertDraft(session, changeSetId, "1", 0.7, 1, role);
+                // UPDATED: create AP draft (stored in legacy draft entity)
+                createRoleAuthorizerPolicyDraft(session, changeSetId, "1", 0.7, 1, role);
             }
         }
 
@@ -253,28 +251,24 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
         UserModel affectedUser = session.users().getUserById(realm, entity.getUser().getId());
         String changeSetId = KeycloakModelUtils.generateId();
-
         entity.setChangeRequestId(changeSetId);
 
-        if(roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+        if (roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
             ComponentModel componentModel = realm.getComponentsStream()
-                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))
                     .findFirst()
                     .orElse(null);
+            if (componentModel == null) throw new Exception("Missing tide-vendor-key component for " + realm.getName());
 
-            if(componentModel == null) {
-                throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
-            }
             List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
                     .setParameter("ID", componentModel.getId()).getResultList();
-            if (realmAuthorizers.isEmpty()){
-                throw new Exception("Authorizer not found for this realm.");
-            }
+            if (realmAuthorizers.isEmpty()) throw new Exception("Authorizer not found for this realm.");
+
             if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                createRoleInitCertDraft(session, changeSetId, "1", 0.7, -1, role);
+                // UPDATED: AP draft with -1 additional admin (effectively re-calc threshold)
+                createRoleAuthorizerPolicyDraft(session, changeSetId, "1", 0.7, -1, role);
             }
         }
-
 
         Set<UserModel> users = new TreeSet<>(Comparator.comparing(UserModel::getId));
         users.add(affectedUser);
@@ -329,46 +323,55 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     @Override
-    public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> roles, ClientModel client, TideUserAdapter userChangesMadeTo, EntityManager em) throws Exception {
+    public void updateAffectedUserContextDrafts(KeycloakSession session,
+                                                AccessProofDetailEntity affectedUserContextDraft,
+                                                Set<RoleModel> roles,
+                                                ClientModel client,
+                                                TideUserAdapter userChangesMadeTo,
+                                                EntityManager em) throws Exception {
         RealmModel realm = session.getContext().getRealm();
-        TideUserRoleMappingDraftEntity affectedUserRoleEntity = em.find(TideUserRoleMappingDraftEntity.class, affectedUserContextDraft.getChangeRequestKey().getMappingId());
-        if (affectedUserRoleEntity == null || !Objects.equals(userChangesMadeTo.getId(), affectedUserRoleEntity.getUser().getId()) || affectedUserRoleEntity.getDraftStatus() == DraftStatus.ACTIVE && (affectedUserRoleEntity.getDeleteStatus() == null || affectedUserRoleEntity.getDeleteStatus().equals(DraftStatus.NULL))){
+        TideUserRoleMappingDraftEntity affectedUserRoleEntity =
+                em.find(TideUserRoleMappingDraftEntity.class, affectedUserContextDraft.getChangeRequestKey().getMappingId());
+        if (affectedUserRoleEntity == null
+                || !Objects.equals(userChangesMadeTo.getId(), affectedUserRoleEntity.getUser().getId())
+                || (affectedUserRoleEntity.getDraftStatus() == DraftStatus.ACTIVE
+                && (affectedUserRoleEntity.getDeleteStatus() == null || affectedUserRoleEntity.getDeleteStatus().equals(DraftStatus.NULL)))) {
             return;
         }
 
         ChangeSetRequest affectedChangeRequest = getChangeSetRequestFromEntity(session, affectedUserRoleEntity);
-
-        if(affectedChangeRequest.getActionType() == ActionType.DELETE) {
+        if (affectedChangeRequest.getActionType() == ActionType.DELETE) {
             affectedUserRoleEntity.setDeleteStatus(DraftStatus.DRAFT);
-        }else if (affectedChangeRequest.getActionType() == ActionType.CREATE) {
+        } else if (affectedChangeRequest.getActionType() == ActionType.CREATE) {
             affectedUserRoleEntity.setDraftStatus(DraftStatus.DRAFT);
         }
 
-        String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, userChangesMadeTo, "openId", affectedUserRoleEntity);
+        // Build the transformed user-context JSON (as before)
+        String userContextDraftJson = ChangeSetProcessor.super.generateTransformedUserContext(
+                session, realm, client, userChangesMadeTo, "openId", affectedUserRoleEntity);
 
+        // Look up the role draft; its initCert column now stores the AuthorizerPolicy compact string.
         RoleEntity roleEntity = em.find(RoleEntity.class, affectedUserRoleEntity.getRoleId());
-        List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+        List<TideRoleDraftEntity> roleDrafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", roleEntity).getResultList();
 
-        if(!tideRoleDraftEntity.isEmpty()){
-            //check if this role has an init cert hash
-            String initCert = tideRoleDraftEntity.get(0).getInitCert();
-            if(initCert != null && !initCert.isEmpty()){
-                UserContext userContext = new UserContext(userContextDraft);
-                AuthorizerPolicy authorizerPolicy = AuthorizerPolicy.fromCompactString(tideRoleDraftEntity.get(0).getInitCert());
-                userContext.setInitCertHash(authorizerPolicy.);
+        if (!roleDrafts.isEmpty()) {
+            String apCompact = roleDrafts.get(0).getInitCert(); // still named initCert in DB; contains AP compact string
+            if (apCompact != null && !apCompact.isBlank()) {
+                // Parse compact AP and extract BH
+                AuthorizerPolicy ap = AuthorizerPolicy.fromCompact(apCompact);
+                String bh = ap.payload().bh; // "sha256:..."
 
-                UserContext oldUserContext = new UserContext(affectedUserContextDraft.getProofDraft());
-                if(oldUserContext.getInitCertHash() != null || oldUserContext.getThreshold() != 0){
-                    userContext.setThreshold(initializerCertificate.getPayload().getThreshold());
-                    affectedUserContextDraft.setProofDraft(userContext.ToString());
-                }
-                return;
+                // Inject BH into userContext.allow.{auth,sign}
+                userContextDraftJson = injectAllowBh(userContextDraftJson, bh, true, true);
+
+                // Optional: set threshold from AP if your userContext still carries threshold
+                int threshold = ap.payload().threshold;
+                userContextDraftJson = setThresholdIfPresent(userContextDraftJson, threshold);
             }
-
         }
 
-        affectedUserContextDraft.setProofDraft(userContextDraft);
+        affectedUserContextDraft.setProofDraft(userContextDraftJson);
     }
 
 
@@ -641,4 +644,34 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 .getResultList();
     }
 
+    private static String injectAllowBh(String userContextJson, String bh, boolean includeAuth, boolean includeSign) {
+        try {
+            ObjectMapper om = new ObjectMapper();
+            var root  = (com.fasterxml.jackson.databind.node.ObjectNode) om.readTree(userContextJson);
+            var allow = root.with("allow");
+            if (includeAuth) appendIfMissing(allow.withArray("auth"), bh);
+            if (includeSign) appendIfMissing(allow.withArray("sign"), bh);
+            return om.writeValueAsString(root);
+        } catch (Exception e) {
+            throw new RuntimeException("injectAllowBh failed", e);
+        }
+    }
+
+    private static void appendIfMissing(com.fasterxml.jackson.databind.node.ArrayNode arr, String value) {
+        for (int i = 0; i < arr.size(); i++) {
+            if (Objects.equals(arr.get(i).asText(), value)) return;
+        }
+        arr.add(value);
+    }
+
+    private static String setThresholdIfPresent(String userContextJson, int threshold) {
+        try {
+            ObjectMapper om = new ObjectMapper();
+            var root = (com.fasterxml.jackson.databind.node.ObjectNode) om.readTree(userContextJson);
+            root.put("threshold", threshold);
+            return om.writeValueAsString(root);
+        } catch (Exception e) {
+            return userContextJson; // ignore if structure differs
+        }
+    }
 }

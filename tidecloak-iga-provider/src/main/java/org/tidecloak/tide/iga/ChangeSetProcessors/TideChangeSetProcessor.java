@@ -14,6 +14,7 @@ import org.midgard.models.AdminAuthorization;
 import org.midgard.models.AdminAuthorizerBuilder;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.ModelRequest;
+import org.midgard.models.AuthorizerPolicyModel.AuthorizerPolicy;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.UserContext.UserContext;
@@ -51,15 +52,8 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
 
     /**
      * Updates all affected user context drafts triggered by a change request commit.
-     * This method performs the following steps:
-     * - Retrieves a list of affected clients based on the entity.
-     * - Updates any related user contexts for these clients.
-     *
-     * @param session   The Keycloak session for the current context.
-     * @param change    The change set request containing details of the change.
-     * @param entity    The entity being processed.
-     * @param em        The EntityManager for database interactions.
-     * @throws Exception If an error occurs during the update process.
+     * Rebuilds the UserContextSignRequest using Admin:2 and classifies admin contexts
+     * by the presence of any sha256:* entry in userContext.allow.{auth|sign}.
      */
     @Override
     public void updateAffectedUserContexts(KeycloakSession session, RealmModel realm, ChangeSetRequest change, T entity, EntityManager em) throws Exception {
@@ -69,44 +63,44 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
                 .sorted(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed())
                 .collect(Collectors.groupingBy(AccessProofDetailEntity::getChangeRequestKey));
 
-        // Process each group
         groupedProofDetails.forEach((changeRequestKey, details) -> {
             try {
-                // Create a list of UserContext for the current changeRequestId
-                List<UserContext>  userContexts = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                        .setParameter("recordId", changeRequestKey.getChangeRequestId()).getResultStream().map(p -> new UserContext(p.getProofDraft())).collect(Collectors.toList());
+                List<UserContext> userContexts = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                        .setParameter("recordId", changeRequestKey.getChangeRequestId())
+                        .getResultStream()
+                        .map(p -> new UserContext(p.getProofDraft()))
+                        .collect(Collectors.toList());
 
-                if(userContexts.isEmpty()){
-                    return;
-                }
-                AtomicInteger numberOfNormalUserContext = new AtomicInteger();
-                userContexts.forEach(x -> {
-                    if(x.getInitCertHash() == null) {
-                        numberOfNormalUserContext.getAndIncrement();
-                    }
-                });
-                Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
-                Stream<UserContext> adminContexts = userContexts.stream().filter(x -> x.getInitCertHash() != null);
-                List<UserContext> orderedContext = Stream.concat(adminContexts, normalUserContext).toList();
+                if (userContexts.isEmpty()) return;
 
-                // Create UserContextSignRequest
-                UserContextSignRequest updatedReq = new UserContextSignRequest("Admin:1");
+                // Admin = any context carrying at least one sha256:* in allow.{auth|sign}
+                List<UserContext> admins = userContexts.stream()
+                        .filter(uc -> isAdminByAllowAny(uc.ToString()))
+                        .toList();
+                List<UserContext> normals = userContexts.stream()
+                        .filter(uc -> !isAdminByAllowAny(uc.ToString()))
+                        .toList();
+
+                List<UserContext> orderedContext = Stream.concat(admins.stream(), normals.stream()).toList();
+                int normalCount = normals.size();
+
+                // Use Admin:2 for Forseti policy flow
+                UserContextSignRequest updatedReq = new UserContextSignRequest("Admin:2");
                 updatedReq.SetUserContexts(orderedContext.toArray(new UserContext[0]));
-                updatedReq.SetNumberOfUserContexts(numberOfNormalUserContext.get());
+                updatedReq.SetNumberOfUserContexts(normalCount);
 
                 ChangeSetType changeSetType;
-                if(details.get(0).getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)){
+                if (details.get(0).getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)) {
                     changeSetType = ChangeSetType.CLIENT_FULLSCOPE;
-                }
-                else if (details.get(0).getChangesetType().equals(ChangeSetType.DEFAULT_ROLES)) {
+                } else if (details.get(0).getChangesetType().equals(ChangeSetType.DEFAULT_ROLES)) {
                     changeSetType = ChangeSetType.COMPOSITE_ROLE;
-                }
-                else{
+                } else {
                     changeSetType = details.get(0).getChangesetType();
                 }
 
-                ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeRequestKey.getChangeRequestId(), changeSetType);
-                if(changesetRequestEntity != null){
+                ChangesetRequestEntity changesetRequestEntity =
+                        ChangesetRequestAdapter.getChangesetRequestEntity(session, changeRequestKey.getChangeRequestId(), changeSetType);
+                if (changesetRequestEntity != null) {
                     changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(updatedReq.GetDraft()));
                 }
                 em.flush();
@@ -118,101 +112,72 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
 
     /**
      * Commits a change request by finalizing the draft and applying changes to the database.
-     *
-     * @param session        The Keycloak session for the current context.
-     * @param change         The change set request containing details of the change.
-     * @param entity         The entity being processed.
-     * @param em             The EntityManager for database interactions.
-     * @param commitCallback A Runnable task to execute during the commit process for additional actions.
-     * @throws Exception If any error occurs during the commit process.
      */
     @Override
     public void commit(KeycloakSession session, ChangeSetRequest change, T entity, EntityManager em, Runnable commitCallback) throws Exception {
         String realmId = session.getContext().getRealm().getId();
-        // Retrieve the user context drafts
         List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, change.getChangeSetId(), change.getType());
-
         if (userContextDrafts.isEmpty()) {
             throw new Exception("No user context drafts found for this change set id, " + change.getChangeSetId());
         }
 
-        // Process each user context draft
         for (AccessProofDetailEntity userContextDraft : userContextDrafts) {
             try {
                 UserEntity userEntity = userContextDraft.getUser();
                 TideUserAdapter affectedUser = TideEntityUtils.toTideUserAdapter(userEntity, session, session.realms().getRealm(userContextDraft.getRealmId()));
-
                 commitUserContextToDatabase(session, userContextDraft, em);
-                em.remove(userContextDraft); // This user context draft is committed, so remove it
+                em.remove(userContextDraft);
                 em.flush();
             } catch (Exception e) {
                 throw new RuntimeException("Error processing user context draft: " + e.getMessage(), e);
             }
         }
 
-        // Execute the commit callback if provided
-        if (commitCallback != null) {
-            commitCallback.run();
-        }
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
-        if (changesetRequestEntity != null) {
-            em.remove(changesetRequestEntity);
-        }
+        if (commitCallback != null) commitCallback.run();
 
-        // Regenerate for client full scope change request.
-        List<Map.Entry<ChangesetRequestEntity,TideClientDraftEntity>> reqAndDrafts =
+        ChangesetRequestEntity changesetRequestEntity =
+                em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
+        if (changesetRequestEntity != null) em.remove(changesetRequestEntity);
+
+        // Re-generate for CLIENT_FULLSCOPE that belong to this realm
+        List<Map.Entry<ChangesetRequestEntity, TideClientDraftEntity>> reqAndDrafts =
                 em.createNamedQuery("getAllChangeRequestsByChangeSetType", ChangesetRequestEntity.class)
                         .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE)
                         .getResultStream()
                         .flatMap(cr -> {
-                            // load drafts for this change-request
                             List<TideClientDraftEntity> drafts = em.createNamedQuery(
                                             "GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
                                     .setParameter("requestId", cr.getChangesetRequestId())
                                     .getResultList();
 
-                            // keep only those in our realm
                             List<TideClientDraftEntity> valid = drafts.stream()
-                                    .filter(d -> d.getClient()
-                                            .getRealmId()
-                                            .equalsIgnoreCase(realmId))
+                                    .filter(d -> d.getClient().getRealmId().equalsIgnoreCase(realmId))
                                     .collect(Collectors.toList());
 
-                            // if none were valid, delete the CR & emit nothing
                             if (valid.isEmpty()) {
                                 em.remove(cr);
                                 return Stream.empty();
                             }
-
-                            // otherwise emit a (request, draft) entry for each valid draft
-                            return valid.stream()
-                                    .map(d -> new AbstractMap.SimpleEntry<>(cr, d));
+                            return valid.stream().map(d -> new AbstractMap.SimpleEntry<>(cr, d));
                         })
                         .collect(Collectors.toList());
 
         ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
 
         reqAndDrafts.forEach(entry -> {
-            ChangesetRequestEntity req   = entry.getKey();
-            TideClientDraftEntity  draft = entry.getValue();
-
-            if (draft == null) return; // Skip if draft entity is missing
+            ChangesetRequestEntity req = entry.getKey();
+            TideClientDraftEntity draft = entry.getValue();
+            if (draft == null) return;
 
             ChangeSetRequest c = getChangeSetRequestFromEntity(session, draft, ChangeSetType.CLIENT_FULLSCOPE);
 
-            // Remove associated admin authorizations
             req.getAdminAuthorizations().clear();
-
-            // Remove associated proof details
             em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                     .setParameter("recordId", req.getChangesetRequestId())
                     .getResultStream()
                     .forEach(em::remove);
-
-            // Remove the changeset request
             em.remove(req);
 
-            // Process the workflow
             WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, c.getActionType().equals(ActionType.DELETE), c.getActionType(), ChangeSetType.CLIENT_FULLSCOPE);
             try {
                 changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT_FULLSCOPE)
@@ -222,221 +187,192 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
             }
         });
 
-        // Flush once after batch processing
         em.flush();
     }
 
     /**
-     * Saves a user context draft to the database.
-     * This method creates a draft entity and persists it along with additional metadata, such as the record ID and proof draft.
-     *
-     * @param session    The Keycloak session for the current context.
-     * @param em         The EntityManager for database interactions.
-     * @param realm      The realm associated with the operation.
-     * @param clientModel The client model for which the draft is being saved.
-     * @param user       The user entity associated with the draft.
-     * @param changeRequestKey   The record ID of the change set.
-     * @param type       The type of the change set.
-     * @param proofDraft The serialized proof draft as a JSON string.
-     * @throws Exception If an error occurs during the save operation.
+     * Save one UserContext draft; inject Forseti Policy BH instead of InitCertHash.
      */
     @Override
-    public void saveUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm, ClientModel clientModel, UserEntity user, ChangeRequestKey changeRequestKey, ChangeSetType type, String proofDraft) throws Exception {
-//        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, clientModel, user, changeRequestKey, type, proofDraft);
+    public void saveUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm, ClientModel clientModel,
+                                     UserEntity user, ChangeRequestKey changeRequestKey, ChangeSetType type, String proofDraft) throws Exception {
 
         List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, changeRequestKey.getChangeRequestId(), type);
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
+
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
         RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-        var tideIdp = session.identityProviders().getByAlias("tide");
-        boolean hasInitCert;
+
         boolean isTideAdminRole;
         boolean isUnassignRole;
         UserModel originalUser;
 
-        InitializerCertifcate cert = null;
-        byte[] certHash = new byte[0];
+        // NEW: AuthorizerPolicy (compact) → BH linkage
+        AuthorizerPolicy ap = null;
+        String bh = null;
 
         if (type.equals(ChangeSetType.USER_ROLE)) {
-            TideUserRoleMappingDraftEntity roleMapping = (TideUserRoleMappingDraftEntity)BasicIGAUtils.fetchDraftRecordEntity(em, type, changeRequestKey.getMappingId());
+            TideUserRoleMappingDraftEntity roleMapping =
+                    (TideUserRoleMappingDraftEntity) BasicIGAUtils.fetchDraftRecordEntity(em, type, changeRequestKey.getMappingId());
             if (roleMapping == null) {
-                throw new Exception("Invalid request, no user role mapping draft entity found for this record ID: " + changeRequestKey.getChangeRequestId());
+                throw new Exception("Invalid request, no user role mapping draft entity found for record ID: " + changeRequestKey.getChangeRequestId());
             }
+
             List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
-                    .setParameter("roleId", roleMapping.getRoleId()).getResultList();
-            if(tideRoleDraftEntity.isEmpty()){
-                throw new Exception("Invalid request, no role draft entity found for this role ID: " + roleMapping.getRoleId());
+                    .setParameter("roleId", roleMapping.getRoleId())
+                    .getResultList();
+            if (tideRoleDraftEntity.isEmpty()) {
+                throw new Exception("Invalid request, no role draft entity found for role ID: " + roleMapping.getRoleId());
             }
 
-            isTideAdminRole = tideRole != null && roleMapping.getRoleId().equals(tideRole.getId());
+            isTideAdminRole = (tideRole != null && roleMapping.getRoleId().equals(tideRole.getId()));
 
-            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, changeRequestKey.getChangeRequestId());
-
-            hasInitCert = roleInitCert != null;
+            RoleInitializerCertificateDraftEntity roleInitCertDraft = getDraftRoleInitCert(session, changeRequestKey.getChangeRequestId());
             ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, roleMapping);
             isUnassignRole = changeSetRequest.getActionType().equals(ActionType.DELETE);
             originalUser = session.users().getUserById(realm, roleMapping.getUser().getId());
-            ComponentModel componentModel = realm.getComponentsStream()
-                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
-                    .findFirst()
-                    .orElse(null);
 
 
             if(componentModel != null){
                 List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)
                         .setParameter("ID", componentModel.getId())
                         .setParameter("types", List.of("firstAdmin", "multiAdmin")).getResultList();
+            // Which AP to use for BH?
+            // 1) If this changeset created a new AP draft, use that
+            if (roleInitCertDraft != null) {
+                ap = AuthorizerPolicy.fromCompact(roleInitCertDraft.getInitCert());
+            } else if (isTideAdminRole) {
+                // 2) Otherwise for firstAdmin path, use the persisted AP on the TIDE_REALM_ADMIN role draft
+                RoleEntity roleRef = em.getReference(RoleEntity.class, tideRole.getId());
+                TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                        .setParameter("role", roleRef)
+                        .getSingleResult();
+                ap = AuthorizerPolicy.fromCompact(tideRoleEntity.getInitCert());
+            }
 
-                if (realmAuthorizers.isEmpty()) {
-                    throw new Exception("Authorizer not found for this realm.");
-                }
-
-                if(isTideAdminRole && realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") && realmAuthorizers.size() == 1){
-                    RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
-
-                    TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                            .setParameter("role", role).getSingleResult();
-                    cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
-                    certHash = cert.hash();
-                }
-
-                else if (hasInitCert) {
-                    cert = InitializerCertifcate.FromString(roleInitCert.getInitCert());
-                    certHash = cert.hash();
-                }
+            if (ap != null && ap.payload() != null) {
+                bh = ap.payload().bh; // e.g. "sha256:...."
             }
         } else {
             isTideAdminRole = false;
-            hasInitCert = false;
-            originalUser = null;
             isUnassignRole = false;
+            originalUser = null;
         }
 
         List<UserContext> userContexts = new ArrayList<>();
-        UserContextSignRequest req = new UserContextSignRequest("Admin:1");
+        int normalCount = 0;
 
+        for (AccessProofDetailEntity p : proofDetails) {
+            UserContext uc = new UserContext(p.getProofDraft());
 
-        InitializerCertifcate finalCert = cert;
-        byte[] finalCertHash = certHash;
+            boolean shouldMarkAdmin = (ap != null && bh != null && !bh.isBlank());
+            boolean isSelfBeingRemoved = isUnassignRole
+                    && originalUser != null
+                    && Objects.equals(p.getUser().getId(), originalUser.getId());
 
-        proofDetails.forEach(p -> {
-            UserContext userContext = new UserContext(p.getProofDraft());
-            if (hasInitCert || isTideAdminRole) {
-                try {
-                    if(!isUnassignRole) {
-                        userContext.setThreshold(finalCert.getPayload().getThreshold());
-                        userContext.setInitCertHash(finalCertHash);
-                    } else if (originalUser != null && !p.getUser().getId().equals(originalUser.getId())) {
-                        userContext.setThreshold(finalCert.getPayload().getThreshold());
-                        userContext.setInitCertHash(finalCertHash);
-                    }
-                    else {
-                        userContext.setThreshold(0);
-                        userContext.setInitCertHash(null);
-                    }
-                    p.setProofDraft(userContext.ToString());
-                    em.flush();
-
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
+            if (shouldMarkAdmin && !isSelfBeingRemoved) {
+                // Inject BH into allow.{auth,sign}
+                String updated = injectAllowBh(uc.ToString(), bh, true, true);
+                p.setProofDraft(updated);
+                uc = new UserContext(updated);
+            } else {
+                // Count as "normal" if it doesn't already carry this BH
+                if (bh == null || !hasExactBh(uc.ToString(), bh)) {
+                    normalCount++;
                 }
+                p.setProofDraft(uc.ToString());
             }
-            userContexts.add(userContext);
-        });
 
-        AtomicInteger numberOfNormalUserContext = new AtomicInteger();
-        userContexts.forEach( uc -> {
-            if(uc.getInitCertHash() == null) {
-                numberOfNormalUserContext.getAndIncrement();
-            }
-        });
-        req.SetNumberOfUserContexts(numberOfNormalUserContext.get());
+            em.flush();
+            userContexts.add(uc);
+        }
 
-        if(hasInitCert || isTideAdminRole) { req.SetInitializationCertificate(finalCert); }
+        // Order: admins first (has any sha256:* in allow), then normals
+        List<UserContext> ordered = Stream.concat(
+                userContexts.stream().filter(uc -> isAdminByAllowAny(uc.ToString())),
+                userContexts.stream().filter(uc -> !isAdminByAllowAny(uc.ToString()))
+        ).toList();
 
-        // filter user contexts, admin contexts first then normal user context
-        Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
-        Stream<UserContext> adminContexts = userContexts.stream().filter(x -> x.getInitCertHash() != null);
-        List<UserContext> orderedContext = Stream.concat(adminContexts, normalUserContext).toList();
-
-        req.SetUserContexts(orderedContext.toArray(new UserContext[0]));
-        String draft = Base64.getEncoder().encodeToString(req.GetDraft());
+        // Build the Admin:2 request (no InitCert attached)
+        UserContextSignRequest req = new UserContextSignRequest("Admin:2");
+        req.SetUserContexts(ordered.toArray(new UserContext[0]));
+        req.SetNumberOfUserContexts(normalCount);
 
         ChangeSetType changeSetType;
-        if(type.equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)){
+        if (type.equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)) {
             changeSetType = ChangeSetType.CLIENT_FULLSCOPE;
-        }
-        else if (type.equals(ChangeSetType.DEFAULT_ROLES)) {
+        } else if (type.equals(ChangeSetType.DEFAULT_ROLES)) {
             changeSetType = ChangeSetType.COMPOSITE_ROLE;
-        }
-        else{
+        } else {
             changeSetType = type;
         }
 
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeRequestKey.getChangeRequestId(), changeSetType));
-        if (changesetRequestEntity == null) {
+        String draft = Base64.getEncoder().encodeToString(req.GetDraft());
+        ChangesetRequestEntity existing =
+                em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeRequestKey.getChangeRequestId(), changeSetType));
+        if (existing == null) {
             ChangesetRequestEntity entity = new ChangesetRequestEntity();
             entity.setChangesetRequestId(changeRequestKey.getChangeRequestId());
             entity.setDraftRequest(draft);
             entity.setChangesetType(type);
             em.persist(entity);
-            em.flush();
         } else {
-            changesetRequestEntity.setDraftRequest(draft);
-            em.flush();
+            existing.setDraftRequest(draft);
         }
+        em.flush();
     }
 
     @Override
-    public void handleCreateRequest(KeycloakSession session, T entity, EntityManager em, Runnable callback) throws Exception {
-    }
+    public void handleCreateRequest(KeycloakSession session, T entity, EntityManager em, Runnable callback) throws Exception {}
 
     @Override
-    public void handleDeleteRequest(KeycloakSession session, T entity, EntityManager em, Runnable callback) throws Exception {
-
-    }
+    public void handleDeleteRequest(KeycloakSession session, T entity, EntityManager em, Runnable callback) throws Exception {}
 
     @Override
-    public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity userContextDraft, Set<RoleModel> uniqRoles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {
-
-    }
+    public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity userContextDraft, Set<RoleModel> uniqRoles, ClientModel client, TideUserAdapter user, EntityManager em) throws Exception {}
 
     @Override
-    public RoleModel getRoleRequestFromEntity(KeycloakSession session, RealmModel realm, T entity) {
-        return null;
-    }
+    public RoleModel getRoleRequestFromEntity(KeycloakSession session, RealmModel realm, T entity) { return null; }
 
-
-    // Helper methods
+    // -------------------------
+    // Helpers
+    // -------------------------
 
     private void commitUserContextToDatabase(KeycloakSession session, AccessProofDetailEntity userContext, EntityManager em) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         ComponentModel componentModel = realm.getComponentsStream()
-                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))
                 .findFirst()
                 .orElse(null);
 
-        if(componentModel == null) {
+        if (componentModel == null) {
             throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
         }
 
         String accessProofSig = userContext.getSignature();
-        if(accessProofSig == null || accessProofSig.isEmpty()){
+        if (accessProofSig == null || accessProofSig.isEmpty()) {
             throw new Exception("Could not find authorization signature for this user context. Request denied.");
         }
 
-        if(userContext.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES) || userContext.getChangesetType().equals(ChangeSetType.CLIENT) || userContext.getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)) {
+        if (userContext.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES)
+                || userContext.getChangesetType().equals(ChangeSetType.CLIENT)
+                || userContext.getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)) {
+
             ClientEntity clientEntity = em.find(ClientEntity.class, userContext.getClientId());
-            TideClientDraftEntity defaultUserContext = em.createNamedQuery("getClientFullScopeStatus", TideClientDraftEntity.class).setParameter("client", clientEntity).getSingleResult();
+            TideClientDraftEntity defaultUserContext = em.createNamedQuery("getClientFullScopeStatus", TideClientDraftEntity.class)
+                    .setParameter("client", clientEntity)
+                    .getSingleResult();
+
             defaultUserContext.setDefaultUserContext(userContext.getProofDraft());
             defaultUserContext.setDefaultUserContextSig(accessProofSig);
             em.flush();
             return;
         }
 
-        UserClientAccessProofEntity userClientAccess = em.find(UserClientAccessProofEntity.class, new UserClientAccessProofEntity.Key(userContext.getUser(), userContext.getClientId()));
+        UserClientAccessProofEntity userClientAccess =
+                em.find(UserClientAccessProofEntity.class, new UserClientAccessProofEntity.Key(userContext.getUser(), userContext.getClientId()));
 
-        if (userClientAccess == null){
+        if (userClientAccess == null) {
             UserClientAccessProofEntity newAccess = new UserClientAccessProofEntity();
             newAccess.setUser(userContext.getUser());
             newAccess.setClientId(userContext.getClientId());
@@ -445,13 +381,75 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
             newAccess.setIdProofSig("");
             newAccess.setAccessProofMeta("");
             em.persist(newAccess);
-
-        } else{
+        } else {
             userClientAccess.setAccessProof(userContext.getProofDraft());
             userClientAccess.setAccessProofMeta("");
             userClientAccess.setAccessProofSig(accessProofSig);
             userClientAccess.setIdProofSig("");
             em.merge(userClientAccess);
         }
+    }
+
+    // Inject the BH into allow.{auth,sign}
+    private static String injectAllowBh(String userContextJson, String bh, boolean includeAuth, boolean includeSign) {
+        try {
+            ObjectMapper om = new ObjectMapper();
+            var root  = (com.fasterxml.jackson.databind.node.ObjectNode) om.readTree(userContextJson);
+            var allow = root.with("allow");
+            if (includeAuth) appendIfMissing(allow.withArray("auth"), bh);
+            if (includeSign) appendIfMissing(allow.withArray("sign"), bh);
+            return om.writeValueAsString(root);
+        } catch (Exception e) {
+            throw new RuntimeException("injectAllowBh failed", e);
+        }
+    }
+
+    private static void appendIfMissing(com.fasterxml.jackson.databind.node.ArrayNode arr, String value) {
+        for (int i = 0; i < arr.size(); i++) {
+            if (Objects.equals(arr.get(i).asText(), value)) return;
+        }
+        arr.add(value);
+    }
+
+    // An "admin" context is any that already carries at least one sha256:* linkage
+    private static boolean isAdminByAllowAny(String userContextJson) {
+        try {
+            ObjectMapper om = new ObjectMapper();
+            var root = (com.fasterxml.jackson.databind.node.ObjectNode) om.readTree(userContextJson);
+            var allow = (com.fasterxml.jackson.databind.node.ObjectNode) root.get("allow");
+            if (allow == null) return false;
+            return arrayHasSha256(allow.get("auth")) || arrayHasSha256(allow.get("sign"));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static boolean hasExactBh(String userContextJson, String bh) {
+        if (bh == null || bh.isBlank()) return false;
+        try {
+            ObjectMapper om = new ObjectMapper();
+            var root = (com.fasterxml.jackson.databind.node.ObjectNode) om.readTree(userContextJson);
+            var allow = (com.fasterxml.jackson.databind.node.ObjectNode) root.get("allow");
+            if (allow == null) return false;
+            return arrayHasValue(allow.get("auth"), bh) || arrayHasValue(allow.get("sign"), bh);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static boolean arrayHasSha256(com.fasterxml.jackson.databind.JsonNode arr) {
+        if (arr == null || !arr.isArray()) return false;
+        for (var it : arr) {
+            if (it.isTextual() && it.asText().startsWith("sha256:")) return true;
+        }
+        return false;
+    }
+
+    private static boolean arrayHasValue(com.fasterxml.jackson.databind.JsonNode arr, String value) {
+        if (arr == null || !arr.isArray()) return false;
+        for (var it : arr) {
+            if (it.isTextual() && Objects.equals(it.asText(), value)) return true;
+        }
+        return false;
     }
 }
