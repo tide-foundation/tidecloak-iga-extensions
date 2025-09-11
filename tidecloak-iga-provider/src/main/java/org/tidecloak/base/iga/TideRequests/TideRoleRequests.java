@@ -68,7 +68,7 @@ public class TideRoleRequests {
         tideRealmAdmin.addCompositeRole(realmAdmin);
         tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
 
-        ArrayList<String> signModels = new ArrayList<>(List.of("UserContext:1", "Rules:1"));
+        ArrayList<String> signModels = new ArrayList<>(List.of("UserContext:2", "Rules:1"));
 
         // Compile once, build two APs
         String policySource = loadDefaultPolicySource();
@@ -146,7 +146,7 @@ public class TideRoleRequests {
 
         // Keep previous resource/signmodels
         String resource = prev.payload().resource;
-        List<String> signModels = new ArrayList<>(prev.payload().signmodels == null ? List.of("UserContext:1") : prev.payload().signmodels);
+        List<String> signModels = new ArrayList<>(prev.payload().signmodels == null ? Collections.emptyList() : prev.payload().signmodels);
 
         // Build a fresh DRAFT AP (unsigned) with the default template
         AuthorizerPolicy ap = ForsetiPolicyFactory.createRoleAuthorizerPolicy_DefaultAdminTemplate(
@@ -238,7 +238,7 @@ public class TideRoleRequests {
         tideRealmAdmin.addCompositeRole(realmAdmin);
         tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
 
-        ArrayList<String> signModels = new ArrayList<>(List.of("UserContext:1", "Rules:1"));
+        ArrayList<String> signModels = new ArrayList<>(List.of("UserContext:2", "Rules:1"));
 
         // Build a DRAFT AP using the default template to keep behavior in sync
         AuthorizerPolicy authorizerPolicy = ForsetiPolicyFactory.createRoleAuthorizerPolicy_DefaultAdminTemplate(
