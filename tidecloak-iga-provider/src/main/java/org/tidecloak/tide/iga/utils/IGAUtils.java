@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.midgard.Midgard;
+import org.midgard.models.AuthorizerPolicyModel.AuthorizerPolicy;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
@@ -76,7 +77,7 @@ public class IGAUtils {
         Map<String, List<String>> refs = new LinkedHashMap<>();
         // keys match your “stage:model:version” convention
         refs.put("auth:Admin:2", Collections.singletonList(hashAuth));
-        refs.put("sign:UserContext:1", Collections.singletonList(hashSign));
+        refs.put("sign:UserContext:2", Collections.singletonList(hashSign));
         return refs;
     }
 
@@ -99,7 +100,8 @@ public class IGAUtils {
             MultivaluedHashMap<String, String> keyProviderConfig,
             UserContext[] orderedUserContexts,
             AuthorizerEntity authorizer,
-            ChangesetRequestEntity changesetRequestEntity
+            ChangesetRequestEntity changesetRequestEntity,
+            String authorizerPolicy
     ) throws Exception {
 
         String currentSecretKeys = keyProviderConfig.getFirst("clientSecret");
@@ -129,6 +131,10 @@ public class IGAUtils {
         UserContextSignRequest req = new UserContextSignRequest("VRK:1");
         req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
         req.SetUserContexts(orderedUserContexts);
+        if(authorizerPolicy != null) {
+            System.out.println(authorizerPolicy);
+            req.SetInitializationCertificate(AuthorizerPolicy.fromCompact(authorizerPolicy));
+        }
 
         // If your request model supports custom claims, uncomment and feed policyRefs here:
         // Map<String, List<String>> policyRefs = IGAUtils.buildPolicyRefs(roleApBundle);

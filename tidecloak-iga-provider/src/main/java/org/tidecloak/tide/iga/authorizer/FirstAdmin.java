@@ -66,8 +66,16 @@ public class FirstAdmin implements Authorizer {
 
         // 2) If this is Tide Realm Admin role assignment, compute policyRefs (auth/sign) from role AP bundle
         //    (The bundle is saved in the role draft initCert column as {"auth":"h.p[.sig]","sign":"h.p[.sig]"} or legacy single compact.)
-        Map<String, List<String>> policyRefs = null;
+        String policyRefs = null;
         if (isAssigningTideRealmAdminRole(draftEntity, session)) {
+            // Check if the user to be assigned the Tide Realm Admin role is a tide user
+            TideUserRoleMappingDraftEntity userRoleMappingDraft = (TideUserRoleMappingDraftEntity) draftEntity;
+            if(userRoleMappingDraft.getUser().getAttributes().stream().noneMatch(a -> a.getName().equalsIgnoreCase("vuid")
+                    || a.getName().equalsIgnoreCase("tideuserkey"))) {
+                throw new BadRequestException("User needs a tide account linked for the tide-realm-admin role");
+
+            }
+
             RoleModel tideRole = session.clients()
                     .getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID)
                     .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
@@ -77,8 +85,8 @@ public class FirstAdmin implements Authorizer {
                     .setParameter("role", roleEntity)
                     .getSingleResult();
 
-            String apBundle = roleDraft.getInitCert(); // now stores both AP compacts or a single legacy compact
-            policyRefs = IGAUtils.buildPolicyRefs(apBundle);
+             policyRefs = roleDraft.getInitCert(); // now stores both AP compacts or a single legacy compact
+            //policyRefs = IGAUtils.buildPolicyRefs(apBundle);
             // If your request model supports extra claims, we will add these in IGAUtils.signContextsWithVrk (commented)
         }
 
@@ -87,7 +95,9 @@ public class FirstAdmin implements Authorizer {
                 componentModel.getConfig(),
                 orderedContexts.toArray(new UserContext[0]),
                 authorizer,
-                changesetRequestEntity
+                changesetRequestEntity,
+                policyRefs
+
         );
 
         // 4) Persist returned signatures back onto proofs (respect ordering used by request)

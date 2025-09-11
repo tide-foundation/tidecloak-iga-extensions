@@ -12,6 +12,9 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
 import org.midgard.Midgard;
 import org.midgard.models.*;
+import org.midgard.models.AdminAuthorization;
+import org.midgard.models.AdminAuthorizerBuilder;
+import org.midgard.models.AuthorizerPolicyModel.AuthorizerPolicy;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
@@ -189,7 +192,7 @@ public class MultiAdmin implements Authorizer{
             if(roleInitCert == null) {
                 throw new BadRequestException("Role Init Cert draft not found for changeSet, " + changeSet.getChangeSetId());
             }
-            req.SetInitializationCertificate(InitializerCertifcate.FromString(roleInitCert.getInitCert()));
+            req.SetInitializationCertificate(AuthorizerPolicy.fromCompact(roleInitCert.getInitCert()));
             SignatureResponse response = Midgard.SignModel(settings, req);
 
             for ( int i = 0; i < orderedProofDetails.size(); i++){

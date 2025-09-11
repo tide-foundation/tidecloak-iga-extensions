@@ -109,7 +109,7 @@ public final class ForsetiPolicyFactory {
         payload.threshold  = threshold;
         payload.id         = UUID.randomUUID().toString();
         payload.authFlows  = new ArrayList<>(List.of("Admin:2")); // template is Admin:2
-        payload.signmodels = new ArrayList<>(signModels == null ? List.of("UserContext:1") : signModels);
+        payload.signmodels = new ArrayList<>(signModels == null ? Collections.emptyList() : signModels);
         payload.policy     = role.getName();
 
         // Linkage + metadata
@@ -172,7 +172,7 @@ public final class ForsetiPolicyFactory {
         payloadAuth.threshold  = threshold;
         payloadAuth.id         = UUID.randomUUID().toString();
         payloadAuth.authFlows  = new ArrayList<>(List.of("Admin:2"));
-        payloadAuth.signmodels = new ArrayList<>(signModels == null ? List.of("UserContext:1") : signModels);
+        payloadAuth.signmodels = new ArrayList<>(signModels == null ? Collections.emptyList() : signModels);
         payloadAuth.policy     = role.getName();
         payloadAuth.bh         = compile.bh;
         payloadAuth.entryType  = compile.entryType;
@@ -192,7 +192,7 @@ public final class ForsetiPolicyFactory {
         payloadSign.threshold  = threshold;
         payloadSign.id         = UUID.randomUUID().toString(); // different from auth
         payloadSign.authFlows  = new ArrayList<>(List.of("Admin:2"));
-        payloadSign.signmodels = new ArrayList<>(signModels == null ? List.of("UserContext:1") : signModels);
+        payloadSign.signmodels = new ArrayList<>(signModels == null ? Collections.emptyList() : signModels);
         payloadSign.policy     = role.getName();
         payloadSign.bh         = compile.bh;
         payloadSign.entryType  = compile.entryType;
