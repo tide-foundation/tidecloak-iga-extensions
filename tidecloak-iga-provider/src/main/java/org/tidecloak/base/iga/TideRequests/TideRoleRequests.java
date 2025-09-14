@@ -1,5 +1,6 @@
 package org.tidecloak.base.iga.TideRequests;
 
+// (imports unchanged)
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
@@ -24,16 +25,8 @@ import static org.tidecloak.base.iga.utils.BasicIGAUtils.getRoleIdFromEntity;
 
 public class TideRoleRequests {
 
-    /* -------------------------------------------------------------------------
-     * Utilities
-     * ---------------------------------------------------------------------- */
+    private static final BiConsumer<String, String> NOOP_CODE_STORE = (bh, assemblyB64) -> {};
 
-    /** No-op codeStore; replace with persistence to your blob store (keyed by bh). */
-    private static final BiConsumer<String, String> NOOP_CODE_STORE = (bh, assemblyB64) -> {
-        // TODO: persist assemblyB64 under key "bh" (S3/DB/filesystem)
-    };
-
-    /** Load the TideRoleDraftEntity for a given Keycloak role. */
     private static TideRoleDraftEntity requireRoleDraft(EntityManager em, RoleEntity roleEntity) throws Exception {
         List<TideRoleDraftEntity> drafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", roleEntity)
@@ -42,18 +35,25 @@ public class TideRoleRequests {
         return drafts.get(0);
     }
 
-    /* -------------------------------------------------------------------------
-     * Admin:2 default (draft AP) into role draft
-     * ---------------------------------------------------------------------- */
+    /** helper to unwrap JSON bundle {"auth": "...", "sign": "..."} to compact; prefer "auth". */
+    private static String unwrapCompactOrFirst(String stored) {
+        if (stored == null) return null;
+        String s = stored.trim();
+        if (!s.startsWith("{")) return s;
+        try {
+            ObjectMapper om = new ObjectMapper();
+            @SuppressWarnings("unchecked")
+            Map<String, Object> m = om.readValue(s, Map.class);
+            Object v = m.get("auth");
+            if (v == null && !m.isEmpty()) v = m.values().iterator().next();
+            return v == null ? null : String.valueOf(v);
+        } catch (Exception e) {
+            return s;
+        }
+    }
 
-    /**
-     * Create the realm admin role and persist BOTH AP compacts (auth + sign)
-     * as a small JSON bundle in the legacy initCert column:
-     * { "auth": "<h.p>", "sign": "<h.p>" }
-     *
-     * The default C# template is loaded from:
-     *   src/main/resources/policies/DefaultTideAdminPolicy.cs
-     */
+    // -------- Admin:2 default (bundle) --------
+
     public static void createRealmAdminAuthorizerPolicy(KeycloakSession session) throws Exception {
         var em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         ClientModel realmMgmt = session.getContext().getRealm()
@@ -70,7 +70,6 @@ public class TideRoleRequests {
 
         ArrayList<String> signModels = new ArrayList<>(List.of("UserContext:2", "Rules:1"));
 
-        // Compile once, build two APs
         String policySource = loadDefaultPolicySource();
         Map<String, AuthorizerPolicy> aps = ForsetiPolicyFactory.createRoleAuthorizerPolicies(
                 session,
@@ -79,8 +78,7 @@ public class TideRoleRequests {
                 signModels,
                 policySource,
                 "Ork.Forseti.Builtins.AuthorizerTemplatePolicy",
-                "1.0.0",
-                NOOP_CODE_STORE
+                "1.0.0"
         );
 
         var roleEntity = em.find(org.keycloak.models.jpa.entities.RoleEntity.class, tideRealmAdmin.getId());
@@ -88,43 +86,31 @@ public class TideRoleRequests {
                 .setParameter("role", roleEntity)
                 .getSingleResult();
 
-        // Store both compacts in one JSON blob
         String bundle = new ObjectMapper().writeValueAsString(Map.of(
                 "auth", aps.get("auth").toCompactString(),
                 "sign", aps.get("sign").toCompactString()
         ));
         roleDraft.setInitCert(bundle);
-
         em.flush();
     }
 
-    /* -------------------------------------------------------------------------
-     * Create an AP "draft row" (stored in legacy RoleInitializerCertificateDraftEntity)
-     * ---------------------------------------------------------------------- */
+    // -------- AP draft (single compact) --------
 
-    /**
-     * Build a new draft AP for a role, copying routing/signmodels from the current draft,
-     * but recomputing threshold based on users and "additional admins".
-     * (For now, this path builds a single AP; if you also need the two-AP bundle in drafts,
-     * duplicate the storage approach used above.)
-     */
     public static void createRoleAuthorizerPolicyDraft(
             KeycloakSession session,
             String recordId,
-            String certVersion,                 // kept for parity; not used by default template
+            String certVersion,
             double thresholdPercentage,
             int numberOfAdditionalAdmins,
             RoleModel role
     ) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
-        // Load existing role draft → get previous AP or bundle
         RoleEntity roleEntity = em.find(RoleEntity.class, role.getId());
         TideRoleDraftEntity roleDraft = requireRoleDraft(em, roleEntity);
 
-        // If a bundle was stored, prefer the "auth" AP as a base
-        String compactBase;
         String stored = roleDraft.getInitCert();
+        String compactBase;
         if (stored != null && stored.trim().startsWith("{")) {
             @SuppressWarnings("unchecked")
             Map<String, String> m = new ObjectMapper().readValue(stored, Map.class);
@@ -135,7 +121,6 @@ public class TideRoleRequests {
 
         AuthorizerPolicy prev = AuthorizerPolicy.fromCompact(compactBase);
 
-        // Compute new threshold: ceil(percentage * (#existing + N new))
         List<TideUserRoleMappingDraftEntity> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
                 .setParameter("draftStatus", DraftStatus.ACTIVE)
                 .setParameter("roleId", role.getId())
@@ -144,11 +129,9 @@ public class TideRoleRequests {
         int population = users.size() + Math.max(0, numberOfAdditionalAdmins);
         int newThreshold = Math.max(1, (int) Math.ceil(thresholdPercentage * population));
 
-        // Keep previous resource/signmodels
         String resource = prev.payload().resource;
         List<String> signModels = new ArrayList<>(prev.payload().signmodels == null ? Collections.emptyList() : prev.payload().signmodels);
 
-        // Build a fresh DRAFT AP (unsigned) with the default template
         AuthorizerPolicy ap = ForsetiPolicyFactory.createRoleAuthorizerPolicy_DefaultAdminTemplate(
                 session, resource, role, signModels, NOOP_CODE_STORE
         );
@@ -156,13 +139,11 @@ public class TideRoleRequests {
 
         ap.payload().threshold = newThreshold;
 
-        // Ensure no duplicate pending draft for this record
         List<RoleInitializerCertificateDraftEntity> existing = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class)
                 .setParameter("changesetId", recordId)
                 .getResultList();
         if (!existing.isEmpty()) throw new Exception("Pending change request already exists: " + recordId);
 
-        // Persist the compact "h.p" into the draft table (legacy)
         RoleInitializerCertificateDraftEntity draft = new RoleInitializerCertificateDraftEntity();
         draft.setId(KeycloakModelUtils.generateId());
         draft.setChangesetRequestId(recordId);
@@ -178,11 +159,6 @@ public class TideRoleRequests {
         return list.isEmpty() ? null : list.get(0);
     }
 
-    /* -------------------------------------------------------------------------
-     * Commit a pending AP draft into the role draft (legacy column)
-     * ---------------------------------------------------------------------- */
-
-    /** Commit a pending AP draft; also mirror threshold to role attribute for UI/compat. */
     public static void commitRoleAuthorizerPolicy(KeycloakSession session, String recordId, Object mapping, String signature) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
@@ -197,29 +173,20 @@ public class TideRoleRequests {
         if (tideDrafts.isEmpty()) throw new Exception("No tide role draft found");
 
         RoleInitializerCertificateDraftEntity draft = getDraftRoleInitCert(session, recordId);
-        if (draft == null) return; // nothing to commit
+        if (draft == null) return;
 
-        // Move compact AP (or bundle string) into the role draft, and store vendor signature
         tideDrafts.get(0).setInitCert(draft.getInitCert());
         tideDrafts.get(0).setInitCertSig(signature);
 
-        // Try to read threshold from the AP we stored (if single compact)
         try {
-            String stored = draft.getInitCert();
-            String compact = stored;
-            if (stored != null && stored.trim().startsWith("{")) {
-                @SuppressWarnings("unchecked")
-                Map<String, String> m = new ObjectMapper().readValue(stored, Map.class);
-                compact = m.getOrDefault("auth", m.values().stream().findFirst().orElseThrow());
-            }
+            String compact = unwrapCompactOrFirst(draft.getInitCert());
             AuthorizerPolicy ap = AuthorizerPolicy.fromCompact(compact);
             if (ap.payload().threshold != null) {
                 roleModel.setSingleAttribute("tideThreshold", Integer.toString(ap.payload().threshold));
             }
-        } catch (Exception ignore) { /* bundle-only or malformed; silently skip threshold mirror */ }
+        } catch (Exception ignore) { }
 
         roleModel.removeAttribute("InitCertDraftId");
-
         em.remove(draft);
         em.flush();
     }
@@ -344,7 +311,6 @@ public class TideRoleRequests {
     }
 
     public static InitializerCertificate createRoleInitCert(KeycloakSession session, String resource, RoleModel role , String certVersion, String algorithm, ArrayList<String> signModels) throws JsonProcessingException {
-        // Grab from tide key provider
         ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
                 .filter(x -> x.getProviderId().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_VENDOR_KEY))
                 .findFirst()
@@ -363,23 +329,18 @@ public class TideRoleRequests {
         return InitializerCertificate.constructInitCert(vvkId, algorithm, certVersion, vendor, resource, threshold, signModels);
     }
 
-    /**
-     * Back-compat wrapper that used to call the “old” factory.
-     * Now upgraded to the default Admin:2 template path.
-     */
     public static AuthorizerPolicy createAdminAuthorizerPolicy(
             KeycloakSession session,
             String resource,
             RoleModel role,
             String certVersion,
             String algorithm,
-            ArrayList<String> authFlows,     // ignored by default template (always Admin:2)
+            ArrayList<String> authFlows,
             ArrayList<String> signModels
     ) throws JsonProcessingException {
         AuthorizerPolicy ap = ForsetiPolicyFactory.createRoleAuthorizerPolicy_DefaultAdminTemplate(
                 session, resource, role, signModels, NOOP_CODE_STORE
         );
-        // Ensure threshold mirrors role attribute
         String tideThreshold = role.getFirstAttribute("tideThreshold");
         if (tideThreshold != null) {
             ap.payload().threshold = Integer.parseInt(tideThreshold);
@@ -387,12 +348,7 @@ public class TideRoleRequests {
         return ap;
     }
 
-    /* -------------------------------------------------------------------------
-     * Helpers
-     * ---------------------------------------------------------------------- */
-
     private static String loadDefaultPolicySource() {
-        // classpath resource at src/main/resources/policies/DefaultTideAdminPolicy.cs
         try (var is = Thread.currentThread().getContextClassLoader()
                 .getResourceAsStream("policies/DefaultTideAdminPolicy.cs")) {
             if (is == null) throw new IllegalStateException("Default policy not found at resources/policies/DefaultTideAdminPolicy.cs");

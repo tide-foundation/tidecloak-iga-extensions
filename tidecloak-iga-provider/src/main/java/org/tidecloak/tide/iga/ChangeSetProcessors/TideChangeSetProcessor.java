@@ -1,6 +1,8 @@
 package org.tidecloak.tide.iga.ChangeSetProcessors;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.BadRequestException;
 import org.keycloak.common.util.MultivaluedHashMap;
@@ -37,27 +39,30 @@ import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
+import org.tidecloak.shared.utils.JsonSorter;
+import org.keycloak.representations.AccessToken;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Base64;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.getUserContextDrafts;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.getUserContextDraftsForRealm;
-import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
 
+/**
+ * Tide-side extension:
+ *  - builds Admin:2 requests
+ *  - injects POLICY HASH (ph) into allow.{auth,sign} for admin contexts
+ *  - remains backward-compatible with legacy DLL BH (bh) when reading/ordering contexts
+ */
 public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
 
-    /**
-     * Updates all affected user context drafts triggered by a change request commit.
-     * Rebuilds the UserContextSignRequest using Admin:2 and classifies admin contexts
-     * by the presence of any sha256:* entry in userContext.allow.{auth|sign}.
-     */
     @Override
     public void updateAffectedUserContexts(KeycloakSession session, RealmModel realm, ChangeSetRequest change, T entity, EntityManager em) throws Exception {
-        // Group proofDetails by changeRequestId
         Map<ChangeRequestKey, List<AccessProofDetailEntity>> groupedProofDetails = getUserContextDraftsForRealm(em, realm.getId()).stream()
                 .filter(proof -> !Objects.equals(proof.getChangeRequestKey().getChangeRequestId(), change.getChangeSetId()))
                 .sorted(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed())
@@ -65,28 +70,28 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
 
         groupedProofDetails.forEach((changeRequestKey, details) -> {
             try {
-                List<UserContext> userContexts = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                List<org.midgard.models.UserContext.UserContext> userContexts = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                         .setParameter("recordId", changeRequestKey.getChangeRequestId())
                         .getResultStream()
-                        .map(p -> new UserContext(p.getProofDraft()))
+                        .map(p -> new org.midgard.models.UserContext.UserContext(p.getProofDraft()))
                         .collect(Collectors.toList());
 
                 if (userContexts.isEmpty()) return;
 
-                // Admin = any context carrying at least one sha256:* in allow.{auth|sign}
-                List<UserContext> admins = userContexts.stream()
-                        .filter(uc -> isAdminByAllowAny(uc.ToString()))
+                // Admins = any context with at least one sha256:* in allow.{auth|sign} (ph or legacy bh)
+                List<org.midgard.models.UserContext.UserContext> admins = userContexts.stream()
+                        .filter(uc -> isAllowAnySha256(uc.ToString()))
                         .toList();
-                List<UserContext> normals = userContexts.stream()
-                        .filter(uc -> !isAdminByAllowAny(uc.ToString()))
+                List<org.midgard.models.UserContext.UserContext> normals = userContexts.stream()
+                        .filter(uc -> !isAllowAnySha256(uc.ToString()))
                         .toList();
 
-                List<UserContext> orderedContext = Stream.concat(admins.stream(), normals.stream()).toList();
+                List<org.midgard.models.UserContext.UserContext> orderedContext = Stream.concat(admins.stream(), normals.stream()).toList();
                 int normalCount = normals.size();
 
-                // Use Admin:2 for Forseti policy flow
-                UserContextSignRequest updatedReq = new UserContextSignRequest("Admin:2");
-                updatedReq.SetUserContexts(orderedContext.toArray(new UserContext[0]));
+                org.midgard.models.RequestExtensions.UserContextSignRequest updatedReq =
+                        new org.midgard.models.RequestExtensions.UserContextSignRequest("Admin:2");
+                updatedReq.SetUserContexts(orderedContext.toArray(new org.midgard.models.UserContext.UserContext[0]));
                 updatedReq.SetNumberOfUserContexts(normalCount);
 
                 ChangeSetType changeSetType;
@@ -98,10 +103,10 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
                     changeSetType = details.get(0).getChangesetType();
                 }
 
-                ChangesetRequestEntity changesetRequestEntity =
+                ChangesetRequestEntity cre =
                         ChangesetRequestAdapter.getChangesetRequestEntity(session, changeRequestKey.getChangeRequestId(), changeSetType);
-                if (changesetRequestEntity != null) {
-                    changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(updatedReq.GetDraft()));
+                if (cre != null) {
+                    cre.setDraftRequest(Base64.getEncoder().encodeToString(updatedReq.GetDraft()));
                 }
                 em.flush();
             } catch (Exception e) {
@@ -110,9 +115,6 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
         });
     }
 
-    /**
-     * Commits a change request by finalizing the draft and applying changes to the database.
-     */
     @Override
     public void commit(KeycloakSession session, ChangeSetRequest change, T entity, EntityManager em, Runnable commitCallback) throws Exception {
         String realmId = session.getContext().getRealm().getId();
@@ -139,7 +141,6 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
                 em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
         if (changesetRequestEntity != null) em.remove(changesetRequestEntity);
 
-        // Re-generate for CLIENT_FULLSCOPE that belong to this realm
         List<Map.Entry<ChangesetRequestEntity, TideClientDraftEntity>> reqAndDrafts =
                 em.createNamedQuery("getAllChangeRequestsByChangeSetType", ChangesetRequestEntity.class)
                         .setParameter("changesetType", ChangeSetType.CLIENT_FULLSCOPE)
@@ -191,7 +192,8 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
     }
 
     /**
-     * Save one UserContext draft; inject Forseti Policy BH instead of InitCertHash.
+     * Save a UserContext draft. We now inject POLICY HASH (ph) into allow.{auth,sign}
+     * for admin contexts. We still order contexts by "has any sha256:*" to be backward-compatible.
      */
     @Override
     public void saveUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm, ClientModel clientModel,
@@ -203,13 +205,13 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
         RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
 
-        boolean isTideAdminRole;
-        boolean isUnassignRole;
-        UserModel originalUser;
+        boolean isTideAdminRole = false;
+        boolean isUnassignRole = false;
+        UserModel originalUser = null;
 
-        // NEW: AuthorizerPolicy (compact) → BH linkage
-        AuthorizerPolicy ap = null;
-        String bh = null;
+        // We will compute ph from the compact AP ("h64.p64") if applicable
+        String policyCompact = null;
+        String policyHashPh = null; // sha256:HEX( header.payload )
 
         if (type.equals(ChangeSetType.USER_ROLE)) {
             TideUserRoleMappingDraftEntity roleMapping =
@@ -227,7 +229,8 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
 
             isTideAdminRole = (tideRole != null && roleMapping.getRoleId().equals(tideRole.getId()));
 
-            RoleInitializerCertificateDraftEntity roleInitCertDraft = getDraftRoleInitCert(session, changeRequestKey.getChangeRequestId());
+            RoleInitializerCertificateDraftEntity roleInitCertDraft =
+                    org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert(session, changeRequestKey.getChangeRequestId());
             ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, roleMapping);
             isUnassignRole = changeSetRequest.getActionType().equals(ActionType.DELETE);
             originalUser = session.users().getUserById(realm, roleMapping.getUser().getId());
@@ -240,62 +243,61 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
             // Which AP to use for BH?
             // 1) If this changeset created a new AP draft, use that
             if (roleInitCertDraft != null) {
-                ap = AuthorizerPolicy.fromCompact(roleInitCertDraft.getInitCert());
+                policyCompact = unwrapCompactOrFirst(roleInitCertDraft.getInitCert());
             } else if (isTideAdminRole) {
-                // 2) Otherwise for firstAdmin path, use the persisted AP on the TIDE_REALM_ADMIN role draft
                 RoleEntity roleRef = em.getReference(RoleEntity.class, tideRole.getId());
                 TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                         .setParameter("role", roleRef)
                         .getSingleResult();
-                ap = AuthorizerPolicy.fromCompact(tideRoleEntity.getInitCert());
+                policyCompact = unwrapCompactOrFirst(tideRoleEntity.getInitCert());
             }
 
-            if (ap != null && ap.payload() != null) {
-                bh = ap.payload().bh; // e.g. "sha256:...."
+            if (policyCompact != null && !policyCompact.isBlank()) {
+                policyHashPh = computePolicyHashFromCompact(policyCompact); // sha256:HEX of header.payload bytes
             }
-        } else {
-            isTideAdminRole = false;
-            isUnassignRole = false;
-            originalUser = null;
         }
 
-        List<UserContext> userContexts = new ArrayList<>();
+        List<org.midgard.models.UserContext.UserContext> userContexts = new ArrayList<>();
         int normalCount = 0;
 
-        for (AccessProofDetailEntity p : proofDetails) {
-            UserContext uc = new UserContext(p.getProofDraft());
+        ObjectMapper om = new ObjectMapper();
 
-            boolean shouldMarkAdmin = (ap != null && bh != null && !bh.isBlank());
+        for (AccessProofDetailEntity p : proofDetails) {
+            org.midgard.models.UserContext.UserContext uc = new org.midgard.models.UserContext.UserContext(p.getProofDraft());
+            boolean injected = false;
+
+            boolean shouldMarkAdmin = (policyHashPh != null && !policyHashPh.isBlank());
             boolean isSelfBeingRemoved = isUnassignRole
                     && originalUser != null
                     && Objects.equals(p.getUser().getId(), originalUser.getId());
 
+            String current = uc.ToString();
+
             if (shouldMarkAdmin && !isSelfBeingRemoved) {
-                // Inject BH into allow.{auth,sign}
-                String updated = injectAllowBh(uc.ToString(), bh, true, true);
+                String updated = injectAllowHash(current, policyHashPh, true, true); // add to both auth & sign
                 p.setProofDraft(updated);
-                uc = new UserContext(updated);
-            } else {
-                // Count as "normal" if it doesn't already carry this BH
-                if (bh == null || !hasExactBh(uc.ToString(), bh)) {
-                    normalCount++;
-                }
-                p.setProofDraft(uc.ToString());
+                uc = new org.midgard.models.UserContext.UserContext(updated);
+                injected = true;
+            }
+
+            // count normals (no exact ph present); legacy bh presence still classifies as admin for ordering
+            if (!hasExactAllowHash(uc.ToString(), policyHashPh)) {
+                normalCount++;
             }
 
             em.flush();
             userContexts.add(uc);
         }
 
-        // Order: admins first (has any sha256:* in allow), then normals
-        List<UserContext> ordered = Stream.concat(
-                userContexts.stream().filter(uc -> isAdminByAllowAny(uc.ToString())),
-                userContexts.stream().filter(uc -> !isAdminByAllowAny(uc.ToString()))
+        // Order: admins first (has *any* sha256:* in allow auth/sign), then normals
+        List<org.midgard.models.UserContext.UserContext> ordered = Stream.concat(
+                userContexts.stream().filter(ux -> isAllowAnySha256(ux.ToString())),
+                userContexts.stream().filter(ux -> !isAllowAnySha256(ux.ToString()))
         ).toList();
 
-        // Build the Admin:2 request (no InitCert attached)
-        UserContextSignRequest req = new UserContextSignRequest("Admin:2");
-        req.SetUserContexts(ordered.toArray(new UserContext[0]));
+        org.midgard.models.RequestExtensions.UserContextSignRequest req =
+                new org.midgard.models.RequestExtensions.UserContextSignRequest("Admin:2");
+        req.SetUserContexts(ordered.toArray(new org.midgard.models.UserContext.UserContext[0]));
         req.SetNumberOfUserContexts(normalCount);
 
         ChangeSetType changeSetType;
@@ -334,9 +336,7 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
     @Override
     public RoleModel getRoleRequestFromEntity(KeycloakSession session, RealmModel realm, T entity) { return null; }
 
-    // -------------------------
-    // Helpers
-    // -------------------------
+    // ------------------------- Helpers -------------------------
 
     private void commitUserContextToDatabase(KeycloakSession session, AccessProofDetailEntity userContext, EntityManager em) throws Exception {
         RealmModel realm = session.getContext().getRealm();
@@ -390,33 +390,33 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
         }
     }
 
-    // Inject the BH into allow.{auth,sign}
-    private static String injectAllowBh(String userContextJson, String bh, boolean includeAuth, boolean includeSign) {
+    // inject "ph" into allow.{auth,sign} (adds if missing)
+    private static String injectAllowHash(String userContextJson, String hash, boolean includeAuth, boolean includeSign) {
         try {
             ObjectMapper om = new ObjectMapper();
-            var root  = (com.fasterxml.jackson.databind.node.ObjectNode) om.readTree(userContextJson);
-            var allow = root.with("allow");
-            if (includeAuth) appendIfMissing(allow.withArray("auth"), bh);
-            if (includeSign) appendIfMissing(allow.withArray("sign"), bh);
-            return om.writeValueAsString(root);
+            ObjectNode root = (ObjectNode) om.readTree(userContextJson);
+            ObjectNode allow = root.with("allow");
+            if (includeAuth) appendIfMissing(allow.withArray("auth"), hash);
+            if (includeSign) appendIfMissing(allow.withArray("sign"), hash);
+            return om.writeValueAsString(JsonSorter.parseAndSortArrays(root.toString()));
         } catch (Exception e) {
-            throw new RuntimeException("injectAllowBh failed", e);
+            throw new RuntimeException("injectAllowHash failed", e);
         }
     }
 
-    private static void appendIfMissing(com.fasterxml.jackson.databind.node.ArrayNode arr, String value) {
+    private static void appendIfMissing(ArrayNode arr, String value) {
         for (int i = 0; i < arr.size(); i++) {
             if (Objects.equals(arr.get(i).asText(), value)) return;
         }
         arr.add(value);
     }
 
-    // An "admin" context is any that already carries at least one sha256:* linkage
-    private static boolean isAdminByAllowAny(String userContextJson) {
+    // classify as "admin" if allow.{auth|sign} has ANY "sha256:*"
+    private static boolean isAllowAnySha256(String userContextJson) {
         try {
             ObjectMapper om = new ObjectMapper();
-            var root = (com.fasterxml.jackson.databind.node.ObjectNode) om.readTree(userContextJson);
-            var allow = (com.fasterxml.jackson.databind.node.ObjectNode) root.get("allow");
+            ObjectNode root = (ObjectNode) om.readTree(userContextJson);
+            ObjectNode allow = (ObjectNode) root.get("allow");
             if (allow == null) return false;
             return arrayHasSha256(allow.get("auth")) || arrayHasSha256(allow.get("sign"));
         } catch (Exception e) {
@@ -424,14 +424,14 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
         }
     }
 
-    private static boolean hasExactBh(String userContextJson, String bh) {
-        if (bh == null || bh.isBlank()) return false;
+    private static boolean hasExactAllowHash(String userContextJson, String hash) {
+        if (hash == null || hash.isBlank()) return false;
         try {
             ObjectMapper om = new ObjectMapper();
-            var root = (com.fasterxml.jackson.databind.node.ObjectNode) om.readTree(userContextJson);
-            var allow = (com.fasterxml.jackson.databind.node.ObjectNode) root.get("allow");
+            ObjectNode root = (ObjectNode) om.readTree(userContextJson);
+            ObjectNode allow = (ObjectNode) root.get("allow");
             if (allow == null) return false;
-            return arrayHasValue(allow.get("auth"), bh) || arrayHasValue(allow.get("sign"), bh);
+            return arrayHasValue(allow.get("auth"), hash) || arrayHasValue(allow.get("sign"), hash);
         } catch (Exception e) {
             return false;
         }
@@ -451,5 +451,33 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
             if (it.isTextual() && Objects.equals(it.asText(), value)) return true;
         }
         return false;
+    }
+
+    /** unwrap JSON bundle { "auth": "...", "sign": "..." } to a compact; prefer "auth". */
+    private static String unwrapCompactOrFirst(String stored) {
+        if (stored == null) return null;
+        String s = stored.trim();
+        if (!s.startsWith("{")) return s;
+        try {
+            ObjectMapper om = new ObjectMapper();
+            @SuppressWarnings("unchecked")
+            Map<String, Object> m = om.readValue(s, Map.class);
+            Object v = m.get("auth");
+            if (v == null && !m.isEmpty()) v = m.values().iterator().next();
+            return v == null ? null : String.valueOf(v);
+        } catch (Exception e) {
+            return s; // fallback
+        }
+    }
+
+    /** ph = sha256( UTF8("header64.payload64") ), uppercase hex, with "sha256:" prefix. */
+    private static String computePolicyHashFromCompact(String compact) throws Exception {
+        String[] parts = compact.split("\\.");
+        if (parts.length < 2) throw new IllegalArgumentException("Compact string must contain header.payload");
+        String hp = parts[0] + "." + parts[1];
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        byte[] digest = md.digest(hp.getBytes(StandardCharsets.UTF_8));
+        String hex = java.util.HexFormat.of().withUpperCase().formatHex(digest);
+        return "sha256:" + hex;
     }
 }

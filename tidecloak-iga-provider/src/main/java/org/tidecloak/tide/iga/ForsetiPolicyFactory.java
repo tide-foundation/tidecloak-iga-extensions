@@ -135,10 +135,9 @@ public final class ForsetiPolicyFactory {
             String resource,
             RoleModel role,
             List<String> signModels,
-            String policySource,   // C# source for the template
+            String policySource,   // C# source
             String entryType,      // e.g. "Ork.Forseti.Builtins.AuthorizerTemplatePolicy"
-            String sdkVersion,     // e.g. "1.0.0"
-            BiConsumer<String, String> codeStore // (bh, assemblyB64)
+            String sdkVersion      // e.g. "1.0.0"
     ) throws JsonProcessingException {
 
         // Resolve vendor / vvk
@@ -159,58 +158,37 @@ public final class ForsetiPolicyFactory {
         if (compile.diagnostics != null && !compile.diagnostics.isBlank()) {
             throw new IllegalStateException("Policy compile diagnostics: " + compile.diagnostics);
         }
-        if (codeStore != null) codeStore.accept(compile.bh, compile.assemblyBase64);
 
-        // Header shared by both APs
         var header = new AuthorizerPolicyHeader(vvkId, "EdDSA", "1");
 
-        // ---- payload for AUTH (unique id) ----
-        var payloadAuth = new AuthorizerPolicyPayload();
-        payloadAuth.vvkid      = vvkId;
-        payloadAuth.vendor     = vendor;
-        payloadAuth.resource   = resource;
-        payloadAuth.threshold  = threshold;
-        payloadAuth.id         = UUID.randomUUID().toString();
-        payloadAuth.authFlows  = new ArrayList<>(List.of("Admin:2"));
-        payloadAuth.signmodels = new ArrayList<>(signModels == null ? Collections.emptyList() : signModels);
-        payloadAuth.policy     = role.getName();
-        payloadAuth.bh         = compile.bh;
-        payloadAuth.entryType  = compile.entryType;
-        payloadAuth.sdkVersion = compile.sdkVersion;
-        payloadAuth.mode       = "enforce";
-        payloadAuth.action     = "*";
-        // if your payload model doesn't have iat, delete the next line:
-        payloadAuth.iat        = System.currentTimeMillis() / 1000;
+        java.util.function.Supplier<AuthorizerPolicyPayload> makePayload = () -> {
+            var p = new AuthorizerPolicyPayload();
+            p.vvkid      = vvkId;
+            p.vendor     = vendor;
+            p.resource   = resource;
+            p.threshold  = threshold;
+            p.id         = java.util.UUID.randomUUID().toString();
+            p.authFlows  = new java.util.ArrayList<>(java.util.List.of("Admin:2"));
+            p.signmodels = new java.util.ArrayList<>(signModels == null ? java.util.Collections.emptyList() : signModels);
+            p.policy     = role.getName();
+            p.bh         = compile.bh;
+            p.entryType  = compile.entryType;
+            p.sdkVersion = compile.sdkVersion;
+            p.mode       = "enforce";
+            p.action     = "*";
+            p.iat        = System.currentTimeMillis() / 1000;
 
-        var apAuth = AuthorizerPolicy.of(header, payloadAuth);
+            // Embed the compiled DLL so the server can vet/validate it (no client code store)
+            p.assemblyBase64 = compile.assemblyBase64;
+            p.dllSize    = (long) java.util.Base64.getDecoder().decode(compile.assemblyBase64).length;
 
-        // ---- payload for SIGN (another unique id) ----
-        var payloadSign = new AuthorizerPolicyPayload();
-        payloadSign.vvkid      = vvkId;
-        payloadSign.vendor     = vendor;
-        payloadSign.resource   = resource;
-        payloadSign.threshold  = threshold;
-        payloadSign.id         = UUID.randomUUID().toString(); // different from auth
-        payloadSign.authFlows  = new ArrayList<>(List.of("Admin:2"));
-        payloadSign.signmodels = new ArrayList<>(signModels == null ? Collections.emptyList() : signModels);
-        payloadSign.policy     = role.getName();
-        payloadSign.bh         = compile.bh;
-        payloadSign.entryType  = compile.entryType;
-        payloadSign.sdkVersion = compile.sdkVersion;
-        payloadSign.mode       = "enforce";
-        payloadSign.action     = "*";
-        // if your payload model doesn't have iat, delete the next line:
-        payloadSign.iat        = System.currentTimeMillis() / 1000;
+            return p;
+        };
 
-        var apSign = AuthorizerPolicy.of(header, payloadSign);
+        var apAuth = AuthorizerPolicy.of(header, makePayload.get());
+        var apSign = AuthorizerPolicy.of(header, makePayload.get());
 
-        // ---- (optional) compute cfg.hash for policyRefs ----
-        // var preAuth = Midgard.BuildPolicyReceiptPreSign(header, payloadAuth);
-        // var preSign = Midgard.BuildPolicyReceiptPreSign(header, payloadSign);
-        // String cfgHashAuth = "sha512:" + bytesToHex(preAuth.hash); // or sha512Hex(preAuth.data)
-        // String cfgHashSign = "sha512:" + bytesToHex(preSign.hash);
-
-        Map<String, AuthorizerPolicy> out = new HashMap<>(2);
+        var out = new java.util.HashMap<String, AuthorizerPolicy>(2);
         out.put("auth", apAuth);
         out.put("sign", apSign);
         return out;
