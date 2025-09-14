@@ -2,9 +2,11 @@ package org.tidecloak.tide.iga.utils;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.midgard.Midgard;
 import org.midgard.models.AuthorizerPolicyModel.AuthorizerPolicy;
+import org.midgard.models.AuthorizerPolicyModel.AuthorizerPolicyPayload;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
@@ -18,6 +20,7 @@ import java.security.MessageDigest;
 import java.util.*;
 import java.util.Base64;
 import java.util.HexFormat;
+import java.util.regex.Pattern;
 
 public class IGAUtils {
 
@@ -101,14 +104,15 @@ public class IGAUtils {
             UserContext[] orderedUserContexts,
             AuthorizerEntity authorizer,
             ChangesetRequestEntity changesetRequestEntity,
-            String authorizerPolicy
+            String authorizerPolicy // compact OR JSON package (preferred)
     ) throws Exception {
 
+        // ----- config / keys -----
         String currentSecretKeys = keyProviderConfig.getFirst("clientSecret");
         SecretKeys secretKeys = new ObjectMapper().readValue(currentSecretKeys, SecretKeys.class);
 
         int threshold = Integer.parseInt(Optional.ofNullable(System.getenv("THRESHOLD_T")).orElse("0"));
-        int max = Integer.parseInt(Optional.ofNullable(System.getenv("THRESHOLD_N")).orElse("0"));
+        int max       = Integer.parseInt(Optional.ofNullable(System.getenv("THRESHOLD_N")).orElse("0"));
         if (threshold == 0 || max == 0) {
             throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
         }
@@ -119,45 +123,139 @@ public class IGAUtils {
         }
 
         SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
-        settings.VVKId = keyProviderConfig.getFirst("vvkId");
-        settings.HomeOrkUrl = keyProviderConfig.getFirst("systemHomeOrk");
-        settings.PayerPublicKey = keyProviderConfig.getFirst("payerPublic");
+        settings.VVKId                     = keyProviderConfig.getFirst("vvkId");
+        settings.HomeOrkUrl                = keyProviderConfig.getFirst("systemHomeOrk");
+        settings.PayerPublicKey            = keyProviderConfig.getFirst("payerPublic");
         settings.ObfuscatedVendorPublicKey = keyProviderConfig.getFirst("obfGVVK");
-        settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
-        settings.Threshold_T = threshold;
-        settings.Threshold_N = max;
+        settings.VendorRotatingPrivateKey  = secretKeys.activeVrk;
+        settings.Threshold_T               = threshold;
+        settings.Threshold_N               = max;
 
-        // Build the request (no InitCert, just contexts)
+        // ----- parse Authorizer Policy input; produce an enriched AP object for SetInitializationCertificate -----
+        final ObjectMapper M = new ObjectMapper();
+
+        final AuthorizerPolicy signAp; // the object we'll pass to SetInitializationCertificate
+        final String          signBh;  // the BH we must find in allow.sign (admin contexts)
+
+        if (authorizerPolicy == null || authorizerPolicy.isBlank()) {
+            throw new IllegalArgumentException("Missing authorizerPolicy");
+        }
+
+        if (authorizerPolicy.trim().startsWith("{")) {
+            // JSON package:
+            // {
+            //   "auth": {"compact":"...", "bh":"sha256:...", "assemblyBase64":"...", "entryType":"...", "sdkVersion":"1.0.0"},
+            //   "sign": {"compact":"...", "bh":"sha256:...", "assemblyBase64":"...", "entryType":"...", "sdkVersion":"1.0.0"}
+            // }
+            JsonNode root = M.readTree(authorizerPolicy);
+            JsonNode signNode = Objects.requireNonNull(root.get("sign"), "authorizerPolicy JSON missing 'sign'");
+
+            // 1) materialize from compact
+            String signCompact;
+            if (signNode.isTextual()) {
+                signCompact = signNode.asText();
+            } else if (signNode.isObject() && signNode.get("compact") != null && signNode.get("compact").isTextual()) {
+                signCompact = signNode.get("compact").asText();
+            } else {
+                throw new IllegalArgumentException("'sign' must be a string compact or object with 'compact'");
+            }
+
+            AuthorizerPolicy base = AuthorizerPolicy.fromCompact(signCompact);
+
+            // 2) enrich payload with DLL/meta if present
+            AuthorizerPolicyPayload p = base.payload(); // mutable fields
+            if (signNode.isObject()) {
+                if (signNode.hasNonNull("assemblyBase64")) p.assemblyBase64 = signNode.get("assemblyBase64").asText();
+                if (signNode.hasNonNull("entryType"))      p.entryType      = signNode.get("entryType").asText();
+                if (signNode.hasNonNull("sdkVersion"))     p.sdkVersion     = signNode.get("sdkVersion").asText();
+                if (signNode.hasNonNull("dllSize"))        p.dllSize        = signNode.get("dllSize").asLong();
+                if (signNode.hasNonNull("manifestHash"))   p.manifestHash   = signNode.get("manifestHash").asText();
+            }
+
+            // reconstruct to refresh compact bytes in case payload changed
+            signAp = AuthorizerPolicy.of(base.header(), p);
+
+            // 3) bh to check
+            signBh = (signNode.isObject() && signNode.hasNonNull("bh"))
+                    ? signNode.get("bh").asText()
+                    : signAp.payload().bh;
+
+        } else {
+            // Legacy: single compact string (no DLL carried)
+            signAp = AuthorizerPolicy.fromCompact(authorizerPolicy);
+            signBh = signAp.payload().bh;
+        }
+
+        if (signBh == null || !signBh.startsWith("sha256:")) {
+            throw new IllegalArgumentException("AuthorizerPolicy bh missing/invalid");
+        }
+
+        // ----- build the request -----
         UserContextSignRequest req = new UserContextSignRequest("VRK:1");
         req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
         req.SetUserContexts(orderedUserContexts);
-        if(authorizerPolicy != null) {
-            System.out.println(authorizerPolicy);
-            req.SetInitializationCertificate(AuthorizerPolicy.fromCompact(authorizerPolicy));
+
+        // Attach the (possibly enriched) AuthorizerPolicy object for vetting/gating/DLL storage
+        req.SetInitializationCertificate(signAp);
+
+        // ----- preflight: ensure an admin context includes this BH in allow.sign -----
+        final java.util.regex.Pattern SHA256 = java.util.regex.Pattern.compile("(?i)^\\s*sha256:[0-9a-f]{64}\\s*$");
+        boolean anyAdminHasBh = false;
+
+        for (UserContext uc : orderedUserContexts) {
+            String json = uc.ToString();
+            com.fasterxml.jackson.databind.node.ObjectNode root = (com.fasterxml.jackson.databind.node.ObjectNode) M.readTree(json);
+
+            boolean isAdmin = root.hasNonNull("InitCertHash"); // legacy marker
+            if (!isAdmin) {
+                JsonNode allow = root.get("allow");
+                if (allow != null && allow.isObject()) {
+                    isAdmin = arrayHasSha256(allow.get("auth"), SHA256) || arrayHasSha256(allow.get("sign"), SHA256);
+                }
+            }
+            if (isAdmin) {
+                JsonNode allow = root.get("allow");
+                if (allow != null && allow.isObject() && arrayContainsExact(allow.get("sign"), signBh)) {
+                    anyAdminHasBh = true;
+                    break;
+                }
+            }
         }
 
-        // If your request model supports custom claims, uncomment and feed policyRefs here:
-        // Map<String, List<String>> policyRefs = IGAUtils.buildPolicyRefs(roleApBundle);
-        // String refsJson = new ObjectMapper().writeValueAsString(policyRefs);
-        // req.AddClaim("policyRefs", refsJson);
+        // === CHANGE: If authorizer is "firstAdmin", skip this local check and let Forseti do the policy check ===
+        String authorizerType = Optional.ofNullable(authorizer.getType()).orElse("");
+        if (!anyAdminHasBh && !authorizerType.equalsIgnoreCase("firstAdmin")) {
+            throw new Exception("Admin context 'allow.sign' does not include the AuthorizerPolicy BH: " + signBh);
+        }
 
-        // Vendor authorization over DataToAuthorize
+        // ----- vendor auth over DataToAuthorize, authorizer identity -----
         req.SetAuthorization(
                 Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
         );
-
-        // Authorizer (vendor) identity + certificate
         req.SetAuthorizer(HexFormat.of().parseHex(authorizer.getAuthorizer()));
         req.SetAuthorizerCertificate(Base64.getDecoder().decode(authorizer.getAuthorizerCertificate()));
         req.SetNumberOfUserContexts(numberOfUserContext);
 
+        // ----- sign -----
         SignatureResponse response = Midgard.SignModel(settings, req);
 
         List<String> signatures = new ArrayList<>();
-        // exactly one per user context (no InitCert slot anymore)
         for (int i = 0; i < orderedUserContexts.length; i++) {
             signatures.add(response.Signatures[i]);
         }
         return signatures;
     }
+
+    // helpers
+    private static boolean arrayHasSha256(JsonNode n, java.util.regex.Pattern pat) {
+        if (n == null || !n.isArray()) return false;
+        for (JsonNode e : n) if (e.isTextual() && pat.matcher(e.asText()).matches()) return true;
+        return false;
+    }
+    private static boolean arrayContainsExact(JsonNode n, String exact) {
+        if (n == null || !n.isArray()) return false;
+        for (JsonNode e : n) if (e.isTextual() && exact.equals(e.asText())) return true;
+        return false;
+    }
+
 }

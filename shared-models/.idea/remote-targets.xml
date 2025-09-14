@@ -18,6 +18,16 @@
           </config>
         </ContributedStateBase>
       </target>
+      <target name="WSL2" type="wsl" uuid="dc9af8a9-88fc-4766-9330-d67c1016bdb2">
+        <config>
+          <option name="distributionMsId" value="Debian" />
+        </config>
+        <ContributedStateBase type="JavaLanguageRuntime">
+          <config>
+            <option name="homePath" value="/usr/local/jdk" />
+          </config>
+        </ContributedStateBase>
+      </target>
     </targets>
   </component>
 </project>

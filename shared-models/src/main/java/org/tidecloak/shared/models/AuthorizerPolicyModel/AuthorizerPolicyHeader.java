@@ -1,4 +1,4 @@
-package org.midgard.models.AuthorizerPolicyModel;
+package org.tidecloak.shared.models.AuthorizerPolicyModel;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 

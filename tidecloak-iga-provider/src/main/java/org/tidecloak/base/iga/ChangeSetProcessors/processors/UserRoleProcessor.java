@@ -1,6 +1,8 @@
 package org.tidecloak.base.iga.ChangeSetProcessors.processors;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import org.jboss.logging.Logger;
 import org.keycloak.component.ComponentModel;
@@ -10,8 +12,6 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.representations.AccessToken;
 import org.midgard.models.AuthorizerPolicyModel.AuthorizerPolicy;
-import org.tidecloak.shared.models.InitializerCertificateModel.InitializerCertificate;
-import org.tidecloak.shared.models.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.base.iga.ChangeSetProcessors.keys.UserClientKey;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
@@ -29,8 +29,9 @@ import org.tidecloak.base.iga.interfaces.TideUserAdapter;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 
-
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -38,7 +39,6 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.createRoleAuthorizerPolicyDraft;
-import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.createRoleInitCertDraft;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.addRoleToAccessToken;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.removeRoleFromAccessToken;
@@ -139,7 +139,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                         em.remove(roleInitializerCertificateDraftEntity.get(0));
                         em.flush();
                     }
-                    //createRoleInitCertDraft(session, request.getId(), "1", 0.7, 1);
                     processRealmManagementRoleAssignment(session, em, realm, clientList, request, u);
 
                 } catch (Exception e) {
@@ -161,7 +160,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     @Override
     public void request(KeycloakSession session, TideUserRoleMappingDraftEntity entity, EntityManager em, ActionType action, Runnable callback, ChangeSetType changeSetType) {
         try {
-            // Log the start of the request with detailed context
             logger.debug(String.format(
                     "Starting workflow: REQUEST. Processor: %s, Action: %s, Entity ID: %s, Change Requests ID: %s",
                     this.getClass().getSimpleName(),
@@ -185,7 +183,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                     throw new IllegalArgumentException("Unsupported action: " + action);
             }
 
-            // Log successful completion
             logger.debug(String.format(
                     "Successfully processed workflow: REQUEST. Processor: %s, Mapping ID: %s, Change Request ID: %s",
                     this.getClass().getSimpleName(),
@@ -226,7 +223,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             if (realmAuthorizers.isEmpty()) throw new Exception("Authorizer not found for this realm.");
 
             if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                // UPDATED: create AP draft (stored in legacy draft entity)
+                // AP draft (legacy draft table); threshold recalculated by helper
                 createRoleAuthorizerPolicyDraft(session, changeSetId, "1", 0.7, 1, role);
             }
         }
@@ -265,7 +262,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             if (realmAuthorizers.isEmpty()) throw new Exception("Authorizer not found for this realm.");
 
             if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                // UPDATED: AP draft with -1 additional admin (effectively re-calc threshold)
+                // AP draft with -1 additional admin (threshold recalculation path)
                 createRoleAuthorizerPolicyDraft(session, changeSetId, "1", 0.7, -1, role);
             }
         }
@@ -305,15 +302,18 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
         clientList.forEach(client -> {
             users.forEach(user -> {
-                    try {
-                        UserEntity u = em.find(UserEntity.class, user.getId());
-                        UserModel wrappedUser = TideEntityUtils.toTideUserAdapter(u, session, realm);
-                        ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, wrappedUser, new ChangeRequestKey(userRoleMapping.getId(), userRoleMapping.getChangeRequestId()),
+                try {
+                    UserEntity u = em.find(UserEntity.class, user.getId());
+                    UserModel wrappedUser = TideEntityUtils.toTideUserAdapter(u, session, realm);
+                    ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(
+                            session, em, realm, client, wrappedUser,
+                            new ChangeRequestKey(userRoleMapping.getId(), userRoleMapping.getChangeRequestId()),
                             ChangeSetType.USER_ROLE, userRoleMapping);
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    }
-                });
+                    // PH injection will happen during combine/update.
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
         });
     }
 
@@ -346,34 +346,28 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             affectedUserRoleEntity.setDraftStatus(DraftStatus.DRAFT);
         }
 
-        // Build the transformed user-context JSON (as before)
+        // Build the transformed user-context JSON (now consistently using "openid")
         String userContextDraftJson = ChangeSetProcessor.super.generateTransformedUserContext(
-                session, realm, client, userChangesMadeTo, "openId", affectedUserRoleEntity);
+                session, realm, client, userChangesMadeTo, "openid", affectedUserRoleEntity);
 
-        // Look up the role draft; its initCert column now stores the AuthorizerPolicy compact string.
+        // Look up the role draft; its initCert column stores AP compact or bundle; inject PH markers.
         RoleEntity roleEntity = em.find(RoleEntity.class, affectedUserRoleEntity.getRoleId());
         List<TideRoleDraftEntity> roleDrafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", roleEntity).getResultList();
 
         if (!roleDrafts.isEmpty()) {
-            String apCompact = roleDrafts.get(0).getInitCert(); // still named initCert in DB; contains AP compact string
-            if (apCompact != null && !apCompact.isBlank()) {
-                // Parse compact AP and extract BH
-                AuthorizerPolicy ap = AuthorizerPolicy.fromCompact(apCompact);
-                String bh = ap.payload().bh; // "sha256:..."
-
-                // Inject BH into userContext.allow.{auth,sign}
-                userContextDraftJson = injectAllowBh(userContextDraftJson, bh, true, true);
-
-                // Optional: set threshold from AP if your userContext still carries threshold
-                int threshold = ap.payload().threshold;
-                userContextDraftJson = setThresholdIfPresent(userContextDraftJson, threshold);
+            AuthorizerPolicy ap = tryParseAuthorizerPolicy(roleDrafts.get(0).getInitCert());
+            if (ap != null) {
+                String[] markers = computePolicyMarkers(ap);
+                userContextDraftJson = injectAllowMarkers(userContextDraftJson, markers, true, true);
+                if (ap.payload() != null && ap.payload().threshold != null) {
+                    userContextDraftJson = setThresholdIfPresent(userContextDraftJson, ap.payload().threshold);
+                }
             }
         }
 
         affectedUserContextDraft.setProofDraft(userContextDraftJson);
     }
-
 
     @Override
     public AccessToken transformUserContext(AccessToken token, KeycloakSession session, TideUserRoleMappingDraftEntity entity, UserModel user, ClientModel clientModel){
@@ -453,7 +447,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             List<AccessProofDetailEntity> toRemoveProofs = new ArrayList<>();
             List<ChangesetRequestEntity> toRemoveRequests = new ArrayList<>();
 
-
             // Merge proofs across clients into a single JSON draft
             for (var clientEntry : userEntry.getValue().entrySet()) {
                 ClientModel cm = clientById.get(clientEntry.getKey());
@@ -463,7 +456,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
                 if (cm == null) continue;
                 String combinedProofDraft = null;
-
 
                 for (var proof : clientEntry.getValue()) {
                     mappingId.set(proof.getChangeRequestKey().getMappingId());
@@ -482,7 +474,22 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                     AccessToken token = objectMapper.readValue(
                             combinedProofDraft, AccessToken.class);
                     combinedProofDraft = combinedTransformedUserContext(
-                            session, realm, cm, um, "openId", draft, token);
+                            session, realm, cm, um, "openid", draft, token);
+
+                    // Inject policy markers from role draft (AP compact/bundle)
+                    RoleEntity roleEntity = em.find(RoleEntity.class, draft.getRoleId());
+                    List<TideRoleDraftEntity> roleDrafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                            .setParameter("role", roleEntity).getResultList();
+                    if (!roleDrafts.isEmpty()) {
+                        AuthorizerPolicy ap = tryParseAuthorizerPolicy(roleDrafts.get(0).getInitCert());
+                        if (ap != null) {
+                            String[] markers = computePolicyMarkers(ap);
+                            combinedProofDraft = injectAllowMarkers(combinedProofDraft, markers, true, true);
+                            if (ap.payload() != null && ap.payload().threshold != null) {
+                                combinedProofDraft = setThresholdIfPresent(combinedProofDraft, ap.payload().threshold);
+                            }
+                        }
+                    }
 
                     toRemoveProofs.add(proof);
                     toRemoveRequests.addAll(em.createNamedQuery(
@@ -503,7 +510,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             // Remove outdated proofs and their change-request entities
             toRemoveProofs.forEach(em::remove);
             toRemoveRequests.forEach(em::remove);
-
 
             // Retrieve the recreated ChangeRequestEntity(ies) for this combinedRequestId
             List<ChangesetRequestEntity> created = em.createNamedQuery(
@@ -550,7 +556,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     private void processRealmManagementRoleAssignment(KeycloakSession session, EntityManager em, RealmModel realm, List<ClientModel> clientList,
-                                                       TideUserRoleMappingDraftEntity entity, UserModel userModel) {
+                                                      TideUserRoleMappingDraftEntity entity, UserModel userModel) {
         Set<UserModel> adminUsers = new HashSet<>();
         adminUsers.add(userModel);
         ClientModel realmManagementClient = realm.getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
@@ -590,7 +596,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     }
 
     private void processRoles(KeycloakSession session, EntityManager em, RealmModel realm, List<ClientModel> clientList,
-                                                  Set<RoleModel> roleMappings, TideUserRoleMappingDraftEntity entity, UserModel userModel) {
+                              Set<RoleModel> roleMappings, TideUserRoleMappingDraftEntity entity, UserModel userModel) {
         clientList.forEach(client -> {
             try {
                 if (isAdminClient(client)) {
@@ -608,7 +614,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         return client.getClientId().equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID) ||
                 client.getClientId().equalsIgnoreCase(Constants.ADMIN_CLI_CLIENT_ID);
     }
-
 
     private Set<TideRoleAdapter> wrapRolesAsTideAdapters(Set<RoleModel> roles, KeycloakSession session, RealmModel realm, EntityManager em) {
         return roles.stream()
@@ -634,44 +639,106 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 .getResultList();
     }
 
+    // ===== Helpers: AP parsing (supports bundle), PH computation, and JSON injection =====
 
-    private List<TideUserRoleMappingDraftEntity> getUserRoleMappings(EntityManager em, String changeSetId, ActionType action, RealmModel realm) {
-        String queryName = action == ActionType.CREATE ? "getUserRoleMappingsByStatusAndRealmAndRecordId" : "getUserRoleMappingsByDeleteStatusAndRealmAndRecordId";
-        return em.createNamedQuery(queryName, TideUserRoleMappingDraftEntity.class)
-                .setParameter(action == ActionType.CREATE ? "draftStatus" : "deleteStatus", DraftStatus.APPROVED)
-                .setParameter("changesetId", changeSetId)
-                .setParameter("realmId", realm.getId())
-                .getResultList();
+    @SuppressWarnings("unchecked")
+    private static AuthorizerPolicy tryParseAuthorizerPolicy(String stored) {
+        if (stored == null || stored.isBlank()) return null;
+        String s = stored.trim();
+        try {
+            if (s.startsWith("{")) {
+                Map<String, String> m = new ObjectMapper().readValue(s, Map.class);
+                String compact = m.getOrDefault("auth", m.values().stream().findFirst().orElse(""));
+                if (compact == null || compact.isBlank()) return null;
+                return AuthorizerPolicy.fromCompact(compact);
+            } else {
+                return AuthorizerPolicy.fromCompact(s);
+            }
+        } catch (Exception ignore) {
+            return null;
+        }
     }
 
-    private static String injectAllowBh(String userContextJson, String bh, boolean includeAuth, boolean includeSign) {
+    private static boolean injectDataBhLegacy() {
+        String v = System.getenv("INJECT_DATA_BH_LEGACY");
+        return v != null && v.equalsIgnoreCase("true");
+    }
+
+    private static boolean injectDllBhLegacy() {
+        String v = System.getenv("INJECT_DLL_BH_LEGACY");
+        return v != null && v.equalsIgnoreCase("true");
+    }
+
+    /** Primary markers: sha256/sha512 over FULL COMPACT ("h.p.s") if present, else "h.p".
+     *  Optional legacy: hashes over "h.p" and/or payload DLL 'bh' via env flags. */
+    private static String[] computePolicyMarkers(AuthorizerPolicy ap) {
+        try {
+            List<String> out = new ArrayList<>(4);
+
+            String compactWithSig = safeCompactWithSig(ap);
+            byte[] full = compactWithSig.getBytes(StandardCharsets.UTF_8);
+            out.add("sha256:" + toHexUpper(MessageDigest.getInstance("SHA-256").digest(full)));
+            out.add("sha512:" + toHexUpper(MessageDigest.getInstance("SHA-512").digest(full)));
+
+            if (injectDataBhLegacy()) {
+                String dataOnly = safeCompactNoSig(ap);
+                byte[] data = dataOnly.getBytes(StandardCharsets.UTF_8);
+                out.add("sha256:" + toHexUpper(MessageDigest.getInstance("SHA-256").digest(data)));
+                out.add("sha512:" + toHexUpper(MessageDigest.getInstance("SHA-512").digest(data)));
+            }
+            if (injectDllBhLegacy() && ap.payload() != null && ap.payload().bh != null && !ap.payload().bh.isBlank()) {
+                out.add(ap.payload().bh);
+            }
+            return out.toArray(new String[0]);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed computing policy markers", e);
+        }
+    }
+
+    private static String safeCompactWithSig(AuthorizerPolicy ap) {
+        String s = ap.toCompactStringWithSignature();
+        if (s == null || s.isBlank()) s = safeCompactNoSig(ap);
+        return s;
+    }
+
+    private static String safeCompactNoSig(AuthorizerPolicy ap) {
+        String s = ap.toCompactString();
+        return (s == null) ? "" : s;
+    }
+
+    private static String injectAllowMarkers(String userContextJson, String[] markers, boolean includeAuth, boolean includeSign) {
         try {
             ObjectMapper om = new ObjectMapper();
-            var root  = (com.fasterxml.jackson.databind.node.ObjectNode) om.readTree(userContextJson);
-            var allow = root.with("allow");
-            if (includeAuth) appendIfMissing(allow.withArray("auth"), bh);
-            if (includeSign) appendIfMissing(allow.withArray("sign"), bh);
+            ObjectNode root  = (ObjectNode) om.readTree(userContextJson);
+            ObjectNode allow = root.with("allow");
+            if (includeAuth) appendAllIfMissing(allow.withArray("auth"), markers);
+            if (includeSign) appendAllIfMissing(allow.withArray("sign"), markers);
             return om.writeValueAsString(root);
         } catch (Exception e) {
-            throw new RuntimeException("injectAllowBh failed", e);
+            throw new RuntimeException("injectAllowMarkers failed", e);
         }
     }
 
-    private static void appendIfMissing(com.fasterxml.jackson.databind.node.ArrayNode arr, String value) {
-        for (int i = 0; i < arr.size(); i++) {
-            if (Objects.equals(arr.get(i).asText(), value)) return;
-        }
-        arr.add(value);
+    private static void appendAllIfMissing(ArrayNode arr, String[] values) {
+        Set<String> existing = new HashSet<>();
+        for (int i = 0; i < arr.size(); i++) existing.add(arr.get(i).asText());
+        for (String v : values) if (!existing.contains(v)) arr.add(v);
     }
 
     private static String setThresholdIfPresent(String userContextJson, int threshold) {
         try {
             ObjectMapper om = new ObjectMapper();
-            var root = (com.fasterxml.jackson.databind.node.ObjectNode) om.readTree(userContextJson);
+            ObjectNode root = (ObjectNode) om.readTree(userContextJson);
             root.put("threshold", threshold);
             return om.writeValueAsString(root);
         } catch (Exception e) {
             return userContextJson; // ignore if structure differs
         }
+    }
+
+    private static String toHexUpper(byte[] b) {
+        StringBuilder sb = new StringBuilder(b.length * 2);
+        for (byte x : b) sb.append(String.format("%02X", x));
+        return sb.toString();
     }
 }
