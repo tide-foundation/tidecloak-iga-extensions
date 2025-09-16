@@ -213,15 +213,15 @@ public class ChangesetRequestAdapter {
     }
 
     public static int getNumberOfActiveAdmins(KeycloakSession session, RealmModel realm, RoleModel tideRole, EntityManager em) {
-         return (int) session.users()
+        return (int) session.users()
                 .getRoleMembersStream(realm, tideRole).filter( u -> {
                     UserEntity user = em.find(UserEntity.class, u.getId());
-                     List<TideUserRoleMappingDraftEntity> entity = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
-                             .setParameter("user", user)
-                             .setParameter("roleId", tideRole.getId())
-                             .setParameter("draftStatus", DraftStatus.ACTIVE).getResultList();
-                     return !entity.isEmpty();
-                 }).count();
+                    List<TideUserRoleMappingDraftEntity> entity = em.createNamedQuery("getUserRoleAssignmentDraftEntityByStatus", TideUserRoleMappingDraftEntity.class)
+                            .setParameter("user", user)
+                            .setParameter("roleId", tideRole.getId())
+                            .setParameter("draftStatus", DraftStatus.ACTIVE).getResultList();
+                    return !entity.isEmpty();
+                }).count();
 
     }
 

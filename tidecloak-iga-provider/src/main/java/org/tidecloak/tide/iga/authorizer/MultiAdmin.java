@@ -11,7 +11,7 @@ import org.keycloak.services.resources.admin.AdminAuth;
 import org.midgard.Midgard;
 import org.midgard.models.AdminAuthorization;
 import org.midgard.models.AdminAuthorizerBuilder;
-import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+import org.midgard.models.AuthorizerPolicyModel.AuthorizerPolicy;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
@@ -31,12 +31,28 @@ import org.tidecloak.shared.models.SecretKeys;
 import java.net.URI;
 import java.util.*;
 
-import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.commitRoleInitCert;
+import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.commitRoleAuthorizerPolicy;
 import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
 import static org.tidecloak.base.iga.utils.BasicIGAUtils.isAuthorityAssignment;
 import static org.tidecloak.base.iga.utils.BasicIGAUtils.sortAccessProof;
 
 public class MultiAdmin implements Authorizer{
+
+    private static String unwrapCompactOrFirst(String stored) {
+        if (stored == null) return null;
+        String s = stored.trim();
+        if (!s.startsWith("{")) return s;
+        try {
+            ObjectMapper om = new ObjectMapper();
+            @SuppressWarnings("unchecked")
+            Map<String, Object> m = om.readValue(s, Map.class);
+            Object v = m.get("auth");
+            if (v == null && !m.isEmpty()) v = m.values().iterator().next();
+            return v == null ? null : String.valueOf(v);
+        } catch (Exception e) {
+            return s;
+        }
+    }
 
     @Override
     public Response signWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, Object draftEntity, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
@@ -62,7 +78,7 @@ public class MultiAdmin implements Authorizer{
 
         URI uri = Midgard.CreateURL(
                 auth.getToken().getSessionId(),
-                redirectURI.toString(),//userSession.getNote("redirectUri"),
+                redirectURI.toString(),
                 redirectUrlSig,
                 tideIdp.getConfig().get("homeORKurl"),
                 config.getFirst("clientId"),
@@ -74,7 +90,7 @@ public class MultiAdmin implements Authorizer{
                 tideIdp.getConfig().get("ImageURL"),
                 "approval",
                 tideIdp.getConfig().get("settingsSig"),
-                voucherURL, //voucherURL,
+                voucherURL,
                 ""
         );
 
@@ -82,7 +98,7 @@ public class MultiAdmin implements Authorizer{
         if(customAdminUiDomain != null) {
             customDomainUri = Midgard.CreateURL(
                     auth.getToken().getSessionId(),
-                    customAdminUiDomain,//userSession.getNote("redirectUri"),
+                    customAdminUiDomain,
                     tideIdp.getConfig().get("customAdminUIDomainSig"),
                     tideIdp.getConfig().get("homeORKurl"),
                     config.getFirst("clientId"),
@@ -94,7 +110,7 @@ public class MultiAdmin implements Authorizer{
                     tideIdp.getConfig().get("ImageURL"),
                     "approval",
                     tideIdp.getConfig().get("settingsSig"),
-                    voucherURL, //voucherURL,
+                    voucherURL,
                     ""
             );
         }
@@ -104,7 +120,7 @@ public class MultiAdmin implements Authorizer{
         response.put("uri", String.valueOf(uri));
         response.put("changeSetRequests", changesetRequestEntity.getDraftRequest());
         response.put("requiresApprovalPopup", "true");
-        response.put("expiry", String.valueOf(changesetRequestEntity.getTimestamp() + 2628000)); // month expiry
+        response.put("expiry", String.valueOf(changesetRequestEntity.getTimestamp() + 2628000));
         if(customAdminUiDomain != null) {
             response.put("customDomainUri", String.valueOf(customDomainUri));
         }
@@ -134,14 +150,17 @@ public class MultiAdmin implements Authorizer{
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", role).getSingleResult();
 
-        InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
-        UserContextSignRequest req = new UserContextSignRequest("Admin:1");
+        // unwrap bundle -> compact, prefer "auth"
+        String compact = unwrapCompactOrFirst(tideRoleEntity.getInitCert());
+        AuthorizerPolicy cert = AuthorizerPolicy.fromCompact(compact);
+
+        UserContextSignRequest req = new UserContextSignRequest("Admin:2");
         req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
         req.SetUserContexts(orderedContext.toArray(new UserContext[0]));
-        req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000); // expiry in 1 month
+        req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000);
+
         AdminAuthorizerBuilder authorizerBuilder = new AdminAuthorizerBuilder();
-        authorizerBuilder.AddInitCert(cert);
-        authorizerBuilder.AddInitCertSignature(tideRoleEntity.getInitCertSig());
+        authorizerBuilder.AddInitCert(cert.toCompactString());
 
         changesetRequestEntity.getAdminAuthorizations().forEach(a -> {
             authorizerBuilder.AddAdminAuthorization(AdminAuthorization.FromString(a.getAdminAuthorization()));
@@ -155,7 +174,7 @@ public class MultiAdmin implements Authorizer{
         }
 
         String currentSecretKeys = config.getFirst("clientSecret");
-        SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
+        org.tidecloak.shared.models.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, org.tidecloak.shared.models.SecretKeys.class);
 
         SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
         settings.VVKId = config.getFirst("vvkId");
@@ -175,13 +194,14 @@ public class MultiAdmin implements Authorizer{
             if(roleInitCert == null) {
                 throw new BadRequestException("Role Init Cert draft not found for changeSet, " + changeSet.getChangeSetId());
             }
-            req.SetInitializationCertificate(InitializerCertifcate.FromString(roleInitCert.getInitCert()));
+            AuthorizerPolicy draftCert = AuthorizerPolicy.fromCompact(unwrapCompactOrFirst(roleInitCert.getInitCert()));
+            req.SetInitializationCertificate(draftCert);
             SignatureResponse response = Midgard.SignModel(settings, req);
 
             for ( int i = 0; i < orderedProofDetails.size(); i++){
                 orderedProofDetails.get(i).setSignature(response.Signatures[i + 1]);
             }
-            commitRoleInitCert(session, changeSet.getChangeSetId(), draftEntity, response.Signatures[0]);
+            commitRoleAuthorizerPolicy(session, changeSet.getChangeSetId(), draftEntity, response.Signatures[0]);
 
         } else {
             SignatureResponse response = Midgard.SignModel(settings, req);
@@ -191,15 +211,13 @@ public class MultiAdmin implements Authorizer{
             }
         }
 
-        ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory(); // Initialize the processor factory
-
+        ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
         WorkflowParams workflowParams = new WorkflowParams(null, false, null, changeSet.getType());
         processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, draftEntity, em, WorkflowType.COMMIT, workflowParams, null);
         String authorizerType = authorizer.getType();
         if (isAuthorityAssignment) {
             if (authorizer.getType().equals(org.tidecloak.shared.Constants.TIDE_INITIAL_AUTHORIZER)){
                 authorizer.setType(org.tidecloak.shared.Constants.TIDE_MULTI_ADMIN_AUTHORIZER);
-
             }
         }
         em.flush();

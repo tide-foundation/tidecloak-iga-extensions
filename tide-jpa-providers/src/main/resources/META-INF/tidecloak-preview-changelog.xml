@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- # TIDECLOAK IMPLEMENTATION #
+     Liquibase changelog for preview/replay models.
+     Safe for upgrades: uses preconditions / IF NOT EXISTS pattern to avoid breaking existing servers. -->
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.5.xsd">
+
+    <!-- 001: Active context revision table -->
+    <changeSet id="tide-preview-001-active-context-revision" author="tidecloak">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <tableExists tableName="tide_active_context_revision"/>
+            </not>
+        </preConditions>
+        <createTable tableName="tide_active_context_revision">
+            <column name="realm_id" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="active_rev" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="updated_at" type="TIMESTAMP WITH TIME ZONE">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+
+    <!-- 002: Token preview table -->
+    <changeSet id="tide-preview-002-token-preview" author="tidecloak">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <tableExists tableName="tide_token_preview"/>
+            </not>
+        </preConditions>
+        <createTable tableName="tide_token_preview">
+            <column name="id" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="realm_id" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="user_id" type="VARCHAR(36)"/>
+            <column name="client_id" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="created_at" type="TIMESTAMP WITH TIME ZONE">
+                <constraints nullable="false"/>
+            </column>
+            <column name="spec_json" type="CLOB">
+                <constraints nullable="false"/>
+            </column>
+            <column name="baseline_json" type="CLOB">
+                <constraints nullable="false"/>
+            </column>
+            <column name="preview_json" type="CLOB">
+                <constraints nullable="false"/>
+            </column>
+            <column name="diff_json" type="CLOB">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <createIndex tableName="tide_token_preview" indexName="idx_ttp_realm_user_client_created">
+            <column name="realm_id"/>
+            <column name="user_id"/>
+            <column name="client_id"/>
+            <column name="created_at"/>
+        </createIndex>
+        <createIndex tableName="tide_token_preview" indexName="idx_ttp_realm_created">
+            <column name="realm_id"/>
+            <column name="created_at"/>
+        </createIndex>
+    </changeSet>
+
+    <!-- 003: Token preview bundle table -->
+    <changeSet id="tide-preview-003-token-preview-bundle" author="tidecloak">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <tableExists tableName="tide_token_preview_bundle"/>
+            </not>
+        </preConditions>
+        <createTable tableName="tide_token_preview_bundle">
+            <column name="id" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="realm_id" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="created_at" type="TIMESTAMP WITH TIME ZONE">
+                <constraints nullable="false"/>
+            </column>
+            <column name="iga_mode" type="VARCHAR(16)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="item_count" type="INT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="merged_count" type="INT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="standalone_count" type="INT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="items_json" type="CLOB">
+                <constraints nullable="false"/>
+            </column>
+            <column name="merged_json" type="CLOB">
+                <constraints nullable="false"/>
+            </column>
+            <column name="preview_ids_json" type="CLOB">
+                <constraints nullable="false"/>
+            </column>
+            <column name="conflicts_json" type="CLOB">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <createIndex tableName="tide_token_preview_bundle" indexName="idx_ttpb_realm_created">
+            <column name="realm_id"/>
+            <column name="created_at"/>
+        </createIndex>
+    </changeSet>
+
+    <!-- Optional cleanup (commented out; enable after verifying nothing references legacy preview tables)
+    <changeSet id="tide-preview-099-drop-legacy" author="tidecloak" runOnChange="true" runAlways="false">
+        <preConditions onFail="MARK_RAN">
+            <and>
+                <tableExists tableName="legacy_preview_table"/>
+            </and>
+        </preConditions>
+        <dropTable tableName="legacy_preview_table"/>
+    </changeSet>
+    -->
+
+</databaseChangeLog>

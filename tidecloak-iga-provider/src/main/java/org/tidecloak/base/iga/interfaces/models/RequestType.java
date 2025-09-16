@@ -4,4 +4,3 @@ public enum RequestType {
     USER, ROLE, GROUP, CLIENT, REALM
 }
 
-

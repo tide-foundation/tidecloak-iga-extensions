@@ -1,44 +1,25 @@
+//  (compat shim)
 package org.tidecloak.base.iga.ChangeSetProcessors.models;
-import org.tidecloak.shared.enums.ActionType;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
+import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 
 public class ChangeSetRequest {
+    private String changeSetId;
+    private ChangeSetType type;
+    private ActionType actionType;
 
-    @JsonProperty("changeSetId")
-    protected String changeSetId;
-    @JsonProperty("changeSetType")
-    protected ChangeSetType changeSetType;
-    @JsonProperty("actionType")
-    protected ActionType actionType;
-
-    public ChangeSetRequest() {}
-
-    public ChangeSetRequest(String changeSetId, ChangeSetType changeSetType, ActionType actionType) {
+    public ChangeSetRequest(){}
+    public ChangeSetRequest(String changeSetId, ChangeSetType type, ActionType actionType){
         this.changeSetId = changeSetId;
-        this.changeSetType = changeSetType;
+        this.type = type;
         this.actionType = actionType;
     }
 
-    public ChangeSetType getType() {
-        return changeSetType;
-    }
-    public String getChangeSetId() {
-        return changeSetId;
-    }
-    public ActionType getActionType() {
-        return actionType;
-    }
-
-    public void setType(ChangeSetType changeSetType) {
-        this.changeSetType = changeSetType;
-    }
-    public void setChangeSetId(String changeSetId) {
-        this.changeSetId = changeSetId;
-    }
-    public void setActionType(ActionType actionType) {
-        this.actionType = actionType;
-    }
-
+    public String getChangeSetId() { return changeSetId; }
+    public void setChangeSetId(String changeSetId) { this.changeSetId = changeSetId; }
+    public ChangeSetType getType() { return type; }
+    public void setType(ChangeSetType type) { this.type = type; }
+    public ActionType getActionType() { return actionType; }
+    public void setActionType(ActionType actionType) { this.actionType = actionType; }
 }
