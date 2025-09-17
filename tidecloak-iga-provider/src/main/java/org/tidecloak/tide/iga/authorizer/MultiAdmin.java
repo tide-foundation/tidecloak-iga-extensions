@@ -31,7 +31,7 @@ import org.tidecloak.shared.models.SecretKeys;
 import java.net.URI;
 import java.util.*;
 
-import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.commitRoleAuthorizerPolicy;
+import static org.tidecloak.tide.iga.replay.TideRoleReplaySupport.commitRoleAuthorizerPolicy;
 import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
 import static org.tidecloak.base.iga.utils.BasicIGAUtils.isAuthorityAssignment;
 import static org.tidecloak.base.iga.utils.BasicIGAUtils.sortAccessProof;
