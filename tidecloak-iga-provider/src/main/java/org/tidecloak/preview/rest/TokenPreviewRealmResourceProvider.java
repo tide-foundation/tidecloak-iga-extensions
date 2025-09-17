@@ -1,33 +1,33 @@
-// 
 package org.tidecloak.preview.rest;
 
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.models.utils.RoleUtils;
+import org.keycloak.protocol.oidc.TokenManager;
 import org.keycloak.representations.AccessToken;
 import org.keycloak.services.resource.RealmResourceProvider;
+import org.keycloak.services.util.DefaultClientSessionContext;
+
 import org.tidecloak.preview.authz.PolicyLinker;
 import org.tidecloak.jpa.entities.preview.TokenPreviewBundleEntity;
 import org.tidecloak.jpa.entities.preview.TokenPreviewEntity;
 import org.tidecloak.preview.dto.TokenPreviewBundleSpec;
 import org.tidecloak.preview.dto.TokenPreviewSpec;
-import org.keycloak.services.util.DefaultClientSessionContext;
-import org.keycloak.models.utils.RoleUtils;
-
-import org.tidecloak.jpa.entities.preview.TokenPreviewBundleEntity;
-import org.tidecloak.jpa.entities.preview.TokenPreviewEntity;
-
-import org.tidecloak.preview.util.TokenPreviewBuilder;
 import org.tidecloak.preview.service.RevisionService;
 import org.tidecloak.preview.util.PreviewBundleConsolidator;
 import org.tidecloak.preview.util.TokenDiffUtil;
 
+import java.io.IOException;
 import java.time.OffsetDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Path("/token-preview")
 public class TokenPreviewRealmResourceProvider implements RealmResourceProvider {
@@ -42,7 +42,7 @@ public class TokenPreviewRealmResourceProvider implements RealmResourceProvider 
     private RealmModel realm() { return session.getContext().getRealm(); }
 
     @POST @Path("/") @Consumes(MediaType.APPLICATION_JSON) @Produces(MediaType.APPLICATION_JSON)
-    public Response createPreview(TokenPreviewSpec spec) {
+    public Response createPreview(TokenPreviewSpec spec) throws IOException {
         RevisionService rs = new RevisionService(session);
         long activeRev = rs.getActiveRev(realm());
         if (spec != null && spec.expectedActiveRev != null && spec.expectedActiveRev.longValue() != activeRev) {
@@ -58,14 +58,15 @@ public class TokenPreviewRealmResourceProvider implements RealmResourceProvider 
             if (client == null) throw new NotFoundException("Client not found: " + spec.clientId);
 
             Map<String,Object> tok = new LinkedHashMap<>();
+            // Fallback issuer field – realm name; if you want URL, compute from baseUri
             tok.put("iss", realm.getName() != null ? realm.getName() : "");
             tok.put("azp", client.getClientId());
 
-            // realm_access from default roles
+            // Minimal realm_access from default role (if present)
             RoleModel def = realm.getDefaultRole();
             if (def != null) {
                 Set<String> rr = new TreeSet<>();
-                org.keycloak.models.utils.RoleUtils.expandCompositeRolesStream(java.util.stream.Stream.of(def))
+                RoleUtils.expandCompositeRolesStream(java.util.stream.Stream.of(def))
                         .forEach(role -> rr.add(role.getName()));
                 if (!rr.isEmpty()) {
                     Map<String,Object> ra = new LinkedHashMap<>();
@@ -74,28 +75,10 @@ public class TokenPreviewRealmResourceProvider implements RealmResourceProvider 
                 }
             }
 
-            // if full scope, add common account roles if present
-            if (client.isFullScopeAllowed()) {
-                ClientModel account = session.clients().getClientByClientId(realm, "account");
-                if (account != null) {
-                    List<String> names = Arrays.asList("manage-account", "manage-account-links", "view-profile");
-                    List<String> present = new ArrayList<>();
-                    for (String n : names) { if (account.getRole(n) != null) present.add(n); }
-                    if (!present.isEmpty()) {
-                        Map<String,Object> ra = new LinkedHashMap<>();
-                        ra.put("roles", present);
-                        Map<String,Object> res = new LinkedHashMap<>();
-                        res.put("account", ra);
-                        tok.put("resource_access", res);
-                        tok.put("aud", "account");
-                    }
-                }
-            }
-
             Map<String,Object> out = new LinkedHashMap<>();
             out.put("baselineToken", tok);
             out.put("previewToken", tok);
-            out.put("diff", Collections.emptyList());
+            out.put("diff", List.of()); // list, consistent with TokenDiffUtil
             out.put("activeRev", activeRev);
             return Response.ok(out).build();
         }
@@ -138,39 +121,35 @@ public class TokenPreviewRealmResourceProvider implements RealmResourceProvider 
                         .map(ClientScopeModel::getName)
                         .collect(Collectors.joining(" "));
 
-        // Build baseline roles directly from the platform
-        boolean fullScopeAllowed = client.isFullScopeAllowed();
-        Set<RoleModel> baselineRoles = org.keycloak.models.utils.RoleUtils.getDeepUserRoleMappings(user);
-        // Scope filter if needed
-        if (!fullScopeAllowed) {
-            Set<RoleModel> scopeRoles = new HashSet<>();
-            requestedScopes.forEach(cs -> cs.getScopeMappingsStream().forEach(scopeRoles::add));
-            baselineRoles.removeIf(r -> r.isClientRole() && !scopeRoles.contains(r));
-        }
-        ClientSessionContext ctx =
-                DefaultClientSessionContext.fromClientSessionAndRequestedScopes(clientSession, requestedScopes, session);
-        AccessToken baselineToken = new org.keycloak.protocol.oidc.TokenManager()
+        // BASELINE token
+        ClientSessionContext baselineCtx =
+                DefaultClientSessionContext.fromClientSessionAndScopeParameter(clientSession, scopeString, session);
+        AccessToken baselineToken = new TokenManager()
                 .createClientAccessToken(session, realm, client, user, userSession, baselineCtx);
-        PolicyLinker.attachPolicies(session, realm, baselineRoles, baselineToken);
 
-        // Preview overlay user: we reuse real user but compute overlay roles
-        Set<RoleModel> previewRoles = PreviewRoleComputer.computeEffectiveRoles(
-                session, realm, user, client, requestedScopes.stream(), fullScopeAllowed,
-                spec.addUserRoles, spec.removeUserRoles, spec.addToComposite,
-                Collections.emptyMap(), spec.addGroups, spec.removeGroups);
+        // Apply any policy overlays on baseline (optional)
+        PolicyLinker.attachPolicies(session, realm, null, baselineToken);
 
-        ClientSessionContext ctx =
-                DefaultClientSessionContext.fromClientSessionAndRequestedScopes(clientSession, requestedScopes, session);
-        AccessToken previewToken = new org.keycloak.protocol.oidc.TokenManager()
-                .createClientAccessToken(session, realm, client, user, userSession, previewCtx);
-        PolicyLinker.attachPolicies(session, realm, previewRoles, previewToken);
+        // PREVIEW token starts from baseline, then apply deltas
+        AccessToken previewToken = org.keycloak.util.JsonSerialization.readValue(
+                org.keycloak.util.JsonSerialization.writeValueAsString(baselineToken), AccessToken.class);
+
+        // Mutate roles based on spec (same helpers as regen service)
+        RoleDelta delta = RoleDelta.fromSpec(session, realm, spec);
+        delta.applyTo(previewToken);
 
         String baselineJson = org.keycloak.util.JsonSerialization.writeValueAsString(baselineToken);
-        String previewJson = org.keycloak.util.JsonSerialization.writeValueAsString(previewToken);
-        Map<String,Object> diff = TokenDiffUtil.diffTokens(
-                org.keycloak.util.JsonSerialization.readValue(baselineJson, Map.class),
-                org.keycloak.util.JsonSerialization.readValue(previewJson, Map.class));
+        String previewJson  = org.keycloak.util.JsonSerialization.writeValueAsString(previewToken);
 
+        @SuppressWarnings("unchecked")
+        Map<String,Object> baselineMap = org.keycloak.util.JsonSerialization.readValue(baselineJson, Map.class);
+        @SuppressWarnings("unchecked")
+        Map<String,Object> previewMap  = org.keycloak.util.JsonSerialization.readValue(previewJson, Map.class);
+
+        // diff is a LIST
+        List<Map<String,Object>> diff = TokenDiffUtil.diffTokens(baselineMap, previewMap);
+
+        // persist
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         TokenPreviewEntity e = new TokenPreviewEntity();
         e.id = java.util.UUID.randomUUID().toString();
@@ -187,15 +166,15 @@ public class TokenPreviewRealmResourceProvider implements RealmResourceProvider 
         Map<String,Object> resp = new LinkedHashMap<>();
         resp.put("id", e.id);
         resp.put("createdAt", e.createdAt.toString());
-        resp.put("baselineToken", org.keycloak.util.JsonSerialization.readValue(baselineJson, Object.class));
-        resp.put("previewToken", org.keycloak.util.JsonSerialization.readValue(previewJson, Object.class));
+        resp.put("baselineToken", baselineMap);
+        resp.put("previewToken", previewMap);
         resp.put("diff", diff);
         resp.put("activeRev", activeRev);
         return Response.ok(resp).build();
     }
 
     @POST @Path("/bundle") @Consumes(MediaType.APPLICATION_JSON) @Produces(MediaType.APPLICATION_JSON)
-    public Response createBundle(TokenPreviewBundleSpec bundleSpec) {
+    public Response createBundle(TokenPreviewBundleSpec bundleSpec) throws IOException {
         RealmModel r = realm();
         if (bundleSpec == null || bundleSpec.items == null || bundleSpec.items.isEmpty())
             throw new BadRequestException("items required");
@@ -223,7 +202,8 @@ public class TokenPreviewRealmResourceProvider implements RealmResourceProvider 
             be.itemsJson = org.keycloak.util.JsonSerialization.writeValueAsString(bundleSpec.items);
             List<Map<String,Object>> mergedAsMaps = new ArrayList<>();
             for (var s : cr.mergedSpecs) {
-                mergedAsMaps.add(org.keycloak.util.JsonSerialization.readValue(org.keycloak.util.JsonSerialization.writeValueAsString(s), Map.class));
+                mergedAsMaps.add(org.keycloak.util.JsonSerialization.readValue(
+                        org.keycloak.util.JsonSerialization.writeValueAsString(s), Map.class));
             }
             be.mergedJson = org.keycloak.util.JsonSerialization.writeValueAsString(mergedAsMaps);
             be.previewIdsJson = org.keycloak.util.JsonSerialization.writeValueAsString(createdIds);
@@ -249,6 +229,136 @@ public class TokenPreviewRealmResourceProvider implements RealmResourceProvider 
             return true;
         } catch (Throwable t) {
             return false;
+        }
+    }
+
+    // ---- helpers reused here ----
+
+    private static final class RoleDelta {
+        final Set<String> addRealm = new HashSet<>();
+        final Set<String> delRealm = new HashSet<>();
+        final Map<String, Set<String>> addClient = new HashMap<>();
+        final Map<String, Set<String>> delClient = new HashMap<>();
+
+        static RoleDelta fromSpec(KeycloakSession session, RealmModel realm, TokenPreviewSpec spec) {
+            RoleDelta d = new RoleDelta();
+
+            // user role adds/removes
+            collectRoles(session, realm, spec.addUserRoles, d.addRealm, d.addClient, true);
+            collectRoles(session, realm, spec.removeUserRoles, d.delRealm, d.delClient, true);
+
+            // group adds/removes (expand composites)
+            if (spec.addGroups != null) {
+                for (String gref : spec.addGroups) {
+                    GroupModel g = resolveGroup(session, realm, gref);
+                    if (g != null) expandAndBucket(g.getRoleMappingsStream(), realm, d.addRealm, d.addClient);
+                }
+            }
+            if (spec.removeGroups != null) {
+                for (String gref : spec.removeGroups) {
+                    GroupModel g = resolveGroup(session, realm, gref);
+                    if (g != null) expandAndBucket(g.getRoleMappingsStream(), realm, d.delRealm, d.delClient);
+                }
+            }
+            return d;
+        }
+
+        void applyTo(AccessToken token) {
+            AccessToken.Access ra = token.getRealmAccess();
+            if (ra == null) { ra = new AccessToken.Access(); token.setRealmAccess(ra); }
+            if (!addRealm.isEmpty()) ra.getRoles().addAll(addRealm);
+            if (!delRealm.isEmpty()) ra.getRoles().removeAll(delRealm);
+
+            Map<String, AccessToken.Access> res = token.getResourceAccess();
+            if (res == null) { res = new LinkedHashMap<>(); token.setResourceAccess(res); }
+
+            Map<String, AccessToken.Access> finalRes = res;
+            addClient.forEach((cid, roles) -> finalRes.computeIfAbsent(cid, __ -> new AccessToken.Access()).getRoles().addAll(roles));
+            delClient.forEach((cid, roles) -> {
+                AccessToken.Access a = finalRes.get(cid);
+                if (a != null) a.getRoles().removeAll(roles);
+            });
+        }
+
+        private static void collectRoles(KeycloakSession session, RealmModel realm, Collection<?> refs,
+                                         Set<String> outRealm, Map<String, Set<String>> outClient, boolean expand) {
+            if (refs == null) return;
+            for (Object rr : refs) {
+                RoleModel r = resolveRole(session, realm, rr);
+                if (r == null) continue;
+                if (expand) {
+                    RoleUtils.expandCompositeRolesStream(Stream.of(r)).forEach(x -> bucket(x, realm, outRealm, outClient));
+                } else {
+                    bucket(r, realm, outRealm, outClient);
+                }
+            }
+        }
+
+        private static void expandAndBucket(Stream<RoleModel> roles, RealmModel realm,
+                                            Set<String> outRealm, Map<String, Set<String>> outClient) {
+            RoleUtils.expandCompositeRolesStream(roles).forEach(r -> bucket(r, realm, outRealm, outClient));
+        }
+
+        private static void bucket(RoleModel r, RealmModel realm,
+                                   Set<String> outRealm, Map<String, Set<String>> outClient) {
+            if (r.isClientRole()) {
+                ClientModel c = realm.getClientById(r.getContainerId());
+                if (c != null) outClient.computeIfAbsent(c.getClientId(), __ -> new HashSet<>()).add(r.getName());
+            } else {
+                outRealm.add(r.getName());
+            }
+        }
+
+        private static RoleModel resolveRole(KeycloakSession session, RealmModel realm, Object ref) {
+            if (ref == null) return null;
+            String name = null, clientId = null, kind = null;
+            try {
+                if (ref instanceof String s) {
+                    name = s;
+                } else if (ref instanceof Map<?,?> m) {
+                    Object n = m.get("name"); if (n instanceof String) name = (String) n;
+                    Object c = m.get("clientId"); if (c instanceof String) clientId = (String) c;
+                    Object k = m.get("kind"); if (k instanceof String) kind = (String) k;
+                } else {
+                    try { name = (String) ref.getClass().getMethod("getName").invoke(ref); } catch (Exception ignored) {}
+                    try { clientId = (String) ref.getClass().getMethod("getClientId").invoke(ref); } catch (Exception ignored) {}
+                    try { kind = (String) ref.getClass().getMethod("getKind").invoke(ref); } catch (Exception ignored) {}
+                    if (name == null) { try { name = (String) ref.getClass().getField("name").get(ref); } catch (Exception ignored) {} }
+                    if (clientId == null) { try { clientId = (String) ref.getClass().getField("clientId").get(ref); } catch (Exception ignored) {} }
+                    if (kind == null) { try { kind = (String) ref.getClass().getField("kind").get(ref); } catch (Exception ignored) {} }
+                }
+            } catch (Throwable ignored) {}
+            RoleModel r;
+            if ("realm".equalsIgnoreCase(kind) && name != null) {
+                r = realm.getRole(name);
+                if (r != null) return r;
+            }
+            if (clientId != null && name != null) {
+                ClientModel c = session.clients().getClientByClientId(realm, clientId);
+                if (c != null) {
+                    r = c.getRole(name);
+                    if (r != null) return r;
+                }
+            }
+            if (name != null) {
+                r = realm.getRole(name);
+                if (r != null) return r;
+                for (ClientModel c : realm.getClientsStream().toList()) {
+                    r = c.getRole(name);
+                    if (r != null) return r;
+                }
+            }
+            return null;
+        }
+
+        private static GroupModel resolveGroup(KeycloakSession session, RealmModel realm, String ref) {
+            if (ref == null) return null;
+            GroupModel g = KeycloakModelUtils.findGroupByPath(session, realm, ref);
+            if (g != null) return g;
+            for (GroupModel gm : realm.getGroupsStream().toList()) {
+                if (ref.equals(gm.getName())) return gm;
+            }
+            return null;
         }
     }
 }

@@ -114,6 +114,29 @@ public class IGAUtils {
         int threshold = Integer.parseInt(Optional.ofNullable(System.getenv("THRESHOLD_T")).orElse("0"));
         int max       = Integer.parseInt(Optional.ofNullable(System.getenv("THRESHOLD_N")).orElse("0"));
         if (threshold == 0 || max == 0) {
+// --- Tide: compute policy hash (ph) from compact AP and inject into allow.{auth,sign} for admin contexts ---
+String __tide_compact = null;
+try {
+    if (authorizerPolicy != null && authorizerPolicy.contains(".")) {
+        __tide_compact = authorizerPolicy;
+    } else if (signAp != null) {
+        try { __tide_compact = signAp.toCompactString(); } catch (Throwable __ignore) { __tide_compact = null; }
+    }
+} catch (Throwable __ignore) { __tide_compact = null; }
+String __tide_ph = null;
+try {
+    if (__tide_compact != null) {
+        __tide_ph = org.tidecloak.tide.replay.UserContextPolicyHashUtil.computePolicyHashFromCompact(__tide_compact);
+    }
+} catch (Throwable __ignore) { __tide_ph = null; }
+if (__tide_ph != null) {
+    for (int __i = 0; __i < orderedUserContexts.length; __i++) {
+        String __json = orderedUserContexts[__i].ToString();
+        String __upd = org.tidecloak.tide.replay.UserContextPolicyHashUtil.injectAllowHash(__json, __tide_ph, true, true);
+        orderedUserContexts[__i] = new org.midgard.models.UserContext.UserContext(__upd);
+    }
+}
+
             throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
         }
 
@@ -198,34 +221,29 @@ public class IGAUtils {
         // Attach the (possibly enriched) AuthorizerPolicy object for vetting/gating/DLL storage
         req.SetInitializationCertificate(signAp);
 
-        // ----- preflight: ensure an admin context includes this BH in allow.sign -----
-        final java.util.regex.Pattern SHA256 = java.util.regex.Pattern.compile("(?i)^\\s*sha256:[0-9a-f]{64}\\s*$");
-        boolean anyAdminHasBh = false;
-
-        for (UserContext uc : orderedUserContexts) {
-            String json = uc.ToString();
-            com.fasterxml.jackson.databind.node.ObjectNode root = (com.fasterxml.jackson.databind.node.ObjectNode) M.readTree(json);
-
-            boolean isAdmin = root.hasNonNull("InitCertHash"); // legacy marker
-            if (!isAdmin) {
-                JsonNode allow = root.get("allow");
-                if (allow != null && allow.isObject()) {
-                    isAdmin = arrayHasSha256(allow.get("auth"), SHA256) || arrayHasSha256(allow.get("sign"), SHA256);
-                }
+        
+// ----- preflight: ensure an admin context includes a policy hash (ph) in allow.{auth|sign} -----
+boolean anyAdminHasPolicyHash = false;
+for (UserContext uc : orderedUserContexts) {
+    String json = uc.ToString();
+    try {
+        if (__tide_ph != null) {
+            if (org.tidecloak.tide.replay.UserContextPolicyHashUtil.hasExactAllowHash(json, __tide_ph)) {
+                anyAdminHasPolicyHash = true;
+                break;
             }
-            if (isAdmin) {
-                JsonNode allow = root.get("allow");
-                if (allow != null && allow.isObject() && arrayContainsExact(allow.get("sign"), signBh)) {
-                    anyAdminHasBh = true;
-                    break;
-                }
+        } else {
+            if (org.tidecloak.tide.replay.UserContextPolicyHashUtil.isAllowAnySha256(json)) {
+                anyAdminHasPolicyHash = true;
+                break;
             }
         }
-
-        // === CHANGE: If authorizer is "firstAdmin", skip this local check and let Forseti do the policy check ===
+    } catch (Throwable __ignore) { }
+}
+// === CHANGE: If authorizer is "firstAdmin", skip this local check and let Forseti do the policy check ===
         String authorizerType = Optional.ofNullable(authorizer.getType()).orElse("");
-        if (!anyAdminHasBh && !authorizerType.equalsIgnoreCase("firstAdmin")) {
-            throw new Exception("Admin context 'allow.sign' does not include the AuthorizerPolicy BH: " + signBh);
+        if (!anyAdminHasPolicyHash && !authorizerType.equalsIgnoreCase("firstAdmin")) {
+            throw new Exception("Admin context 'allow.sign' does not include a policy hash (ph): " + signBh);
         }
 
         // ----- vendor auth over DataToAuthorize, authorizer identity -----
