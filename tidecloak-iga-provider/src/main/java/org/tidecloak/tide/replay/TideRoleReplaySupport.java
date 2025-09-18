@@ -1,7 +1,7 @@
 package org.tidecloak.tide.replay;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.keycloak.component.ModelException;
+import org.keycloak.models.ModelException;
 import org.keycloak.models.*;
 import org.midgard.models.AuthorizerPolicyModel.AuthorizerPolicy;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;

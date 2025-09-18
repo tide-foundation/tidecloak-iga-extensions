@@ -6,7 +6,6 @@ import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.core.Response;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
-import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
 import org.midgard.Midgard;
 import org.midgard.models.AdminAuthorization;
@@ -22,21 +21,20 @@ import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
-import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
+import org.tidecloak.tide.replay.UserContextPolicyHashUtil;
+import org.tidecloak.tide.replay.ReplayMetaStore;
 
 import java.net.URI;
 import java.util.*;
 
-import static org.tidecloak.tide.iga.replay.TideRoleReplaySupport.commitRoleAuthorizerPolicy;
-import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
 import static org.tidecloak.base.iga.utils.BasicIGAUtils.isAuthorityAssignment;
 import static org.tidecloak.base.iga.utils.BasicIGAUtils.sortAccessProof;
+import static org.tidecloak.tide.replay.TideRoleReplaySupport.commitRoleAuthorizerPolicy;
 
-public class MultiAdmin implements Authorizer{
+public class MultiAdmin implements Authorizer {
 
     private static String unwrapCompactOrFirst(String stored) {
         if (stored == null) return null;
@@ -74,7 +72,7 @@ public class MultiAdmin implements Authorizer{
         UserSessionModel userSession = session.sessions().getUserSession(realm, auth.getToken().getSessionId());
         String port = redirectURI.getPort() == -1 ? "" : ":" + redirectURI.getPort();
         String voucherURL = redirectURI.getScheme() + "://" + redirectURI.getHost() + port + "/realms/" +
-                session.getContext().getRealm().getName() + "/tidevouchers/fromUserSession?sessionId=" +userSession.getId();
+                session.getContext().getRealm().getName() + "/tidevouchers/fromUserSession?sessionId=" + userSession.getId();
 
         URI uri = Midgard.CreateURL(
                 auth.getToken().getSessionId(),
@@ -85,7 +83,7 @@ public class MultiAdmin implements Authorizer{
                 config.getFirst("gVRK"),
                 config.getFirst("gVRKCertificate"),
                 realm.isRegistrationAllowed(),
-                Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
+                Boolean.parseBoolean(tideIdp.getConfig().get("backupOn")),
                 tideIdp.getConfig().get("LogoURL"),
                 tideIdp.getConfig().get("ImageURL"),
                 "approval",
@@ -95,7 +93,7 @@ public class MultiAdmin implements Authorizer{
         );
 
         URI customDomainUri = null;
-        if(customAdminUiDomain != null) {
+        if (customAdminUiDomain != null) {
             customDomainUri = Midgard.CreateURL(
                     auth.getToken().getSessionId(),
                     customAdminUiDomain,
@@ -105,7 +103,7 @@ public class MultiAdmin implements Authorizer{
                     config.getFirst("gVRK"),
                     config.getFirst("gVRKCertificate"),
                     realm.isRegistrationAllowed(),
-                    Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
+                    Boolean.parseBoolean(tideIdp.getConfig().get("backupOn")),
                     tideIdp.getConfig().get("LogoURL"),
                     tideIdp.getConfig().get("ImageURL"),
                     "approval",
@@ -121,7 +119,7 @@ public class MultiAdmin implements Authorizer{
         response.put("changeSetRequests", changesetRequestEntity.getDraftRequest());
         response.put("requiresApprovalPopup", "true");
         response.put("expiry", String.valueOf(changesetRequestEntity.getTimestamp() + 2628000));
-        if(customAdminUiDomain != null) {
+        if (customAdminUiDomain != null) {
             response.put("customDomainUri", String.valueOf(customDomainUri));
         }
 
@@ -145,13 +143,27 @@ public class MultiAdmin implements Authorizer{
         List<AccessProofDetailEntity> orderedProofDetails = sortAccessProof(proofDetails);
         List<UserContext> orderedContext = orderedProofDetails.stream().map(a -> new UserContext(a.getProofDraft())).toList();
 
-        RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-        RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
-        TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                .setParameter("role", role).getSingleResult();
+        // Resolve the AP used for this approval (bundle or compact):
+        String compactOrBundle;
+        boolean isAuthorityAssignment = isAuthorityAssignment(session, draftEntity, em);
+        if (isAuthorityAssignment) {
+            // replay-specific draft
+            compactOrBundle = ReplayMetaStore.getRoleInitCert(session, changeSet.getChangeSetId());
+            if (compactOrBundle == null || compactOrBundle.isBlank()) {
+                throw new BadRequestException("Role Init Cert draft not found for changeSet, " + changeSet.getChangeSetId());
+            }
+        } else {
+            // current, committed cert from role attributes
+            ClientModel realmMgmt = session.clients().getClientByClientId(realm, org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID);
+            RoleModel tideAdmin = realmMgmt.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+            compactOrBundle = Optional.ofNullable(tideAdmin.getFirstAttribute("InitCertBundle"))
+                    .orElse(tideAdmin.getFirstAttribute("InitCert"));
+            if (compactOrBundle == null || compactOrBundle.isBlank()) {
+                throw new BadRequestException("Tide admin role has no InitCert/InitCertBundle attributes set.");
+            }
+        }
 
-        // unwrap bundle -> compact, prefer "auth"
-        String compact = unwrapCompactOrFirst(tideRoleEntity.getInitCert());
+        String compact = unwrapCompactOrFirst(compactOrBundle);
         AuthorizerPolicy cert = AuthorizerPolicy.fromCompact(compact);
 
         UserContextSignRequest req = new UserContextSignRequest("Admin:2");
@@ -167,46 +179,41 @@ public class MultiAdmin implements Authorizer{
         });
 
         int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
-        int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
-
-        if ( threshold == 0 || max == 0){
+        int max       = Integer.parseInt(System.getenv("THRESHOLD_N"));
+        if (threshold == 0 || max == 0){
             throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
         }
 
         String currentSecretKeys = config.getFirst("clientSecret");
-        org.tidecloak.shared.models.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, org.tidecloak.shared.models.SecretKeys.class);
+        SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
 
         SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
-        settings.VVKId = config.getFirst("vvkId");
-        settings.HomeOrkUrl = config.getFirst("systemHomeOrk");
-        settings.PayerPublicKey = config.getFirst("payerPublic");
+        settings.VVKId                     = config.getFirst("vvkId");
+        settings.HomeOrkUrl                = config.getFirst("systemHomeOrk");
+        settings.PayerPublicKey            = config.getFirst("payerPublic");
         settings.ObfuscatedVendorPublicKey = config.getFirst("obfGVVK");
-        settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
-        settings.Threshold_T = threshold;
-        settings.Threshold_N = max;
+        settings.VendorRotatingPrivateKey  = secretKeys.activeVrk;
+        settings.Threshold_T               = threshold;
+        settings.Threshold_N               = max;
 
         authorizerBuilder.AddAuthorizationToSignRequest(req);
 
-        boolean isAuthorityAssignment = isAuthorityAssignment(session, draftEntity, em);
+        if (isAuthorityAssignment) {
+            // use the replay draft AP for this request, and commit AP on success
+            String draftBundleOrCompact = ReplayMetaStore.getRoleInitCert(session, changeSet.getChangeSetId());
+            String draftCompact = UserContextPolicyHashUtil.unwrapCompactOrFirst(draftBundleOrCompact);
+            AuthorizerPolicy draftCert = AuthorizerPolicy.fromCompact(draftCompact);
 
-        if(isAuthorityAssignment) {
-            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, changeSet.getChangeSetId());
-            if(roleInitCert == null) {
-                throw new BadRequestException("Role Init Cert draft not found for changeSet, " + changeSet.getChangeSetId());
-            }
-            AuthorizerPolicy draftCert = AuthorizerPolicy.fromCompact(unwrapCompactOrFirst(roleInitCert.getInitCert()));
             req.SetInitializationCertificate(draftCert);
             SignatureResponse response = Midgard.SignModel(settings, req);
 
-            for ( int i = 0; i < orderedProofDetails.size(); i++){
+            for (int i = 0; i < orderedProofDetails.size(); i++){
                 orderedProofDetails.get(i).setSignature(response.Signatures[i + 1]);
             }
             commitRoleAuthorizerPolicy(session, changeSet.getChangeSetId(), draftEntity, response.Signatures[0]);
-
         } else {
             SignatureResponse response = Midgard.SignModel(settings, req);
-
-            for ( int i = 0; i < orderedProofDetails.size(); i++){
+            for (int i = 0; i < orderedProofDetails.size(); i++){
                 orderedProofDetails.get(i).setSignature(response.Signatures[i]);
             }
         }
@@ -216,7 +223,7 @@ public class MultiAdmin implements Authorizer{
         processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, draftEntity, em, WorkflowType.COMMIT, workflowParams, null);
         String authorizerType = authorizer.getType();
         if (isAuthorityAssignment) {
-            if (authorizer.getType().equals(org.tidecloak.shared.Constants.TIDE_INITIAL_AUTHORIZER)){
+            if (org.tidecloak.shared.Constants.TIDE_INITIAL_AUTHORIZER.equals(authorizer.getType())){
                 authorizer.setType(org.tidecloak.shared.Constants.TIDE_MULTI_ADMIN_AUTHORIZER);
             }
         }
