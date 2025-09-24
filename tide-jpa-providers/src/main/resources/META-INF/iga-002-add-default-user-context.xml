@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+    <changeSet id="iga-002-add-default-user-context" author="iga-delta">
+        <addColumn tableName="ACCESS_PROOF_DETAIL">
+            <column name="DEFAULT_USER_CONTEXT" type="CLOB"/>
+            <column name="AUTHORIZER_POLICY_HASH" type="VARCHAR(512)"/>
+            <column name="DRAFT_STATUS" type="VARCHAR(32)"/>
+        </addColumn>
+    </changeSet>
+</databaseChangeLog>

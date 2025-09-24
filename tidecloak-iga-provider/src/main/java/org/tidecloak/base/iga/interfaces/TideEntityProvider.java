@@ -12,17 +12,8 @@ public class TideEntityProvider implements JpaEntityProvider {
     @Override
     public List<Class<?>> getEntities() {
         return List.of(UserClientAccessProofEntity.class,
-                TideUserDraftEntity.class,
-                TideUserRoleMappingDraftEntity.class,
-                TideCompositeRoleMappingDraftEntity.class,
-                TideGroupDraftEntity.class,
-                TideUserGroupMembershipEntity.class,
-                TideGroupRoleMappingEntity.class,
-                TideClientDraftEntity.class,
-                TideCompositeRoleDraftEntity.class,
                 AccessProofDetailDependencyEntity.class,
-                AccessProofDetailEntity.class,
-                UserClientAccessProofEntity.class
+                AccessProofDetailEntity.class
                 );
     }
 

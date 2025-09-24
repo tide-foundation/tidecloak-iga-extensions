@@ -23,4 +23,5 @@
     <include file="META-INF/tide-jpa-changelog-0.0.3.xml"/>
     <include file="META-INF/tide-jpa-changelog-0.0.4.xml"/>
     <include file="META-INF/tide-jpa-changelog-0.0.5.xml"/>
+    <include file="META-INF/iga-002-add-default-user-context.xml"/>
 </databaseChangeLog>

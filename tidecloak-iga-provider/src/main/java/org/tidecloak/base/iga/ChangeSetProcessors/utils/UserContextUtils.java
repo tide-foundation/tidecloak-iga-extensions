@@ -1,428 +1,224 @@
 package org.tidecloak.base.iga.ChangeSetProcessors.utils;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
-import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.RoleUtils;
-import org.keycloak.representations.AccessToken;
+import org.tidecloak.base.iga.UserContextBuilder;
+import org.tidecloak.base.iga.UserContextDeltaUtils;
+import org.tidecloak.base.iga.UserContextDraftService;
+import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.ChangeRequestKey;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
-import org.tidecloak.jpa.entities.drafting.*;
-import org.tidecloak.shared.enums.ActionType;
+import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideUserDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
-import org.tidecloak.shared.enums.WorkflowType;
-import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.utils.UserContextUtilBase;
-import org.tidecloak.shared.enums.DraftStatus;
-import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
-import org.tidecloak.base.iga.interfaces.TideRoleAdapter;
-import org.tidecloak.base.iga.interfaces.TideUserAdapter;
-import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+/**
+ * Minimal utilities kept after ChangeSetProcessors deprecation.
+ * - Restaging drafts uses UserContextDraftService.stage(...)
+ * - Role expansion uses plain Keycloak RoleUtils
+ * - Token mutation helpers removed (UserContextBuilder shapes payload now)
+ * - No Tide wrappers / adapters
+ */
 public class UserContextUtils extends UserContextUtilBase {
 
+    private static final ObjectMapper M = new ObjectMapper();
+
+    /**
+     * Recreate drafts for the given user using the new engine:
+     *  - Deletes the old ChangesetRequest + AccessProofDetailEntity rows for each changeSet group
+     *  - Restages drafts via UserContextDraftService.stage(...) using the original per-(user,client) deltas
+     *  - Signing/commit is handled by normal approval flow
+     */
     public void recreateUserContext(KeycloakSession session, UserModel userModel) {
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        final RealmModel realm = session.getContext().getRealm();
+        final EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
-        // get all affected clients from AccessProofDraftEntity
-        // This returns the access proof in descending order by timestamp
-        UserEntity user = em.find(UserEntity.class, userModel.getId());
+        // fetch all drafts for this user (use UserEntity for the named query)
+        UserEntity uEnt = em.getReference(UserEntity.class, userModel.getId());
+        List<AccessProofDetailEntity> drafts = em.createNamedQuery("getProofDetailsForUser", AccessProofDetailEntity.class)
+                .setParameter("user", uEnt)
+                .getResultList();
 
-        List<AccessProofDetailEntity> userAccessDrafts = em.createNamedQuery("getProofDetailsForUser", AccessProofDetailEntity.class)
-                .setParameter("user", user)
-                .getResultStream()
-                .toList();
-
-        Map<ChangeRequestKey, List<AccessProofDetailEntity>> groupedProofDetails = userAccessDrafts.stream()
+        Map<ChangeRequestKey, List<AccessProofDetailEntity>> grouped = drafts.stream()
                 .collect(Collectors.groupingBy(AccessProofDetailEntity::getChangeRequestKey));
 
-        groupedProofDetails.forEach((changeRequestKey, details)  -> {
+        grouped.forEach((key, details) -> {
             try {
-                // remove old request, then we recreate
-                List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", changeRequestKey.getChangeRequestId()).getResultList();
-                if(!changesetRequestEntity.isEmpty()) {
-                    changesetRequestEntity.forEach(c -> {
-                        c.getAdminAuthorizations().clear();
-                        em.remove(c);
-                    });
+                // remove the envelope + drafts
+                List<ChangesetRequestEntity> envelopes = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                        .setParameter("changesetRequestId", key.getChangeRequestId())
+                        .getResultList();
+                for (ChangesetRequestEntity cr : envelopes) {
+                    cr.getAdminAuthorizations().clear();
+                    em.remove(cr);
                 }
-                details.forEach(em::remove);
+                for (AccessProofDetailEntity pd : details) em.remove(pd);
                 em.flush();
 
-                ChangeSetType changeSetType = details.get(0).getChangesetType();
-                ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
-                WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, changeSetType);
-                Object mapping = getMappings(em, changeRequestKey.getMappingId(), changeSetType);
-                changeSetProcessorFactory.getProcessor(changeSetType).executeWorkflow(session, mapping, em, WorkflowType.REQUEST, params, null);
+                // restage using original (user, client) + delta derived from stored draft/baseline
+                List<UserContextDraftService.AffectedTuple> affected = new ArrayList<>();
+                for (AccessProofDetailEntity pd : details) {
+                    // pd.getUser() returns a JPA UserEntity; resolve models for rebuild
+                    UserModel u = session.users().getUserById(realm, pd.getUser().getId());
+                    // pd.getClientId() stores the DB ID; fetch by ID then expose logical clientId to stage()
+                    ClientModel client = session.clients().getClientById(realm, pd.getClientId());
+                    if (u == null || client == null) continue;
 
+                    ObjectNode nowDefault = UserContextBuilder.build(session, realm, u, client);
+
+                    String baselineJson = pd.getDefaultUserContext();
+                    ObjectNode baseline = (baselineJson == null || baselineJson.isBlank())
+                            ? nowDefault
+                            : (ObjectNode) M.readTree(baselineJson);
+
+                    Map<String, Object> delta = UserContextDeltaUtils.deriveDelta(baseline.toString(), pd.getProofDraft());
+
+                    // Stage expects the logical clientId (alias), not the DB id
+                    affected.add(new UserContextDraftService.AffectedTuple(u.getId(), client.getClientId(), delta));
+                }
+
+                if (!affected.isEmpty()) {
+                    // ChangeSetType is on the entity row, not in ChangeRequestKey
+                    ChangeSetType type = details.get(0).getChangesetType();
+
+                    UserContextDraftService.stage(
+                            session,
+                            realm,
+                            em,
+                            key.getChangeRequestId(),
+                            type,
+                            affected,
+                            null // authorizerPolicyHashBase64 if you precompute one for this request
+                    );
+                }
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
         });
+
         em.flush();
     }
-    
-    @Override
-    public  Set<RoleModel> getDeepUserRoleMappings(UserModel user, KeycloakSession session, RealmModel realm, DraftStatus draftStatus) {
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
-        UserEntity userEntity = TideEntityUtils.toUserEntity(user, em);
-        TideUserAdapter tideUser = TideEntityUtils.toTideUserAdapter( userEntity, session, realm);
-
-        Set<RoleModel> roleMappings = tideUser.getRoleMappingsStreamByStatus(draftStatus).map((x) -> TideEntityUtils.wrapRoleModel(x, session, realm)).collect(Collectors.toSet());
-
-        user.getGroupsStream().forEach((group) -> {
-            TideEntityUtils.addGroupRoles(TideEntityUtils.wrapGroupModel(group, session, realm), roleMappings, draftStatus);
-        });
-        Set<RoleModel> wrappedRoles = roleMappings.stream().map((r) -> (TideRoleAdapter) TideEntityUtils.wrapRoleModel(r, session, realm)).collect(Collectors.toSet());
-        return expandCompositeRoles(wrappedRoles, draftStatus);
-    }
-
-
-    @Override
-    public Set<RoleModel> expandActiveCompositeRoles(KeycloakSession session, Set<RoleModel> roles) {
-        RealmModel realm = session.getContext().getRealm();
-
-        Set<RoleModel> visited = new HashSet<>();
-
-        return roles.stream()
-                .flatMap(roleModel -> UserContextUtils.expandCompositeRolesStream(TideEntityUtils.toTideRoleAdapter(roleModel, session, realm), visited, DraftStatus.ACTIVE))
-                .collect(Collectors.toSet());
-    }
-
+    // ---------- draft lookups (unchanged) ----------
 
     public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, String recordId) {
         return em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
                 .setParameter("recordId", recordId)
-                .getResultStream()
-                .collect(Collectors.toList());
+                .getResultList();
     }
 
     public static List<AccessProofDetailEntity> getUserContextDraftsForRealm(EntityManager em, String realmId) {
         return em.createNamedQuery("getProofDetailsForRealm", AccessProofDetailEntity.class)
                 .setParameter("realmId", realmId)
-                .getResultStream()
-                .collect(Collectors.toList());
+                .getResultList();
     }
 
-
     public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, String recordId, ChangeSetType changeSetType) {
-        List<ChangeSetType> changeSetTypes = new ArrayList<>();
-        if(changeSetType.equals(ChangeSetType.COMPOSITE_ROLE) || changeSetType.equals(ChangeSetType.DEFAULT_ROLES) ) {
-            changeSetTypes.add(ChangeSetType.DEFAULT_ROLES);
-            changeSetTypes.add(ChangeSetType.COMPOSITE_ROLE);
-        }
-        else if (changeSetType.equals(ChangeSetType.CLIENT_FULLSCOPE) || changeSetType.equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)) {
-            changeSetTypes.add(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT);
-            changeSetTypes.add(ChangeSetType.CLIENT_FULLSCOPE);
-        }
-        else{
-            changeSetTypes.add(changeSetType);
+        List<ChangeSetType> types = new ArrayList<>();
+        if (changeSetType == ChangeSetType.COMPOSITE_ROLE || changeSetType == ChangeSetType.DEFAULT_ROLES) {
+            types.add(ChangeSetType.DEFAULT_ROLES);
+            types.add(ChangeSetType.COMPOSITE_ROLE);
+        } else if (changeSetType == ChangeSetType.CLIENT_FULLSCOPE || changeSetType == ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT) {
+            types.add(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT);
+            types.add(ChangeSetType.CLIENT_FULLSCOPE);
+        } else {
+            types.add(changeSetType);
         }
         return em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
                 .setParameter("recordId", recordId)
-                .setParameter("changesetTypes", changeSetTypes)
-                .getResultStream()
-                .collect(Collectors.toList());
+                .setParameter("changesetTypes", types)
+                .getResultList();
     }
 
-
-
-    public static List<AccessProofDetailEntity>  getUserContextDrafts(EntityManager em, ClientModel client) {
+    public static List<AccessProofDetailEntity> getUserContextDrafts(EntityManager em, ClientModel client) {
         return em.createNamedQuery("getProofDetailsByClient", AccessProofDetailEntity.class)
                 .setParameter("clientId", client.getId())
                 .getResultList();
     }
 
-    public static Set<RoleModel> expandCompositeRoles(KeycloakSession session, Set<RoleModel> roles) {
-        RealmModel realm = session.getContext().getRealm();
+    // ---------- role helpers (plain Keycloak only) ----------
 
+    /** Expand composite roles using vanilla Keycloak utilities (no Tide adapters). */
+    public static Set<RoleModel> expandCompositeRoles(Set<RoleModel> roles) {
         Set<RoleModel> visited = new HashSet<>();
-
         return roles.stream()
-                .flatMap(roleModel -> UserContextUtils.expandCompositeRolesStream(TideEntityUtils.toTideRoleAdapter(roleModel, session, realm), visited, DraftStatus.ACTIVE))
+                .flatMap(r -> expandCompositeRolesStream(r, visited))
                 .collect(Collectors.toSet());
     }
 
-    public static Set<RoleModel> getAllAccess(KeycloakSession session, Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes, boolean isFullScopeAllowed, RoleModel roleToInclude) {
-        RealmModel realm = session.getContext().getRealm();
-
+    /** Sometimes callers still want “all access” set given scopes/fullscope. */
+    public static Set<RoleModel> getAllAccess(Set<RoleModel> roleModels,
+                                              ClientModel client,
+                                              Stream<ClientScopeModel> clientScopes,
+                                              boolean isFullScopeAllowed,
+                                              RoleModel roleToInclude) {
         Set<RoleModel> visited = new HashSet<>();
-
         Set<RoleModel> expanded = roleModels.stream()
-                .flatMap(roleModel -> UserContextUtils.expandCompositeRolesStream(TideEntityUtils.toTideRoleAdapter(roleModel, session, realm), visited, DraftStatus.ACTIVE))
+                .flatMap(r -> expandCompositeRolesStream(r, visited))
                 .collect(Collectors.toSet());
 
-        if ( roleToInclude != null) {
+        if (roleToInclude != null) {
             expanded.add(roleToInclude);
         }
 
         if (isFullScopeAllowed) {
             return expanded;
-        } else {
-
-            // 1 - Client roles of this client itself
-            Stream<RoleModel> scopeMappings = client.getRolesStream();
-
-            // 2 - Role mappings of client itself + default client scopes + optional client scopes requested by scope parameter (if applyScopeParam is true)
-            Stream<RoleModel> clientScopesMappings;
-            clientScopesMappings = clientScopes.flatMap(ScopeContainerModel::getScopeMappingsStream);
-
-            scopeMappings = Stream.concat(scopeMappings, clientScopesMappings);
-
-            // 3 - Expand scope mappings
-            scopeMappings = RoleUtils.expandCompositeRolesStream(scopeMappings);
-
-            // Intersection of expanded user roles and expanded scopeMappings
-            expanded.retainAll(scopeMappings.collect(Collectors.toSet()));
-
-            return expanded;
         }
+
+        Stream<RoleModel> scopeMappings = client.getRolesStream();
+        Stream<RoleModel> clientScopesMappings = clientScopes.flatMap(ScopeContainerModel::getScopeMappingsStream);
+        scopeMappings = Stream.concat(scopeMappings, clientScopesMappings);
+        scopeMappings = RoleUtils.expandCompositeRolesStream(scopeMappings);
+
+        expanded.retainAll(scopeMappings.collect(Collectors.toSet()));
+        return expanded;
     }
 
+    /** Filter by client scopes when fullscope is false. */
+    public static Set<RoleModel> getAccess(Set<RoleModel> roleModels,
+                                           ClientModel client,
+                                           Stream<ClientScopeModel> clientScopes,
+                                           boolean isFullScopeAllowed) {
+        if (isFullScopeAllowed) return roleModels;
 
-    public static Set<RoleModel> getAccess(Set<RoleModel> roleModels, ClientModel client, Stream<ClientScopeModel> clientScopes, boolean isFullScopeAllowed) {
-        if (isFullScopeAllowed) {
-            return roleModels;
-        } else {
+        Stream<RoleModel> scopeMappings = client.getRolesStream();
+        Stream<ClientScopeModel> cs = (clientScopes == null) ? Stream.empty() : clientScopes;
+        Stream<RoleModel> clientScopesMappings = cs.flatMap(ScopeContainerModel::getScopeMappingsStream);
 
-            // 1 - Client roles of this client itself
-            Stream<RoleModel> scopeMappings = client.getRolesStream();
+        scopeMappings = Stream.concat(scopeMappings, clientScopesMappings);
+        scopeMappings = RoleUtils.expandCompositeRolesStream(scopeMappings);
 
-            // 2 - Role mappings of client itself + default client scopes + optional client scopes requested by scope parameter (if applyScopeParam is true)
-            Stream<RoleModel> clientScopesMappings;
-            clientScopesMappings = clientScopes.flatMap(ScopeContainerModel::getScopeMappingsStream);
-
-            scopeMappings = Stream.concat(scopeMappings, clientScopesMappings);
-
-            // 3 - Expand scope mappings
-            scopeMappings = RoleUtils.expandCompositeRolesStream(scopeMappings);
-
-            // Intersection of expanded user roles and expanded scopeMappings
-            roleModels.retainAll(scopeMappings.collect(Collectors.toSet()));
-
-            return roleModels;
-        }
+        roleModels.retainAll(scopeMappings.collect(Collectors.toSet()));
+        return roleModels;
     }
 
-    public static void addRoleToAccessTokenMasterRealm(AccessToken token, RoleModel role, RealmModel realm, EntityManager em) {
-        AccessToken.Access access = null;
-        if (!role.isClientRole()) {
-            // Handle realm-level roles
-            access = token.getRealmAccess();
-            if (access == null) {
-                access = new AccessToken.Access();
-                token.setRealmAccess(access);
-            }
+    // ---------- internals ----------
 
-            // Check for duplicates first
-            if (access.getRoles() != null && access.getRoles().contains(role.getName())) {
-                return; // Role already exists, skip adding
-            }
-
-            // Add the role if it's not already present
-            access.addRole(role.getName());
-        } else if (role.isClientRole()) {
-            RoleEntity roleEntity = em.find(RoleEntity.class, role.getId());
-            ClientModel client = realm.getClientById(roleEntity.getClientId());
-            // Handle client-level roles
-            access = token.getResourceAccess(client.getClientId());
-
-            if (access == null) {
-                access = token.addAccess(client.getClientId());
-                if (client.isSurrogateAuthRequired()) {
-                    access.verifyCaller(true);
-                }
-            } else if (access.getRoles() != null && access.getRoles().contains(role.getName())) {
-                return; // Role already exists, skip adding
-            }
-
-            // Add the role if it's not already present
-            access.addRole(role.getName());
-        }
-    }
-
-    public static void addRoleToAccessToken(AccessToken token, RoleModel role) {
-        AccessToken.Access access = null;
-
-        if (role.getContainer() instanceof RealmModel) {
-            // Handle realm-level roles
-            access = token.getRealmAccess();
-            if (access == null) {
-                access = new AccessToken.Access();
-                token.setRealmAccess(access);
-            }
-
-            // Check for duplicates first
-            if (access.getRoles() != null && access.getRoles().contains(role.getName())) {
-                return; // Role already exists, skip adding
-            }
-
-            // Add the role if it's not already present
-            access.addRole(role.getName());
-        } else if (role.getContainer() instanceof ClientModel client) {
-
-            // Handle client-level roles
-            access = token.getResourceAccess(client.getClientId());
-
-            if (access == null) {
-                access = token.addAccess(client.getClientId());
-                if (client.isSurrogateAuthRequired()) {
-                    access.verifyCaller(true);
-                }
-            } else if (access.getRoles() != null && access.getRoles().contains(role.getName())) {
-                return; // Role already exists, skip adding
-            }
-
-            // Add the role if it's not already present
-            access.addRole(role.getName());
-        }
-    }
-
-    public static void removeRoleFromAccessTokenMasterRealm(AccessToken token, RoleModel role, RealmModel realm, EntityManager em) {
-        if (!role.isClientRole()) {
-            // Handle realm-level roles
-            AccessToken.Access realmAccess = token.getRealmAccess();
-            if (realmAccess != null && realmAccess.getRoles().contains(role.getName())) {
-                realmAccess.getRoles().remove(role.getName());
-            }
-        } else if (role.isClientRole()) {
-            // Handle client-level roles
-            RoleEntity roleEntity = em.find(RoleEntity.class, role.getId());
-            ClientModel client = realm.getClientById(roleEntity.getClientId());
-            AccessToken.Access clientAccess = token.getResourceAccess(client.getClientId());
-            if (clientAccess != null && clientAccess.getRoles().contains(role.getName())) {
-                clientAccess.getRoles().remove(role.getName());
-            }
-        }
-    }
-
-
-    public static void removeRoleFromAccessToken(AccessToken token, RoleModel role) {
-        if (role.getContainer() instanceof RealmModel) {
-            // Handle realm-level roles
-            AccessToken.Access realmAccess = token.getRealmAccess();
-            if (realmAccess != null && realmAccess.getRoles().contains(role.getName())) {
-                realmAccess.getRoles().remove(role.getName());
-            }
-        } else if (role.getContainer() instanceof ClientModel) {
-            // Handle client-level roles
-            ClientModel client = (ClientModel) role.getContainer();
-            AccessToken.Access clientAccess = token.getResourceAccess(client.getClientId());
-            if (clientAccess != null && clientAccess.getRoles().contains(role.getName())) {
-                clientAccess.getRoles().remove(role.getName());
-            }
-        }
-    }
-
-    public void normalizeAccessToken(AccessToken token, boolean isFullscope){
-        updateTokenAudience(token, isFullscope);
-        cleanAccessToken(token);
-    }
-
-    public static void updateTokenAudience(AccessToken token, boolean isFullscope) {
-        if(!isFullscope){
-            token.audience(null);
-            return;
-        }
-        // Create a set to hold the updated audience
-        Set<String> audience = new HashSet<>();
-
-        // Add clients from resource access that still have roles
-        Map<String, AccessToken.Access> resourceAccess = token.getResourceAccess();
-        if (resourceAccess != null) {
-            resourceAccess.forEach((clientId, access) -> {
-                if (access != null && access.getRoles() != null && !access.getRoles().isEmpty()) {
-                    if(!clientId.equalsIgnoreCase(token.getIssuedFor())) {
-                        audience.add(clientId); // Include only clients with roles
-                    }
-                }
-            });
-        }
-
-        // Update the token audience or remove it if empty
-        if (audience.isEmpty()) {
-            token.audience(null); // Remove the audience field
-        } else {
-            token.audience(audience.toArray(new String[0])); // Update the audience with filtered clients
-        }
-    }
-
-
-    public static void cleanAccessToken(AccessToken token) {
-        // Clean up realm access if roles are empty or null
-        if (token.getRealmAccess() != null &&
-                (token.getRealmAccess().getRoles() == null || token.getRealmAccess().getRoles().isEmpty())) {
-            token.setRealmAccess(null);
-        }
-
-        // Clean up resource access
-        if (token.getResourceAccess() != null) {
-            Map<String, AccessToken.Access> resourceAccess = token.getResourceAccess();
-            resourceAccess.entrySet().removeIf(entry ->
-                    entry.getValue().getRoles() == null || entry.getValue().getRoles().isEmpty()
-            );
-            // If no resource access remains, remove the map entirely
-            if (resourceAccess.isEmpty()) {
-                token.setResourceAccess(null);
-            }
-        }
-    }
-
-
-
-    private Set<RoleModel> expandCompositeRoles(Set<RoleModel> roles, DraftStatus draftStatus) {
-        Set<RoleModel> visited = new HashSet<>();
-
-        return roles.stream()
-                .flatMap(roleModel -> UserContextUtils.expandCompositeRolesStream(roleModel, visited, draftStatus))
-                .collect(Collectors.toSet());
-    }
-
-
-    /**
-     * Recursively expands composite roles into their composite.
-     *
-     * @param role
-     * @param visited Track roles, which were already visited. Those will be ignored and won't be added to the stream. Besides that,
-     *                the "visited" set itself will be updated as a result of this method call and all the tracked roles will be added to it
-     * @return Stream of containing all of the composite roles and their components. Never returns {@code null}.
-     */
-    private static Stream<RoleModel> expandCompositeRolesStream(RoleModel role, Set<RoleModel> visited, DraftStatus draftStatus) {
-        Stream.Builder<RoleModel> sb = Stream.builder();
-
-        if (!visited.add(role)) {
-            return sb.build(); // Early return if role is already visited
-        }
+    private static Stream<RoleModel> expandCompositeRolesStream(RoleModel role, Set<RoleModel> visited) {
+        Stream.Builder<RoleModel> out = Stream.builder();
+        if (!visited.add(role)) return out.build();
 
         Deque<RoleModel> stack = new ArrayDeque<>();
-        //TODO: if initial role is pending a delete, we do not bother expanding it.
-
         stack.push(role);
 
-
         while (!stack.isEmpty()) {
-            RoleModel current = stack.pop();
-            sb.add(current);
-
-            if (current.isComposite()) {
-                Stream<RoleModel> compositesStream;
-
-                // Check if the role can be cast to CustomRoleAdapter and has the method
-                if (role instanceof TideRoleAdapter) {
-                    compositesStream = ((TideRoleAdapter) current).getCompositesStreamByStatus(draftStatus);
-                } else {
-                    // Fallback to default composites if not a CustomRoleAdapter
-                    compositesStream = current.getCompositesStream();
-                }
-
-                compositesStream
+            RoleModel cur = stack.pop();
+            out.add(cur);
+            if (cur.isComposite()) {
+                cur.getCompositesStream()
                         .filter(r -> !visited.contains(r))
                         .forEach(r -> {
                             visited.add(r);
@@ -430,10 +226,12 @@ public class UserContextUtils extends UserContextUtilBase {
                         });
             }
         }
-
-        return sb.build();
+        return out.build();
     }
 
+    // ---------- legacy mapping fetcher kept for old callers (unused by new engine) ----------
+
+    @SuppressWarnings("unused")
     private Object getMappings(EntityManager em, String recordId, ChangeSetType type) {
         return switch (type) {
             case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, recordId);
@@ -445,7 +243,4 @@ public class UserContextUtils extends UserContextUtilBase {
             default -> null;
         };
     }
-
-
-
 }

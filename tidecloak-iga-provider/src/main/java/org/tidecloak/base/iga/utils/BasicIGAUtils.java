@@ -9,17 +9,14 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.NoResultException;
 import jakarta.ws.rs.BadRequestException;
-import jakarta.ws.rs.core.Response;
-import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
-import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitter;
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitterFactory;
-import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+// NOTE: update this import if your ChangeSetRequest class is in a different package now.
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.ChangeSetSigner.ChangeSetSigner;
 import org.tidecloak.base.iga.ChangeSetSigner.ChangeSetSignerFactory;
@@ -30,9 +27,7 @@ import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
-import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
-import org.tidecloak.shared.models.SecretKeys;
 import org.tidecloak.shared.models.UserContext;
 
 import java.io.UncheckedIOException;
@@ -49,27 +44,18 @@ public class BasicIGAUtils {
     public static List<AccessProofDetailEntity> sortAccessProof (List<AccessProofDetailEntity> accessProofDetailEntities) {
         Stream<AccessProofDetailEntity> adminProofs = accessProofDetailEntities.stream().filter(x -> {
             UserContext userContext = new UserContext(x.getProofDraft());
-            if(userContext.getInitCertHash() != null) {
-                return true;
-            }
-            return false;
-
+            return userContext.getInitCertHash() != null;
         });
         Stream<AccessProofDetailEntity> userProofs = accessProofDetailEntities.stream().filter(x -> {
             UserContext userContext = new UserContext(x.getProofDraft());
-            if(userContext.getInitCertHash() == null) {
-                return true;
-            }
-            return false;
-
+            return userContext.getInitCertHash() == null;
         });
         return Stream.concat(adminProofs, userProofs).toList();
     }
 
     public static boolean isAuthorityAssignment(KeycloakSession session, Object mapping, EntityManager em){
-        if ( mapping instanceof  TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
+        if (mapping instanceof TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
             RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, tideUserRoleMappingDraftEntity.getChangeRequestId());
-
             return roleInitCert != null;
         }
         return false;
@@ -82,20 +68,18 @@ public class BasicIGAUtils {
 
     public static List<AccessProofDetailEntity> getAccessProofs(EntityManager em, String recordId, ChangeSetType changeSetType) {
         List<ChangeSetType> changeSetTypes = new ArrayList<>();
-        if(changeSetType.equals(ChangeSetType.COMPOSITE_ROLE) || changeSetType.equals(ChangeSetType.DEFAULT_ROLES) ) {
+        if (changeSetType.equals(ChangeSetType.COMPOSITE_ROLE) || changeSetType.equals(ChangeSetType.DEFAULT_ROLES)) {
             changeSetTypes.add(ChangeSetType.DEFAULT_ROLES);
             changeSetTypes.add(ChangeSetType.COMPOSITE_ROLE);
-        }
-        else if (changeSetType.equals(ChangeSetType.CLIENT_FULLSCOPE) || changeSetType.equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)) {
+        } else if (changeSetType.equals(ChangeSetType.CLIENT_FULLSCOPE) || changeSetType.equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)) {
             changeSetTypes.add(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT);
             changeSetTypes.add(ChangeSetType.CLIENT_FULLSCOPE);
-        }
-        else {
+        } else {
             changeSetTypes.add(changeSetType);
         }
         return em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
                 .setParameter("recordId", recordId)
-                .setParameter("changesetTypes", changeSetTypes) // Pass list instead of single value
+                .setParameter("changesetTypes", changeSetTypes)
                 .getResultStream()
                 .collect(Collectors.toList());
     }
@@ -107,29 +91,24 @@ public class BasicIGAUtils {
         int adminCount = ChangesetRequestAdapter.getNumberOfActiveAdmins(session, realm, realmAdminRole, em);
         boolean isTemporaryAdmin = adminUser.getFirstAttribute("is_temporary_admin") != null && adminUser.getFirstAttribute("is_temporary_admin").equalsIgnoreCase("true");
         ComponentModel componentModel = realm.getComponentsStream()
-                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))
                 .findFirst()
                 .orElse(null);
 
-        if(componentModel != null) {
+        if (componentModel != null) {
             throw new BadRequestException("This method can only be run without Tide keys.");
         }
-        // if approver is temp admin, check if there are users with realm-admin role. IF a realm-admin user exists, temp admin is not allowed to approve a request.
-        if(isTemporaryAdmin && adminCount > 0){
+        if (isTemporaryAdmin && adminCount > 0){
             throw new BadRequestException("Temporary admin is not allowed to approve change request, contact a realm-admin to approve. User ID: " + adminUser.getId());
-        }
-        else if(!isTemporaryAdmin && !adminUser.hasRole(realmAdminRole)) {
+        } else if (!isTemporaryAdmin && !adminUser.hasRole(realmAdminRole)) {
             throw new BadRequestException("User is not authorized to approve requests.");
         }
 
-        for(int i = 0; i < proofDetails.size(); i++){
-            proofDetails.get(i).setSignature(adminUser.getId());
+        for (AccessProofDetailEntity proofDetail : proofDetails) {
+            proofDetail.setSignature(adminUser.getId());
         }
-
         ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSet.getType().name(), changeSet.getChangeSetId(), changeSet.getActionType().name(), adminUser, "", "", "");
     }
-
-
 
     public static String getEntityId(Object entity) {
         if (entity instanceof TideUserRoleMappingDraftEntity) {
@@ -168,8 +147,6 @@ public class BasicIGAUtils {
         return null;
     }
 
-
-
     public static List<AccessProofDetailEntity> getAccessProofsFromEntity(EntityManager em, Object entity) {
         if (entity instanceof TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity) {
             return getAccessProofs(em, tideUserRoleMappingDraftEntity.getChangeRequestId(), ChangeSetType.USER_ROLE);
@@ -200,29 +177,25 @@ public class BasicIGAUtils {
                 case USER_ROLE -> em.createNamedQuery("GetUserRoleMappingDraftEntityByRequestId", TideUserRoleMappingDraftEntity.class)
                         .setParameter("requestId", changeSetId)
                         .getResultList();
-
                 case COMPOSITE_ROLE, DEFAULT_ROLES -> em.createNamedQuery("GetCompositeRoleMappingDraftEntityByRequestId", TideCompositeRoleMappingDraftEntity.class)
                         .setParameter("requestId", changeSetId)
                         .getResultList();
-
                 case ROLE -> em.createNamedQuery("GetRoleDraftEntityByRequestId", TideRoleDraftEntity.class)
                         .setParameter("requestId", changeSetId)
                         .getResultList();
-
                 case USER -> em.createNamedQuery("GetUserEntityByRequestId", TideUserDraftEntity.class)
                         .setParameter("requestId", changeSetId)
                         .getResultList();
-
                 case CLIENT, CLIENT_FULLSCOPE -> em.createNamedQuery("GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
                         .setParameter("requestId", changeSetId)
                         .getResultList();
-
                 default -> null;
             };
         } catch (NoResultException e) {
             return null;
         }
     }
+
     public static Object fetchDraftRecordEntitiesByRequestIdAndClientAndUser(EntityManager em, ChangeSetType type, String changeSetId, UserEntity user, String clientId) {
         try {
             return switch (type) {
@@ -231,23 +204,18 @@ public class BasicIGAUtils {
                         .setParameter("user", user)
                         .setParameter("clientId", clientId)
                         .getResultList();
-
                 case COMPOSITE_ROLE, DEFAULT_ROLES -> em.createNamedQuery("GetCompositeRoleMappingDraftEntityByRequestId", TideCompositeRoleMappingDraftEntity.class)
                         .setParameter("requestId", changeSetId)
                         .getResultList();
-
                 case ROLE -> em.createNamedQuery("GetRoleDraftEntityByRequestId", TideRoleDraftEntity.class)
                         .setParameter("requestId", changeSetId)
                         .getResultList();
-
                 case USER -> em.createNamedQuery("GetUserEntityByRequestId", TideUserDraftEntity.class)
                         .setParameter("requestId", changeSetId)
                         .getResultList();
-
                 case CLIENT, CLIENT_FULLSCOPE -> em.createNamedQuery("GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
                         .setParameter("requestId", changeSetId)
                         .getResultList();
-
                 default -> null;
             };
         } catch (NoResultException e) {
@@ -255,13 +223,12 @@ public class BasicIGAUtils {
         }
     }
 
-
     public static void updateDraftStatus(ChangeSetType changeSetType, ActionType changeSetAction, Object draftRecordEntity) {
         switch (changeSetType) {
             case USER_ROLE:
-                if(changeSetAction == ActionType.CREATE) {
+                if (changeSetAction == ActionType.CREATE) {
                     ((TideUserRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
-                } else if (changeSetAction == ActionType.DELETE){
+                } else if (changeSetAction == ActionType.DELETE) {
                     ((TideUserRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(DraftStatus.APPROVED);
                 }
                 break;
@@ -269,9 +236,9 @@ public class BasicIGAUtils {
                 ((TideRoleDraftEntity) draftRecordEntity).setDeleteStatus(DraftStatus.APPROVED);
                 break;
             case COMPOSITE_ROLE:
-                if(changeSetAction == ActionType.CREATE){
+                if (changeSetAction == ActionType.CREATE) {
                     ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
-                } else if (changeSetAction == ActionType.DELETE){
+                } else if (changeSetAction == ActionType.DELETE) {
                     ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(DraftStatus.APPROVED);
                 }
                 break;
@@ -293,9 +260,9 @@ public class BasicIGAUtils {
 
         switch (changeSetType) {
             case USER_ROLE:
-                if(changeSetAction == ActionType.CREATE) {
+                if (changeSetAction == ActionType.CREATE) {
                     ((TideUserRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
-                } else if (changeSetAction == ActionType.DELETE){
+                } else if (changeSetAction == ActionType.DELETE) {
                     ((TideUserRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(draftStatus);
                 }
                 break;
@@ -303,9 +270,9 @@ public class BasicIGAUtils {
                 ((TideRoleDraftEntity) draftRecordEntity).setDeleteStatus(draftStatus);
                 break;
             case COMPOSITE_ROLE:
-                if(changeSetAction == ActionType.CREATE){
+                if (changeSetAction == ActionType.CREATE) {
                     ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
-                } else if (changeSetAction == ActionType.DELETE){
+                } else if (changeSetAction == ActionType.DELETE) {
                     ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(draftStatus);
                 }
                 break;
@@ -329,21 +296,15 @@ public class BasicIGAUtils {
         RoleModel tideRealmAdmin = client.getRole(Constants.TIDE_REALM_ADMIN);
 
         int numberOfAdmins = session.users().getRoleMembersStream(realm, tideRealmAdmin).collect(Collectors.toSet()).size();
-        int numberOfRejections = changesetRequest.getAdminAuthorizations().stream().filter(a -> !a.getIsApproval()).collect(Collectors.toSet()).size();
+        int numberOfRejections = (int) changesetRequest.getAdminAuthorizations().stream().filter(a -> !a.getIsApproval()).count();
 
-        // Check the count of the remaining admins left to approve. If less than the threshold then just cancel change request
-        if((numberOfAdmins - numberOfRejections) < Integer.parseInt(tideRealmAdmin.getFirstAttribute("tideThreshold"))) {
+        if ((numberOfAdmins - numberOfRejections) < Integer.parseInt(tideRealmAdmin.getFirstAttribute("tideThreshold"))) {
             return DraftStatus.DENIED;
         }
         return DraftStatus.PENDING;
     }
 
-    /**
-     * Merge update into mainNode directly, no deep clone.
-     * - Objects recurse
-     * - Arrays merge via HashSet (preserves order, no duplicates)
-     * - Scalars: preserve mainNode’s value
-     */
+    /** Merge update into mainNode; arrays deduped; scalars keep existing values (except "aud" union). */
     public static void mergeInPlace(ObjectNode mainNode, ObjectNode update) {
         Iterator<Map.Entry<String, JsonNode>> fields = update.fields();
         while (fields.hasNext()) {
@@ -352,47 +313,32 @@ public class BasicIGAUtils {
             JsonNode value = entry.getValue();
 
             if (!mainNode.has(key)) {
-                // brand-new field → just add
                 mainNode.set(key, value);
-            }
-            else {
+            } else {
                 JsonNode existing = mainNode.get(key);
-                // both are objects → recurse
                 if (existing.isObject() && value.isObject()) {
                     mergeInPlace((ObjectNode) existing, (ObjectNode) value);
                 }
-                // both are arrays → dedupe in O(n)
                 else if (existing.isArray() && value.isArray()) {
                     ArrayNode array = (ArrayNode) existing;
                     Set<JsonNode> seen = new LinkedHashSet<>();
                     array.forEach(seen::add);
                     value.forEach(seen::add);
-                    array.removeAll();  // clear existing
+                    array.removeAll();
                     seen.forEach(array::add);
                 }
-                else if(key.equalsIgnoreCase("aud")){
-
-                    // scalar/array mismatch or two scalars → unify into array
+                else if (key.equalsIgnoreCase("aud")) {
                     ArrayNode merged = JsonNodeFactory.instance.arrayNode();
-                    // helper: stream either the one node or all elements if it's an array
-                    Stream<JsonNode> fromExisting = asStream(existing);
-                    Stream<JsonNode> fromUpdate   = asStream(value);
-
-                    // LinkedHashSet preserves order and dedups by JsonNode.equals()
                     Set<JsonNode> seen = new LinkedHashSet<>();
-                    Stream.concat(fromExisting, fromUpdate)
-                            .forEach(seen::add);
-
+                    Stream.concat(asStream(existing), asStream(value)).forEach(seen::add);
                     seen.forEach(merged::add);
                     merged.add(mainNode.get("azp"));
                     mainNode.set(key, merged);
                 }
-                // scalar or type mismatch → skip (keep mainNode)
             }
         }
     }
 
-    /** If node is an ArrayNode, stream its elements; otherwise stream just the node itself. */
     private static Stream<JsonNode> asStream(JsonNode node) {
         if (node.isArray()) {
             return StreamSupport.stream(node.spliterator(), false);
@@ -423,7 +369,6 @@ public class BasicIGAUtils {
         }
     }
 
-    // helper to parse a JSON string into an ObjectNode
     public static ObjectNode parseNode(ObjectMapper objectMapper, String json) {
         try {
             return (ObjectNode) objectMapper.readTree(json);
@@ -432,7 +377,9 @@ public class BasicIGAUtils {
         }
     }
 
-
+    /**
+     * Sign & commit each change-set individually (no bundling/processor factory).
+     */
     public static void processChangeSetsForSigning(List<ChangeSetRequest> changeSets, KeycloakSession session, AdminAuth auth) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
@@ -441,68 +388,20 @@ public class BasicIGAUtils {
             throw new IllegalArgumentException("No change sets provided for signing.");
         }
 
-        if (changeSets.size() > 1) {
-            // Group by type and map to draft entities
-            Map<ChangeSetType, List<Object>> requests =
-                    changeSets.stream()
-                            .collect(Collectors.groupingBy(
-                                    ChangeSetRequest::getType,
-                                    Collectors.flatMapping(
-                                            req -> BasicIGAUtils
-                                                    .fetchDraftRecordEntityByRequestId(
-                                                            em, req.getType(), req.getChangeSetId()
-                                                    )
-                                                    .stream(),
-                                            Collectors.toList()
-                                    )
-                            ));
+        ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
+        ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
 
-
-            // Process grouped entities
-            ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
-            ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
-            ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
-
-            requests.forEach((requestType, entities) -> {
-                try {
-                    List<ChangesetRequestEntity> changeRequests =  processorFactory.getProcessor(requestType).combineChangeRequests(session, entities, em);
-
-                    changeRequests.forEach(cre -> {
-                        try {
-                            Object draftRecordEntity = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, cre.getChangesetType(), cre.getChangesetRequestId()).get(0);
-                            signer.sign(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
-                            committer.commit(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
-                        }
-                    });
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-
-            });
-        } else {
-            // Single item path
-            ChangeSetRequest changeSet = changeSets.get(0);
-            Object draftRecordEntity = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId()).get(0);
+        for (ChangeSetRequest changeSet : changeSets) {
+            Object draftRecordEntity = BasicIGAUtils
+                    .fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId())
+                    .stream().findFirst().orElse(null);
 
             if (draftRecordEntity == null) {
                 throw new Exception("Unsupported change set type for ID: " + changeSet.getChangeSetId());
             }
 
-            ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
-            ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
-
-            try {
-                signer.sign(changeSet, em, session, realm, draftRecordEntity, auth);
-                committer.commit(changeSet, em, session, realm, draftRecordEntity, auth);
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
+            signer.sign(changeSet, em, session, realm, draftRecordEntity, auth);
+            committer.commit(changeSet, em, session, realm, draftRecordEntity, auth);
         }
     }
-
-
-
 }
-

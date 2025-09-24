@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
+import org.tidecloak.shared.enums.DraftStatus;
 
 @NamedQueries({
         @NamedQuery(
@@ -87,14 +88,13 @@ import org.tidecloak.shared.enums.ChangeSetType;
                 query = "DELETE FROM AccessProofDetailEntity r WHERE r.clientId = :clientId"
         )
 })
-
 @Entity
 @Table(name = "ACCESS_PROOF_DETAIL")
 public class AccessProofDetailEntity {
 
     @Id
     @Column(name="ID", length = 36)
-    @Access(AccessType.PROPERTY) // we do this because relationships often fetch id, but not entity.  This avoids an extra SQL
+    @Access(AccessType.PROPERTY)
     protected String id;
 
     @Embedded
@@ -115,104 +115,77 @@ public class AccessProofDetailEntity {
     @Column(name = "REALM_ID")
     protected String realmId;
 
+    /** Baseline (current/active) user-context snapshot */
+    @Lob
+    @Column(name = "DEFAULT_USER_CONTEXT")
+    protected String defaultUserContext;
+
+    /** Draft preview (baseline + delta without dynamic fields) */
+    @Lob
     @Column(name = "PROOF_DRAFT")
     protected String proofDraft;
+
+    /** Optional AP hash (base64-url) when a role introduces an authorizer policy */
+    @Column(name = "AUTHORIZER_POLICY_HASH")
+    protected String authorizerPolicyHash;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "DRAFT_STATUS")
+    protected DraftStatus draftStatus;
 
     @Column(name = "CREATED_TIMESTAMP")
     protected Long createdTimestamp = System.currentTimeMillis();
 
+    /** Final signature (Tide) or admin id (Base IGA) once committed */
     @Column(name = "FINAL_SIGNATURE")
     protected String signature;
 
-    public String getId() {
-        return id;
-    }
+    // --- getters/setters ---
 
-    public void setId(String id) {
-        this.id = id;
-    }
+    public String getId() { return id; }
+    public void setId(String id) { this.id = id; }
 
-    public UserEntity getUser() {
-        return user;
-    }
+    public ChangeRequestKey getChangeRequestKey() { return changeRequestKey; }
+    public void setChangeRequestKey(ChangeRequestKey changeRequestKey) { this.changeRequestKey = changeRequestKey; }
 
-    public void setUser(UserEntity user) {
-        this.user = user;
-    }
+    public ChangeSetType getChangesetType() { return changesetType; }
+    public void setChangesetType(ChangeSetType changesetType) { this.changesetType = changesetType; }
 
-    public String getClientId() {
-        return clientId;
-    }
+    public UserEntity getUser() { return user; }
+    public void setUser(UserEntity user) { this.user = user; }
 
-    public void setClientId(String clientId) {
-        this.clientId = clientId;
-    }
+    public String getClientId() { return clientId; }
+    public void setClientId(String clientId) { this.clientId = clientId; }
 
-    public String getRealmId() {
-        return realmId;
-    }
+    public String getRealmId() { return realmId; }
+    public void setRealmId(String realmId) { this.realmId = realmId; }
 
-    public void setRealmId(String realmId) {
-        this.realmId = realmId;
-    }
+    public String getDefaultUserContext() { return defaultUserContext; }
+    public void setDefaultUserContext(String defaultUserContext) { this.defaultUserContext = defaultUserContext; }
 
-    public ChangeRequestKey getChangeRequestKey() {
-        return changeRequestKey;
-    }
+    public String getProofDraft() { return proofDraft; }
+    public void setProofDraft(String proofDraft) { this.proofDraft = proofDraft; }
 
-    public void setChangeRequestKey(ChangeRequestKey changeRequestKey) {
-        this.changeRequestKey = changeRequestKey;
-    }
+    public String getAuthorizerPolicyHash() { return authorizerPolicyHash; }
+    public void setAuthorizerPolicyHash(String authorizerPolicyHash) { this.authorizerPolicyHash = authorizerPolicyHash; }
 
-    public ChangeSetType getChangesetType() {
-        return changesetType;
-    }
+    public DraftStatus getDraftStatus() { return draftStatus; }
+    public void setDraftStatus(DraftStatus draftStatus) { this.draftStatus = draftStatus; }
 
-    public void setChangesetType(ChangeSetType changesetType) {
-        this.changesetType = changesetType;
-    }
+    public Long getCreatedTimestamp() { return createdTimestamp; }
+    public void setCreatedTimestamp(Long timestamp) { this.createdTimestamp = timestamp; }
 
-    public String getProofDraft() {
-        return proofDraft;
-    }
-
-    public void setProofDraft(String proofDraft) {
-        this.proofDraft = proofDraft;
-    }
-
-    public Long getCreatedTimestamp() {
-        return createdTimestamp;
-    }
-
-    public void setCreatedTimestamp(Long timestamp) {
-        createdTimestamp = timestamp;
-    }
-
-    public String getSignature() {
-        return signature;
-    }
-
-    public void setSignature(String signature) {
-        this.signature = signature;
-    }
-
+    public String getSignature() { return signature; }
+    public void setSignature(String signature) { this.signature = signature; }
 
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
-        if (o == null) return false;
         if (!(o instanceof AccessProofDetailEntity)) return false;
-
-        AccessProofDetailEntity key = (AccessProofDetailEntity) o;
-
-        if (!id.equals(key.id)) return false;
-
-        return true;
+        AccessProofDetailEntity that = (AccessProofDetailEntity) o;
+        return id != null && id.equals(that.id);
     }
 
     @Override
-    public int hashCode() {
-        return id.hashCode();
-    }
-
+    public int hashCode() { return id == null ? 0 : id.hashCode(); }
 }

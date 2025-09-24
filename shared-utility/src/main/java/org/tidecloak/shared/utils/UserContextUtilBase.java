@@ -9,23 +9,32 @@ import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
 import org.tidecloak.shared.enums.DraftStatus;
-import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 
 import java.util.Set;
 
+/**
+ * Base utility with minimal defaults. The real implementation is loaded dynamically
+ * from the new engine at: org.tidecloak.base.iga.usercontext.UserContextUtils
+ */
 public class UserContextUtilBase {
 
+    /** New engine can override to provide deep role mapping expansion. */
     public Set<RoleModel> getDeepUserRoleMappings(UserModel user, KeycloakSession session, RealmModel realm, DraftStatus draftStatus) {
-        return Set.of(); // Return empty set as default
+        return Set.of(); // default: empty
     }
 
-    public Set<RoleModel> expandActiveCompositeRoles(KeycloakSession session, Set<RoleModel> roles){
-        return Set.of();
-    };
+    /** New engine can override to provide composite expansion for ACTIVE roles. */
+    public Set<RoleModel> expandActiveCompositeRoles(KeycloakSession session, Set<RoleModel> roles) {
+        return Set.of(); // default: empty
+    }
 
-
+    /**
+     * Active user context for (user, client).
+     * Returns the persisted UserClientAccessProofEntity row if present, otherwise null.
+     */
     public static UserClientAccessProofEntity getUserContext(KeycloakSession session, String clientId, UserModel userModel) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         UserEntity user = em.getReference(UserEntity.class, userModel.getId());
@@ -36,11 +45,15 @@ public class UserContextUtilBase {
                     .setParameter("clientId", clientId)
                     .getSingleResult();
         } catch (NoResultException e) {
-            // get the default usercontext for the lcient
+            // No active user-context yet for (user, client)
             return null;
         }
     }
 
+    /**
+     * Returns the client's default user-context configuration row (if your project keeps this
+     * in TideClientDraftEntity via named query "getClientFullScopeStatus"). Otherwise null.
+     */
     public static TideClientDraftEntity getDefaultUserContext(KeycloakSession session, String clientId) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         ClientEntity client = em.getReference(ClientEntity.class, clientId);
@@ -50,26 +63,27 @@ public class UserContextUtilBase {
                     .setParameter("client", client)
                     .getSingleResult();
         } catch (NoResultException e) {
-            // get the default usercontext for the lcient
+            // No default user-context row for this client
             return null;
         }
     }
 
+    /**
+     * Factory that prefers the real implementation from the new engine.
+     * Fallback is this base class with no-ops.
+     */
     public static UserContextUtilBase getUserContextUtil() {
+        final String implClass = "org.tidecloak.base.iga.usercontext.UserContextUtils";
         try {
-            // Attempt to load the real implementation dynamically
-            return (UserContextUtilBase) Class.forName("org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils")
+            return (UserContextUtilBase) Class.forName(implClass)
                     .getDeclaredConstructor()
                     .newInstance();
         } catch (ClassNotFoundException e) {
-            // Log that the real implementation was not found
-            System.out.println("Real implementation not found. Using base implementation.");
+            System.out.println("UserContextUtils implementation not found at " + implClass + ". Using base implementation.");
         } catch (Exception e) {
-            // Handle any other exceptions during instantiation
-            System.err.println("Error instantiating UserContextUtils: " + e.getMessage());
+            System.err.println("Error instantiating " + implClass + ": " + e.getMessage());
         }
 
-        // Fallback to base class implementation
         return new UserContextUtilBase() {
             @Override
             public Set<RoleModel> expandActiveCompositeRoles(KeycloakSession session, Set<RoleModel> roles) {
@@ -77,5 +91,4 @@ public class UserContextUtilBase {
             }
         };
     }
-
 }
