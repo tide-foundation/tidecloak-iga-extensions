@@ -2,74 +2,61 @@ package org.tidecloak.base.iga.TideRequests;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.persistence.EntityManager;
-import org.keycloak.common.util.MultivaluedHashMap;
-import org.keycloak.component.ComponentModel;
-import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
-import org.keycloak.models.jpa.entities.RoleEntity;
-import org.keycloak.models.utils.KeycloakModelUtils;
 import org.midgard.models.AuthorizerPolicyModel.AuthorizerPolicy;
-import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
-import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
-import org.tidecloak.shared.enums.DraftStatus;
-import org.tidecloak.shared.models.InitializerCertificateModel.InitializerCertificate;
+import org.tidecloak.jpa.store.RoleAttributeLongStore;
 import org.tidecloak.tide.iga.ForsetiPolicyFactory;
 
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.function.BiConsumer;
 
-import static org.tidecloak.base.iga.utils.BasicIGAUtils.getRoleIdFromEntity;
-
+/**
+ * New-engine helpers for role-bound AuthorizerPolicy (AP).
+ *
+ * Key ideas:
+ * - Any role may carry an AP via role attribute "tide.ap.model" (compact string).
+ * - Threshold is mirrored in role attribute "tideThreshold" (string).
+ * - Large AP values are stored in ROLE_ATTRIBUTE_LONG via RoleAttributeLongStore to avoid VARCHAR(255) overflow.
+ */
 public class TideRoleRequests {
 
-    private static final BiConsumer<String, String> NOOP_CODE_STORE = (bh, assemblyB64) -> {};
+    /** Attribute keys used on roles. */
+    public static final String ATTR_AP_COMPACT   = "tide.ap.model";     // compact AuthorizerPolicy (logical name)
+    public static final String ATTR_THRESHOLD    = "tideThreshold";     // numeric string
+    public static final String ADMIN_DEFAULT_POL = "policies/DefaultTideAdminPolicy.cs";
 
-    private static TideRoleDraftEntity requireRoleDraft(EntityManager em, RoleEntity roleEntity) throws Exception {
-        List<TideRoleDraftEntity> drafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                .setParameter("role", roleEntity)
-                .getResultList();
-        if (drafts.isEmpty()) throw new Exception("No TideRoleDraftEntity found for role id=" + roleEntity.getId());
-        return drafts.get(0);
-    }
+    private static final ObjectMapper M = new ObjectMapper();
 
-    /** helper to unwrap JSON bundle {"auth": "...", "sign": "..."} to compact; prefer "auth". */
-    private static String unwrapCompactOrFirst(String stored) {
-        if (stored == null) return null;
-        String s = stored.trim();
-        if (!s.startsWith("{")) return s;
-        try {
-            ObjectMapper om = new ObjectMapper();
-            @SuppressWarnings("unchecked")
-            Map<String, Object> m = om.readValue(s, Map.class);
-            Object v = m.get("auth");
-            if (v == null && !m.isEmpty()) v = m.values().iterator().next();
-            return v == null ? null : String.valueOf(v);
-        } catch (Exception e) {
-            return s;
-        }
-    }
-
-    // -------- Admin:2 default (bundle) --------
-
+    /**
+     * Idempotently create a default "TIDE_REALM_ADMIN" role under realm-management, composite to REALM_ADMIN,
+     * generate a baseline AP (auth/sign) via Forseti template, and store it on the role.
+     */
     public static void createRealmAdminAuthorizerPolicy(KeycloakSession session) throws Exception {
-        var em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        ClientModel realmMgmt = session.getContext().getRealm()
-                .getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
+        RealmModel realm = session.getContext().getRealm();
+        ClientModel realmMgmt = realm.getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
+        if (realmMgmt == null) {
+            throw new IllegalStateException("Realm management client not found");
+        }
+
+        RoleModel realmAdmin = realmMgmt.getRole(AdminRoles.REALM_ADMIN);
+        if (realmAdmin == null) {
+            throw new IllegalStateException("REALM_ADMIN role not found on realm-management");
+        }
+
+        RoleModel tideRealmAdmin = realmMgmt.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        if (tideRealmAdmin == null) {
+            tideRealmAdmin = realmMgmt.addRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+            tideRealmAdmin.addCompositeRole(realmAdmin);
+        }
+
+        int threshold = getRoleThreshold(tideRealmAdmin, 1);
+        tideRealmAdmin.setSingleAttribute(ATTR_THRESHOLD, Integer.toString(threshold));
 
         String resource = Constants.ADMIN_CONSOLE_CLIENT_ID;
-        RoleModel realmAdmin = session.getContext().getRealm()
-                .getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID)
-                .getRole(AdminRoles.REALM_ADMIN);
-
-        RoleModel tideRealmAdmin = realmMgmt.addRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-        tideRealmAdmin.addCompositeRole(realmAdmin);
-        tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
-
-        ArrayList<String> signModels = new ArrayList<>(List.of("UserContext:2", "Rules:1"));
-
+        List<String> signModels = new ArrayList<>(List.of("UserContext:2", "Rules:1"));
         String policySource = loadDefaultPolicySource();
+
         Map<String, AuthorizerPolicy> aps = ForsetiPolicyFactory.createRoleAuthorizerPolicies(
                 session,
                 resource,
@@ -80,163 +67,157 @@ public class TideRoleRequests {
                 "1.0.0"
         );
 
-        var roleEntity = em.find(org.keycloak.models.jpa.entities.RoleEntity.class, tideRealmAdmin.getId());
-        var roleDraft = em.createNamedQuery("getRoleDraftByRole", org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity.class)
-                .setParameter("role", roleEntity)
-                .getSingleResult();
+        String apAuthCompact = aps.get("auth").toCompactString();
+        String apSignCompact = aps.get("sign").toCompactString();
 
-        String bundle = new ObjectMapper().writeValueAsString(Map.of(
-                "auth", aps.get("auth").toCompactString(),
-                "sign", aps.get("sign").toCompactString()
-        ));
-        roleDraft.setInitCert(bundle);
-        em.flush();
+        // Persist in ROLE_ATTRIBUTE_LONG to avoid varchar(255) overflow.
+        RoleAttributeLongStore.putRaw(session, tideRealmAdmin.getId(), ATTR_AP_COMPACT, apAuthCompact);
+        RoleAttributeLongStore.putRaw(session, tideRealmAdmin.getId(), "tide.ap.model.sign", apSignCompact);
+
+        // Optionally mirror to short attributes only if they fit.
+        mirrorShortIfFits(tideRealmAdmin, ATTR_AP_COMPACT, apAuthCompact);
+        mirrorShortIfFits(tideRealmAdmin, "tide.ap.model.sign", apSignCompact);
     }
 
-    // -------- AP draft (single compact) --------
+    /** Prefer this overload when a session is available: it reads long-store first, then short attr. */
+    public static AuthorizerPolicy getRoleAuthorizerPolicy(KeycloakSession session, RoleModel role) {
+        try {
+            String longVal = RoleAttributeLongStore.getRaw(session, role.getId(), ATTR_AP_COMPACT);
+            if (longVal != null && !longVal.isBlank()) {
+                return AuthorizerPolicy.fromCompact(longVal.trim());
+            }
+        } catch (Throwable ignored) { /* fall back */ }
+        return getRoleAuthorizerPolicy(role);
+    }
 
-    public static void createRoleAuthorizerPolicyDraft(
-            KeycloakSession session,
-            String recordId,
-            String certVersion,
-            double thresholdPercentage,
-            int numberOfAdditionalAdmins,
-            RoleModel role
-    ) throws Exception {
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+    /** Back-compat: read AP from short attribute only. */
+    public static AuthorizerPolicy getRoleAuthorizerPolicy(RoleModel role) {
+        String compact = role.getFirstAttribute(ATTR_AP_COMPACT);
+        if (compact == null || compact.isBlank()) return null;
+        return AuthorizerPolicy.fromCompact(compact.trim());
+    }
 
-        RoleEntity roleEntity = em.find(RoleEntity.class, role.getId());
-        TideRoleDraftEntity roleDraft = requireRoleDraft(em, roleEntity);
-
-        String stored = roleDraft.getInitCert();
-        String compactBase;
-        if (stored != null && stored.trim().startsWith("{")) {
-            @SuppressWarnings("unchecked")
-            Map<String, String> m = new ObjectMapper().readValue(stored, Map.class);
-            compactBase = m.getOrDefault("auth", m.values().stream().findFirst().orElseThrow());
-        } else {
-            compactBase = stored;
+    /** Prefer this overload to persist via long-store and mirror short if it fits. */
+    public static void setRoleAuthorizerPolicy(KeycloakSession session, RoleModel role, AuthorizerPolicy ap) {
+        if (ap == null) {
+            RoleAttributeLongStore.delete(session, role.getId(), ATTR_AP_COMPACT);
+            role.removeAttribute(ATTR_AP_COMPACT);
+            return;
         }
+        String compact = ap.toCompactString();
+        RoleAttributeLongStore.putRaw(session, role.getId(), ATTR_AP_COMPACT, compact);
+        mirrorShortIfFits(role, ATTR_AP_COMPACT, compact);
 
-        AuthorizerPolicy prev = AuthorizerPolicy.fromCompact(compactBase);
+        if (ap.payload() != null && ap.payload().threshold != null) {
+            role.setSingleAttribute(ATTR_THRESHOLD, Integer.toString(ap.payload().threshold));
+        }
+    }
 
-        List<TideUserRoleMappingDraftEntity> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
-                .setParameter("draftStatus", DraftStatus.ACTIVE)
-                .setParameter("roleId", role.getId())
-                .getResultList();
+    /** Back-compat: writes only to short attribute (avoid using for big values). */
+    public static void setRoleAuthorizerPolicy(RoleModel role, AuthorizerPolicy ap) {
+        if (ap == null) {
+            role.removeAttribute(ATTR_AP_COMPACT);
+            return;
+        }
+        String compact = ap.toCompactString();
+        mirrorShortIfFits(role, ATTR_AP_COMPACT, compact);
+        if (ap.payload() != null && ap.payload().threshold != null) {
+            role.setSingleAttribute(ATTR_THRESHOLD, Integer.toString(ap.payload().threshold));
+        }
+    }
 
-        int population = users.size() + Math.max(0, numberOfAdditionalAdmins);
-        int newThreshold = Math.max(1, (int) Math.ceil(thresholdPercentage * population));
+    public static AuthorizerPolicy upsertRoleAPWithComputedThreshold(
+            KeycloakSession session,
+            RoleModel role,
+            double thresholdPct,
+            int additionalAdmins,
+            List<String> signModels
+    ) throws JsonProcessingException {
+        int holders = countRoleHolders(session, session.getContext().getRealm(), role);
+        int population = Math.max(0, holders) + Math.max(0, additionalAdmins);
+        int newThreshold = Math.max(1, (int) Math.ceil(thresholdPct * Math.max(1, population)));
 
-        String resource = prev.payload().resource;
-        List<String> signModels = new ArrayList<>(prev.payload().signmodels == null ? Collections.emptyList() : prev.payload().signmodels);
+        String resource = resolveResourceForRole(role, Constants.ADMIN_CONSOLE_CLIENT_ID);
+        List<String> sms = (signModels == null) ? Collections.emptyList() : new ArrayList<>(signModels);
 
         AuthorizerPolicy ap = ForsetiPolicyFactory.createRoleAuthorizerPolicy_DefaultAdminTemplate(
-                session, resource, role, signModels, NOOP_CODE_STORE
+                session, resource, role, sms, (bh, dllB64) -> { /* NOOP */ }
         );
-        if (ap == null) throw new Exception("Failed to create AuthorizerPolicy draft");
-
         ap.payload().threshold = newThreshold;
 
-        List<RoleInitializerCertificateDraftEntity> existing = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class)
-                .setParameter("changesetId", recordId)
-                .getResultList();
-        if (!existing.isEmpty()) throw new Exception("Pending change request already exists: " + recordId);
+        role.setSingleAttribute(ATTR_THRESHOLD, Integer.toString(newThreshold));
 
-        RoleInitializerCertificateDraftEntity draft = new RoleInitializerCertificateDraftEntity();
-        draft.setId(KeycloakModelUtils.generateId());
-        draft.setChangesetRequestId(recordId);
-        draft.setInitCert(ap.toCompactString());
-        em.persist(draft);
-        em.flush();
-    }
+        // Persist AP in long-store and mirror short if it fits
+        String compact = ap.toCompactString();
+        RoleAttributeLongStore.putRaw(session, role.getId(), ATTR_AP_COMPACT, compact);
+        mirrorShortIfFits(role, ATTR_AP_COMPACT, compact);
 
-    public static RoleInitializerCertificateDraftEntity getDraftRoleInitCert(KeycloakSession session, String recordId){
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        List<RoleInitializerCertificateDraftEntity> list = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class)
-                .setParameter("changesetId", recordId).getResultList();
-        return list.isEmpty() ? null : list.get(0);
-    }
-
-    public static void commitRoleAuthorizerPolicy(KeycloakSession session, String recordId, Object mapping, String signature) throws Exception {
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-
-        String roleId = getRoleIdFromEntity(mapping);
-        RoleEntity roleEntity = em.find(RoleEntity.class, roleId);
-        if (roleEntity == null) throw new Exception("No role entity found");
-
-        RoleModel roleModel = session.getContext().getRealm().getRoleById(roleId);
-
-        List<TideRoleDraftEntity> tideDrafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                .setParameter("role", roleEntity).getResultList();
-        if (tideDrafts.isEmpty()) throw new Exception("No tide role draft found");
-
-        RoleInitializerCertificateDraftEntity draft = getDraftRoleInitCert(session, recordId);
-        if (draft == null) return;
-
-        tideDrafts.get(0).setInitCert(draft.getInitCert());
-        tideDrafts.get(0).setInitCertSig(signature);
-
-        try {
-            String compact = unwrapCompactOrFirst(draft.getInitCert());
-            AuthorizerPolicy ap = AuthorizerPolicy.fromCompact(compact);
-            if (ap.payload().threshold != null) {
-                roleModel.setSingleAttribute("tideThreshold", Integer.toString(ap.payload().threshold));
-            }
-        } catch (Exception ignore) { }
-
-        roleModel.removeAttribute("InitCertDraftId");
-        em.remove(draft);
-        em.flush();
-    }
-
-    // --- legacy InitCert helpers kept as-is (omitted for brevity; unchanged from your current file) ---
-
-    public static InitializerCertificate createRoleInitCert(KeycloakSession session, String resource, RoleModel role , String certVersion, String algorithm, ArrayList<String> signModels) throws JsonProcessingException {
-        ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
-                .filter(x -> x.getProviderId().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_VENDOR_KEY))
-                .findFirst()
-                .orElse(null);
-
-        MultivaluedHashMap<String, String> config = componentModel.getConfig();
-        String vvkId = config.getFirst("vvkId");
-        String vendor = session.getContext().getRealm().getName();
-
-        String tideThreshold = role.getFirstAttribute("tideThreshold");
-        if (tideThreshold == null ) {
-            return null;
-        }
-
-        int threshold = Integer.parseInt(tideThreshold);
-        return InitializerCertificate.constructInitCert(vvkId, algorithm, certVersion, vendor, resource, threshold, signModels);
-    }
-
-    public static AuthorizerPolicy createAdminAuthorizerPolicy(
-            KeycloakSession session,
-            String resource,
-            RoleModel role,
-            String certVersion,
-            String algorithm,
-            ArrayList<String> authFlows,
-            ArrayList<String> signModels
-    ) throws JsonProcessingException {
-        AuthorizerPolicy ap = ForsetiPolicyFactory.createRoleAuthorizerPolicy_DefaultAdminTemplate(
-                session, resource, role, signModels, NOOP_CODE_STORE
-        );
-        String tideThreshold = role.getFirstAttribute("tideThreshold");
-        if (tideThreshold != null) {
-            ap.payload().threshold = Integer.parseInt(tideThreshold);
-        }
         return ap;
     }
 
+    public static void recomputeAndPersistThreshold(KeycloakSession session,
+                                                    RoleModel role,
+                                                    double thresholdPct,
+                                                    int additionalAdmins) throws JsonProcessingException {
+        AuthorizerPolicy current = getRoleAuthorizerPolicy(session, role);
+        if (current == null) {
+            upsertRoleAPWithComputedThreshold(session, role, thresholdPct, additionalAdmins, List.of());
+            return;
+        }
+
+        int holders = countRoleHolders(session, session.getContext().getRealm(), role);
+        int population = Math.max(0, holders) + Math.max(0, additionalAdmins);
+        int newThreshold = Math.max(1, (int) Math.ceil(thresholdPct * Math.max(1, population)));
+
+        current.payload().threshold = newThreshold;
+        role.setSingleAttribute(ATTR_THRESHOLD, Integer.toString(newThreshold));
+
+        // Re-write AP to long-store (content changed) and mirror short if it fits
+        String compact = current.toCompactString();
+        RoleAttributeLongStore.putRaw(session, role.getId(), ATTR_AP_COMPACT, compact);
+        mirrorShortIfFits(role, ATTR_AP_COMPACT, compact);
+    }
+
+    /* ───────────────────────────────────────────────
+       Utilities
+       ─────────────────────────────────────────────── */
+
+    private static int getRoleThreshold(RoleModel role, int fallback) {
+        String t = role.getFirstAttribute(ATTR_THRESHOLD);
+        if (t == null || t.isBlank()) return fallback;
+        try { return Integer.parseInt(t.trim()); } catch (NumberFormatException nfe) { return fallback; }
+    }
+
+    private static String resolveResourceForRole(RoleModel role, String defaultResource) {
+        String res = role.getFirstAttribute("tide.ap.resource");
+        return (res == null || res.isBlank()) ? defaultResource : res;
+    }
+
+    private static int countRoleHolders(KeycloakSession session, RealmModel realm, RoleModel role) {
+        // Use RoleMembers stream (available across KC versions better than getUsersStream)
+        try {
+            long cnt = session.users().getRoleMembersStream(realm, role).count();
+            return (int) Math.min(cnt, Integer.MAX_VALUE);
+        } catch (Throwable ignore) {
+            return 0;
+        }
+    }
+
     private static String loadDefaultPolicySource() {
-        try (var is = Thread.currentThread().getContextClassLoader()
-                .getResourceAsStream("policies/DefaultTideAdminPolicy.cs")) {
-            if (is == null) throw new IllegalStateException("Default policy not found at resources/policies/DefaultTideAdminPolicy.cs");
-            return new String(is.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        try (InputStream is = Thread.currentThread().getContextClassLoader().getResourceAsStream(ADMIN_DEFAULT_POL)) {
+            if (is == null) throw new IllegalStateException("Default policy not found at resources/" + ADMIN_DEFAULT_POL);
+            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
         } catch (Exception e) {
-            throw new RuntimeException("Failed to read DefaultTideAdminPolicy.cs", e);
+            throw new RuntimeException("Failed to read " + ADMIN_DEFAULT_POL, e);
+        }
+    }
+
+    /** Mirror to ROLE_ATTRIBUTE only if value length <= 255; else ensure short attr is absent. */
+    private static void mirrorShortIfFits(RoleModel role, String name, String value) {
+        if (value != null && value.length() <= 255) {
+            role.setSingleAttribute(name, value);
+        } else {
+            role.removeAttribute(name);
         }
     }
 }

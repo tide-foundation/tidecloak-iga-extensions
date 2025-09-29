@@ -23,12 +23,11 @@ import org.keycloak.services.resources.LoginActionsService;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.AdminAuthorization;
-import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
 import org.midgard.models.VendorData;
 import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
-import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
+import org.tidecloak.shared.models.SecretKeys;
 
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -39,10 +38,12 @@ public class TideAdminRealmResource {
     private final KeycloakSession session;
     private final RealmModel realm;
     private final AdminPermissionEvaluator auth;
-    public static final String tideRealmAdminRole = "tide-realm-admin";
-    protected static final String tideVendorKeyId = "tide-vendor-key";
+
+    public static final String TIDE_REALM_ADMIN_ROLE = "tide-realm-admin";
+    protected static final String TIDE_VENDOR_KEY_PROVIDER_ID = "tide-vendor-key";
 
     protected static final Logger logger = Logger.getLogger(TideAdminRealmResource.class);
+
     public TideAdminRealmResource(KeycloakSession session, RealmModel realm, AdminPermissionEvaluator auth) {
         this.session = session;
         this.realm = realm;
@@ -52,203 +53,228 @@ public class TideAdminRealmResource {
     @POST
     @Path("add-authorization")
     @Produces(MediaType.TEXT_PLAIN)
-    public Response AddAuthorization(@FormParam("changeSetId") String changeSetId, @FormParam("actionType") String actionType, @FormParam("changeSetType") String changeSetType, @FormParam("authorizerApproval") String authorizerApproval, @FormParam("authorizerAuthentication") String authorizerAuthentication ) throws Exception {
+    public Response addAuthorization(@FormParam("changeSetId") String changeSetId,
+                                     @FormParam("actionType") String actionType,
+                                     @FormParam("changeSetType") String changeSetType,
+                                     @FormParam("authorizerApproval") String authorizerApproval,
+                                     @FormParam("authorizerAuthentication") String authorizerAuthentication) {
         try {
-            RoleModel role = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
-            auth.adminAuth().getUser().hasRole(role);
+            // Permission gate: require the tide-realm-admin role
+            RoleModel adminRole = session.getContext().getRealm()
+                    .getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID)
+                    .getRole(TIDE_REALM_ADMIN_ROLE);
+            if (!auth.adminAuth().getUser().hasRole(adminRole)) {
+                return ErrorPage.error(session, null, Response.Status.FORBIDDEN, "Insufficient permission.");
+            }
 
             ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
-                    .filter(x -> tideVendorKeyId.equals(x.getProviderId()))  // Use .equals for string comparison
+                    .filter(x -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(x.getProviderId()))
                     .findFirst()
                     .orElse(null);
 
-            if(componentModel == null) {
-                logger.warn("There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
-                return ErrorPage.error(session, null, Response.Status.BAD_REQUEST, "There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
+            if (componentModel == null) {
+                String msg = "No tide-vendor-key component configured for realm " + realm.getName();
+                logger.warn(msg);
+                return ErrorPage.error(session, null, Response.Status.BAD_REQUEST, msg);
             }
-            MultivaluedHashMap<String, String> tideVendorKeyConfig = componentModel.getConfig();
-            ObjectMapper objectMapper = new ObjectMapper();
-            String currentSecretKeys = tideVendorKeyConfig.getFirst("clientSecret");
 
-            SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
-            String vrk = secretKeys.activeVrk;
+            MultivaluedHashMap<String, String> cfg = componentModel.getConfig();
+            String secretBlob = cfg.getFirst("clientSecret");
+            if (secretBlob == null || secretBlob.isBlank()) {
+                return buildResponse(400, "Missing clientSecret in tide-vendor-key config");
+            }
+
+            ObjectMapper om = new ObjectMapper();
+            SecretKeys secretKeys = om.readValue(secretBlob, SecretKeys.class);
+            String vrk = (secretKeys.activeVrk != null && !secretKeys.activeVrk.isBlank())
+                    ? secretKeys.activeVrk
+                    : secretKeys.VZK;
+
+            if (vrk == null || vrk.isBlank()) {
+                return buildResponse(400, "No VRK available (activeVrk/VZK empty)");
+            }
 
             VendorData vendorData = Midgard.DecryptVendorData(authorizerAuthentication, vrk);
 
-            ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSetType, changeSetId, actionType, auth.adminAuth().getUser(), vendorData.AuthToken, vendorData.blindSig, authorizerApproval);
+            ChangesetRequestAdapter.saveAdminAuthorizaton(
+                    session,
+                    changeSetType,
+                    changeSetId,
+                    actionType,
+                    auth.adminAuth().getUser(),
+                    vendorData.AuthToken,
+                    vendorData.blindSig,
+                    authorizerApproval
+            );
 
-            return buildResponse(200, "Successfully added admin authorization to changeSetRequest with id " + changeSetId);
+            return buildResponse(200, "Successfully added admin authorization to changeSetRequest " + changeSetId);
 
         } catch (Exception e) {
-            logger.error("Error adding authorization to change set request with ID: " + changeSetId +"." + Arrays.toString(e.getStackTrace()));
-            return  buildResponse(500, "Error adding authorization to change set request with ID: " + changeSetId +" ." + e.getMessage());
+            logger.errorf(e, "Error adding authorization to change set request (id=%s)", changeSetId);
+            return buildResponse(500, "Error adding authorization to change set request: " + e.getMessage());
         }
     }
 
     @POST
     @Path("add-rejection")
     @Produces(MediaType.TEXT_PLAIN)
-    public Response AddRejection(@FormParam("changeSetId") String changeSetId, @FormParam("actionType") String actionType, @FormParam("changeSetType") String changeSetType) throws Exception {
+    public Response addRejection(@FormParam("changeSetId") String changeSetId,
+                                 @FormParam("actionType") String actionType,
+                                 @FormParam("changeSetType") String changeSetType) {
         try {
-            RoleModel role = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
-            auth.adminAuth().getUser().hasRole(role);
+            RoleModel adminRole = session.getContext().getRealm()
+                    .getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID)
+                    .getRole(TIDE_REALM_ADMIN_ROLE);
+            if (!auth.adminAuth().getUser().hasRole(adminRole)) {
+                return ErrorPage.error(session, null, Response.Status.FORBIDDEN, "Insufficient permission.");
+            }
 
             ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
-                    .filter(x -> tideVendorKeyId.equals(x.getProviderId()))  // Use .equals for string comparison
+                    .filter(x -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(x.getProviderId()))
                     .findFirst()
                     .orElse(null);
 
-            if(componentModel == null) {
-                logger.warn("There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
-                return ErrorPage.error(session, null, Response.Status.BAD_REQUEST, "There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
+            if (componentModel == null) {
+                String msg = "No tide-vendor-key component configured for realm " + realm.getName();
+                logger.warn(msg);
+                return ErrorPage.error(session, null, Response.Status.BAD_REQUEST, msg);
             }
-            ChangesetRequestAdapter.saveAdminRejection(session, changeSetType, changeSetId, actionType, auth.adminAuth().getUser());
 
-            return buildResponse(200, "Successfully added admin rejection to changeSetRequest with id " + changeSetId);
+            ChangesetRequestAdapter.saveAdminRejection(session, changeSetType, changeSetId, actionType, auth.adminAuth().getUser());
+            return buildResponse(200, "Successfully added admin rejection to changeSetRequest " + changeSetId);
 
         } catch (Exception e) {
-            logger.error("Error adding rejection to change set request with ID: " + changeSetId +"." + Arrays.toString(e.getStackTrace()));
-            return  buildResponse(500, "Error adding rejection to change set request with ID: " + changeSetId +" ." + e.getMessage());
+            logger.errorf(e, "Error adding rejection to change set request (id=%s)", changeSetId);
+            return buildResponse(500, "Error adding rejection to change set request: " + e.getMessage());
         }
     }
-
 
     @POST
     @Path("new-voucher")
     @Produces(MediaType.TEXT_PLAIN)
-    public Response GetAdminVouchers(@FormParam("voucherRequest") String voucherRequest){
-        try{
+    public Response getAdminVouchers(@FormParam("voucherRequest") String voucherRequest) {
+        try {
             auth.realm().requireManageRealm();
-            // Now that we know this is an admin - we provided whatever voucher they want
             return Response.status(200)
                     .header("Access-Control-Allow-Origin", "*")
                     .entity(getVouchers(voucherRequest))
                     .type(MediaType.TEXT_PLAIN)
                     .build();
-
-        }catch(Exception ex){
-            ex.printStackTrace();
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("File upload failed: " + ex.getMessage()).type(MediaType.TEXT_PLAIN).build();
+        } catch (Exception ex) {
+            logger.error("Voucher request failed", ex);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("Voucher request failed: " + ex.getMessage())
+                    .type(MediaType.TEXT_PLAIN)
+                    .build();
         }
     }
-    private String getVouchers(
-            String voucherRequest
-    ) throws JsonProcessingException {
+
+    private String getVouchers(String voucherRequest) throws JsonProcessingException {
         ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
-                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .filter(x -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(x.getProviderId()))
                 .findFirst()
                 .orElse(null);
 
-        MultivaluedHashMap<String, String> config = componentModel.getConfig();
+        if (componentModel == null) {
+            throw new BadRequestException("No tide-vendor-key component configured for realm " + realm.getName());
+        }
 
-        String currentSecretKeys = config.getFirst("clientSecret");
-        ObjectMapper objectMapper = new ObjectMapper();
-        SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
-        String vvkId = config.getFirst("vvkId");
+        MultivaluedHashMap<String, String> cfg = componentModel.getConfig();
+        String secretBlob = cfg.getFirst("clientSecret");
+        if (secretBlob == null || secretBlob.isBlank()) {
+            throw new BadRequestException("Missing clientSecret in tide-vendor-key config");
+        }
 
+        ObjectMapper om = new ObjectMapper();
+        SecretKeys secretKeys = om.readValue(secretBlob, SecretKeys.class);
 
-        String payerPublicKey = config.getFirst("payerPublic");
+        String vvkId = cfg.getFirst("vvkId");
+        String payerPublicKey = cfg.getFirst("payerPublic");
 
-        // Always use the active vrk unless this is the initial license. The initial license does not yet have an active VRK and is waiting on the pending vrk to be commited
-        String vrk = vvkId == null || vvkId.isEmpty() ? secretKeys.pendingVrk : secretKeys.activeVrk;
-        String response = Midgard.GetVouchers(
+        // Use active VRK if vvkId is present; otherwise pending VRK for initial license bootstrap.
+        String vrk = (vvkId == null || vvkId.isEmpty()) ? secretKeys.pendingVrk : secretKeys.activeVrk;
+
+        return Midgard.GetVouchers(
                 voucherRequest,
-                config.getFirst("obfGVVK"),
+                cfg.getFirst("obfGVVK"),
                 payerPublicKey,
-                vrk);
-
-        return response;
+                vrk
+        );
     }
 
     @GET
     @Path("get-init-cert")
     @Produces(MediaType.TEXT_PLAIN)
-    public Response GetInitCert(@QueryParam("roleId") String roleId) throws Exception {
-        try{
-            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-            ObjectMapper objectMapper = new ObjectMapper();
-            List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
-                    .setParameter("roleId", roleId).getResultList();
-
-            if(tideRoleDraftEntity.isEmpty()){
-                throw new Exception("Invalid request, no role draft entity found for this role ID: " + roleId);
-            }
-
-            InitializerCertifcate initializerCertifcate = InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
-
-            Map<String, String> response = new HashMap<>();
-            response.put("cert", Base64.getUrlEncoder().encodeToString(initializerCertifcate.Encode()));
-            response.put("sig", tideRoleDraftEntity.get(0).getInitCertSig());
-
-            return buildResponse(200, objectMapper.writeValueAsString(response));
-        }catch(Exception e) {
-            logger.error("Error getting init cert: ", e);
-            throw e;
-        }
+    public Response getInitCert(@QueryParam("roleId") String roleId) {
+        // Wrappers removed in the new engine; role init cert is no longer fetched from TideRoleDraftEntity here.
+        // If you still need this, wire it to your replay store (e.g., ReplayMetaStore) and return the compact cert.
+        return buildResponse(400, "get-init-cert is not supported by the new engine (no draft wrappers).");
     }
 
     @GET
     @Path("Create-Approval-URI")
-    public Response CreateApprovalUri() throws URISyntaxException, JsonProcessingException {
+    public Response createApprovalUri() throws URISyntaxException, JsonProcessingException {
         IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
 
         ComponentModel componentModel = realm.getComponentsStream()
-                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .filter(x -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(x.getProviderId()))
                 .findFirst()
                 .orElse(null);
 
-        if(componentModel == null) {
-            return buildResponse(400, "There is no tide-vendor-key component set up for this realm, " + realm.getName());
+        if (componentModel == null) {
+            return buildResponse(400, "No tide-vendor-key component configured for realm " + realm.getName());
         }
 
-        MultivaluedHashMap<String, String> config = componentModel.getConfig();
+        MultivaluedHashMap<String, String> cfg = componentModel.getConfig();
 
-        ObjectMapper objectMapper = new ObjectMapper();
+        ObjectMapper om = new ObjectMapper();
         String defaultAdminUiDomain = tideIdp.getConfig().get("changeSetEndpoint");
-        String customAdminUiDomain = tideIdp.getConfig().get("CustomAdminUIDomain");
-        String redirectUrlSig = tideIdp.getConfig().get("changeSetURLSig");
+        String customAdminUiDomain  = tideIdp.getConfig().get("CustomAdminUIDomain");
+        String redirectUrlSig       = tideIdp.getConfig().get("changeSetURLSig");
 
         URI redirectURI = new URI(defaultAdminUiDomain);
         UserSessionModel userSession = session.sessions().getUserSession(realm, auth.adminAuth().getToken().getSessionId());
-        String port = redirectURI.getPort() == -1 ? "" : ":" + redirectURI.getPort();
-        String voucherURL = redirectURI.getScheme() + "://" + redirectURI.getHost() + port + "/realms/" +
-                session.getContext().getRealm().getName() + "/tidevouchers/fromUserSession?sessionId=" +userSession.getId();
+
+        String port = (redirectURI.getPort() == -1) ? "" : ":" + redirectURI.getPort();
+        String voucherURL = redirectURI.getScheme() + "://" + redirectURI.getHost() + port
+                + "/realms/" + realm.getName()
+                + "/tidevouchers/fromUserSession?sessionId=" + userSession.getId();
 
         URI uri = Midgard.CreateURL(
                 auth.adminAuth().getToken().getSessionId(),
-                redirectURI.toString(),//userSession.getNote("redirectUri"),
+                redirectURI.toString(),
                 redirectUrlSig,
                 tideIdp.getConfig().get("homeORKurl"),
-                config.getFirst("clientId"),
-                config.getFirst("gVRK"),
-                config.getFirst("gVRKCertificate"),
+                cfg.getFirst("clientId"),
+                cfg.getFirst("gVRK"),
+                cfg.getFirst("gVRKCertificate"),
                 realm.isRegistrationAllowed(),
-                Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
+                Boolean.parseBoolean(tideIdp.getConfig().getOrDefault("backupOn", "false")),
                 tideIdp.getConfig().get("LogoURL"),
                 tideIdp.getConfig().get("ImageURL"),
                 "approval",
                 tideIdp.getConfig().get("settingsSig"),
-                voucherURL, //voucherURL,
+                voucherURL,
                 ""
         );
 
         URI customDomainUri = null;
-        if(customAdminUiDomain != null) {
+        if (customAdminUiDomain != null) {
             customDomainUri = Midgard.CreateURL(
                     auth.adminAuth().getToken().getSessionId(),
-                    customAdminUiDomain,//userSession.getNote("redirectUri"),
+                    customAdminUiDomain,
                     tideIdp.getConfig().get("customAdminUIDomainSig"),
                     tideIdp.getConfig().get("homeORKurl"),
-                    config.getFirst("clientId"),
-                    config.getFirst("gVRK"),
-                    config.getFirst("gVRKCertificate"),
+                    cfg.getFirst("clientId"),
+                    cfg.getFirst("gVRK"),
+                    cfg.getFirst("gVRKCertificate"),
                     realm.isRegistrationAllowed(),
-                    Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
+                    Boolean.parseBoolean(tideIdp.getConfig().getOrDefault("backupOn", "false")),
                     tideIdp.getConfig().get("LogoURL"),
                     tideIdp.getConfig().get("ImageURL"),
                     "approval",
                     tideIdp.getConfig().get("settingsSig"),
-                    voucherURL, //voucherURL,
+                    voucherURL,
                     ""
             );
         }
@@ -256,84 +282,80 @@ public class TideAdminRealmResource {
         Map<String, String> response = new HashMap<>();
         response.put("message", "Opening Enclave to request approval.");
         response.put("uri", String.valueOf(uri));
-        if(customAdminUiDomain != null) {
+        if (customDomainUri != null) {
             response.put("customDomainUri", String.valueOf(customDomainUri));
         }
 
-        return buildResponse(200, objectMapper.writeValueAsString(response));
+        return buildResponse(200, om.writeValueAsString(response));
     }
 
     @POST
     @Path("create-authorization")
     @Produces(MediaType.TEXT_PLAIN)
-    public Response CreateAuthorization(@QueryParam("clientId") String clientId, @FormParam("authorizerApproval") String authorizerApproval, @FormParam("authorizerAuthentication") String authorizerAuthentication ) throws Exception {
+    public Response createAuthorization(@QueryParam("clientId") String clientId,
+                                        @FormParam("authorizerApproval") String authorizerApproval,
+                                        @FormParam("authorizerAuthentication") String authorizerAuthentication) {
         try {
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
             UserModel user = auth.adminAuth().getUser();
 
             ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
-                    .filter(x -> tideVendorKeyId.equals(x.getProviderId()))  // Use .equals for string comparison
+                    .filter(x -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(x.getProviderId()))
                     .findFirst()
                     .orElse(null);
 
-            if(componentModel == null) {
-                logger.warn("There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
-                return ErrorPage.error(session, null, Response.Status.BAD_REQUEST, "There is no tide-vendor-key component set up for this realm, " + session.getContext().getRealm());
+            if (componentModel == null) {
+                String msg = "No tide-vendor-key component configured for realm " + realm.getName();
+                logger.warn(msg);
+                return ErrorPage.error(session, null, Response.Status.BAD_REQUEST, msg);
             }
-            MultivaluedHashMap<String, String> tideVendorKeyConfig = componentModel.getConfig();
-            ObjectMapper objectMapper = new ObjectMapper();
-            String currentSecretKeys = tideVendorKeyConfig.getFirst("clientSecret");
 
-            SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
-            String vrk = secretKeys.activeVrk;
+            MultivaluedHashMap<String, String> cfg = componentModel.getConfig();
+            ObjectMapper om = new ObjectMapper();
+            String secretBlob = cfg.getFirst("clientSecret");
+            if (secretBlob == null || secretBlob.isBlank()) {
+                return buildResponse(400, "Missing clientSecret in tide-vendor-key config");
+            }
+
+            SecretKeys secretKeys = om.readValue(secretBlob, SecretKeys.class);
+            String vrk = (secretKeys.activeVrk != null && !secretKeys.activeVrk.isBlank())
+                    ? secretKeys.activeVrk
+                    : secretKeys.VZK;
+
+            if (vrk == null || vrk.isBlank()) {
+                return buildResponse(400, "No VRK available (activeVrk/VZK empty)");
+            }
 
             VendorData vendorData = Midgard.DecryptVendorData(authorizerAuthentication, vrk);
-            ;
-            UserEntity userEntity = em.find(UserEntity.class, user.getId());
-            List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
-                    .setParameter("user", userEntity)
-                    .setParameter("clientId", realm.getClientByClientId(clientId).getId()).getResultList();
 
-            if ( userClientAccessProofEntity == null || userClientAccessProofEntity.isEmpty() ){
-                throw new Exception("This user does not have any roles for this client: Client UID: " + clientId + ", User ID: " + userEntity.getId());
+            UserEntity userEntity = em.find(UserEntity.class, user.getId());
+            List<UserClientAccessProofEntity> proofs = em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
+                    .setParameter("user", userEntity)
+                    .setParameter("clientId", realm.getClientByClientId(clientId).getId())
+                    .getResultList();
+
+            if (proofs == null || proofs.isEmpty()) {
+                throw new BadRequestException("User has no roles for client " + clientId + " (userId=" + userEntity.getId() + ")");
             }
 
-            UserContext adminContext = new UserContext(userClientAccessProofEntity.get(0).getAccessProof());
-            AdminAuthorization adminAuthorization = new AdminAuthorization(adminContext.ToString(), userClientAccessProofEntity.get(0).getAccessProofSig(), vendorData.AuthToken, vendorData.blindSig, authorizerApproval);
+            UserClientAccessProofEntity proof = proofs.get(0);
+            UserContext adminContext = new UserContext(proof.getAccessProof());
 
+            AdminAuthorization adminAuthorization = new AdminAuthorization(
+                    adminContext.ToString(),
+                    proof.getAccessProofSig(),
+                    vendorData.AuthToken,
+                    vendorData.blindSig,
+                    authorizerApproval
+            );
 
             return buildResponse(200, adminAuthorization.ToString());
 
         } catch (Exception e) {
-            logger.error("Error creating authorization" + Arrays.toString(e.getStackTrace()));
-            return  buildResponse(500, "Error creating authorization" + e.getMessage());
+            logger.error("Error creating authorization", e);
+            return buildResponse(500, "Error creating authorization: " + e.getMessage());
         }
     }
-
-//    @GET
-//    @Path("get-init-cert")
-//    @Produces(MediaType.TEXT_PLAIN)
-//    public Response GetInitCert(@QueryParam("roleId") String roleId) throws Exception {
-//        try{
-//            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-//            ObjectMapper objectMapper = new ObjectMapper();
-//            List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
-//                    .setParameter("roleId", roleId).getResultList();
-//
-//            if(tideRoleDraftEntity.isEmpty()){
-//                throw new Exception("Invalid request, no role draft entity found for this role ID: " + roleId);
-//            }
-//
-//            Map<String, String> response = new HashMap<>();
-//            response.put("cert", tideRoleDraftEntity.get(0).getInitCert());
-//            response.put("sig", tideRoleDraftEntity.get(0).getInitCertSig());
-//
-//            return buildResponse(200, objectMapper.writeValueAsString(response));
-//        }catch(Exception e) {
-//            logger.error("Error getting init cert: ", e);
-//            throw e;
-//        }
-//    }
 
     @POST
     @Path("get-required-action-link")
@@ -343,25 +365,30 @@ public class TideAdminRealmResource {
             @Parameter(description = "Client id") @QueryParam(OIDCLoginProtocol.CLIENT_ID_PARAM) String clientId,
             @Parameter(description = "Number of seconds after which the generated token expires") @QueryParam("lifespan") Integer lifespan,
             @Parameter(description = "Required actions the user needs to complete") List<String> actions
-    ){
+    ) {
         UserModel user = session.users().getUserById(realm, userId);
         auth.users().requireManage(user);
 
         int expiration = Time.currentTime() + lifespan;
-        ExecuteActionsActionToken token = new ExecuteActionsActionToken(user.getId(), user.getEmail(), expiration, actions, redirectUri, clientId);
+        ExecuteActionsActionToken token = new ExecuteActionsActionToken(
+                user.getId(),
+                user.getEmail(),
+                expiration,
+                actions,
+                redirectUri,
+                clientId
+        );
         try {
             UriBuilder builder = LoginActionsService.actionTokenProcessor(session.getContext().getUri());
             builder.queryParam("key", token.serialize(session, realm, session.getContext().getUri()));
 
             String link = builder.build(realm.getName()).toString();
-
             return buildResponse(200, link);
 
         } catch (Exception e) {
-            throw ErrorResponse.error("Failed to get link tide account URL " + e.getMessage(), Response.Status.INTERNAL_SERVER_ERROR);
+            throw ErrorResponse.error("Failed to get required action link: " + e.getMessage(),
+                    Response.Status.INTERNAL_SERVER_ERROR);
         }
-
-
     }
 
     private Response buildResponse(int status, String message) {
@@ -369,17 +396,5 @@ public class TideAdminRealmResource {
                 .entity(message)
                 .type(MediaType.TEXT_PLAIN)
                 .build();
-    }
-    
-    public static class SecretKeys {
-        public String activeVrk;
-        public String pendingVrk;
-        public String VZK;
-        public List<String> history = new ArrayList<>();
-
-        // Method to add a new entry to the history
-        public void addToHistory(String newEntry) {
-            history.add(newEntry);
-        }
     }
 }

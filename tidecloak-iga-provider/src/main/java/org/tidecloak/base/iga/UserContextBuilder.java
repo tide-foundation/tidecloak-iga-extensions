@@ -3,6 +3,7 @@ package org.tidecloak.base.iga;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.keycloak.models.*;
+import org.tidecloak.jpa.store.RoleAttributeLongStore;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -30,7 +31,9 @@ public final class UserContextBuilder {
         );
 
         // Groups
-        Set<String> groups = user.getGroupsStream().map(GroupModel::getName).collect(Collectors.toCollection(TreeSet::new));
+        Set<String> groups = user.getGroupsStream()
+                .map(GroupModel::getName)
+                .collect(Collectors.toCollection(TreeSet::new));
         root.putArray("groups").addAll(groups.stream().map(JsonNodeFactory.instance::textNode).toList());
 
         return root;
@@ -74,10 +77,17 @@ public final class UserContextBuilder {
                         user.getClientRoleMappingsStream(client))
                 .collect(Collectors.toSet());
 
+        RoleAttributeLongStore store = new RoleAttributeLongStore();
         Set<String> apModels = new HashSet<>();
         for (RoleModel r : effective) {
-            String apModel = r.getFirstAttribute("tide.ap.model");
-            if (apModel != null && !apModel.isBlank()) apModels.add(apModel);
+            // Prefer long-store, fall back to short attribute
+            String apModel = store.load(session, r, "tide.ap.model");
+            if (apModel == null || apModel.isBlank()) {
+                apModel = r.getFirstAttribute("tide.ap.model");
+            }
+            if (apModel != null && !apModel.isBlank()) {
+                apModels.add(apModel);
+            }
         }
 
         if (!apModels.isEmpty()) {

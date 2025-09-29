@@ -16,29 +16,36 @@ public class IGARealmResourceProvider
 
     @Override
     public AdminRealmResourceProvider create(KeycloakSession session) {
+        // This provider is stateless; returning `this` is fine. If you prefer,
+        // you can return `new IGARealmResourceProvider()` instead.
         return this;
     }
 
     @Override
-    public Object getResource(KeycloakSession session, RealmModel realm, AdminPermissionEvaluator auth, AdminEventBuilder adminEvent) {
+    public Object getResource(KeycloakSession session,
+                              RealmModel realm,
+                              AdminPermissionEvaluator auth,
+                              AdminEventBuilder adminEvent) {
         return new IGARealmResource(session, realm, auth);
     }
 
     @Override
     public void init(Config.Scope config) {
+        // no-op
     }
 
     @Override
     public void postInit(KeycloakSessionFactory factory) {
+        // no-op
     }
 
     @Override
     public void close() {
+        // no-op
     }
 
     @Override
     public String getId() {
         return PROVIDER_ID;
     }
-
 }

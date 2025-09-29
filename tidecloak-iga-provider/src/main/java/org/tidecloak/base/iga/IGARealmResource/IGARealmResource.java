@@ -2,56 +2,55 @@ package org.tidecloak.base.iga.IGARealmResource;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
-import jakarta.persistence.LockModeType;
-import jakarta.persistence.NoResultException;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-import org.eclipse.microprofile.openapi.annotations.parameters.Parameter;
 import org.jboss.logging.Logger;
 import org.keycloak.Config;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
-import org.keycloak.models.*;
-import org.keycloak.models.cache.UserCache;
-import org.keycloak.models.jpa.entities.ClientEntity;
-import org.keycloak.models.jpa.entities.RoleEntity;         // <-- use RoleEntity directly (no Tide wrappers)
-import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.models.IdentityProviderModel;
+import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.RealmModel;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitter;
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitterFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequestList;
-import org.tidecloak.base.iga.ChangeSetSigner.ChangeSetSigner;
-import org.tidecloak.base.iga.ChangeSetSigner.ChangeSetSignerFactory;
-import org.tidecloak.base.iga.UserContextDraftService;     // <-- keep, but use .stage(...)
 import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
-import org.tidecloak.jpa.entities.*;
-import org.tidecloak.jpa.entities.drafting.*;
-import org.tidecloak.shared.enums.ActionType;
+import org.tidecloak.jpa.entities.AdminAuthorizationEntity;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
-import org.tidecloak.shared.enums.WorkflowType;
-import org.tidecloak.base.iga.interfaces.models.RequestChangesUserRecord;
-import org.tidecloak.base.iga.interfaces.models.RequestType;
-import org.tidecloak.base.iga.interfaces.models.RequestedChanges;
-import org.tidecloak.base.iga.interfaces.models.RoleChangeRequest;
-import org.tidecloak.base.iga.interfaces.models.CompositeRoleChangeRequest;
-import org.tidecloak.shared.enums.models.WorkflowParams;
 
 import java.util.*;
-import java.util.stream.Collectors;
 
-import static org.tidecloak.shared.utils.UserContextDraftUtil.findDraftsNotInAccessProof;
-
+/**
+ * Mounted by the admin-realm-restapi-extension factory (id: tide-admin).
+ *
+ * Endpoints:
+ *  - POST   toggle-iga
+ *  - POST   add-rejection
+ *  - POST   replay/{rest:.+}
+ *  - PUT    replay/{rest:.+}
+ *  - PATCH  replay/{rest:.+}
+ *  - DELETE replay/{rest:.+}
+ *  - POST   change-set/sign
+ *  - POST   change-set/sign/batch
+ *  - POST   change-set/commit
+ *  - POST   change-set/commit/batch
+ *  - GET/POST change-set/{scope}/requests
+ *  - GET     change-set/{scope}/requests/{id}
+ */
 public class IGARealmResource {
+
+    private static final Logger LOG = Logger.getLogger(IGARealmResource.class);
+    private static final ObjectMapper M = new ObjectMapper();
 
     private final KeycloakSession session;
     private final RealmModel realm;
     private final AdminPermissionEvaluator auth;
-
-    protected static final Logger logger = Logger.getLogger(IGARealmResource.class);
 
     public IGARealmResource(KeycloakSession session, RealmModel realm, AdminPermissionEvaluator auth) {
         this.session = session;
@@ -63,16 +62,15 @@ public class IGARealmResource {
     @Path("toggle-iga")
     @Produces(MediaType.TEXT_PLAIN)
     public Response toggleIGA(@FormParam("isIGAEnabled") boolean isEnabled) throws Exception {
-        try{
+        try {
             RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
-            if(realm.equals(masterRealm)){
+            if (realm.equals(masterRealm)) {
                 return buildResponse(400, "Master realm does not support IGA.");
             }
 
-            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
             auth.realm().requireManageRealm();
-            session.getContext().getRealm().setAttribute("isIGAEnabled", isEnabled);
-            logger.info("IGA has been toggled to : " + isEnabled);
+            realm.setAttribute("isIGAEnabled", isEnabled);
+            LOG.infof("IGA has been toggled to : %s", isEnabled);
 
             IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
             ComponentModel componentModel = realm.getComponentsStream()
@@ -81,42 +79,22 @@ public class IGARealmResource {
                     .orElse(null);
 
             if (tideIdp != null && componentModel != null) {
-                String currentAlgorithm = session.getContext().getRealm().getDefaultSignatureAlgorithm();
-
+                String currentAlg = realm.getDefaultSignatureAlgorithm();
                 if (isEnabled) {
-                    if (!"EdDSA".equalsIgnoreCase(currentAlgorithm)) {
-                        session.getContext().getRealm().setDefaultSignatureAlgorithm("EdDSA");
-                        logger.info("IGA has been enabled, default signature algorithm updated to EdDSA");
-                    }
-                    // Seed AccessProof for clients that don't have one yet
-                    List<TideClientDraftEntity> entities = findDraftsNotInAccessProof(em, realm);
-                    for (TideClientDraftEntity c : entities) {
-                        try {
-                            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.CLIENT);
-                            // Use generic stage(...) (default UC per client) – no stageDefaultForClient() helper.
-                            UserContextDraftService.stage(
-                                    session,
-                                    realm,
-                                    em,
-                                    c.getChangeRequestId(),
-                                    ChangeSetType.CLIENT,
-                                    Collections.emptyList(),  // default UC (no per-user tuples)
-                                    null
-                            );
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
-                        }
+                    if (!"EdDSA".equalsIgnoreCase(currentAlg)) {
+                        realm.setDefaultSignatureAlgorithm("EdDSA");
+                        LOG.info("IGA enabled, default signature algorithm set to EdDSA");
                     }
                 } else {
-                    if ("EdDSA".equalsIgnoreCase(currentAlgorithm)) {
-                        session.getContext().getRealm().setDefaultSignatureAlgorithm("RS256");
-                        logger.info("IGA has been disabled, default signature algorithm updated to RS256");
+                    if ("EdDSA".equalsIgnoreCase(currentAlg)) {
+                        realm.setDefaultSignatureAlgorithm("RS256");
+                        LOG.info("IGA disabled, default signature algorithm reset to RS256");
                     }
                 }
             }
             return buildResponse(200, "IGA has been toggled to : " + isEnabled);
-        }catch(Exception e) {
-            logger.error("Error toggling IGA on realm: ", e);
+        } catch (Exception e) {
+            LOG.error("Error toggling IGA on realm", e);
             throw e;
         }
     }
@@ -124,127 +102,175 @@ public class IGARealmResource {
     @POST
     @Path("add-rejection")
     @Produces(MediaType.TEXT_PLAIN)
-    public Response AddRejection(@FormParam("changeSetId") String changeSetId, @FormParam("actionType") String actionType, @FormParam("changeSetType") String changeSetType) {
+    public Response addRejection(@FormParam("changeSetId") String changeSetId,
+                                 @FormParam("actionType") String actionType,
+                                 @FormParam("changeSetType") String changeSetType) {
         try {
             auth.realm().requireManageRealm();
             ChangesetRequestAdapter.saveAdminRejection(session, changeSetType, changeSetId, actionType, auth.adminAuth().getUser());
             return buildResponse(200, "Successfully added admin rejection to changeSetRequest with id " + changeSetId);
         } catch (Exception e) {
-            logger.error("Error adding rejection to change set request with ID: " + changeSetId +".", e);
-            return  buildResponse(500, "Error adding rejection to change set request with ID: " + changeSetId +" ." + e.getMessage());
+            LOG.errorf(e, "Error adding rejection to change set request with ID: %s", changeSetId);
+            return buildResponse(500, "Error adding rejection to change set request with ID: " + changeSetId + " ." + e.getMessage());
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Auto-draft replay endpoints
+    // ─────────────────────────────────────────────────────────────────────────
     @GET
-    @Path("users/{user-id}/roles/{role-id}/draft/status")
-    public Response getUserRoleAssignmentDraftStatus(@PathParam("user-id") String userId, @PathParam("role-id") String roleId) {
-        if(!BasicIGAUtils.isIGAEnabled(realm)){
-            return Response.ok().entity(new ArrayList<>()).build();
-        }
-        auth.users().requireQuery();
-
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        UserEntity userEntity = em.find(UserEntity.class, userId);
-
-        try {
-            TideUserRoleMappingDraftEntity userRoleMappingDraft = em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class)
-                    .setParameter("user", userEntity)
-                    .setParameter("roleId", roleId)
-                    .getSingleResult();
-
-            Map<String, DraftStatus> statusMap = new HashMap<>();
-            statusMap.put("draftStatus", userRoleMappingDraft.getDraftStatus());
-            statusMap.put("deleteStatus", userRoleMappingDraft.getDeleteStatus());
-            return Response.ok(statusMap).build();
-        } catch (NoResultException e) {
-            return Response.status(Response.Status.OK).entity(new ArrayList<>()).build();
-        }
-    }
-
-    @GET
-    @Path("users/{user-id}/draft/status")
-    public Response getUserDraftStatus(@PathParam("user-id") String id) {
-        if(!BasicIGAUtils.isIGAEnabled(realm)){
-            return Response.ok().entity(new ArrayList<>()).build();
-        }
-        auth.users().requireQuery();
-
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        UserEntity userEntity = em.find(UserEntity.class, id);
-
-        try {
-            DraftStatus draftStatus = em.createNamedQuery("getTideUserDraftEntity", TideUserDraftEntity.class)
-                    .setParameter("user", userEntity)
-                    .getSingleResult()
-                    .getDraftStatus();
-            return Response.ok(draftStatus).build();
-        } catch (NoResultException e) {
-            return Response.status(Response.Status.OK).entity(new ArrayList<>()).build();
-        }
-    }
-
-    @GET
-    @Path("composite/{parent-id}/child/{child-id}/draft/status")
-    public Response getRoleDraftStatus(@PathParam("parent-id") String parentId, @PathParam("child-id") String childId) {
-        if(!BasicIGAUtils.isIGAEnabled(realm)){
-            return Response.ok().entity(new ArrayList<>()).build();
-        }
-        auth.users().requireQuery();
-
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        RoleModel parentRole = realm.getRoleById(parentId);
-        RoleModel childRole = realm.getRoleById(childId);
-
-        try{
-            // Replace TideEntityUtils with straight RoleEntity lookups
-            RoleEntity parentEntity = em.find(RoleEntity.class, parentRole.getId());
-            RoleEntity childEntity  = em.find(RoleEntity.class, childRole.getId());
-
-            TideCompositeRoleMappingDraftEntity entity = em.createNamedQuery("getCompositeRoleMappingDraft", TideCompositeRoleMappingDraftEntity.class)
-                    .setParameter("composite", parentEntity)
-                    .setParameter("childRole", childEntity)
-                    .getSingleResult();
-
-            Map<String, DraftStatus> statusMap = new HashMap<>();
-            statusMap.put("draftStatus", entity.getDraftStatus());
-            statusMap.put("deleteStatus", entity.getDeleteStatus());
-            return Response.ok(statusMap).build();
-        }
-        catch (NoResultException e) {
-            return Response.status(Response.Status.OK).entity(new ArrayList<>()).build();
-        }
-    }
+    @Path("replay/{rest:.+}") @Consumes(MediaType.APPLICATION_JSON) @Produces(MediaType.APPLICATION_JSON)
+    public Response replayGET(@PathParam("rest") String restPath, Object body)   { return replayRouter(restPath, "GET",   body); }
 
     @POST
-    @Consumes(MediaType.APPLICATION_JSON)
-    @Path("change-set/cancel")
-    public Response cancelChangeSet(ChangeSetRequest changeSet) {
-        try{
-            return cancelChangeSets(Collections.singletonList(changeSet));
-        } catch(Exception e) {
-            return buildResponse(500, "There was an error cancelling this change set request. " + e.getMessage());
+    @Path("replay/{rest:.+}") @Consumes(MediaType.APPLICATION_JSON) @Produces(MediaType.APPLICATION_JSON)
+    public Response replayPost(@PathParam("rest") String restPath, Object body)  { return replayRouter(restPath, "POST",  body); }
+
+    @jakarta.ws.rs.PUT
+    @Path("replay/{rest:.+}") @Consumes(MediaType.APPLICATION_JSON) @Produces(MediaType.APPLICATION_JSON)
+    public Response replayPut(@PathParam("rest") String restPath, Object body)   { return replayRouter(restPath, "PUT",   body); }
+
+    @PATCH
+    @Path("replay/{rest:.+}") @Consumes(MediaType.APPLICATION_JSON) @Produces(MediaType.APPLICATION_JSON)
+    public Response replayPatch(@PathParam("rest") String restPath, Object body) { return replayRouter(restPath, "PATCH", body); }
+
+    @jakarta.ws.rs.DELETE
+    @Path("replay/{rest:.+}") @Consumes(MediaType.APPLICATION_JSON) @Produces(MediaType.APPLICATION_JSON)
+    public Response replayDelete(@PathParam("rest") String restPath, Object body){ return replayRouter(restPath, "DELETE", body); }
+
+    @SuppressWarnings("unchecked")
+    private Response replayRouter(String restPath, String httpMethod, Object body) {
+        try {
+            auth.realm().requireManageRealm();
+
+            String action = httpToAction(httpMethod);
+            Map<String,Object> rep = Map.of(); // default empty
+
+            if (body == null) {
+                // no body; keep defaults
+            } else if (body instanceof Map<?,?> m) {
+                Object maybeAction = m.get("action");
+                Object maybeRep    = m.get("rep");
+
+                if (maybeAction != null) action = String.valueOf(maybeAction);
+                if (maybeRep instanceof Map<?,?> rm) {
+                    rep = (Map<String, Object>) rm;
+                } else if (maybeRep instanceof List<?> rl) {
+                    rep = Map.of("roles", rl);
+                } else if (maybeRep == null) {
+                    rep = (Map<String, Object>) m;
+                } else {
+                    rep = M.convertValue(maybeRep, Map.class);
+                }
+
+            } else if (body instanceof List<?> list) {
+                rep = Map.of("roles", list);
+
+            } else {
+                var node = M.valueToTree(body);
+                if (node.isArray()) {
+                    rep = Map.of("roles", M.convertValue(node, List.class));
+                } else if (node.isObject()) {
+                    rep = M.convertValue(node, Map.class);
+                }
+            }
+
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            String changeSetId = stageDraftFromRestPath(em, restPath, action, rep);
+
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("changeSetId", changeSetId);
+            out.put("action", action);
+            out.put("path", restPath);
+            return Response.accepted(out).build(); // 202 Accepted
+
+        } catch (BadRequestException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error","bad_request", "error_description", e.getMessage()))
+                    .build();
+        } catch (Exception e) {
+            LOG.errorf(e, "Replay staging failed for path=%s", restPath);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity(Map.of("error","unknown_error", "error_description", e.getMessage()))
+                    .build();
         }
     }
 
-    @POST
-    @Consumes(MediaType.APPLICATION_JSON)
-    @Path("change-set/cancel/batch")
-    public Response cancelChangeSets(ChangeSetRequestList changeSets) {
-        try{
-            return cancelChangeSets(changeSets.getChangeSets());
-        } catch(Exception e) {
-            return buildResponse(500, "There was an error cancelling these change set requests. " + e.getMessage());
+    private String stageDraftFromRestPath(EntityManager em, String restPath, String action, Map<String, Object> rep) throws Exception {
+        String[] seg = (restPath == null ? "" : restPath).split("/");
+        if (seg.length == 0 || seg[0].isBlank()) {
+            throw new BadRequestException("Invalid replay path");
         }
+
+        final String head = seg[0];
+        final String type;
+        switch (head) {
+            case "roles":
+            case "roles-by-id":
+                type = "ROLE"; break;
+            case "groups":
+                type = "GROUP"; break;
+            case "clients":
+                type = "CLIENT"; break;
+            case "client-scopes":
+                type = "CLIENT_SCOPE"; break;
+            case "users":
+                type = restPath.contains("/role-mappings") ? "USER_ROLE_MAPPING" : "USER";
+                break;
+            case "realm":
+                type = "REALM_SETTINGS"; break;
+            default:
+                throw new BadRequestException("Unsupported replay path: " + head);
+        }
+
+        String id = tryStageViaReflection(
+                "org.tidecloak.base.iga.utils.BasicIGAUtils",
+                "stageFromRep",
+                new Class[]{KeycloakSession.class, RealmModel.class, EntityManager.class, String.class, String.class, Map.class},
+                new Object[]{session, realm, em, type, action, rep}
+        );
+        if (id != null) return id;
+
+        id = tryStageViaReflection(
+                "org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter",
+                "stageFromRep",
+                new Class[]{KeycloakSession.class, RealmModel.class, EntityManager.class, String.class, String.class, Map.class},
+                new Object[]{session, realm, em, type, action, rep}
+        );
+        if (id != null) return id;
+
+        if ("USER_ROLE_MAPPING".equals(type)) {
+            id = tryStageViaReflection(
+                    "org.tidecloak.base.iga.utils.BasicIGAUtils",
+                    "stageUserRoleMappingDraft",
+                    new Class[]{KeycloakSession.class, RealmModel.class, EntityManager.class, String.class, Map.class},
+                    new Object[]{session, realm, em, action, rep}
+            );
+            if (id != null) return id;
+        }
+
+        throw new BadRequestException(
+                "Replay staging not wired for type=" + type + ". " +
+                        "Implement one of:\n" +
+                        " - BasicIGAUtils.stageFromRep(KeycloakSession, RealmModel, EntityManager, String type, String action, Map<String,Object> rep)\n" +
+                        ("USER_ROLE_MAPPING".equals(type)
+                                ? " - BasicIGAUtils.stageUserRoleMappingDraft(KeycloakSession, RealmModel, EntityManager, String action, Map<String,Object> rep)\n"
+                                : "") +
+                        " - ChangesetRequestAdapter.stageFromRep(KeycloakSession, RealmModel, EntityManager, String type, String action, Map<String,Object> rep)"
+        );
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Sign
+    // ─────────────────────────────────────────────────────────────────────────
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign")
     public Response signChangeset(ChangeSetRequest changeSet) {
-        try{
+        try {
             List<String> result = signChangeSets(Collections.singletonList(changeSet));
             return Response.ok(result.get(0)).build();
-        }catch (Exception ex) {
+        } catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
         }
     }
@@ -253,59 +279,40 @@ public class IGARealmResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign/batch")
     public Response signMultipleChangeSets(ChangeSetRequestList changeSets) {
-        try{
-            ObjectMapper objectMapper = new ObjectMapper();
-            List<String> result =  signChangeSets(changeSets.getChangeSets());
-            return Response.ok(objectMapper.writeValueAsString(result)).build();
-        }catch (Exception ex) {
+        try {
+            List<String> result = signChangeSets(changeSets.getChangeSets());
+            return Response.ok(M.writeValueAsString(result)).build();
+        } catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
         }
     }
 
-    @GET
-    @Path("change-set/users/requests")
-    public Response getRequestedChangesForUsers() {
+    public List<String> signChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
         auth.realm().requireManageRealm();
-        if(!BasicIGAUtils.isIGAEnabled(realm)){
-            return Response.ok().entity(new ArrayList<>()).build();
-        }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        List<RequestedChanges> changes = new ArrayList<>(processUserRoleMappings(em, realm));
-        return Response.ok(changes).build();
-    }
+        RealmModel realm = session.getContext().getRealm();
+        var signer = org.tidecloak.base.iga.ChangeSetSigner.ChangeSetSignerFactory.getSigner(session);
 
-    @GET
-    @Path("change-set/roles/requests")
-    public Response getRequestedChanges() {
-        auth.realm().requireManageRealm();
-        if(!BasicIGAUtils.isIGAEnabled(realm)){
-            return Response.ok().entity(new ArrayList<>()).build();
+        List<String> signedJsonList = new ArrayList<>();
+        for (ChangeSetRequest changeSet : changeSets) {
+            // NEW ENGINE: work with the envelope instead of draft-record lookup
+            Object envelope = BasicIGAUtils.getEnvelope(em, changeSet);
+            if (envelope == null) {
+                throw new BadRequestException("No envelope found for " + changeSet.getType() + " / " + changeSet.getChangeSetId());
+            }
+            Response singleResp = signer.sign(changeSet, em, session, realm, envelope, auth.adminAuth());
+            signedJsonList.add(singleResp.readEntity(String.class));
         }
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        List<RequestedChanges> requestedChangesList = new ArrayList<>(processRoleMappings(em, realm));
-        requestedChangesList.addAll(processCompositeRoleMappings(em, realm));
-        return Response.ok(requestedChangesList).build();
-    }
-
-    @GET
-    @Path("change-set/clients/requests")
-    public Response getRequestedChangesForClients() {
-        auth.realm().requireManageRealm();
-        if(!BasicIGAUtils.isIGAEnabled(realm)){
-            return Response.ok().entity(new ArrayList<>()).build();
-        }
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        List<RequestedChanges> changes = new ArrayList<>(processClientDraftRecords(em, realm));
-        return Response.ok(changes).build();
+        return signedJsonList;
     }
 
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/commit")
     public Response commitChangeSet(ChangeSetRequest change) {
-        try{
+        try {
             return commitChangeSets(Collections.singletonList(change));
-        }catch (Exception ex) {
+        } catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
         }
     }
@@ -314,319 +321,11 @@ public class IGARealmResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/commit/batch")
     public Response commitMultipleChangeSets(ChangeSetRequestList changeSets) {
-        try{
+        try {
             return commitChangeSets(changeSets.getChangeSets());
-        }
-        catch (Exception ex) {
+        } catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
         }
-    }
-
-    @POST
-    @Path("generate-default-user-context")
-    public Response generateDefaultUserContext(@Parameter(description = "Clients to generate the default user context for") List<String> clients) {
-        auth.realm().requireManageRealm();
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-
-        try {
-            for (String clientId : clients) {
-                ClientModel clientModel = realm.getClientByClientId(clientId);
-                if (clientModel == null) continue;
-
-                ClientEntity client = em.find(ClientEntity.class, clientModel.getId());
-                if (client == null) continue;
-
-                List<TideClientDraftEntity> clientDrafts = em.createNamedQuery("getClientFullScopeStatus", TideClientDraftEntity.class)
-                        .setParameter("client", client)
-                        .getResultList();
-                if (clientDrafts.isEmpty()) continue;
-
-                for (TideClientDraftEntity draft : clientDrafts) {
-
-                    // Remove existing Access Proofs
-                    List<AccessProofDetailEntity> accessProof = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                            .setParameter("recordId", draft.getChangeRequestId()).getResultList();
-                    accessProof.forEach(em::remove);
-
-                    // Remove existing ChangeSetRequestEntity
-                    ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class,
-                            new ChangesetRequestEntity.Key(draft.getChangeRequestId(), ChangeSetType.CLIENT));
-                    if (changesetRequestEntity != null) {
-                        changesetRequestEntity.getAdminAuthorizations().clear();
-                        em.remove(changesetRequestEntity);
-                    }
-
-                    // Restage default user context via the new engine
-                    try {
-                        draft.setDraftStatus(DraftStatus.DRAFT);
-                        WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.CLIENT);
-                        UserContextDraftService.stage(
-                                session,
-                                realm,
-                                em,
-                                draft.getChangeRequestId(),
-                                ChangeSetType.CLIENT,
-                                Collections.emptyList(), // default UC only
-                                null
-                        );
-                    } catch (Exception e) {
-                        throw new WebApplicationException("Workflow execution failed for draft: " + draft.getId(), e, Response.Status.INTERNAL_SERVER_ERROR);
-                    }
-                }
-            }
-
-            em.flush(); // Flush once after processing all clients for efficiency
-            return Response.ok("Default User Contexts Generated").build();
-
-        } catch (Exception e) {
-            return buildResponse(500, "There was an error generating the default user contexts. " + e.getMessage());
-        }
-    }
-
-    public static List<RequestedChanges> processClientDraftRecords(EntityManager em, RealmModel realm) {
-        List<TideClientDraftEntity> mappings = em.createNamedQuery("getClientFullScopeStatusDraftThatDoesNotHaveStatus", TideClientDraftEntity.class)
-                .setParameter("status", DraftStatus.ACTIVE)
-                .setParameter("status2", DraftStatus.NULL)
-                .getResultList();
-
-        return processClientDraftRecords(em, realm, mappings);
-    }
-
-    public static List<RequestedChanges> processPreApprovedClientDraftRecords(EntityManager em, RealmModel realm, List<DraftStatus> statuses) {
-        List<TideClientDraftEntity> mappings = em.createNamedQuery("getPreApprovedClientFullScopeStatusDraftThatDoesNotHaveStatus", TideClientDraftEntity.class)
-                .setParameter("status", statuses)
-                .setParameter("activeStatus", DraftStatus.ACTIVE)
-                .setParameter("status2", DraftStatus.NULL)
-                .getResultList();
-
-        return processClientDraftRecords(em, realm, mappings);
-    }
-
-    public static List<RequestedChanges> processClientDraftRecords(EntityManager em, RealmModel realm, List<TideClientDraftEntity> mappings ) {
-        List<RequestedChanges> changes = new ArrayList<>();
-
-        for (TideClientDraftEntity c : mappings) {
-            em.lock(c, LockModeType.PESSIMISTIC_WRITE);
-            ClientModel client = realm.getClientById(c.getClient().getId());
-            if (client == null) continue;
-
-            List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                    .setParameter("recordId", c.getChangeRequestId())
-                    .getResultList();
-
-            RequestedChanges requestChange = new RequestedChanges("",ChangeSetType.CLIENT_FULLSCOPE, RequestType.CLIENT, client.getClientId(), realm.getName(), c.getAction(), c.getChangeRequestId(), new ArrayList<>(), DraftStatus.DRAFT, DraftStatus.NULL);
-            proofs.forEach(p -> {
-                em.lock(p, LockModeType.PESSIMISTIC_WRITE);
-
-                if(p.getChangesetType().equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)) {
-                    requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context for all USERS", p.getId(), c.getClient().getClientId(), p.getProofDraft()));
-                }
-                else if (p.getChangesetType().equals(ChangeSetType.CLIENT_FULLSCOPE)) {
-                    requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), c.getClient().getClientId(), p.getProofDraft()));
-                }
-            });
-
-            if(c.getFullScopeEnabled() != DraftStatus.ACTIVE && c.getFullScopeEnabled() != DraftStatus.NULL) {
-                String action = "Enabling Full-Scope on Client";
-
-                requestChange.setAction(action);
-                requestChange.setStatus(c.getFullScopeEnabled());
-                requestChange.setActionType(ActionType.CREATE);
-            }
-            else if ( c.getFullScopeDisabled() != DraftStatus.ACTIVE && c.getFullScopeDisabled() != DraftStatus.NULL) {
-                String action = "Disabling Full-Scope on Client";
-                requestChange.setAction(action);
-                requestChange.setStatus(c.getFullScopeDisabled());
-                requestChange.setActionType(ActionType.DELETE);
-            }
-            changes.add(requestChange);
-        }
-
-        List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndRealm", AccessProofDetailEntity.class)
-                .setParameter("realmId", realm.getId())
-                .setParameter("changesetType", ChangeSetType.CLIENT)
-                .getResultList();
-        if (!proofs.isEmpty()) {
-            proofs.forEach(p -> {
-                TideClientDraftEntity tideClientDraftEntity = (TideClientDraftEntity) BasicIGAUtils.fetchDraftRecordEntity(em, p.getChangesetType(), p.getChangeRequestKey().getMappingId());
-                ClientModel client = realm.getClientById(p.getClientId());
-                RequestedChanges requestChange = new RequestedChanges("New Client Created",ChangeSetType.CLIENT, RequestType.CLIENT, client.getClientId(), realm.getName(), ActionType.CREATE, p.getChangeRequestKey().getChangeRequestId(), new ArrayList<>(), tideClientDraftEntity.getDraftStatus(), DraftStatus.NULL);
-                requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context for all USERS", p.getId(), client.getClientId(), p.getProofDraft()));
-                changes.add(requestChange);
-            });
-        }
-        return changes;
-    }
-
-    public static List<RequestedChanges> processUserRoleMappings(EntityManager em, RealmModel realm) {
-        List<TideUserRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllPendingUserRoleMappingsByRealm", TideUserRoleMappingDraftEntity.class)
-                .setParameter("draftStatus", DraftStatus.ACTIVE)
-                .setParameter("deleteStatus", DraftStatus.ACTIVE)
-                .setParameter("realmId", realm.getId())
-                .getResultList();
-        return processUserRoleMappings(em, realm, mappings);
-    }
-
-    public static List<RequestedChanges> processPreApprovedUserRoleMappings(EntityManager em, RealmModel realm, List<DraftStatus> statuses) {
-        List<TideUserRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllPreApprovedUserRoleMappingsByRealm", TideUserRoleMappingDraftEntity.class)
-                .setParameter("draftStatus", statuses)
-                .setParameter("activeStatus", DraftStatus.ACTIVE)
-                .setParameter("realmId", realm.getId())
-                .getResultList();
-
-        return processUserRoleMappings(em, realm, mappings);
-    }
-
-    public static List<RequestedChanges> processUserRoleMappings(EntityManager em, RealmModel realm, List<TideUserRoleMappingDraftEntity> mappings) {
-        List<RequestedChanges> changes = new ArrayList<>();
-
-        for (TideUserRoleMappingDraftEntity m : mappings) {
-            em.lock(m, LockModeType.PESSIMISTIC_WRITE);
-            RoleModel role = realm.getRoleById(m.getRoleId());
-            if (role == null ) {
-                continue;
-            }
-            String clientId = role.isClientRole() ? realm.getClientById(role.getContainerId()).getClientId() : null;
-            List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                    .setParameter("recordId", m.getChangeRequestId())
-                    .getResultList();
-
-            if(proofs.isEmpty()){
-                continue;
-            }
-
-            boolean isDeleteRequest = m.getDraftStatus() == DraftStatus.ACTIVE && (m.getDeleteStatus() != DraftStatus.ACTIVE || m.getDeleteStatus() != null);
-            String actionDescription = isDeleteRequest ? "Unassigning Role from User" : "Granting Role to User";
-            ActionType action = isDeleteRequest ? ActionType.DELETE : ActionType.CREATE;
-            RequestedChanges requestChange = new RoleChangeRequest(realm.getRoleById(m.getRoleId()).getName(), actionDescription, ChangeSetType.USER_ROLE, RequestType.USER, clientId, realm.getName(), action, m.getChangeRequestId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
-            proofs.forEach(p -> {
-                em.lock(p, LockModeType.PESSIMISTIC_WRITE);
-                requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
-            });
-            changes.add(requestChange);
-        }
-        return changes;
-    }
-
-    public static List<RequestedChanges> processCompositeRoleMappings(EntityManager em, RealmModel realm) {
-        List<TideCompositeRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllCompositeRoleMappingsByRealm", TideCompositeRoleMappingDraftEntity.class)
-                .setParameter("draftStatus", DraftStatus.ACTIVE)
-                .setParameter("deleteStatus", DraftStatus.ACTIVE)
-                .setParameter("realmId", realm.getId())
-                .getResultList();
-
-        return processCompositeRoleMappings(em, realm, mappings);
-    }
-
-    public static List<RequestedChanges> processPreApprovedCompositeRoleMappings(EntityManager em, RealmModel realm, List<DraftStatus> statuses) {
-        List<TideCompositeRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllPreApprovedCompositeRoleMappingsByRealm", TideCompositeRoleMappingDraftEntity.class)
-                .setParameter("draftStatus", statuses)
-                .setParameter("activeStatus", DraftStatus.ACTIVE)
-                .setParameter("realmId", realm.getId())
-                .getResultList();
-
-        return processCompositeRoleMappings(em, realm, mappings);
-    }
-
-    public static List<RequestedChanges> processCompositeRoleMappings(EntityManager em, RealmModel realm, List<TideCompositeRoleMappingDraftEntity> mappings ) {
-        List<RequestedChanges> changes = new ArrayList<>();
-        for (TideCompositeRoleMappingDraftEntity m : mappings) {
-            if (m.getComposite() == null) {
-                continue;
-            }
-            List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                    .setParameter("recordId", m.getChangeRequestId())
-                    .setLockMode(LockModeType.PESSIMISTIC_WRITE)
-                    .getResultList();
-            if(proofs.isEmpty()){
-                continue;
-            }
-            boolean isDeleteRequest = m.getDraftStatus() == DraftStatus.ACTIVE && (m.getDeleteStatus() != DraftStatus.ACTIVE || m.getDeleteStatus() != null);
-            String actionDescription = isDeleteRequest ? "Removing Role from Composite Role": "Granting Role to Composite Role";
-            ActionType action = isDeleteRequest ? ActionType.DELETE : ActionType.CREATE;
-
-            String clientId = m.getComposite().isClientRole() ? realm.getClientById(m.getComposite().getClientId()).getClientId() : "" ;
-            RequestedChanges requestChange = new CompositeRoleChangeRequest(m.getChildRole().getName(), m.getComposite().getName(), actionDescription, ChangeSetType.COMPOSITE_ROLE, RequestType.ROLE, clientId, realm.getName(), action, m.getChangeRequestId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
-
-            proofs.forEach(p -> {
-                if ( p.getChangesetType().equals(ChangeSetType.DEFAULT_ROLES)){
-                    requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context For All Users", p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
-
-                } else {
-                    requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
-                }
-            });
-            changes.add(requestChange);
-        }
-        return changes;
-    }
-
-    public static List<RequestedChanges> processRoleMappings(EntityManager em, RealmModel realm) {
-        List<TideRoleDraftEntity> mappings = em.createNamedQuery("getAllRoleDraft", TideRoleDraftEntity.class)
-                .setParameter("draftStatus", DraftStatus.ACTIVE)
-                .setParameter("deleteStatus", DraftStatus.ACTIVE)
-                .setParameter("realmId", realm.getId())
-                .getResultList();
-
-        return  processRoleMappings(em, realm, mappings);
-    }
-
-    public static List<RequestedChanges> processPreApprovedRoleMappings(EntityManager em, RealmModel realm, List<DraftStatus> statuses) {
-        List<TideRoleDraftEntity> mappings = em.createNamedQuery("getAllPreApprovedRoleDraft", TideRoleDraftEntity.class)
-                .setParameter("draftStatus", statuses)
-                .setParameter("activeStatus", DraftStatus.ACTIVE)
-                .setParameter("realmId", realm.getId())
-                .getResultList();
-
-        return processRoleMappings(em, realm, mappings);
-    }
-
-    public static List<RequestedChanges> processRoleMappings(EntityManager em, RealmModel realm, List<TideRoleDraftEntity> mappings) {
-        List<RequestedChanges> changes = new ArrayList<>();
-
-        for (TideRoleDraftEntity m : mappings) {
-            String clientId = m.getRole().isClientRole() ? m.getRole().getClientId() : null;
-            List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                    .setParameter("recordId", m.getChangeRequestId())
-                    .getResultList();
-            if(proofs.isEmpty()){
-                continue;
-            }
-
-            String action = clientId != null ? "Deleting Role from Client" : "Deleting Role from Realm" ;
-            RequestedChanges requestChange = new RoleChangeRequest(m.getRole().getName(), action, ChangeSetType.ROLE, RequestType.ROLE, clientId, realm.getName(), ActionType.DELETE, m.getChangeRequestId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
-            proofs.forEach(p -> requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft())));
-            changes.add(requestChange);
-        }
-        return changes;
-    }
-
-    private Response buildResponse(int status, String message) {
-        return Response.status(status)
-                .entity(message)
-                .type(MediaType.TEXT_PLAIN)
-                .build();
-    }
-
-    public List<String> signChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
-        auth.realm().requireManageRealm();
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        RealmModel realm = session.getContext().getRealm();
-        ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
-        List<String> signedJsonList = new ArrayList<>();
-
-        for (ChangeSetRequest changeSet : changeSets) {
-            Object draftRecordEntity = BasicIGAUtils
-                    .fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId())
-                    .stream().findFirst().orElse(null);
-            if (draftRecordEntity == null) {
-                throw new BadRequestException("Unsupported change set type for ID: " + changeSet.getChangeSetId());
-            }
-            Response singleResp = signer.sign(changeSet, em, session, realm, draftRecordEntity, auth.adminAuth());
-            signedJsonList.add(singleResp.readEntity(String.class));
-        }
-
-        return signedJsonList;
     }
 
     private Response commitChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
@@ -634,39 +333,197 @@ public class IGARealmResource {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
 
-        ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
-        for (ChangeSetRequest changeSet: changeSets){
-            Object draftRecordEntity= BasicIGAUtils
-                    .fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId())
-                    .stream().findFirst().orElse(null);
-            if (draftRecordEntity ==  null) {
-                return Response.status(Response.Status.BAD_REQUEST).entity("Unsupported change set type").build();
+        for (ChangeSetRequest changeSet : changeSets) {
+            // NEW ENGINE: work with the envelope instead of draft-record lookup
+            Object envelope = BasicIGAUtils.getEnvelope(em, changeSet);
+            if (envelope == null) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity("No envelope found for " + changeSet.getType() + " / " + changeSet.getChangeSetId())
+                        .build();
             }
-            committer.commit(changeSet, em, session, realm, draftRecordEntity, auth.adminAuth());
+            ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
+            committer.commit(changeSet, em, session, realm, envelope, auth.adminAuth());
         }
         return Response.ok("Change sets approved and committed").build();
     }
 
-    private Response cancelChangeSets(List<ChangeSetRequest> changeSets){
-        auth.realm().requireManageRealm();
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+    // ─────────────────────────────────────────────────────────────────────────
+    // Change-set listing & details for Admin UI (review queue)
+    // ─────────────────────────────────────────────────────────────────────────
 
-        changeSets.forEach(changeSet -> {
-            List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                    .setParameter("recordId", changeSet.getChangeSetId())
-                    .getResultList();
-            proofs.forEach(em::remove);
+    @GET
+    @Path("change-set/{scope}/requests")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response listChangeSetRequests(@PathParam("scope") String scope) {
+        try {
+            auth.realm().requireViewRealm();
 
-            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
-            if(changesetRequestEntity != null ) {
-                changesetRequestEntity.getAdminAuthorizations().clear();
-                em.remove(changesetRequestEntity);
+            var type = mapScopeToChangeSetType(scope);
+            if (type == null) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error","bad_scope","error_description","Unsupported scope: " + scope))
+                        .build();
             }
-            em.flush();
-            UserCache userCache = session.getProvider(UserCache.class);
-            if (userCache != null) userCache.clear();
-        });
 
-        return Response.ok("Change set request has been canceled").build();
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+            List<ChangesetRequestEntity> rows = em.createQuery(
+                            "SELECT c FROM ChangesetRequestEntity c WHERE c.changesetType = :t ORDER BY c.timestamp DESC",
+                            ChangesetRequestEntity.class)
+                    .setParameter("t", type)
+                    .getResultList();
+
+            List<Map<String,Object>> out = new ArrayList<>(rows.size());
+            for (var c : rows) {
+                DraftStatus status;
+                long approvals;
+                long rejections;
+
+                try {
+                    status = ChangesetRequestAdapter.getChangeSetStatus(session, c.getChangesetRequestId(), c.getChangesetType());
+                } catch (Exception ex) {
+                    // Harden against missing realm-management client / role configuration, etc.
+                    LOG.warnf(ex, "Status computation failed for changeSetId=%s; defaulting to DRAFT", c.getChangesetRequestId());
+                    status = DraftStatus.DRAFT;
+                }
+
+                approvals  = c.getAdminAuthorizations().stream().filter(AdminAuthorizationEntity::getIsApproval).count();
+                rejections = c.getAdminAuthorizations().size() - approvals;
+
+                Map<String,Object> dto = new LinkedHashMap<>();
+                dto.put("changeSetId",  c.getChangesetRequestId());
+                dto.put("type",         c.getChangesetType().name());
+                dto.put("status",       status.name());
+                dto.put("approvals",    approvals);
+                dto.put("rejections",   rejections);
+                dto.put("timestamp",    c.getTimestamp());
+                // If the UI previews the payload, send the stored draft (often Base64 or JSON)
+                dto.put("draft",        c.getDraftRequest());
+                out.add(dto);
+            }
+
+            return Response.ok(out).build();
+        } catch (Exception e) {
+            LOG.errorf(e, "Failed to list change-set requests for scope=%s", scope);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity(Map.of("error","unknown_error","error_description", e.getMessage()))
+                    .build();
+        }
+    }
+
+    @POST
+    @Path("change-set/{scope}/requests")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response listChangeSetRequestsPOST(@PathParam("scope") String scope) {
+        return listChangeSetRequests(scope);
+    }
+
+    @GET
+    @Path("change-set/{scope}/requests/{id}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getChangeSetRequest(@PathParam("scope") String scope, @PathParam("id") String id) {
+        try {
+            auth.realm().requireViewRealm();
+
+            var type = mapScopeToChangeSetType(scope);
+            if (type == null) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error","bad_scope","error_description","Unsupported scope: " + scope))
+                        .build();
+            }
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            var env = BasicIGAUtils.getEnvelope(em, type, id);
+            if (env == null) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity(Map.of("error","not_found","error_description","No change-set found for id="+id))
+                        .build();
+            }
+
+            DraftStatus status;
+            try {
+                status = ChangesetRequestAdapter.getChangeSetStatus(session, env.getChangesetRequestId(), env.getChangesetType());
+            } catch (Exception ex) {
+                LOG.warnf(ex, "Status computation failed for changeSetId=%s; defaulting to DRAFT", env.getChangesetRequestId());
+                status = DraftStatus.DRAFT;
+            }
+
+            long approvals  = env.getAdminAuthorizations().stream().filter(AdminAuthorizationEntity::getIsApproval).count();
+            long rejections = env.getAdminAuthorizations().size() - approvals;
+
+            Map<String,Object> dto = new LinkedHashMap<>();
+            dto.put("changeSetId", env.getChangesetRequestId());
+            dto.put("type",        env.getChangesetType().name());
+            dto.put("status",      status.name());
+            dto.put("approvals",   approvals);
+            dto.put("rejections",  rejections);
+            dto.put("timestamp",   env.getTimestamp());
+            dto.put("draft",       env.getDraftRequest());
+            // expose authorizations minimally so UI can show who approved/rejected
+            List<Map<String,Object>> authz = new ArrayList<>();
+            for (var a : env.getAdminAuthorizations()) {
+                Map<String,Object> aDto = new LinkedHashMap<>();
+                aDto.put("userId",      a.getUserId());
+                aDto.put("isApproval",  a.getIsApproval());
+                authz.add(aDto);
+            }
+            dto.put("adminAuthorizations", authz);
+
+            return Response.ok(dto).build();
+        } catch (Exception e) {
+            LOG.errorf(e, "Failed to fetch change-set %s/%s", scope, id);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity(Map.of("error","unknown_error","error_description", e.getMessage()))
+                    .build();
+        }
+    }
+
+    /** Map UI scope segment → ChangeSetType */
+    private static ChangeSetType mapScopeToChangeSetType(String scope) {
+        if (scope == null) return null;
+        String s = scope.trim().toLowerCase(Locale.ROOT);
+        switch (s) {
+            case "users":
+            case "user-role-mappings":
+            case "role-mappings":
+                return ChangeSetType.USER_ROLE_MAPPING;
+            case "roles":          return ChangeSetType.ROLE;
+            case "groups":         return ChangeSetType.GROUP;
+            case "clients":        return ChangeSetType.CLIENT;
+            case "client-scopes":  return ChangeSetType.CLIENT_SCOPE;
+            case "realm":
+            case "realm-settings": return ChangeSetType.REALM_SETTINGS;
+            default: return null;
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Helpers
+    // ─────────────────────────────────────────────────────────────────────────
+    private Response buildResponse(int status, String message) {
+        return Response.status(status).entity(message).type(MediaType.TEXT_PLAIN).build();
+    }
+
+    private static String httpToAction(String method) {
+        return switch (method) {
+            case "POST" -> "CREATE";
+            case "PUT", "PATCH" -> "UPDATE";
+            case "DELETE" -> "DELETE";
+            default -> "NONE";
+        };
+    }
+
+    private static String tryStageViaReflection(String fqcn, String method, Class<?>[] sig, Object[] args) {
+        try {
+            Class<?> cls = Class.forName(fqcn);
+            var m = cls.getMethod(method, sig);
+            Object out = m.invoke(null, args);
+            if (out == null) return null;
+            String s = String.valueOf(out);
+            return s.isBlank() ? null : s;
+        } catch (ClassNotFoundException | NoSuchMethodException e) {
+            return null;
+        } catch (Throwable t) {
+            throw new RuntimeException("Error in " + fqcn + "." + method + ": " + t.getMessage(), t);
+        }
     }
 }

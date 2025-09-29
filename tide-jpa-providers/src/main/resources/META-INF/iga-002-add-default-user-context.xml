@@ -1,10 +1,63 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!-- keep the original "add default user context" columns -->
     <changeSet id="iga-002-add-default-user-context" author="iga-delta">
         <addColumn tableName="ACCESS_PROOF_DETAIL">
             <column name="DEFAULT_USER_CONTEXT" type="CLOB"/>
             <column name="AUTHORIZER_POLICY_HASH" type="VARCHAR(512)"/>
             <column name="DRAFT_STATUS" type="VARCHAR(32)"/>
         </addColumn>
+    </changeSet>
+
+    <!-- new table for long role attributes -->
+    <changeSet id="iga-003-role-attribute-long" author="iga-delta">
+        <preConditions onFail="MARK_RAN" onError="HALT">
+            <not>
+                <tableExists tableName="ROLE_ATTRIBUTE_LONG"/>
+            </not>
+        </preConditions>
+
+        <createTable tableName="ROLE_ATTRIBUTE_LONG">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" primaryKeyName="PK_ROLE_ATTR_LONG" nullable="false"/>
+            </column>
+            <column name="ROLE_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="NAME" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <!-- compressed + base64url payload -->
+            <column name="VALUE" type="CLOB">
+                <constraints nullable="false"/>
+            </column>
+            <column name="HASH_SHA256" type="VARCHAR(64)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="UPDATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+
+        <addUniqueConstraint tableName="ROLE_ATTRIBUTE_LONG"
+                             columnNames="ROLE_ID,NAME"
+                             constraintName="UK_ROLE_ATTR_LONG_ROLE_NAME"/>
+
+        <createIndex tableName="ROLE_ATTRIBUTE_LONG" indexName="IX_ROLE_ATTR_LONG_ROLE">
+            <column name="ROLE_ID"/>
+        </createIndex>
+
+        <rollback>
+            <dropIndex indexName="IX_ROLE_ATTR_LONG_ROLE" tableName="ROLE_ATTRIBUTE_LONG"/>
+            <dropUniqueConstraint tableName="ROLE_ATTRIBUTE_LONG" constraintName="UK_ROLE_ATTR_LONG_ROLE_NAME"/>
+            <dropTable tableName="ROLE_ATTRIBUTE_LONG"/>
+        </rollback>
     </changeSet>
 </databaseChangeLog>
