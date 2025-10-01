@@ -1,6 +1,8 @@
 package org.tidecloak.base.iga.IGARealmResource;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
@@ -9,22 +11,22 @@ import org.jboss.logging.Logger;
 import org.keycloak.Config;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
-import org.keycloak.models.IdentityProviderModel;
-import org.keycloak.models.KeycloakSession;
-import org.keycloak.models.RealmModel;
+import org.keycloak.models.*;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitter;
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitterFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequestList;
+import org.tidecloak.base.iga.UserContextBuilder;
 import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.jpa.entities.AdminAuthorizationEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
-import org.tidecloak.shared.enums.DraftStatus;
 
+import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.Base64;
 
 /**
  * Mounted by the admin-realm-restapi-extension factory (id: tide-admin).
@@ -32,10 +34,7 @@ import java.util.*;
  * Endpoints:
  *  - POST   toggle-iga
  *  - POST   add-rejection
- *  - POST   replay/{rest:.+}
- *  - PUT    replay/{rest:.+}
- *  - PATCH  replay/{rest:.+}
- *  - DELETE replay/{rest:.+}
+ *  - GET/POST/PUT/PATCH/DELETE replay/{rest:.+}
  *  - POST   change-set/sign
  *  - POST   change-set/sign/batch
  *  - POST   change-set/commit
@@ -144,10 +143,16 @@ public class IGARealmResource {
             auth.realm().requireManageRealm();
 
             String action = httpToAction(httpMethod);
+
+            // Do NOT stage on GET/reads — prevents empty envelopes like {"roles":[]}
+            if ("NONE".equals(action)) {
+                return Response.status(Response.Status.NO_CONTENT).build();
+            }
+
             Map<String,Object> rep = Map.of(); // default empty
 
             if (body == null) {
-                // no body; keep defaults
+                // keep defaults
             } else if (body instanceof Map<?,?> m) {
                 Object maybeAction = m.get("action");
                 Object maybeRep    = m.get("rep");
@@ -174,6 +179,12 @@ public class IGARealmResource {
                     rep = M.convertValue(node, Map.class);
                 }
             }
+
+            // Stamp who requested this draft
+            try {
+                String requesterId = auth.adminAuth().getUser().getId();
+                rep = put(rep, "_requestedBy", requesterId);
+            } catch (Throwable ignored) {}
 
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
             String changeSetId = stageDraftFromRestPath(em, restPath, action, rep);
@@ -221,6 +232,20 @@ public class IGARealmResource {
                 type = "REALM_SETTINGS"; break;
             default:
                 throw new BadRequestException("Unsupported replay path: " + head);
+        }
+
+        // Enrich USER_ROLE_MAPPING envelopes with path-derived fields
+        if ("USER_ROLE_MAPPING".equals(type)) {
+            rep = put(rep, "_replayPath", restPath);
+            String[] parts = (restPath == null ? "" : restPath).split("/");
+            for (int i = 0; i < parts.length; i++) {
+                if ("users".equals(parts[i]) && i + 1 < parts.length) {
+                    rep = put(rep, "userId", parts[i + 1]);
+                }
+                if ("clients".equals(parts[i]) && i + 1 < parts.length) {
+                    rep = put(rep, "clientId", parts[i + 1]);
+                }
+            }
         }
 
         String id = tryStageViaReflection(
@@ -295,7 +320,6 @@ public class IGARealmResource {
 
         List<String> signedJsonList = new ArrayList<>();
         for (ChangeSetRequest changeSet : changeSets) {
-            // NEW ENGINE: work with the envelope instead of draft-record lookup
             Object envelope = BasicIGAUtils.getEnvelope(em, changeSet);
             if (envelope == null) {
                 throw new BadRequestException("No envelope found for " + changeSet.getType() + " / " + changeSet.getChangeSetId());
@@ -334,7 +358,6 @@ public class IGARealmResource {
         RealmModel realm = session.getContext().getRealm();
 
         for (ChangeSetRequest changeSet : changeSets) {
-            // NEW ENGINE: work with the envelope instead of draft-record lookup
             Object envelope = BasicIGAUtils.getEnvelope(em, changeSet);
             if (envelope == null) {
                 return Response.status(Response.Status.BAD_REQUEST)
@@ -348,9 +371,8 @@ public class IGARealmResource {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Change-set listing & details for Admin UI (review queue)
+    // Change-set listing & details for Admin UI
     // ─────────────────────────────────────────────────────────────────────────
-
     @GET
     @Path("change-set/{scope}/requests")
     @Produces(MediaType.APPLICATION_JSON)
@@ -375,20 +397,9 @@ public class IGARealmResource {
 
             List<Map<String,Object>> out = new ArrayList<>(rows.size());
             for (var c : rows) {
-                DraftStatus status;
-                long approvals;
-                long rejections;
-
-                try {
-                    status = ChangesetRequestAdapter.getChangeSetStatus(session, c.getChangesetRequestId(), c.getChangesetType());
-                } catch (Exception ex) {
-                    // Harden against missing realm-management client / role configuration, etc.
-                    LOG.warnf(ex, "Status computation failed for changeSetId=%s; defaulting to DRAFT", c.getChangesetRequestId());
-                    status = DraftStatus.DRAFT;
-                }
-
-                approvals  = c.getAdminAuthorizations().stream().filter(AdminAuthorizationEntity::getIsApproval).count();
-                rejections = c.getAdminAuthorizations().size() - approvals;
+                var status = ChangesetRequestAdapter.getChangeSetStatus(session, c.getChangesetRequestId(), c.getChangesetType());
+                long approvals  = c.getAdminAuthorizations().stream().filter(AdminAuthorizationEntity::getIsApproval).count();
+                long rejections = c.getAdminAuthorizations().size() - approvals;
 
                 Map<String,Object> dto = new LinkedHashMap<>();
                 dto.put("changeSetId",  c.getChangesetRequestId());
@@ -397,8 +408,20 @@ public class IGARealmResource {
                 dto.put("approvals",    approvals);
                 dto.put("rejections",   rejections);
                 dto.put("timestamp",    c.getTimestamp());
-                // If the UI previews the payload, send the stored draft (often Base64 or JSON)
                 dto.put("draft",        c.getDraftRequest());
+
+                // Requested by (from draft)
+                attachRequestedBy(dto, c.getDraftRequest());
+
+                // Affected users & preview
+                var preview = computePreviewForEnvelope(c);
+                dto.put("affectedUsers", preview.affectedUsers);
+                dto.put("userContextsPreview", preview.userContextsPreview);
+                dto.put("affectedUsersDetailed", resolveUsers(preview.affectedUsers));
+
+                // Rich authorization history
+                attachAuthorizationHistory(dto, c.getAdminAuthorizations());
+
                 out.add(dto);
             }
 
@@ -439,14 +462,7 @@ public class IGARealmResource {
                         .build();
             }
 
-            DraftStatus status;
-            try {
-                status = ChangesetRequestAdapter.getChangeSetStatus(session, env.getChangesetRequestId(), env.getChangesetType());
-            } catch (Exception ex) {
-                LOG.warnf(ex, "Status computation failed for changeSetId=%s; defaulting to DRAFT", env.getChangesetRequestId());
-                status = DraftStatus.DRAFT;
-            }
-
+            var status = ChangesetRequestAdapter.getChangeSetStatus(session, env.getChangesetRequestId(), env.getChangesetType());
             long approvals  = env.getAdminAuthorizations().stream().filter(AdminAuthorizationEntity::getIsApproval).count();
             long rejections = env.getAdminAuthorizations().size() - approvals;
 
@@ -458,15 +474,18 @@ public class IGARealmResource {
             dto.put("rejections",  rejections);
             dto.put("timestamp",   env.getTimestamp());
             dto.put("draft",       env.getDraftRequest());
-            // expose authorizations minimally so UI can show who approved/rejected
-            List<Map<String,Object>> authz = new ArrayList<>();
-            for (var a : env.getAdminAuthorizations()) {
-                Map<String,Object> aDto = new LinkedHashMap<>();
-                aDto.put("userId",      a.getUserId());
-                aDto.put("isApproval",  a.getIsApproval());
-                authz.add(aDto);
-            }
-            dto.put("adminAuthorizations", authz);
+
+            // Requested by (from draft)
+            attachRequestedBy(dto, env.getDraftRequest());
+
+            // Add affected users + preview
+            var preview = computePreviewForEnvelope(env);
+            dto.put("affectedUsers", preview.affectedUsers);
+            dto.put("userContextsPreview", preview.userContextsPreview);
+            dto.put("affectedUsersDetailed", resolveUsers(preview.affectedUsers));
+
+            // Rich authorization history
+            attachAuthorizationHistory(dto, env.getAdminAuthorizations());
 
             return Response.ok(dto).build();
         } catch (Exception e) {
@@ -525,5 +544,177 @@ public class IGARealmResource {
         } catch (Throwable t) {
             throw new RuntimeException("Error in " + fqcn + "." + method + ": " + t.getMessage(), t);
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String,Object> put(Map<String,Object> rep, String k, Object v) {
+        if (!(rep instanceof LinkedHashMap)) {
+            rep = new LinkedHashMap<>(rep);
+        }
+        ((Map<String,Object>)rep).put(k, v);
+        return rep;
+    }
+
+    private static String decodeMaybeBase64(String s) {
+        if (s == null || s.isBlank()) return s;
+        String t = s.trim();
+        if (!t.startsWith("{") && !t.startsWith("[")) {
+            try {
+                byte[] raw = Base64.getDecoder().decode(t);
+                String decoded = new String(raw, StandardCharsets.UTF_8);
+                if (decoded.trim().startsWith("{") || decoded.trim().startsWith("[")) return decoded;
+            } catch (IllegalArgumentException ignored) { }
+        }
+        return s;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Affected users & preview computation
+    // ─────────────────────────────────────────────────────────────────────────
+    private static final class Preview {
+        final List<String> affectedUsers;
+        final List<Map<String, Object>> userContextsPreview;
+        Preview(List<String> u, List<Map<String,Object>> p) { this.affectedUsers = u; this.userContextsPreview = p; }
+    }
+
+    private Preview computePreviewForEnvelope(ChangesetRequestEntity env) {
+        try {
+            String draftJson = decodeMaybeBase64(env.getDraftRequest());
+            String userId = null;
+            String clientId = null;
+
+            if (draftJson != null && !draftJson.isBlank()) {
+                JsonNode n = M.readTree(draftJson);
+                // Prefer explicit userId/clientId
+                userId   = optText(n, "userId");
+                clientId = optText(n, "clientId");
+
+                // Fallback: parse from _replayPath if present
+                if ((userId == null || userId.isBlank()) && n.has("_replayPath")) {
+                    String rp = optText(n, "_replayPath");
+                    if (rp != null) {
+                        String[] parts = rp.split("/");
+                        for (int i = 0; i < parts.length; i++) {
+                            if ("users".equals(parts[i]) && i + 1 < parts.length) userId = parts[i + 1];
+                            if ("clients".equals(parts[i]) && i + 1 < parts.length) clientId = parts[i + 1];
+                        }
+                    }
+                }
+            }
+
+            List<String> affected = new ArrayList<>();
+            List<Map<String,Object>> previews = new ArrayList<>();
+
+            if (userId != null && !userId.isBlank()) {
+                affected.add(userId);
+
+                UserProvider users = session.users();
+                UserModel user = users.getUserById(realm, userId);
+                if (user != null) {
+                    ClientModel client = resolveClient(clientId);
+
+                    // BUILD WITH DELTA → applies realm/client role changes to the preview
+                    ObjectNode ctx = UserContextBuilder.buildAccessTokenPreviewWithDelta(
+                            session, realm, user, client, draftJson
+                    );
+
+                    Map<String,Object> one = new LinkedHashMap<>();
+                    one.put("userId", userId);
+                    one.put("clientId", client != null ? client.getId() : null);
+                    one.put("context", ctx.toString());
+                    previews.add(one);
+                }
+            }
+
+            return new Preview(affected, previews);
+        } catch (Exception e) {
+            // Non-fatal – just return empty preview
+            LOG.debugf(e, "Preview computation failed for envelope %s/%s",
+                    env.getChangesetType(), env.getChangesetRequestId());
+            return new Preview(List.of(), List.of());
+        }
+    }
+
+    private ClientModel resolveClient(String clientIdMaybe) {
+        if (clientIdMaybe == null || clientIdMaybe.isBlank()) return null;
+        // Try as internal KC id first
+        ClientModel c = session.clients().getClientById(realm, clientIdMaybe);
+        if (c != null) return c;
+        // Then try by clientId (alias)
+        return session.clients().getClientByClientId(realm, clientIdMaybe);
+    }
+
+    private static String optText(JsonNode n, String field) {
+        if (n == null) return null;
+        JsonNode v = n.get(field);
+        return (v != null && v.isTextual()) ? v.asText() : null;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Enrichment helpers: users, requestedBy, approvals/rejections
+    // ─────────────────────────────────────────────────────────────────────────
+    private Map<String, Object> resolveUserBasic(String userId) {
+        if (userId == null || userId.isBlank()) return null;
+        try {
+            UserModel u = session.users().getUserById(realm, userId);
+            if (u == null) return Map.of("id", userId);
+            Map<String,Object> m = new LinkedHashMap<>();
+            m.put("id", u.getId());
+            m.put("username", u.getUsername());
+            m.put("email", u.getEmail());
+            m.put("firstName", u.getFirstName());
+            m.put("lastName", u.getLastName());
+            return m;
+        } catch (Exception e) {
+            return Map.of("id", userId);
+        }
+    }
+
+    private List<Map<String,Object>> resolveUsers(List<String> ids) {
+        if (ids == null) return List.of();
+        List<Map<String,Object>> out = new ArrayList<>(ids.size());
+        for (String id : ids) {
+            var m = resolveUserBasic(id);
+            if (m != null) out.add(m);
+        }
+        return out;
+    }
+
+    private static String jsonTextOrNull(com.fasterxml.jackson.databind.JsonNode n, String field) {
+        if (n == null) return null;
+        var v = n.get(field);
+        return (v != null && v.isTextual()) ? v.asText() : null;
+    }
+
+    private void attachRequestedBy(Map<String,Object> dto, String draftRaw) {
+        try {
+            String draftJson = decodeMaybeBase64(draftRaw);
+            String requestedById = null;
+            if (draftJson != null && !draftJson.isBlank()) {
+                var n = M.readTree(draftJson);
+                requestedById = jsonTextOrNull(n, "_requestedBy");
+            }
+            if (requestedById != null) {
+                dto.put("requestedBy", resolveUserBasic(requestedById));
+            }
+        } catch (Exception ignored) { }
+    }
+
+    private void attachAuthorizationHistory(Map<String,Object> dto, List<AdminAuthorizationEntity> authz) {
+        List<Map<String,Object>> approvals = new ArrayList<>();
+        List<Map<String,Object>> rejections = new ArrayList<>();
+        if (authz != null) {
+            for (var a : authz) {
+                Map<String,Object> row = new LinkedHashMap<>();
+                row.put("user", resolveUserBasic(a.getUserId()));
+                if (Boolean.TRUE.equals(a.getIsApproval())) {
+                    approvals.add(row);
+                } else {
+                    rejections.add(row);
+                }
+            }
+        }
+        dto.put("adminApprovals", approvals);
+        dto.put("adminRejections", rejections);
     }
 }
