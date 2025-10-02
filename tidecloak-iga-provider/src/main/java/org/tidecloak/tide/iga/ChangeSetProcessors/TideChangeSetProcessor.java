@@ -11,6 +11,7 @@ import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
@@ -180,7 +181,7 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
                         })
                         .collect(Collectors.toList());
 
-        ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+        ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
 
         reqAndDrafts.forEach(entry -> {
             ChangesetRequestEntity req   = entry.getKey();

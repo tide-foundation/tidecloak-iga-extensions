@@ -34,8 +34,10 @@ import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.shared.models.SecretKeys;
 import org.tidecloak.shared.models.UserContext;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 
 import java.io.UncheckedIOException;
+import java.lang.reflect.Method;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -194,28 +196,120 @@ public class BasicIGAUtils {
         };
     }
 
-    public static List<?> fetchDraftRecordEntityByRequestId(EntityManager em, ChangeSetType type, String changeSetId) {
+    public static ChangeSetType getTypeFromEntity(Object entity) {
+        if (entity == null) return null;
+
+        if (entity instanceof TideUserRoleMappingDraftEntity) {
+            return ChangeSetType.USER_ROLE;
+        }
+
+        if (entity instanceof TideCompositeRoleMappingDraftEntity) {
+            return ChangeSetType.COMPOSITE_ROLE;
+        }
+
+        if (entity instanceof TideRoleDraftEntity) {
+            return ChangeSetType.ROLE;
+        }
+
+        if (entity instanceof TideUserDraftEntity) {
+            return ChangeSetType.USER;
+        }
+
+        if (entity instanceof TideClientDraftEntity) {
+            return ChangeSetType.CLIENT;
+        }
+
+        return null;
+    }
+
+    public static ActionType getActionTypeFromEntity(Object entity) {
+        if (entity == null) return ActionType.NONE;
+
+        if (entity instanceof TideUserRoleMappingDraftEntity) {
+            return ((TideUserRoleMappingDraftEntity) entity).getAction();
+        }
+
+        if (entity instanceof TideCompositeRoleMappingDraftEntity) {
+            return ((TideCompositeRoleMappingDraftEntity) entity).getAction();
+        }
+
+        if (entity instanceof TideRoleDraftEntity) {
+            return ((TideRoleDraftEntity) entity).getAction();
+        }
+
+        if (entity instanceof TideUserDraftEntity) {
+            return ((TideUserDraftEntity) entity).getAction();
+        }
+
+        if (entity instanceof TideClientDraftEntity) {
+            return ((TideClientDraftEntity) entity).getAction();
+        }
+
+        return ActionType.NONE;
+    }
+
+
+    public static List<?> fetchDraftRecordEntityByRequestId(EntityManager em,
+                                                            ChangeSetType type,
+                                                            String changeSetId) {
         try {
             return switch (type) {
-                case USER_ROLE -> em.createNamedQuery("GetUserRoleMappingDraftEntityByRequestId", TideUserRoleMappingDraftEntity.class)
-                        .setParameter("requestId", changeSetId)
-                        .getResultList();
+                case RAGNAROK -> {
+                    try {
+                        // real entity available?
+                        Class<?> offClass = Class.forName(
+                                "org.ragnarok.jpa.entities.drafting.OffboardingDraftEntity"
+                        );
+                        yield em.createNamedQuery(
+                                        "OffboardingDraft.findByChangeRequestId",
+                                        offClass
+                                )
+                                .setParameter("changeRequestId", changeSetId)
+                                .getResultList();
+                    } catch (ClassNotFoundException cnfe) {
+                        yield List.of(changeSetId);
+                    }
+                }
 
-                case COMPOSITE_ROLE, DEFAULT_ROLES -> em.createNamedQuery("GetCompositeRoleMappingDraftEntityByRequestId", TideCompositeRoleMappingDraftEntity.class)
-                        .setParameter("requestId", changeSetId)
-                        .getResultList();
+                case USER_ROLE ->
+                        em.createNamedQuery(
+                                        "GetUserRoleMappingDraftEntityByRequestId",
+                                        TideUserRoleMappingDraftEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
 
-                case ROLE -> em.createNamedQuery("GetRoleDraftEntityByRequestId", TideRoleDraftEntity.class)
-                        .setParameter("requestId", changeSetId)
-                        .getResultList();
+                case COMPOSITE_ROLE, DEFAULT_ROLES ->
+                        em.createNamedQuery(
+                                        "GetCompositeRoleMappingDraftEntityByRequestId",
+                                        TideCompositeRoleMappingDraftEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
 
-                case USER -> em.createNamedQuery("GetUserEntityByRequestId", TideUserDraftEntity.class)
-                        .setParameter("requestId", changeSetId)
-                        .getResultList();
+                case ROLE ->
+                        em.createNamedQuery(
+                                        "GetRoleDraftEntityByRequestId",
+                                        TideRoleDraftEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
 
-                case CLIENT, CLIENT_FULLSCOPE -> em.createNamedQuery("GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
-                        .setParameter("requestId", changeSetId)
-                        .getResultList();
+                case USER ->
+                        em.createNamedQuery(
+                                        "GetUserEntityByRequestId",
+                                        TideUserDraftEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
+
+                case CLIENT, CLIENT_FULLSCOPE ->
+                        em.createNamedQuery(
+                                        "GetClientDraftEntityByRequestId",
+                                        TideClientDraftEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
 
                 default -> null;
             };
@@ -223,6 +317,7 @@ public class BasicIGAUtils {
             return null;
         }
     }
+
     public static Object fetchDraftRecordEntitiesByRequestIdAndClientAndUser(EntityManager em, ChangeSetType type, String changeSetId, UserEntity user, String clientId) {
         try {
             return switch (type) {
@@ -288,37 +383,88 @@ public class BasicIGAUtils {
         }
     }
 
-    public static void updateDraftStatus(KeycloakSession session, ChangeSetType changeSetType, String changeSetID, ActionType changeSetAction, Object draftRecordEntity) throws Exception {
+    public static void updateDraftStatus(KeycloakSession session,
+                                         ChangeSetType changeSetType,
+                                         String changeSetID,
+                                         ActionType changeSetAction,
+                                         Object draftRecordEntity) throws Exception {
         DraftStatus draftStatus = getChangeSetStatus(session, changeSetID, changeSetType);
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
         switch (changeSetType) {
-            case USER_ROLE:
-                if(changeSetAction == ActionType.CREATE) {
-                    ((TideUserRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
-                } else if (changeSetAction == ActionType.DELETE){
-                    ((TideUserRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(draftStatus);
+            case RAGNAROK:
+                if (changeSetAction == ActionType.CREATE) {
+                    try {
+                        Class<?> offClass = Class.forName(
+                                "org.ragnarok.jpa.entities.drafting.OffboardingDraftEntity"
+                        );
+
+                        if (offClass.isInstance(draftRecordEntity)) {
+                            Method setStatus = offClass.getMethod("setDraftStatus", DraftStatus.class);
+                            setStatus.invoke(draftRecordEntity, draftStatus);
+                            em.merge(draftRecordEntity);
+                        } else {
+                            Object off = em.createNamedQuery(
+                                            "OffboardingDraft.findByChangeRequestId", offClass)
+                                    .setParameter("changeRequestId", changeSetID)
+                                    .getSingleResult();
+                            Method setStatus2 = offClass.getMethod("setDraftStatus", DraftStatus.class);
+                            setStatus2.invoke(off, draftStatus);
+                            em.merge(off);
+                        }
+                    } catch (ClassNotFoundException cnfe) {
+                        // fallback to native SQL: only update DRAFT_STATUS
+                        em.createNativeQuery(
+                                        "UPDATE OFFBOARDING_DRAFT " +
+                                                "   SET DRAFT_STATUS = ? " +
+                                                " WHERE CHANGE_REQUEST_ID = ?")
+                                .setParameter(1, draftStatus.name())
+                                .setParameter(2, changeSetID)
+                                .executeUpdate();
+                    }
                 }
                 break;
+
+            case USER_ROLE:
+                if (changeSetAction == ActionType.CREATE) {
+                    ((TideUserRoleMappingDraftEntity) draftRecordEntity)
+                            .setDraftStatus(draftStatus);
+                } else if (changeSetAction == ActionType.DELETE) {
+                    ((TideUserRoleMappingDraftEntity) draftRecordEntity)
+                            .setDeleteStatus(draftStatus);
+                }
+                break;
+
             case ROLE:
                 ((TideRoleDraftEntity) draftRecordEntity).setDeleteStatus(draftStatus);
                 break;
+
             case COMPOSITE_ROLE:
-                if(changeSetAction == ActionType.CREATE){
-                    ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
-                } else if (changeSetAction == ActionType.DELETE){
-                    ((TideCompositeRoleMappingDraftEntity) draftRecordEntity).setDeleteStatus(draftStatus);
+                if (changeSetAction == ActionType.CREATE) {
+                    ((TideCompositeRoleMappingDraftEntity) draftRecordEntity)
+                            .setDraftStatus(draftStatus);
+                } else if (changeSetAction == ActionType.DELETE) {
+                    ((TideCompositeRoleMappingDraftEntity) draftRecordEntity)
+                            .setDeleteStatus(draftStatus);
                 }
                 break;
+
             case CLIENT_FULLSCOPE:
                 if (changeSetAction == ActionType.CREATE) {
-                    ((TideClientDraftEntity) draftRecordEntity).setFullScopeEnabled(draftStatus);
+                    ((TideClientDraftEntity) draftRecordEntity)
+                            .setFullScopeEnabled(draftStatus);
                 } else if (changeSetAction == ActionType.DELETE) {
-                    ((TideClientDraftEntity) draftRecordEntity).setFullScopeDisabled(draftStatus);
+                    ((TideClientDraftEntity) draftRecordEntity)
+                            .setFullScopeDisabled(draftStatus);
                 }
                 break;
+
             case CLIENT:
                 ((TideClientDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
                 break;
+
+            default:
+                throw new IllegalArgumentException("Unhandled ChangeSetType " + changeSetType);
         }
     }
 
@@ -459,7 +605,8 @@ public class BasicIGAUtils {
 
 
             // Process grouped entities
-            ChangeSetProcessorFactory processorFactory = new ChangeSetProcessorFactory();
+            ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();// Initialize the processor factory
+
             ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
             ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
 
@@ -469,9 +616,12 @@ public class BasicIGAUtils {
 
                     changeRequests.forEach(cre -> {
                         try {
-                            Object draftRecordEntity = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, cre.getChangesetType(), cre.getChangesetRequestId()).get(0);
-                            signer.sign(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
-                            committer.commit(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntity, auth);
+                            List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, cre.getChangesetType(), cre.getChangesetRequestId());
+                            if(draftRecordEntities == null || draftRecordEntities.isEmpty()){
+                                throw new Exception("Unsupported change set type for ID: " + cre.getChangesetRequestId());
+                            }
+                            signer.sign(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntities, auth);
+                            committer.commit(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntities.get(0), auth);
                         } catch (Exception e) {
                             throw new RuntimeException(e);
                         }
@@ -484,9 +634,9 @@ public class BasicIGAUtils {
         } else {
             // Single item path
             ChangeSetRequest changeSet = changeSets.get(0);
-            Object draftRecordEntity = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId()).get(0);
+            List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
 
-            if (draftRecordEntity == null) {
+            if (draftRecordEntities == null || draftRecordEntities.isEmpty()) {
                 throw new Exception("Unsupported change set type for ID: " + changeSet.getChangeSetId());
             }
 
@@ -494,8 +644,8 @@ public class BasicIGAUtils {
             ChangeSetCommitter committer = ChangeSetCommitterFactory.getCommitter(session);
 
             try {
-                signer.sign(changeSet, em, session, realm, draftRecordEntity, auth);
-                committer.commit(changeSet, em, session, realm, draftRecordEntity, auth);
+                signer.sign(changeSet, em, session, realm, draftRecordEntities, auth);
+                committer.commit(changeSet, em, session, realm, draftRecordEntities, auth);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }

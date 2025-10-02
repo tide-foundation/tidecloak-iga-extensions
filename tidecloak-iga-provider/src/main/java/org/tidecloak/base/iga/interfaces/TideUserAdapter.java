@@ -13,6 +13,7 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.ClientUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
@@ -44,7 +45,7 @@ public class TideUserAdapter extends UserAdapter {
         this.session = session;
         this.realm = realm;
 
-        ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+        ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
         this.processor = changeSetProcessorFactory.getProcessor(ChangeSetType.USER_ROLE);
 
     }
