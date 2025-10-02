@@ -9,6 +9,14 @@ import org.keycloak.models.jpa.entities.ComponentEntity;
         @NamedQuery(
                 name = "getLicenseHistoryForKey",
                 query = "SELECT l FROM LicenseHistoryEntity l WHERE l.componentEntity = :componentEntity"
+        ),
+        @NamedQuery(
+                name = "LicenseHistory.findByGvrk",
+                query = "SELECT l FROM LicenseHistoryEntity l WHERE l.GVRK = :gvrk ORDER BY l.expiry DESC"
+        ),
+        @NamedQuery(
+                name = "LicenseHistory.findLatestByGvrk",
+                query = "SELECT l FROM LicenseHistoryEntity l WHERE l.GVRK = :gvrk ORDER BY l.expiry DESC"
         )
 })
 public class LicenseHistoryEntity {

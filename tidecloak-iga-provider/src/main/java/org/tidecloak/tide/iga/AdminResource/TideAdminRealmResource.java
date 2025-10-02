@@ -3,10 +3,12 @@ package org.tidecloak.tide.iga.AdminResource;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.LockModeType;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriBuilder;
+import jakarta.xml.bind.DatatypeConverter;
 import org.eclipse.microprofile.openapi.annotations.parameters.Parameter;
 import org.jboss.logging.Logger;
 import org.keycloak.authentication.actiontoken.execactions.ExecuteActionsActionToken;
@@ -15,24 +17,40 @@ import org.keycloak.common.util.Time;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.keycloak.models.cache.CacheRealmProvider;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.services.ErrorPage;
 import org.keycloak.services.ErrorResponse;
 import org.keycloak.services.resources.LoginActionsService;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.midgard.Midgard;
-import org.midgard.models.AdminAuthorization;
+import org.midgard.models.*;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
-import org.midgard.models.VendorData;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
+import org.tidecloak.base.iga.interfaces.models.RequestType;
+import org.tidecloak.base.iga.interfaces.models.RequestedChanges;
+import org.tidecloak.base.iga.utils.BasicIGAUtils;
+import org.tidecloak.jpa.entities.LicensingDraftEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
+import org.tidecloak.shared.enums.ActionType;
+import org.tidecloak.shared.enums.ChangeSetType;
+import org.tidecloak.shared.enums.DraftStatus;
+import org.tidecloak.shared.enums.WorkflowType;
+import org.tidecloak.shared.enums.models.WorkflowParams;
 
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
+import java.util.stream.Stream;
+
+import static org.keycloak.models.credential.dto.PasswordSecretData.logger;
 
 public class TideAdminRealmResource {
 
@@ -41,14 +59,105 @@ public class TideAdminRealmResource {
     private final AdminPermissionEvaluator auth;
     public static final String tideRealmAdminRole = "tide-realm-admin";
     protected static final String tideVendorKeyId = "tide-vendor-key";
+    private final ChangeSetProcessor<LicensingDraftEntity> processor;
+
 
     protected static final Logger logger = Logger.getLogger(TideAdminRealmResource.class);
     public TideAdminRealmResource(KeycloakSession session, RealmModel realm, AdminPermissionEvaluator auth) {
         this.session = session;
         this.realm = realm;
         this.auth = auth;
+        ChangeSetProcessorFactory factory = ChangeSetProcessorFactoryProvider.getFactory();
+        this.processor = factory.getProcessor(ChangeSetType.REALM_LICENSING);
     }
 
+    @GET
+    @Path("change-set/licensing/requests")
+    public Response getRequestedChangesForUsers() {
+        auth.realm().requireManageRealm();
+        if(!BasicIGAUtils.isIGAEnabled(realm)){
+            return Response.ok().entity(new ArrayList<>()).build();
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<RequestedChanges> changes = new ArrayList<>(processLicensingRequests(em, realm));
+        return Response.ok(changes).build();
+    }
+
+    @POST
+    @Path("trigger-license-signing")
+    @Produces(MediaType.TEXT_PLAIN)
+    public Response triggerLicensing(@QueryParam("gvrk") String gvrk) {
+        try {
+            auth.realm().requireManageRealm();
+            final String realmId = realm.getId();
+
+            // 1) Only proceed if license is active (truthy). Anything else blocks.
+            boolean licenseActive = false;
+            try {
+                // Use whatever “active” signal you already expose. This one returns a boolean.
+                licenseActive = IsPendingLicenseActive(realm);
+            } catch (Exception e) {
+                // Treat errors as “not active”
+                licenseActive = false;
+            }
+
+            if (!licenseActive) {
+                return buildResponse(
+                        409,
+                        "License is not active yet. Please try again after the license becomes active."
+                );
+            }
+
+            // 2) Prevent duplicate drafts for this realm
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            List<LicensingDraftEntity> drafts = em
+                    .createNamedQuery("LicensingDraft.findByRealm", LicensingDraftEntity.class)
+                    .setParameter("realmId", realmId)
+                    .getResultList();
+
+            if (!drafts.isEmpty()) {
+                return buildResponse(200, "Licensing already triggered, awaiting review.");
+            }
+            String igaAttribute = realm.getAttribute("isIGAEnabled");
+            boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
+
+            // Just sign with VRK
+            if(!isIGAEnabled){
+                try {
+                    RotateVrk(realmId, session, gvrk);
+                    return buildResponse(200, "Licensing has been rotated.");
+                }catch (Exception e) {
+                    logger.error("Error rotating license", e);
+                    return buildResponse(500, "Error rotating license: " + e.getMessage());
+                }
+
+            }
+
+            // 3) Create draft
+            LicensingDraftEntity draft = new LicensingDraftEntity();
+            draft.setId(org.keycloak.models.utils.KeycloakModelUtils.generateId());
+            draft.setDraftStatus(DraftStatus.DRAFT);
+            draft.setAction(ActionType.CREATE);
+            draft.setRealmId(realmId);
+            em.persist(draft);
+            em.flush();
+
+            // 4) Kick workflow — LICENSING changeset
+            WorkflowParams params = new WorkflowParams(
+                    DraftStatus.DRAFT,
+                    false,
+                    ActionType.CREATE,
+                    ChangeSetType.REALM_LICENSING
+            );
+            processor.executeWorkflow(session, draft, em, WorkflowType.REQUEST, params, null);
+
+            return buildResponse(200, "Licensing Change Request created and awaiting quorum approval.");
+
+        } catch (Exception e) {
+            logger.error("Error creating licensing change request", e);
+            return buildResponse(500, "Error creating licensing change request: " + e.getMessage());
+        }
+    }
 
     @POST
     @Path("add-authorization")
@@ -381,6 +490,125 @@ public class TideAdminRealmResource {
         // Method to add a new entry to the history
         public void addToHistory(String newEntry) {
             history.add(newEntry);
+        }
+    }
+
+    private static List<RequestedChanges> processLicensingRequests(EntityManager em, RealmModel realm) {
+        // Get all pending changes, records that do not have an active delete status or active draft status
+        List<LicensingDraftEntity> drafts = em
+                .createNamedQuery("LicensingDraft.findByRealmAndStatusNotEqual",
+                        LicensingDraftEntity.class)
+                .setParameter("realmId", realm.getId())
+                .setParameter("status", DraftStatus.ACTIVE)
+                .getResultList();
+
+        return processLicensingRequests(em, realm, drafts);
+    }
+
+    public static List<RequestedChanges> processLicensingRequests(EntityManager em, RealmModel realm, List<LicensingDraftEntity> entities) {
+        List<RequestedChanges> changes = new ArrayList<>();
+
+        for (LicensingDraftEntity e : entities) {
+            em.lock(e, LockModeType.PESSIMISTIC_WRITE); // Lock the entity to prevent concurrent modifications
+
+            String actionDescription = "Tide offboarding has been requested";
+            RequestedChanges requestChange = new RequestedChanges(actionDescription, ChangeSetType.REALM_LICENSING, RequestType.SETTINGS, null, realm.getId(), ActionType.CREATE, e.getChangeRequestId(), List.of(), e.getDraftStatus(), DraftStatus.NULL);
+            changes.add(requestChange);
+        }
+        return changes;
+    }
+
+    private static SignRequestSettingsMidgard ConstructSignSettings(MultivaluedHashMap<String, String> keyProviderConfig, String vrk){
+        int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
+        int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
+
+        SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
+        settings.VVKId = keyProviderConfig.getFirst("vvkId");
+        settings.HomeOrkUrl = keyProviderConfig.getFirst("systemHomeOrk");
+        settings.PayerPublicKey = keyProviderConfig.getFirst("payerPublic");
+        settings.ObfuscatedVendorPublicKey = keyProviderConfig.getFirst("obfGVVK");
+        settings.VendorRotatingPrivateKey = vrk;
+        settings.Threshold_T = threshold;
+        settings.Threshold_N = max;
+
+        return settings;
+    }
+    private static boolean IsPendingLicenseActive(RealmModel realm) throws Exception {
+        try {
+            ComponentModel componentModel;
+            try (Stream<ComponentModel> components = realm.getComponentsStream()) {
+                componentModel = components
+                        .filter(c -> "tide-vendor-key".equals(c.getProviderId()))
+                        .findAny() // findAny can be more efficient than findFirst if ordering doesn't matter
+                        .orElse(null);
+            }
+
+            if(componentModel == null) {
+                logger.warn("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+                throw new BadRequestException("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+            }
+
+            MultivaluedHashMap<String, String> config = componentModel.getConfig();
+            String homeOrkUrl = config.getFirst("systemHomeOrk");
+            String payerPublic = config.getFirst("payerPublic");
+            String pendingVendorId = config.getFirst("pendingVendorId");
+
+            return  Midgard.IsLicenseActive(homeOrkUrl, payerPublic, pendingVendorId);
+
+        } catch (Exception e) {
+            logger.warn("Could not check if pending license is active", e);// may be committed by JTA which can't
+            e.printStackTrace();
+            throw new Exception("Could not check if pending license is active ");
+
+        }
+    }
+    public static void RotateVrk(String realmId, KeycloakSession session, String gVRK) throws JsonProcessingException {
+        try {
+            RealmModel realm = session.realms().getRealm(realmId);
+            ComponentModel componentModel;
+            try (Stream<ComponentModel> components = realm.getComponentsStream()) {
+                componentModel = components
+                        .filter(c -> "tide-vendor-key".equals(c.getProviderId()))
+                        .findAny() // findAny can be more efficient than findFirst if ordering doesn't matter
+                        .orElse(null);
+            }
+
+            if(componentModel == null) {
+                logger.warn("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+                throw new BadRequestException("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+            }
+
+            MultivaluedHashMap<String, String> config = componentModel.getConfig();
+            ObjectMapper objectMapper = new ObjectMapper();
+            String currentSecretKeys = config.getFirst("clientSecret");
+            SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);;
+
+            SignRequestSettingsMidgard settings = ConstructSignSettings(config, secretKeys.activeVrk);
+
+            ModelRequest req = ModelRequest.New("RotateVRK", "1", "VRK:1", DatatypeConverter.parseHexBinary(gVRK));
+
+            req.SetAuthorization(Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
+            req.SetAuthorizer(DatatypeConverter.parseHexBinary(config.getFirst("gVRK")));
+            req.SetAuthorizerCertificate(Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
+
+            SignatureResponse response = Midgard.SignModel(settings, req);
+
+
+            // Add pending GVRK signature to configuration. The pending configuartion is now signed/authorized and is awaiting SWITCH on current license expiry.
+            config.putSingle("pendingGVRKCertificate", response.Signatures[0]);
+
+            componentModel.setConfig(config);
+            realm.updateComponent(componentModel);
+
+            CacheRealmProvider cacheRealmProvider = session.getProvider(CacheRealmProvider.class);
+            cacheRealmProvider.clear();
+
+            logger.info("Successfully rotated VRK, configuration pending switch on current license expiry");
+
+        } catch(Exception e){
+            logger.warn("Could not generate and save tide network keys", e);// may be committed by JTA which can't
+            e.printStackTrace();
+            throw e;
         }
     }
 }

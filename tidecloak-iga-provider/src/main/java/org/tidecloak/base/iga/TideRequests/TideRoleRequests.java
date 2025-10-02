@@ -22,8 +22,6 @@ import static org.tidecloak.base.iga.utils.BasicIGAUtils.getRoleIdFromEntity;
 
 public class TideRoleRequests {
 
-
-
     // Creates a Realm Admin role for current realm. The role has full access to manage the current realm.
     public static void createRealmAdminInitCert(KeycloakSession session) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
@@ -36,7 +34,7 @@ public class TideRoleRequests {
         tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
 
         ArrayList<String> signModels = new ArrayList<String>();
-        signModels.addAll(List.of("UserContext:1", "Rules:1", "Offboard:1"));
+        signModels.addAll(List.of("UserContext:1", "Rules:1", "Offboard:1", "TidecloakUpdateSettings:1"));
 
         InitializerCertificate initCert = createRoleInitCert(session, resource, tideRealmAdmin, "1", "EdDSA", signModels);
 
