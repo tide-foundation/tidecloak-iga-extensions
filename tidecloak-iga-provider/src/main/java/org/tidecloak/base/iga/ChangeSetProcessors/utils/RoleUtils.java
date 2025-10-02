@@ -11,8 +11,6 @@ import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
 import java.util.Arrays;
 import java.util.Objects;
 
-import static org.keycloak.models.ImpersonationConstants.IMPERSONATION_ROLE;
-
 public class RoleUtils {
 
     public static Boolean commitDefaultRolesOnInitiation(KeycloakSession session, RealmModel realm, RoleEntity parentEntity, RoleModel child, EntityManager em) {
@@ -106,7 +104,7 @@ public class RoleUtils {
     }
 
     private static boolean isImpersonation(String childName) {
-        return Objects.equals(childName, IMPERSONATION_ROLE);
+        return Objects.equals(childName, AdminRoles.IMPERSONATION);
     }
 
     private static boolean isDefaultRole(String entityName, RealmModel realm) {

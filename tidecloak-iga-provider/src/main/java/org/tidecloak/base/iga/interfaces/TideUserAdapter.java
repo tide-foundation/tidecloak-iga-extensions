@@ -132,7 +132,7 @@ public class TideUserAdapter extends UserAdapter {
             }
 
             boolean isTempAdmin = this.user.getAttributes().stream()
-                    .anyMatch(attribute -> attribute.getName().equalsIgnoreCase(Constants.IS_TEMP_ADMIN_ATTR_NAME));
+                    .anyMatch(attribute -> attribute.getName().equalsIgnoreCase(UserModel.IS_TEMP_ADMIN_ATTR_NAME));
             if (isTempAdmin) {
                 return;
             }
