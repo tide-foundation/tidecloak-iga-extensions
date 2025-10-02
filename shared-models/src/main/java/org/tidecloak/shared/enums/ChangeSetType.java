@@ -12,6 +12,7 @@ public enum ChangeSetType {
     COMPOSITE_ROLE,
     GROUP_ROLE,
     CLIENT_FULLSCOPE,
-    RAGNAROK
+    RAGNAROK,
+    REALM_LICENSING
     ;
 }
