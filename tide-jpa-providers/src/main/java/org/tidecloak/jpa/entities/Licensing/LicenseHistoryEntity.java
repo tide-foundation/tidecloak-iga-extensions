@@ -37,6 +37,9 @@ public class LicenseHistoryEntity {
     @Column(name = "GVRK")
     protected String GVRK;
 
+    @Column(name = "GVRK_CERTIFICATE")
+    protected String GVRKCertificate;
+
     @Column(name = "VVK_ID", length = 256)
     protected String vvkId;
 
@@ -82,6 +85,14 @@ public class LicenseHistoryEntity {
 
     public void setGVRK(String GVRK) {
         this.GVRK = GVRK;
+    }
+
+    public String getGVRKCertificate() {
+        return GVRKCertificate;
+    }
+
+    public void setGVRKCertificate(String GVRKCertificate) {
+        this.GVRKCertificate = GVRKCertificate;
     }
 
     public String getVvkId() {

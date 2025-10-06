@@ -23,4 +23,22 @@
             <column name="TIMESTAMP" type="BIGINT"/>
         </createTable>
     </changeSet>
+    <changeSet id="20251007-add-gvrk-certificate-to-license-history" author="tidecloak">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <columnExists tableName="LICENSE_HISTORY" columnName="GVRK_CERTIFICATE"/>
+            </not>
+        </preConditions>
+
+        <addColumn tableName="LICENSE_HISTORY">
+            <column name="GVRK_CERTIFICATE" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+
+        <rollback>
+            <dropColumn tableName="LICENSE_HISTORY" columnName="GVRK_CERTIFICATE"/>
+        </rollback>
+    </changeSet>
+
 </databaseChangeLog>

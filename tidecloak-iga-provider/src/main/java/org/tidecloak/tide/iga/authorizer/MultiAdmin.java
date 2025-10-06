@@ -5,32 +5,34 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.core.Response;
+import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
 import org.midgard.Midgard;
-import org.midgard.models.AdminAuthorization;
-import org.midgard.models.AdminAuthorizerBuilder;
+import org.midgard.models.*;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
-import org.midgard.models.SignRequestSettingsMidgard;
-import org.midgard.models.SignatureResponse;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
+import org.tidecloak.base.iga.utils.LicenseHistory;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
+import org.tidecloak.jpa.entities.LicensingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
+import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 
+import javax.xml.bind.DatatypeConverter;
 import java.net.URI;
 import java.util.*;
 
@@ -125,8 +127,14 @@ public class MultiAdmin implements Authorizer{
             throw new BadRequestException("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
         }
 
+
         var config = componentModel.getConfig();
         String authorizerType = authorizer.getType();
+
+        if(changeSet.getType().equals(ChangeSetType.REALM_LICENSING)){
+            commitLicenseSettingsWithAuthorizer(session, em, changesetRequestEntity);
+            return Response.ok("Change set approved and committed with authorizer type:  " + authorizerType).build();
+        }
 
         List<AccessProofDetailEntity> proofDetails = BasicIGAUtils.getAccessProofs(em, BasicIGAUtils.getEntityChangeRequestId(draftEntity), changeSet.getType());
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
@@ -209,4 +217,82 @@ public class MultiAdmin implements Authorizer{
         em.flush();
         return Response.ok("Change set approved and committed with authorizer type:  " + authorizerType).build();
     }
+
+    private void commitLicenseSettingsWithAuthorizer(KeycloakSession session, EntityManager em, ChangesetRequestEntity changesetRequestEntity) throws Exception {
+        RealmModel realm = session.getContext().getRealm();
+        ObjectMapper objectMapper = new ObjectMapper();
+        RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
+        TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                .setParameter("role", role).getSingleResult();
+
+        InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
+
+        ComponentModel componentModel = realm.getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .findFirst()
+                .orElse(null);
+
+        if(componentModel == null) {
+            throw new BadRequestException("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+        }
+
+        MultivaluedHashMap<String, String> config = componentModel.getConfig();
+        String gVRK = config.getFirst("gVRK");
+
+        AdminAuthorizerBuilder authorizerBuilder = new AdminAuthorizerBuilder();
+        authorizerBuilder.AddInitCert(cert);
+        authorizerBuilder.AddInitCertSignature(tideRoleEntity.getInitCertSig());
+
+        changesetRequestEntity.getAdminAuthorizations().forEach(a -> {
+            authorizerBuilder.AddAdminAuthorization(AdminAuthorization.FromString(a.getAdminAuthorization()));
+        });
+
+        var req =  ModelRequest.New("RotateVRK", "1", "Admin:1", Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
+        req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000);
+        authorizerBuilder.AddAuthorizationToSignRequest(req);
+
+        int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
+        int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
+
+        if ( threshold == 0 || max == 0){
+            throw new RuntimeException("Env variables not set: THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max);
+        }
+
+        String currentSecretKeys = config.getFirst("clientSecret");
+        SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
+
+        SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
+        settings.VVKId = config.getFirst("vvkId");
+        settings.HomeOrkUrl = config.getFirst("systemHomeOrk");
+        settings.PayerPublicKey = config.getFirst("payerPublic");
+        settings.ObfuscatedVendorPublicKey = config.getFirst("obfGVVK");
+        settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
+        settings.Threshold_T = threshold;
+        settings.Threshold_N = max;
+
+        authorizerBuilder.AddAuthorizationToSignRequest(req);
+        SignatureResponse response = Midgard.SignModel(settings, req);
+
+        org.tidecloak.jpa.entities.Licensing.LicenseHistoryEntity hist =
+                em.createNamedQuery("LicenseHistory.findLatestByGvrk",
+                                org.tidecloak.jpa.entities.Licensing.LicenseHistoryEntity.class)
+                        .setParameter("gvrk", changesetRequestEntity.getDraftRequest())
+                        .setMaxResults(1)
+                        .getResultStream()
+                        .findFirst()
+                        .orElse(null);
+
+        if(hist == null) throw new RuntimeException("License not found in history. " + changesetRequestEntity.getDraftRequest());
+
+        hist.setGVRKCertificate(response.Signatures[0]);
+        LicensingDraftEntity licensingDraftEntity = em
+                .createNamedQuery("LicensingDraftEntity.findByChangeRequestId", LicensingDraftEntity.class)
+                .setParameter("changeRequestId", changesetRequestEntity.getChangesetRequestId())
+                .getSingleResult();
+
+        licensingDraftEntity.setDraftStatus(DraftStatus.ACTIVE);
+        licensingDraftEntity.setTimestamp(System.currentTimeMillis());
+        em.remove(changesetRequestEntity);
+    };
 }

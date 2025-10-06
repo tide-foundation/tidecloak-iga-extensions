@@ -11,15 +11,19 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.midgard.Serialization.Tools;
+import org.midgard.models.ModelRequest;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.base.iga.ChangeSetProcessors.keys.ChangeRequestKey;
 import org.tidecloak.base.iga.interfaces.TideUserAdapter;
+import org.tidecloak.base.iga.utils.LicenseHistory;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.LicensingDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 
+import javax.xml.bind.DatatypeConverter;
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.Objects;
@@ -60,7 +64,7 @@ public class RealmLicenseProcessor implements org.tidecloak.base.iga.ChangeSetPr
                 logger.debug(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", entity.getId(), entity.getChangeRequestId()));
                 handleCreateRequest(session, entity, em, callback);
                 ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
-                saveDraftReq(entity, em, session.getContext().getRealm());
+                callback.run();
             } else {
                 logger.warn(String.format("Unsupported action type: %s for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", action, entity.getId(), entity.getChangeRequestId()));
                 throw new IllegalArgumentException("Unsupported action: " + action);
@@ -120,7 +124,7 @@ public class RealmLicenseProcessor implements org.tidecloak.base.iga.ChangeSetPr
         return null;
     }
 
-    private void saveDraftReq(LicensingDraftEntity entity, EntityManager em, RealmModel realm) {
+    public void saveDraftReq(LicensingDraftEntity entity, EntityManager em, RealmModel realm, String gvrk) {
         ComponentModel componentModel = realm.getComponentsStream()
                 .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
                 .findFirst()
@@ -130,24 +134,16 @@ public class RealmLicenseProcessor implements org.tidecloak.base.iga.ChangeSetPr
             throw new BadRequestException("There is no tide-vendor-key component set up for this realm, " + realm.getName());
         }
 
-        MultivaluedHashMap<String, String> config = componentModel.getConfig();
-        String gVRK = config.getFirst("gVRK");
-        String gVRKCertificate = config.getFirst("gVRKCertificate");
-
-        byte[] draft = Tools.CreateTideMemory(
-                HexFormat.of().parseHex(gVRK),
-                Base64.getDecoder().decode(gVRKCertificate)
-        );
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(entity.getChangeRequestId(), ChangeSetType.REALM_LICENSING));
         if (changesetRequestEntity == null) {
             ChangesetRequestEntity cre = new ChangesetRequestEntity();
             cre.setChangesetRequestId(entity.getChangeRequestId());
-            cre.setDraftRequest(Base64.getEncoder().encodeToString(draft));
+            cre.setDraftRequest(Base64.getEncoder().encodeToString(Base64.getEncoder().encode(DatatypeConverter.parseHexBinary(gvrk))));
             cre.setChangesetType(ChangeSetType.REALM_LICENSING);
             em.persist(entity);
             em.flush();
         } else {
-            changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(draft));
+            changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(Base64.getEncoder().encode(DatatypeConverter.parseHexBinary(gvrk))));
             em.flush();
         }
     }
