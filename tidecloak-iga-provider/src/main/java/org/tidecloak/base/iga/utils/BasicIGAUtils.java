@@ -270,6 +270,22 @@ public class BasicIGAUtils {
                         yield List.of(changeSetId);
                     }
                 }
+                case REALM_LICENSING -> {
+                    try {
+                        // real entity available?
+                        Class<?> offClass = Class.forName(
+                                "org.ragnarok.jpa.entities.drafting.LicensingDraftEntity"
+                        );
+                        yield em.createNamedQuery(
+                                        "LicensingDraft.findByChangeRequestId",
+                                        offClass
+                                )
+                                .setParameter("changeRequestId", changeSetId)
+                                .getResultList();
+                    } catch (ClassNotFoundException cnfe) {
+                        yield List.of(changeSetId);
+                    }
+                }
 
                 case USER_ROLE ->
                         em.createNamedQuery(
@@ -416,6 +432,38 @@ public class BasicIGAUtils {
                         // fallback to native SQL: only update DRAFT_STATUS
                         em.createNativeQuery(
                                         "UPDATE OFFBOARDING_DRAFT " +
+                                                "   SET DRAFT_STATUS = ? " +
+                                                " WHERE CHANGE_REQUEST_ID = ?")
+                                .setParameter(1, draftStatus.name())
+                                .setParameter(2, changeSetID)
+                                .executeUpdate();
+                    }
+                }
+                break;
+            case REALM_LICENSING:
+                if (changeSetAction == ActionType.CREATE) {
+                    try {
+                        Class<?> offClass = Class.forName(
+                                "org.ragnarok.jpa.entities.drafting.LicensingDraftEntity"
+                        );
+
+                        if (offClass.isInstance(draftRecordEntity)) {
+                            Method setStatus = offClass.getMethod("setDraftStatus", DraftStatus.class);
+                            setStatus.invoke(draftRecordEntity, draftStatus);
+                            em.merge(draftRecordEntity);
+                        } else {
+                            Object off = em.createNamedQuery(
+                                            "LicensingDraft.findByChangeRequestId", offClass)
+                                    .setParameter("changeRequestId", changeSetID)
+                                    .getSingleResult();
+                            Method setStatus2 = offClass.getMethod("setDraftStatus", DraftStatus.class);
+                            setStatus2.invoke(off, draftStatus);
+                            em.merge(off);
+                        }
+                    } catch (ClassNotFoundException cnfe) {
+                        // fallback to native SQL: only update DRAFT_STATUS
+                        em.createNativeQuery(
+                                        "UPDATE LICENSING_DRAFT " +
                                                 "   SET DRAFT_STATUS = ? " +
                                                 " WHERE CHANGE_REQUEST_ID = ?")
                                 .setParameter(1, draftStatus.name())
