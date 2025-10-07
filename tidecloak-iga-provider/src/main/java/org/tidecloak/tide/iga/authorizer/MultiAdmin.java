@@ -22,6 +22,7 @@ import org.tidecloak.base.iga.utils.LicenseHistory;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
+import org.tidecloak.jpa.entities.Licensing.LicenseHistoryEntity;
 import org.tidecloak.jpa.entities.LicensingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
@@ -132,7 +133,7 @@ public class MultiAdmin implements Authorizer{
         String authorizerType = authorizer.getType();
 
         if(changeSet.getType().equals(ChangeSetType.REALM_LICENSING)){
-            commitLicenseSettingsWithAuthorizer(session, em, changesetRequestEntity);
+            commitLicenseSettingsWithAuthorizer(session, em, changesetRequestEntity, authorizer);
             return Response.ok("Change set approved and committed with authorizer type:  " + authorizerType).build();
         }
 
@@ -218,7 +219,7 @@ public class MultiAdmin implements Authorizer{
         return Response.ok("Change set approved and committed with authorizer type:  " + authorizerType).build();
     }
 
-    private void commitLicenseSettingsWithAuthorizer(KeycloakSession session, EntityManager em, ChangesetRequestEntity changesetRequestEntity) throws Exception {
+    private void commitLicenseSettingsWithAuthorizer(KeycloakSession session, EntityManager em, ChangesetRequestEntity changesetRequestEntity, AuthorizerEntity authorizer) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         ObjectMapper objectMapper = new ObjectMapper();
         RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
@@ -238,19 +239,15 @@ public class MultiAdmin implements Authorizer{
         }
 
         MultivaluedHashMap<String, String> config = componentModel.getConfig();
-        String gVRK = config.getFirst("gVRK");
+        ModelRequest req =  ModelRequest.New("RotateVRK", "1", "Admin:1", DatatypeConverter.parseHexBinary(changesetRequestEntity.getDraftRequest()));
 
+        req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000); // expiry in 1 month
         AdminAuthorizerBuilder authorizerBuilder = new AdminAuthorizerBuilder();
         authorizerBuilder.AddInitCert(cert);
         authorizerBuilder.AddInitCertSignature(tideRoleEntity.getInitCertSig());
-
         changesetRequestEntity.getAdminAuthorizations().forEach(a -> {
             authorizerBuilder.AddAdminAuthorization(AdminAuthorization.FromString(a.getAdminAuthorization()));
         });
-
-        var req =  ModelRequest.New("RotateVRK", "1", "Admin:1", Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
-        req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000);
-        authorizerBuilder.AddAuthorizationToSignRequest(req);
 
         int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
         int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
@@ -274,20 +271,34 @@ public class MultiAdmin implements Authorizer{
         authorizerBuilder.AddAuthorizationToSignRequest(req);
         SignatureResponse response = Midgard.SignModel(settings, req);
 
-        org.tidecloak.jpa.entities.Licensing.LicenseHistoryEntity hist =
-                em.createNamedQuery("LicenseHistory.findLatestByGvrk",
-                                org.tidecloak.jpa.entities.Licensing.LicenseHistoryEntity.class)
+        // fetch latest history for this draft request (you already have this)
+        LicenseHistoryEntity hist =
+                em.createNamedQuery("LicenseHistory.findLatestByGvrk", LicenseHistoryEntity.class)
                         .setParameter("gvrk", changesetRequestEntity.getDraftRequest())
                         .setMaxResults(1)
                         .getResultStream()
                         .findFirst()
                         .orElse(null);
 
-        if(hist == null) throw new RuntimeException("License not found in history. " + changesetRequestEntity.getDraftRequest());
+        // resolve which GVRK to use
+        String draftReq = changesetRequestEntity.getDraftRequest();
+        String pendingGvrk = config.getFirst("pendingGVRK"); // null if not set
 
-        hist.setGVRKCertificate(response.Signatures[0]);
+        if (pendingGvrk.equals(draftReq)) {
+            // pending entry matches this draft request – use it
+            config.putSingle("pendingGVRKCertificate", response.Signatures[0]);
+            componentModel.setConfig(config);
+            realm.updateComponent(componentModel);
+        } else if (hist != null && hist.getGVRK() != null) {
+            hist.setGVRKCertificate(response.Signatures[0]);
+        } else {
+            // nothing pending and no history – handle as you prefer
+            // e.g., throw, return Optional.empty(), or log & default
+            throw new IllegalStateException("No GVRK found (no pending match and no history) for draft: " + draftReq);
+        }
+
         LicensingDraftEntity licensingDraftEntity = em
-                .createNamedQuery("LicensingDraftEntity.findByChangeRequestId", LicensingDraftEntity.class)
+                .createNamedQuery("LicensingDraft.findByChangeRequestId", LicensingDraftEntity.class)
                 .setParameter("changeRequestId", changesetRequestEntity.getChangesetRequestId())
                 .getSingleResult();
 

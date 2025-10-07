@@ -70,10 +70,6 @@ public class TideAdminRealmResource {
         this.processor = factory.getProcessor(ChangeSetType.REALM_LICENSING);
     }
 
-    // -----------------------------
-    // REQUESTS (unchanged behavior)
-    // -----------------------------
-
     @GET
     @Path("change-set/licensing/requests")
     public Response getRequestedChangesForUsers() {
@@ -85,10 +81,6 @@ public class TideAdminRealmResource {
         List<RequestedChanges> changes = new ArrayList<>(processLicensingRequests(em, realm));
         return Response.ok(changes).build();
     }
-
-    // ----------------------------------------
-    // TRIGGER LICENSING (kept as you provided)
-    // ----------------------------------------
 
     @POST
     @Path("trigger-license-signing")

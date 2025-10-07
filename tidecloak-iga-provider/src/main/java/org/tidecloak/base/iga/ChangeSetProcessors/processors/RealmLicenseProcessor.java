@@ -33,14 +33,20 @@ public class RealmLicenseProcessor implements org.tidecloak.base.iga.ChangeSetPr
     protected static final Logger logger = Logger.getLogger(RealmLicenseProcessor.class);
 
     @Override
-    public void cancel(KeycloakSession session, LicensingDraftEntity entity, EntityManager em, ActionType actionType){
-        String realmId = session.getContext().getRealm().getId();
+    public void cancel(KeycloakSession session, LicensingDraftEntity entity, EntityManager em, ActionType actionType) {
 
-        em.createNamedQuery("LicensingDraft.deleteByRealm")
-                .setParameter("realmId", realmId)
-                .executeUpdate();
+        LicensingDraftEntity draft =
+                em.createNamedQuery("LicensingDraftEntity.findByChangeRequestId", LicensingDraftEntity.class)
+                        .setParameter("changeRequestId", entity.getChangeRequestId())
+                        .setMaxResults(1)
+                        .getResultStream()
+                        .findFirst()
+                        .orElse(null);
 
-        em.flush();
+        if (draft != null) {
+            em.remove(draft);
+            em.flush();
+        }
 
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(entity.getId(), ChangeSetType.REALM_LICENSING));
         if(changesetRequestEntity != null){
@@ -138,12 +144,12 @@ public class RealmLicenseProcessor implements org.tidecloak.base.iga.ChangeSetPr
         if (changesetRequestEntity == null) {
             ChangesetRequestEntity cre = new ChangesetRequestEntity();
             cre.setChangesetRequestId(entity.getChangeRequestId());
-            cre.setDraftRequest(Base64.getEncoder().encodeToString(Base64.getEncoder().encode(DatatypeConverter.parseHexBinary(gvrk))));
+            cre.setDraftRequest(gvrk);
             cre.setChangesetType(ChangeSetType.REALM_LICENSING);
             em.persist(entity);
             em.flush();
         } else {
-            changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(Base64.getEncoder().encode(DatatypeConverter.parseHexBinary(gvrk))));
+            changesetRequestEntity.setDraftRequest(gvrk);
             em.flush();
         }
     }
