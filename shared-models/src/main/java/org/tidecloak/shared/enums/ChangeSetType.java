@@ -11,5 +11,8 @@ public enum ChangeSetType {
     USER_GROUP_MEMBERSHIP,
     COMPOSITE_ROLE,
     GROUP_ROLE,
-    CLIENT_FULLSCOPE;
+    CLIENT_FULLSCOPE,
+    RAGNAROK,
+    REALM_LICENSING
+    ;
 }

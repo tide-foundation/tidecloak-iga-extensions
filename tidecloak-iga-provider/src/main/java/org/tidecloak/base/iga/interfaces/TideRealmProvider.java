@@ -13,6 +13,7 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.RepresentationToModel;
 import org.keycloak.representations.idm.ProtocolMapperRepresentation;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
@@ -32,7 +33,7 @@ import static org.keycloak.common.util.StackUtil.getShortStackTrace;
 
 public class TideRealmProvider extends JpaRealmProvider {
     private final KeycloakSession session;
-    private final ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+    private final ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
 
 
     public TideRealmProvider(KeycloakSession session, EntityManager em, Set<String> clientSearchableAttributes, Set<String> groupSearchableAttributes) {

@@ -178,25 +178,6 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
                 em.remove(changesetRequestEntity);
             }
             em.flush();
-
-            List<AccessProofDetailEntity> clientEntities = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndRealm", AccessProofDetailEntity.class)
-                    .setParameter("changesetType", ChangeSetType.CLIENT)
-                    .setParameter("realmId", realm.getId()).getResultList();
-
-            if(parentRole.equals(realm.getDefaultRole())){
-                 if (!clientEntities.isEmpty()) {
-                     clientEntities.forEach(c -> {
-                         try {
-                             ClientModel client = realm.getClientById(c.getClientId());
-                             String defaultFullScopeUserContext = generateRealmDefaultUserContext(session, realm, client, childRole, em, false);
-                             em.remove(c);
-                             ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, client, null, new ChangeRequestKey(entity.getId(), entity.getChangeRequestId()), ChangeSetType.CLIENT, defaultFullScopeUserContext);
-                         } catch (Exception e) {
-                             throw new RuntimeException(e);
-                         }
-                     });
-                }
-            }
         }
         else {
             List<ClientModel> clientList = getUniqueClientList(session, realm, childRole, em);

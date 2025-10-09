@@ -7,6 +7,7 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.RoleUtils;
 import org.keycloak.representations.AccessToken;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.jpa.entities.ChangeRequestKey;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.*;
@@ -56,7 +57,7 @@ public class UserContextUtils extends UserContextUtilBase {
                 em.flush();
 
                 ChangeSetType changeSetType = details.get(0).getChangesetType();
-                ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+                ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
                 WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, changeSetType);
                 Object mapping = getMappings(em, changeRequestKey.getMappingId(), changeSetType);
                 changeSetProcessorFactory.getProcessor(changeSetType).executeWorkflow(session, mapping, em, WorkflowType.REQUEST, params, null);

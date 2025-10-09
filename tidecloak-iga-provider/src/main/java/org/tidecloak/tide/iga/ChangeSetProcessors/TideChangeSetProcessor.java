@@ -1,16 +1,25 @@
 package org.tidecloak.tide.iga.ChangeSetProcessors;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
+import jakarta.ws.rs.BadRequestException;
+import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.midgard.Serialization.Tools;
+import org.midgard.models.AdminAuthorization;
+import org.midgard.models.AdminAuthorizerBuilder;
 import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+import org.midgard.models.ModelRequest;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
+import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
@@ -26,6 +35,7 @@ import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
+import org.tidecloak.shared.models.SecretKeys;
 
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -180,7 +190,7 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
                         })
                         .collect(Collectors.toList());
 
-        ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+        ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
 
         reqAndDrafts.forEach(entry -> {
             ChangesetRequestEntity req   = entry.getKey();
@@ -270,6 +280,7 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
                     .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
                     .findFirst()
                     .orElse(null);
+
 
             if(componentModel != null){
                 List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)

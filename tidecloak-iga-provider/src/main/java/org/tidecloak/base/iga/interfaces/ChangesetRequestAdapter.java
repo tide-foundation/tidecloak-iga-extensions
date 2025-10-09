@@ -30,13 +30,10 @@ public class ChangesetRequestAdapter {
         if(changesetRequestEntity == null){
             throw new Exception("No change set request found with this record id, " + changeSetRequestID);
         }
-        UserEntity adminEntity = em.find(UserEntity.class, adminUser.getId());
-        ClientModel client = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
         ComponentModel componentModel = realm.getComponentsStream()
                 .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
                 .findFirst()
                 .orElse(null);
-
 
         if(BasicIGAUtils.isIGAEnabled(session.getContext().getRealm()) && componentModel == null) {
             String json = "{\"id\":\"" + adminUser.getId() + "\"}";
@@ -80,7 +77,7 @@ public class ChangesetRequestAdapter {
             List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
             draftRecordEntity.forEach(d -> {
                 try {
-                    BasicIGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), d);
+                    BasicIGAUtils.updateDraftStatus(session, ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), d);
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
@@ -103,7 +100,7 @@ public class ChangesetRequestAdapter {
         List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
         draftRecordEntity.forEach(d -> {
             try {
-                BasicIGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), d);
+                BasicIGAUtils.updateDraftStatus(session, ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), d);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }

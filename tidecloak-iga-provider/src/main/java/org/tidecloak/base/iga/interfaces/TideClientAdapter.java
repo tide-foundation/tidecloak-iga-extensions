@@ -8,6 +8,7 @@ import org.keycloak.models.jpa.ClientAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -20,7 +21,7 @@ import java.util.*;
 public class TideClientAdapter extends ClientAdapter {
 
     private final boolean isMigration;
-    private final ChangeSetProcessorFactory changeSetProcessorFactory = new ChangeSetProcessorFactory();
+    private final ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
 
     public TideClientAdapter(RealmModel realm, EntityManager em, KeycloakSession session, ClientEntity entity) {
         super(realm, em, session, entity);
