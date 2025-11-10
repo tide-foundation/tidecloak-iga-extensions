@@ -25,7 +25,7 @@ import org.keycloak.services.resources.LoginActionsService;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.*;
-import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+//import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
@@ -359,7 +359,8 @@ public class TideAdminRealmResource {
             if (tideRoleDraftEntity.isEmpty()) {
                 throw new Exception("Invalid request, no role draft entity found for this role ID: " + roleId);
             }
-
+            throw new Exception("Not implemented");
+            /*
             InitializerCertifcate initializerCertifcate =
                     InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
 
@@ -368,6 +369,7 @@ public class TideAdminRealmResource {
             response.put("sig", tideRoleDraftEntity.get(0).getInitCertSig());
 
             return buildResponse(200, objectMapper.writeValueAsString(response));
+            */
         } catch (Exception e) {
             logger.error("Error getting init cert", e);
             throw e;
@@ -486,6 +488,8 @@ public class TideAdminRealmResource {
             }
 
             UserContext adminContext = new UserContext(userClientAccessProofEntity.get(0).getAccessProof());
+            throw new Exception("Not implemented");
+            /*
             AdminAuthorization adminAuthorization = new AdminAuthorization(
                     adminContext.ToString(),
                     userClientAccessProofEntity.get(0).getAccessProofSig(),
@@ -495,6 +499,7 @@ public class TideAdminRealmResource {
             );
 
             return buildResponse(200, adminAuthorization.ToString());
+            */
 
         } catch (Exception e) {
             logger.error("Error creating authorization", e);

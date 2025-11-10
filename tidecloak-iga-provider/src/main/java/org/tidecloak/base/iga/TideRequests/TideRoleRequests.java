@@ -34,7 +34,7 @@ public class TideRoleRequests {
         tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
 
         ArrayList<String> signModels = new ArrayList<String>();
-        signModels.addAll(List.of("UserContext:1", "Rules:1", "Offboard:1", "RotateVRK:1"));
+        signModels.addAll(List.of("UserContext:1", "Offboard:1", "RotateVRK:1"));
 
         InitializerCertificate initCert = createRoleInitCert(session, resource, tideRealmAdmin, "1", "EdDSA", signModels);
 
@@ -80,6 +80,7 @@ public class TideRoleRequests {
         if(roleDraft.isEmpty()){
             throw new Exception("This authorizer role does not have an role draft entity, " + role.getName());
         }
+
         InitializerCertificate prevInitializerCertifcate = InitializerCertificate.FromString(roleDraft.get(0).getInitCert());
 
         List<TideUserRoleMappingDraftEntity> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
@@ -120,6 +121,7 @@ public class TideRoleRequests {
         initCertDraft.setInitCert(initCertString);
         em.persist(initCertDraft);
         em.flush();
+        
     }
 
     public static RoleInitializerCertificateDraftEntity getDraftRoleInitCert(KeycloakSession session, String recordId){
@@ -174,8 +176,7 @@ public class TideRoleRequests {
         MultivaluedHashMap<String, String> config = componentModel.getConfig();
         String vvkId = config.getFirst("vvkId");
         String vendor = session.getContext().getRealm().getName();
-
-
+   
         InitializerCertificate initializerCertifcate = InitializerCertificate.constructInitCert(vvkId, algorithm, certVersion, vendor, resource, Integer.parseInt(threshold),  signModels);
 
         List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", recordId).getResultList();
@@ -191,7 +192,7 @@ public class TideRoleRequests {
         initCertDraft.setInitCert(initCertString);
         em.persist(initCertDraft);
         em.flush();
-
+    
     }
 
     public static InitializerCertificate createRoleInitCert(KeycloakSession session, String resource, RoleModel role , String certVersion, String algorithm, ArrayList<String> signModels) throws JsonProcessingException {

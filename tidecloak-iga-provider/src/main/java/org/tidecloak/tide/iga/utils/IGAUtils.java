@@ -3,7 +3,7 @@ package org.tidecloak.tide.iga.utils;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.midgard.Midgard;
-import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+//import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
@@ -19,7 +19,7 @@ import java.util.List;
 
 public class IGAUtils {
 
-
+/*
     public static List<String>  signInitialTideAdmin(MultivaluedHashMap<String, String> keyProviderConfig,
                                                       UserContext[] userContexts,
                                                       InitializerCertifcate initCert,
@@ -75,7 +75,7 @@ public class IGAUtils {
         return signatures;
 
     }
-
+*/
     public static List<String>  signContextsWithVrk(MultivaluedHashMap<String, String> keyProviderConfig,
                                                      UserContext[] userContexts,
                                                      AuthorizerEntity authorizer,

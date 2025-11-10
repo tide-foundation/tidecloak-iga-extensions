@@ -10,9 +10,9 @@ import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.midgard.Serialization.Tools;
-import org.midgard.models.AdminAuthorization;
-import org.midgard.models.AdminAuthorizerBuilder;
-import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+//import org.midgard.models.AdminAuthorization;
+//import org.midgard.models.AdminAuthorizerBuilder;
+//import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.ModelRequest;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
@@ -254,93 +254,93 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
         boolean isUnassignRole;
         UserModel originalUser;
 
-        InitializerCertifcate cert = null;
-        byte[] certHash = new byte[0];
+        // InitializerCertifcate cert = null;
+        // byte[] certHash = new byte[0];
 
-        if (type.equals(ChangeSetType.USER_ROLE)) {
-            TideUserRoleMappingDraftEntity roleMapping = (TideUserRoleMappingDraftEntity)BasicIGAUtils.fetchDraftRecordEntity(em, type, changeRequestKey.getMappingId());
-            if (roleMapping == null) {
-                throw new Exception("Invalid request, no user role mapping draft entity found for this record ID: " + changeRequestKey.getChangeRequestId());
-            }
-            List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
-                    .setParameter("roleId", roleMapping.getRoleId()).getResultList();
-            if(tideRoleDraftEntity.isEmpty()){
-                throw new Exception("Invalid request, no role draft entity found for this role ID: " + roleMapping.getRoleId());
-            }
+        // if (type.equals(ChangeSetType.USER_ROLE)) {
+            // TideUserRoleMappingDraftEntity roleMapping = (TideUserRoleMappingDraftEntity)BasicIGAUtils.fetchDraftRecordEntity(em, type, changeRequestKey.getMappingId());
+            // if (roleMapping == null) {
+            //     throw new Exception("Invalid request, no user role mapping draft entity found for this record ID: " + changeRequestKey.getChangeRequestId());
+            // }
+            // List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+            //         .setParameter("roleId", roleMapping.getRoleId()).getResultList();
+            // if(tideRoleDraftEntity.isEmpty()){
+            //     throw new Exception("Invalid request, no role draft entity found for this role ID: " + roleMapping.getRoleId());
+            // }
 
-            isTideAdminRole = tideRole != null && roleMapping.getRoleId().equals(tideRole.getId());
+            // //isTideAdminRole = tideRole != null && roleMapping.getRoleId().equals(tideRole.getId());
 
-            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, changeRequestKey.getChangeRequestId());
+            // //RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, changeRequestKey.getChangeRequestId());
 
-            hasInitCert = roleInitCert != null;
-            ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, roleMapping);
-            isUnassignRole = changeSetRequest.getActionType().equals(ActionType.DELETE);
-            originalUser = session.users().getUserById(realm, roleMapping.getUser().getId());
-            ComponentModel componentModel = realm.getComponentsStream()
-                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
-                    .findFirst()
-                    .orElse(null);
+            // hasInitCert = false;
+            // ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, roleMapping);
+            // isUnassignRole = changeSetRequest.getActionType().equals(ActionType.DELETE);
+            // originalUser = session.users().getUserById(realm, roleMapping.getUser().getId());
+            // ComponentModel componentModel = realm.getComponentsStream()
+            //         .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+            //         .findFirst()
+            //         .orElse(null);
 
 
-            if(componentModel != null){
-                List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)
-                        .setParameter("ID", componentModel.getId())
-                        .setParameter("types", List.of("firstAdmin", "multiAdmin")).getResultList();
+            // if(componentModel != null){
+            //     List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)
+            //             .setParameter("ID", componentModel.getId())
+            //             .setParameter("types", List.of("firstAdmin", "multiAdmin")).getResultList();
 
-                if (realmAuthorizers.isEmpty()) {
-                    throw new Exception("Authorizer not found for this realm.");
-                }
+            //     if (realmAuthorizers.isEmpty()) {
+            //         throw new Exception("Authorizer not found for this realm.");
+            //     }
 
-                if(isTideAdminRole && realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") && realmAuthorizers.size() == 1){
-                    RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
+            //     // if(isTideAdminRole && realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") && realmAuthorizers.size() == 1){
+            //     //     RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
 
-                    TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                            .setParameter("role", role).getSingleResult();
-                    cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
-                    certHash = cert.hash();
-                }
+            //     //     TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+            //     //             .setParameter("role", role).getSingleResult();
+            //     //     cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
+            //     //     certHash = cert.hash();
+            //     // }
 
-                else if (hasInitCert) {
-                    cert = InitializerCertifcate.FromString(roleInitCert.getInitCert());
-                    certHash = cert.hash();
-                }
-            }
-        } else {
-            isTideAdminRole = false;
-            hasInitCert = false;
-            originalUser = null;
-            isUnassignRole = false;
-        }
+            //     // else if (hasInitCert) {
+            //     //     cert = InitializerCertifcate.FromString(roleInitCert.getInitCert());
+            //     //     certHash = cert.hash();
+            //     // }
+        //     // }
+        // } else {
+        // }
+        isTideAdminRole = false;
+        hasInitCert = false;
+        originalUser = null;
+        isUnassignRole = false;
 
         List<UserContext> userContexts = new ArrayList<>();
         UserContextSignRequest req = new UserContextSignRequest("Admin:1");
 
 
-        InitializerCertifcate finalCert = cert;
-        byte[] finalCertHash = certHash;
+        // InitializerCertifcate finalCert = cert;
+        // byte[] finalCertHash = certHash;
 
         proofDetails.forEach(p -> {
             UserContext userContext = new UserContext(p.getProofDraft());
-            if (hasInitCert || isTideAdminRole) {
-                try {
-                    if(!isUnassignRole) {
-                        userContext.setThreshold(finalCert.getPayload().getThreshold());
-                        userContext.setInitCertHash(finalCertHash);
-                    } else if (originalUser != null && !p.getUser().getId().equals(originalUser.getId())) {
-                        userContext.setThreshold(finalCert.getPayload().getThreshold());
-                        userContext.setInitCertHash(finalCertHash);
-                    }
-                    else {
-                        userContext.setThreshold(0);
-                        userContext.setInitCertHash(null);
-                    }
-                    p.setProofDraft(userContext.ToString());
-                    em.flush();
+            // if (hasInitCert || isTideAdminRole) {
+            //     try {
+            //         if(!isUnassignRole) {
+            //             userContext.setThreshold(finalCert.getPayload().getThreshold());
+            //             userContext.setInitCertHash(finalCertHash);
+            //         } else if (originalUser != null && !p.getUser().getId().equals(originalUser.getId())) {
+            //             userContext.setThreshold(finalCert.getPayload().getThreshold());
+            //             userContext.setInitCertHash(finalCertHash);
+            //         }
+            //         else {
+            //             userContext.setThreshold(0);
+            //             userContext.setInitCertHash(null);
+            //         }
+            //         p.setProofDraft(userContext.ToString());
+            //         em.flush();
 
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-            }
+            //     } catch (Exception e) {
+            //         throw new RuntimeException(e);
+            //     }
+            // }
             userContexts.add(userContext);
         });
 
@@ -352,12 +352,12 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
         });
         req.SetNumberOfUserContexts(numberOfNormalUserContext.get());
 
-        if(hasInitCert || isTideAdminRole) { req.SetInitializationCertificate(finalCert); }
+        // if(hasInitCert || isTideAdminRole) { req.SetInitializationCertificate(finalCert); }
 
         // filter user contexts, admin contexts first then normal user context
-        Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
-        Stream<UserContext> adminContexts = userContexts.stream().filter(x -> x.getInitCertHash() != null);
-        List<UserContext> orderedContext = Stream.concat(adminContexts, normalUserContext).toList();
+        // Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
+        // Stream<UserContext> adminContexts = userContexts.stream().filter(x -> x.getInitCertHash() != null);
+        List<UserContext> orderedContext = userContexts;
 
         req.SetUserContexts(orderedContext.toArray(new UserContext[0]));
         String draft = Base64.getEncoder().encodeToString(req.GetDraft());

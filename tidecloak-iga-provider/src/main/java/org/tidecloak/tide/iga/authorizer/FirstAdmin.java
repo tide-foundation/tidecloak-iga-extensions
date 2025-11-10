@@ -10,7 +10,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
-import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+//import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
@@ -57,9 +57,12 @@ public class FirstAdmin implements Authorizer {
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", role).getSingleResult();
 
-        InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
+        
 
         if(isAssigningTideRealmAdminRole(draftEntity, session)) {
+                    throw new Exception("Not implemented");
+/*
+            InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
 
             // Check if the user to be assigned the Tide Realm Admin role is a tide user
             TideUserRoleMappingDraftEntity userRoleMappingDraft = (TideUserRoleMappingDraftEntity) draftEntity;
@@ -90,6 +93,7 @@ public class FirstAdmin implements Authorizer {
             for(int i = 0; i < orderedProofDetails.size(); i++){
                 orderedProofDetails.get(i).setSignature(signatures.get(i + 1));
             }
+            */
         } else {
             List<String> signatures = IGAUtils.signContextsWithVrk(componentModel.getConfig(), orderedContext.toArray(new UserContext[0]), authorizer, changesetRequestEntity);
             for(int i = 0; i < userContexts.size(); i++){

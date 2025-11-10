@@ -5,7 +5,7 @@ import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.UserEntity;
-import org.midgard.models.AdminAuthorization;
+//import org.midgard.models.AdminAuthorization;
 import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.jpa.entities.AdminAuthorizationEntity;
@@ -46,6 +46,8 @@ public class TideChangesetRequestAdapter extends ChangesetRequestAdapter {
         }
 
         UserContext adminContext = new UserContext(adminAccessProof.get(0).getAccessProof());
+        throw new Exception("Not implemented");
+        /*
         AdminAuthorization adminAuthorization = new AdminAuthorization(adminContext.ToString(), adminAccessProof.get(0).getAccessProofSig(), adminTideAuthMsg, adminTideBlindSig, adminSessionApprovalSig);
         AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), adminAuthorization.ToString(), adminUser.getId(), em);
         changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
@@ -58,6 +60,7 @@ public class TideChangesetRequestAdapter extends ChangesetRequestAdapter {
                 throw new RuntimeException(e);
             }
         });
+        */
     }
 
 

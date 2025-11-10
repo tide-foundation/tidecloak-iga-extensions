@@ -12,7 +12,7 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
 import org.midgard.Midgard;
 import org.midgard.models.*;
-import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+//import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
@@ -148,6 +148,8 @@ public class MultiAdmin implements Authorizer{
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", role).getSingleResult();
 
+        throw new Exception("Not implemented");
+        /*
         InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
         UserContextSignRequest req = new UserContextSignRequest("Admin:1");
         req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
@@ -217,6 +219,7 @@ public class MultiAdmin implements Authorizer{
         }
         em.flush();
         return Response.ok("Change set approved and committed with authorizer type:  " + authorizerType).build();
+        */
     }
 
     private void commitLicenseSettingsWithAuthorizer(KeycloakSession session, EntityManager em, ChangesetRequestEntity changesetRequestEntity, AuthorizerEntity authorizer) throws Exception {
@@ -227,6 +230,8 @@ public class MultiAdmin implements Authorizer{
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", role).getSingleResult();
 
+        throw new Exception("Not implemented");
+        /*
         InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
 
         ComponentModel componentModel = realm.getComponentsStream()
@@ -305,5 +310,6 @@ public class MultiAdmin implements Authorizer{
         licensingDraftEntity.setDraftStatus(DraftStatus.ACTIVE);
         licensingDraftEntity.setTimestamp(System.currentTimeMillis());
         em.remove(changesetRequestEntity);
+        */
     };
 }
