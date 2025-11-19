@@ -25,7 +25,6 @@ import org.keycloak.services.resources.LoginActionsService;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.midgard.Midgard;
 import org.midgard.models.*;
-import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
@@ -222,54 +221,6 @@ public class TideAdminRealmResource {
                 .collect(Collectors.toList());
     }
 
-    // ------------------------------------------------
-    // EXISTING endpoints below (unchanged or as-is)
-    // ------------------------------------------------
-
-    @POST
-    @Path("add-authorization")
-    @Produces(MediaType.TEXT_PLAIN)
-    public Response AddAuthorization(@FormParam("changeSetId") String changeSetId,
-                                     @FormParam("actionType") String actionType,
-                                     @FormParam("changeSetType") String changeSetType,
-                                     @FormParam("authorizerApproval") String authorizerApproval,
-                                     @FormParam("authorizerAuthentication") String authorizerAuthentication) {
-        try {
-            RoleModel role = session.getContext().getRealm()
-                    .getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID)
-                    .getRole(tideRealmAdminRole);
-            auth.adminAuth().getUser().hasRole(role);
-
-            ComponentModel componentModel = findVendorComponent(session.getContext().getRealm());
-            if (componentModel == null) {
-                logger.warn("There is no tide-vendor-key component set up for this realm, "
-                        + session.getContext().getRealm());
-                return ErrorPage.error(session, null, Response.Status.BAD_REQUEST,
-                        "There is no tide-vendor-key component set up for this realm, "
-                                + session.getContext().getRealm());
-            }
-            MultivaluedHashMap<String, String> tideVendorKeyConfig = componentModel.getConfig();
-            ObjectMapper objectMapper = new ObjectMapper();
-            String currentSecretKeys = tideVendorKeyConfig.getFirst("clientSecret");
-
-            SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
-            String vrk = secretKeys.activeVrk;
-
-            VendorData vendorData = Midgard.DecryptVendorData(authorizerAuthentication, vrk);
-
-            ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSetType, changeSetId, actionType,
-                    auth.adminAuth().getUser(), vendorData.AuthToken, vendorData.blindSig, authorizerApproval);
-
-            return buildResponse(200,
-                    "Successfully added admin authorization to changeSetRequest with id " + changeSetId);
-
-        } catch (Exception e) {
-            logger.error("Error adding authorization to change set request with ID: " + changeSetId, e);
-            return buildResponse(500,
-                    "Error adding authorization to change set request with ID: " + changeSetId + " ." + e.getMessage());
-        }
-    }
-
     @POST
     @Path("add-rejection")
     @Produces(MediaType.TEXT_PLAIN)
@@ -345,36 +296,6 @@ public class TideAdminRealmResource {
     }
 
     @GET
-    @Path("get-init-cert")
-    @Produces(MediaType.TEXT_PLAIN)
-    public Response GetInitCert(@QueryParam("roleId") String roleId) throws Exception {
-        try {
-            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-            ObjectMapper objectMapper = new ObjectMapper();
-            List<org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity> tideRoleDraftEntity =
-                    em.createNamedQuery("getRoleDraftByRoleId",
-                                    org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity.class)
-                            .setParameter("roleId", roleId).getResultList();
-
-            if (tideRoleDraftEntity.isEmpty()) {
-                throw new Exception("Invalid request, no role draft entity found for this role ID: " + roleId);
-            }
-
-            InitializerCertifcate initializerCertifcate =
-                    InitializerCertifcate.FromString(tideRoleDraftEntity.get(0).getInitCert());
-
-            Map<String, String> response = new HashMap<>();
-            response.put("cert", Base64.getUrlEncoder().encodeToString(initializerCertifcate.Encode()));
-            response.put("sig", tideRoleDraftEntity.get(0).getInitCertSig());
-
-            return buildResponse(200, objectMapper.writeValueAsString(response));
-        } catch (Exception e) {
-            logger.error("Error getting init cert", e);
-            throw e;
-        }
-    }
-
-    @GET
     @Path("Create-Approval-URI")
     public Response CreateApprovalUri() throws URISyntaxException, JsonProcessingException {
         IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
@@ -445,61 +366,6 @@ public class TideAdminRealmResource {
         }
 
         return buildResponse(200, objectMapper.writeValueAsString(response));
-    }
-
-    @POST
-    @Path("create-authorization")
-    @Produces(MediaType.TEXT_PLAIN)
-    public Response CreateAuthorization(@QueryParam("clientId") String clientId,
-                                        @FormParam("authorizerApproval") String authorizerApproval,
-                                        @FormParam("authorizerAuthentication") String authorizerAuthentication) {
-        try {
-            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-            UserModel user = auth.adminAuth().getUser();
-
-            ComponentModel componentModel = findVendorComponent(session.getContext().getRealm());
-            if (componentModel == null) {
-                logger.warn("There is no tide-vendor-key component set up for this realm, "
-                        + session.getContext().getRealm());
-                return ErrorPage.error(session, null, Response.Status.BAD_REQUEST,
-                        "There is no tide-vendor-key component set up for this realm, "
-                                + session.getContext().getRealm());
-            }
-            MultivaluedHashMap<String, String> tideVendorKeyConfig = componentModel.getConfig();
-            ObjectMapper objectMapper = new ObjectMapper();
-            String currentSecretKeys = tideVendorKeyConfig.getFirst("clientSecret");
-
-            SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
-            String vrk = secretKeys.activeVrk;
-
-            VendorData vendorData = Midgard.DecryptVendorData(authorizerAuthentication, vrk);
-
-            UserEntity userEntity = em.find(UserEntity.class, user.getId());
-            List<UserClientAccessProofEntity> userClientAccessProofEntity =
-                    em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
-                            .setParameter("user", userEntity)
-                            .setParameter("clientId", realm.getClientByClientId(clientId).getId()).getResultList();
-
-            if (userClientAccessProofEntity == null || userClientAccessProofEntity.isEmpty()) {
-                throw new Exception("This user does not have any roles for this client: Client UID: "
-                        + clientId + ", User ID: " + userEntity.getId());
-            }
-
-            UserContext adminContext = new UserContext(userClientAccessProofEntity.get(0).getAccessProof());
-            AdminAuthorization adminAuthorization = new AdminAuthorization(
-                    adminContext.ToString(),
-                    userClientAccessProofEntity.get(0).getAccessProofSig(),
-                    vendorData.AuthToken,
-                    vendorData.blindSig,
-                    authorizerApproval
-            );
-
-            return buildResponse(200, adminAuthorization.ToString());
-
-        } catch (Exception e) {
-            logger.error("Error creating authorization", e);
-            return buildResponse(500, "Error creating authorization" + e.getMessage());
-        }
     }
 
     @POST

@@ -7,13 +7,15 @@ import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
+import org.midgard.models.Policy.*;
+
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
-import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
+import org.tidecloak.jpa.entities.drafting.PolicyDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.DraftStatus;
-import org.tidecloak.shared.models.InitializerCertificateModel.InitializerCertificate;
+
 
 import java.util.*;
 
@@ -23,7 +25,7 @@ import static org.tidecloak.base.iga.utils.BasicIGAUtils.getRoleIdFromEntity;
 public class TideRoleRequests {
 
     // Creates a Realm Admin role for current realm. The role has full access to manage the current realm.
-    public static void createRealmAdminInitCert(KeycloakSession session) throws Exception {
+    public static void createRealmAdminPolicy(KeycloakSession session) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         ClientModel realmManagement = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
 
@@ -33,12 +35,11 @@ public class TideRoleRequests {
         tideRealmAdmin.addCompositeRole(realmAdmin);
         tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
 
-        ArrayList<String> signModels = new ArrayList<String>();
-        signModels.addAll(List.of("UserContext:1", "Rules:1", "Offboard:1", "RotateVRK:1"));
+        ArrayList<String> signModels = new ArrayList<String>(List.of("UserContext:1", "Policy:1", "Offboard:1", "RotateVRK:1"));
 
-        InitializerCertificate initCert = createRoleInitCert(session, resource, tideRealmAdmin, "1", "EdDSA", signModels);
+        Policy policy = createRolePolicy(session, tideRealmAdmin);
 
-        if (initCert == null){
+        if (policy == null){
             throw new Exception("Unable to create initCert for TideRealmAdminRole, tideThreshold needs to be set");
         }
 
@@ -48,30 +49,29 @@ public class TideRoleRequests {
                 .getSingleResult();
 
         ObjectMapper objectMapper = new ObjectMapper();
-        String initCertString =  objectMapper.writeValueAsString(initCert);
-        roleDraft.setInitCert(initCertString);
+        String rolePolicyString =  policy.ToString();
+        roleDraft.setInitCert(rolePolicyString);
 
         em.flush();
     }
 
-    public static void createRoleInitCertDraft(KeycloakSession session, String initCertString, String recordId ) throws Exception {
+    public static void createRolePolicyDraft(KeycloakSession session, String policyString, String recordId ) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", recordId).getResultList();
+        List<PolicyDraftEntity> policyDraftEntity = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", recordId).getResultList();
+        Policy.FromString(policyString);
 
-        InitializerCertificate.FromString(initCertString);
-
-        if(!roleInitializerCertificateDraftEntity.isEmpty()){
+        if(!policyDraftEntity.isEmpty()){
             throw new Exception("There is already a pending change request with this record ID, " + recordId);
         }
-        RoleInitializerCertificateDraftEntity initCertDraft = new RoleInitializerCertificateDraftEntity();
-        initCertDraft.setId(KeycloakModelUtils.generateId());
-        initCertDraft.setChangesetRequestId(recordId);
-        initCertDraft.setInitCert(initCertString);
-        em.persist(initCertDraft);
+        PolicyDraftEntity policyDraft = new PolicyDraftEntity();
+        policyDraft.setId(KeycloakModelUtils.generateId());
+        policyDraft.setChangesetRequestId(recordId);
+        policyDraft.setPolicy(policyString);
+        em.persist(policyDraftEntity);
         em.flush();
     }
 
-    public static void createRoleInitCertDraft(KeycloakSession session,  String recordId, String certVersion, double thresholdPercentage, int numberOfAdditionalAdmins, RoleModel role) throws Exception {
+    public static void createRolePolicyDraft(KeycloakSession session,  String recordId, double thresholdPercentage, int numberOfAdditionalAdmins, RoleModel role) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         String algorithm = "EdDSA";
         List<TideRoleDraftEntity> roleDraft = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
@@ -80,7 +80,6 @@ public class TideRoleRequests {
         if(roleDraft.isEmpty()){
             throw new Exception("This authorizer role does not have an role draft entity, " + role.getName());
         }
-        InitializerCertificate prevInitializerCertifcate = InitializerCertificate.FromString(roleDraft.get(0).getInitCert());
 
         List<TideUserRoleMappingDraftEntity> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
                 .setParameter("draftStatus", DraftStatus.ACTIVE)
@@ -100,38 +99,38 @@ public class TideRoleRequests {
 
         MultivaluedHashMap<String, String> config = componentModel.getConfig();
         String vvkId = config.getFirst("vvkId");
-        String vendor = session.getContext().getRealm().getName();
-        String resource = prevInitializerCertifcate.getPayload().getResource();
-        ArrayList<String> signModels = prevInitializerCertifcate.getPayload().getSignModels();
+        String vendor = session.getContext().getRealm().getName();;
 
+        PolicyParameters params = new PolicyParameters();
+        params.put("threshold", threshold);
+        params.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        Policy policy = new Policy("GenericRealmAccessThresholdRole:1", "any", vvkId, params);
 
-        InitializerCertificate initializerCertifcate = InitializerCertificate.constructInitCert(vvkId, algorithm, certVersion, vendor, resource, threshold,  signModels);
+        List<PolicyDraftEntity> policyDraftEntities = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", recordId).getResultList();
 
-        List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", recordId).getResultList();
-
-        if(!roleInitializerCertificateDraftEntity.isEmpty()){
+        if(!policyDraftEntities.isEmpty()){
             throw new Exception("There is already a pending change request with this record ID, " + recordId);
         }
         ObjectMapper objectMapper = new ObjectMapper();
-        String initCertString =  objectMapper.writeValueAsString(initializerCertifcate);
-        RoleInitializerCertificateDraftEntity initCertDraft = new RoleInitializerCertificateDraftEntity();
-        initCertDraft.setId(KeycloakModelUtils.generateId());
-        initCertDraft.setChangesetRequestId(recordId);
-        initCertDraft.setInitCert(initCertString);
-        em.persist(initCertDraft);
+        String policyString =  policy.ToString();
+        PolicyDraftEntity policyDraftEntity = new PolicyDraftEntity();
+        policyDraftEntity.setId(KeycloakModelUtils.generateId());
+        policyDraftEntity.setChangesetRequestId(recordId);
+        policyDraftEntity.setPolicy(policyString);
+        em.persist(policyDraftEntity);
         em.flush();
     }
 
-    public static RoleInitializerCertificateDraftEntity getDraftRoleInitCert(KeycloakSession session, String recordId){
+    public static PolicyDraftEntity getDraftRolePolicy(KeycloakSession session, String recordId){
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", recordId).getResultList();
-        if(roleInitializerCertificateDraftEntity.isEmpty()){
+        List<PolicyDraftEntity> policyDraftEntities = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", recordId).getResultList();
+        if(policyDraftEntities.isEmpty()){
             return null;
         }
-        return roleInitializerCertificateDraftEntity.get(0);
+        return policyDraftEntities.get(0);
     }
 
-    public static void commitRoleInitCert(KeycloakSession session, String recordId, Object mapping, String signature) throws Exception {
+    public static void commitRolePolicy(KeycloakSession session, String recordId, Object mapping, String signature) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         String roleId = getRoleIdFromEntity(mapping);
         RoleEntity roleEntity = em.find(RoleEntity.class, roleId);
@@ -146,74 +145,61 @@ public class TideRoleRequests {
         if(roleDraftEntity.isEmpty()){
             throw new Exception("No tide role entity found");
         }
-        RoleInitializerCertificateDraftEntity roleInitializerCertificateDraftEntity = getDraftRoleInitCert(session, recordId);
-        if(roleInitializerCertificateDraftEntity == null) {
-            System.out.println("No init cert to commit");
+        PolicyDraftEntity policyDraftEntity = getDraftRolePolicy(session, recordId);
+        if(policyDraftEntity == null) {
+            System.out.println("No policyto commit");
             return;
         }
 
-        roleDraftEntity.get(0).setInitCert(roleInitializerCertificateDraftEntity.getInitCert());
+        roleDraftEntity.get(0).setInitCert(policyDraftEntity.getPolicy());
         roleDraftEntity.get(0).setInitCertSig(signature);
-        InitializerCertificate initCert = InitializerCertificate.FromString(roleInitializerCertificateDraftEntity.getInitCert());
-        roleModel.setSingleAttribute("tideThreshold", Integer.toString(initCert.getPayload().getThreshold()));
+        Policy policy = Policy.FromString(policyDraftEntity.getPolicy());
+
+        roleModel.setSingleAttribute("tideThreshold", policy.GetParameter("threshold", String.class).toString());
         roleModel.removeAttribute("InitCertDraftId");
 
-        em.remove(roleInitializerCertificateDraftEntity);
+        em.remove(policyDraftEntity);
         em.flush();
 
     }
-    public static void createRoleInitCert(KeycloakSession session, String recordId, String resource, String certVersion, String algorithm, ArrayList<String> signModels, String threshold) throws Exception {
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
+    public static Policy createRolePolicy(KeycloakSession session, int threshold) throws JsonProcessingException {
         // Grab from tide key provider
         ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
                 .filter(x -> x.getProviderId().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_VENDOR_KEY))
                 .findFirst()
                 .orElse(null);
-
         MultivaluedHashMap<String, String> config = componentModel.getConfig();
         String vvkId = config.getFirst("vvkId");
-        String vendor = session.getContext().getRealm().getName();
 
+        PolicyParameters params = new PolicyParameters();
+        params.put("threshold", threshold);
+        params.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
 
-        InitializerCertificate initializerCertifcate = InitializerCertificate.constructInitCert(vvkId, algorithm, certVersion, vendor, resource, Integer.parseInt(threshold),  signModels);
-
-        List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", recordId).getResultList();
-
-        if(!roleInitializerCertificateDraftEntity.isEmpty()){
-            throw new Exception("There is already a pending change request with this record ID, " + recordId);
-        }
-        ObjectMapper objectMapper = new ObjectMapper();
-        String initCertString =  objectMapper.writeValueAsString(initializerCertifcate);
-        RoleInitializerCertificateDraftEntity initCertDraft = new RoleInitializerCertificateDraftEntity();
-        initCertDraft.setId(KeycloakModelUtils.generateId());
-        initCertDraft.setChangesetRequestId(recordId);
-        initCertDraft.setInitCert(initCertString);
-        em.persist(initCertDraft);
-        em.flush();
-
+        return new Policy("GenericRealmAccessThresholdRole:1", "Policy",  vvkId, params);
     }
 
-    public static InitializerCertificate createRoleInitCert(KeycloakSession session, String resource, RoleModel role , String certVersion, String algorithm, ArrayList<String> signModels) throws JsonProcessingException {
+    public static Policy createRolePolicy(KeycloakSession session, RoleModel role ) throws JsonProcessingException {
         // Grab from tide key provider
         ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
                 .filter(x -> x.getProviderId().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_VENDOR_KEY))
                 .findFirst()
                 .orElse(null);
-
         MultivaluedHashMap<String, String> config = componentModel.getConfig();
         String vvkId = config.getFirst("vvkId");
-        String vendor = session.getContext().getRealm().getName();
+
 
         String tideThreshold = role.getFirstAttribute("tideThreshold");
         if (tideThreshold == null ) {
             return null;
         }
-
         int threshold = Integer.parseInt(tideThreshold);
 
-        return InitializerCertificate.constructInitCert(vvkId, algorithm, certVersion, vendor, resource, threshold,  signModels);
+        PolicyParameters params = new PolicyParameters();
+        params.put("threshold", threshold);
+        params.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
 
+        return new Policy("GenericRealmAccessThresholdRole:1", "any",  vvkId, params);
     }
 
     private static Map<String, Object> expandCompositeRolesAsNestedStructure(RoleModel rootRole) {
@@ -284,4 +270,3 @@ public class TideRoleRequests {
         }
     }
 }
-

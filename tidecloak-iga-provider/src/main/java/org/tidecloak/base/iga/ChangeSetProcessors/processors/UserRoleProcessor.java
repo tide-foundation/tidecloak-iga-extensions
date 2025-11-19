@@ -9,7 +9,7 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.representations.AccessToken;
-import org.tidecloak.shared.models.InitializerCertificateModel.InitializerCertificate;
+import org.tidecloak.jpa.entities.drafting.PolicyDraftEntity;
 import org.tidecloak.shared.models.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.base.iga.ChangeSetProcessors.keys.UserClientKey;
@@ -19,7 +19,6 @@ import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.jpa.entities.*;
-import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -36,10 +35,11 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
-import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.createRoleInitCertDraft;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.addRoleToAccessToken;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.removeRoleFromAccessToken;
+import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.createRolePolicy;
+import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.createRolePolicyDraft;
 
 public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMappingDraftEntity> {
 
@@ -132,9 +132,9 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                         em.remove(p);
                         em.flush();
                     });
-                    List<RoleInitializerCertificateDraftEntity> roleInitializerCertificateDraftEntity = em.createNamedQuery("getInitCertByChangeSetId", RoleInitializerCertificateDraftEntity.class).setParameter("changesetId", request.getChangeRequestId()).getResultList();
-                    if(!roleInitializerCertificateDraftEntity.isEmpty()){
-                        em.remove(roleInitializerCertificateDraftEntity.get(0));
+                    List<PolicyDraftEntity> policyDraftEntities = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", request.getChangeRequestId()).getResultList();
+                    if(!policyDraftEntities.isEmpty()){
+                        em.remove(policyDraftEntities.get(0));
                         em.flush();
                     }
                     //createRoleInitCertDraft(session, request.getId(), "1", 0.7, 1);
@@ -228,7 +228,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 throw new Exception("Authorizer not found for this realm.");
             }
             if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                createRoleInitCertDraft(session, changeSetId, "1", 0.7, 1, role);
+                createRolePolicyDraft(session, changeSetId, 0.7, 1, role);
             }
         }
 
@@ -270,23 +270,13 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 throw new Exception("Authorizer not found for this realm.");
             }
             if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
-                createRoleInitCertDraft(session, changeSetId, "1", 0.7, -1, role);
+                createRolePolicyDraft(session, changeSetId, 0.7, -1, role);
             }
         }
 
 
         Set<UserModel> users = new TreeSet<>(Comparator.comparing(UserModel::getId));
         users.add(affectedUser);
-        if(roleEntity != null && roleEntity.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
-            Set<UserModel> adminUsers = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
-                    .setParameter("draftStatus", DraftStatus.ACTIVE)
-                    .setParameter("roleId", entity.getRoleId())
-                    .getResultList().stream()
-                    .map(t -> session.users().getUserById(realm, t.getUser().getId()))
-                    .collect(Collectors.toSet());
-
-            users.addAll(adminUsers);
-        }
 
         RoleModel tideRoleModel = TideEntityUtils.toTideRoleAdapter(roleEntity, session, realm);
         List<TideUserRoleMappingDraftEntity> activeDraftEntities = TideUserAdapter.getActiveDraftEntities(em, entity.getUser(), tideRoleModel);
@@ -344,29 +334,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         }
 
         String userContextDraft = ChangeSetProcessor.super.generateTransformedUserContext(session, realm, client, userChangesMadeTo, "openId", affectedUserRoleEntity);
-
-        RoleEntity roleEntity = em.find(RoleEntity.class, affectedUserRoleEntity.getRoleId());
-        List<TideRoleDraftEntity> tideRoleDraftEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                .setParameter("role", roleEntity).getResultList();
-
-        if(!tideRoleDraftEntity.isEmpty()){
-            //check if this role has an init cert hash
-            String initCert = tideRoleDraftEntity.get(0).getInitCert();
-            if(initCert != null && !initCert.isEmpty()){
-                UserContext userContext = new UserContext(userContextDraft);
-                InitializerCertificate initializerCertificate = InitializerCertificate.FromString(tideRoleDraftEntity.get(0).getInitCert());
-                userContext.setInitCertHash(initializerCertificate.hash());
-
-                UserContext oldUserContext = new UserContext(affectedUserContextDraft.getProofDraft());
-                if(oldUserContext.getInitCertHash() != null || oldUserContext.getThreshold() != 0){
-                    userContext.setThreshold(initializerCertificate.getPayload().getThreshold());
-                    affectedUserContextDraft.setProofDraft(userContext.ToString());
-                }
-                return;
-            }
-
-        }
-
         affectedUserContextDraft.setProofDraft(userContextDraft);
     }
 
@@ -549,19 +516,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                                                        TideUserRoleMappingDraftEntity entity, UserModel userModel) {
         Set<UserModel> adminUsers = new HashSet<>();
         adminUsers.add(userModel);
-        ClientModel realmManagementClient = realm.getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
-        RoleEntity roleEntity = em.find(RoleEntity.class, entity.getRoleId());
-        RoleModel role = realmManagementClient.getRole(roleEntity.getName());
-        if(role != null && role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)){
-            Set<UserModel> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
-                    .setParameter("draftStatus", DraftStatus.ACTIVE)
-                    .setParameter("roleId", entity.getRoleId())
-                    .getResultList().stream()
-                    .map(t -> session.users().getUserById(realm, t.getUser().getId()))
-                    .collect(Collectors.toSet());
-
-            adminUsers.addAll(users);
-        }
         clientList.forEach(client -> {
             try {
                 boolean isAdminClient = client.getClientId().equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID) || client.getClientId().equalsIgnoreCase(Constants.ADMIN_CLI_CLIENT_ID);

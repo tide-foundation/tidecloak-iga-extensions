@@ -12,7 +12,7 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
 import org.midgard.Midgard;
 import org.midgard.models.*;
-import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
+import org.midgard.models.Policy.*;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
@@ -24,6 +24,7 @@ import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.Licensing.LicenseHistoryEntity;
 import org.tidecloak.jpa.entities.LicensingDraftEntity;
+import org.tidecloak.jpa.entities.drafting.PolicyDraftEntity;
 import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -37,8 +38,8 @@ import javax.xml.bind.DatatypeConverter;
 import java.net.URI;
 import java.util.*;
 
-import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.commitRoleInitCert;
-import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
+import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.commitRolePolicy;
+import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRolePolicy;
 import static org.tidecloak.base.iga.utils.BasicIGAUtils.isAuthorityAssignment;
 import static org.tidecloak.base.iga.utils.BasicIGAUtils.sortAccessProof;
 
@@ -115,6 +116,8 @@ public class MultiAdmin implements Authorizer{
             response.put("customDomainUri", String.valueOf(customDomainUri));
         }
 
+
+
         return Response.ok(objectMapper.writeValueAsString(response)).build();
     }
 
@@ -148,18 +151,11 @@ public class MultiAdmin implements Authorizer{
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", role).getSingleResult();
 
-        InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
+        Policy policy = Policy.FromString(tideRoleEntity.getInitCert());
         UserContextSignRequest req = new UserContextSignRequest("Admin:1");
         req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
         req.SetUserContexts(orderedContext.toArray(new UserContext[0]));
         req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000); // expiry in 1 month
-        AdminAuthorizerBuilder authorizerBuilder = new AdminAuthorizerBuilder();
-        authorizerBuilder.AddInitCert(cert);
-        authorizerBuilder.AddInitCertSignature(tideRoleEntity.getInitCertSig());
-
-        changesetRequestEntity.getAdminAuthorizations().forEach(a -> {
-            authorizerBuilder.AddAdminAuthorization(AdminAuthorization.FromString(a.getAdminAuthorization()));
-        });
 
         int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
         int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
@@ -180,22 +176,19 @@ public class MultiAdmin implements Authorizer{
         settings.Threshold_T = threshold;
         settings.Threshold_N = max;
 
-        authorizerBuilder.AddAuthorizationToSignRequest(req);
-
         boolean isAuthorityAssignment = isAuthorityAssignment(session, draftEntity, em);
 
         if(isAuthorityAssignment) {
-            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, changeSet.getChangeSetId());
+            PolicyDraftEntity roleInitCert = getDraftRolePolicy(session, changeSet.getChangeSetId());
             if(roleInitCert == null) {
                 throw new BadRequestException("Role Init Cert draft not found for changeSet, " + changeSet.getChangeSetId());
             }
-            req.SetInitializationCertificate(InitializerCertifcate.FromString(roleInitCert.getInitCert()));
             SignatureResponse response = Midgard.SignModel(settings, req);
 
             for ( int i = 0; i < orderedProofDetails.size(); i++){
                 orderedProofDetails.get(i).setSignature(response.Signatures[i + 1]);
             }
-            commitRoleInitCert(session, changeSet.getChangeSetId(), draftEntity, response.Signatures[0]);
+            commitRolePolicy(session, changeSet.getChangeSetId(), draftEntity, response.Signatures[0]);
 
         } else {
             SignatureResponse response = Midgard.SignModel(settings, req);
@@ -227,7 +220,7 @@ public class MultiAdmin implements Authorizer{
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", role).getSingleResult();
 
-        InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
+        Policy policy = Policy.FromString(tideRoleEntity.getInitCert());
 
         ComponentModel componentModel = realm.getComponentsStream()
                 .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
@@ -242,12 +235,6 @@ public class MultiAdmin implements Authorizer{
         ModelRequest req =  ModelRequest.New("RotateVRK", "1", "Admin:1", DatatypeConverter.parseHexBinary(changesetRequestEntity.getDraftRequest()));
 
         req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000); // expiry in 1 month
-        AdminAuthorizerBuilder authorizerBuilder = new AdminAuthorizerBuilder();
-        authorizerBuilder.AddInitCert(cert);
-        authorizerBuilder.AddInitCertSignature(tideRoleEntity.getInitCertSig());
-        changesetRequestEntity.getAdminAuthorizations().forEach(a -> {
-            authorizerBuilder.AddAdminAuthorization(AdminAuthorization.FromString(a.getAdminAuthorization()));
-        });
 
         int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
         int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
@@ -268,7 +255,6 @@ public class MultiAdmin implements Authorizer{
         settings.Threshold_T = threshold;
         settings.Threshold_N = max;
 
-        authorizerBuilder.AddAuthorizationToSignRequest(req);
         SignatureResponse response = Midgard.SignModel(settings, req);
 
         // fetch latest history for this draft request (you already have this)

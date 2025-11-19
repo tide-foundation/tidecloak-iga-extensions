@@ -43,7 +43,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
-import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
+import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRolePolicy;
 import static org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter.getChangeSetStatus;
 
 public class BasicIGAUtils {
@@ -70,9 +70,9 @@ public class BasicIGAUtils {
 
     public static boolean isAuthorityAssignment(KeycloakSession session, Object mapping, EntityManager em){
         if ( mapping instanceof  TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
-            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, tideUserRoleMappingDraftEntity.getChangeRequestId());
+            PolicyDraftEntity rolePolicy = getDraftRolePolicy(session, tideUserRoleMappingDraftEntity.getChangeRequestId());
 
-            return roleInitCert != null;
+            return rolePolicy != null;
         }
         return false;
     }
