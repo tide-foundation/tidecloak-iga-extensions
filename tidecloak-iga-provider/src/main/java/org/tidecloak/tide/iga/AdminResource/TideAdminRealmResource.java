@@ -35,6 +35,7 @@ import org.tidecloak.base.iga.interfaces.models.RequestType;
 import org.tidecloak.base.iga.interfaces.models.RequestedChanges;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
+import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.Licensing.LicenseHistoryEntity;
 import org.tidecloak.jpa.entities.LicensingDraftEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
@@ -439,7 +440,7 @@ public class TideAdminRealmResource {
         return changes;
     }
 
-    private static SignRequestSettingsMidgard ConstructSignSettings(MultivaluedHashMap<String, String> keyProviderConfig, String vrk) {
+    public static SignRequestSettingsMidgard ConstructSignSettings(MultivaluedHashMap<String, String> keyProviderConfig, String vrk) {
         int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
         int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
 
@@ -534,7 +535,7 @@ public class TideAdminRealmResource {
     // tiny shared utils
     // ------------------
 
-    private static ComponentModel findVendorComponent(RealmModel realm) {
+    public static ComponentModel findVendorComponent(RealmModel realm) {
         try (Stream<ComponentModel> components = realm.getComponentsStream()) {
             return components
                     .filter(c -> tideVendorKeyId.equals(c.getProviderId()))

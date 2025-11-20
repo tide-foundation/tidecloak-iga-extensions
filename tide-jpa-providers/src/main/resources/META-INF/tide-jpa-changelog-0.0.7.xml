@@ -29,6 +29,9 @@
                 <constraints nullable="true"/>
             </column>
         </createTable>
+        <addColumn tableName="CHANGESET_REQUEST">
+            <column name="REQUEST_MODEL" type="TEXT"><constraints nullable="true"/></column>
+        </addColumn>
 
         <rollback>
             <dropTable tableName="POLICY"/>

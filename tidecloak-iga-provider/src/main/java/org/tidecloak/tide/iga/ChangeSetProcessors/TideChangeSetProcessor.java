@@ -3,12 +3,16 @@ package org.tidecloak.tide.iga.ChangeSetProcessors;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.BadRequestException;
+import jakarta.xml.bind.DatatypeConverter;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
+import org.midgard.models.*;
+import org.midgard.Midgard;
+
 
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
@@ -31,7 +35,9 @@ import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
+import org.tidecloak.tide.iga.AdminResource.TideAdminRealmResource;
 
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
@@ -40,6 +46,7 @@ import java.util.stream.Stream;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.getUserContextDrafts;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.getUserContextDraftsForRealm;
+import static org.tidecloak.tide.iga.AdminResource.TideAdminRealmResource.ConstructSignSettings;
 
 public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
 
@@ -227,10 +234,34 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
     @Override
     public void saveUserContextDraft(KeycloakSession session, EntityManager em, RealmModel realm, ClientModel clientModel, UserEntity user, ChangeRequestKey changeRequestKey, ChangeSetType type, String proofDraft) throws Exception {
 //        ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, clientModel, user, changeRequestKey, type, proofDraft);
+        ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                .findFirst()
+                .orElse(null);
+
+        List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery(
+                        "getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)
+                .setParameter("ID", componentModel.getId())
+                .setParameter("types", List.of("firstAdmin", "multiAdmin"))
+                .getResultList();
+        MultivaluedHashMap<String, String> config = componentModel.getConfig();
+
+        String currentSecretKeys = config.getFirst("clientSecret");
+        ObjectMapper objectMapper = new ObjectMapper();
+        TideAdminRealmResource.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, TideAdminRealmResource.SecretKeys.class);
+
+        ModelRequest modelReq = null;
+        var authFlow = realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") ? "VRK:1" : "Policy:1";
+        if(authFlow.equalsIgnoreCase("Policy:1")) {
+            SignRequestSettingsMidgard signedSettings = ConstructSignSettings(config, secretKeys.activeVrk);
+            modelReq = ModelRequest.New("UserContext", "1", authFlow, proofDraft.getBytes(StandardCharsets.UTF_8));
+            modelReq = ModelRequest.InitializeTideRequestWithVrk(modelReq, signedSettings, "UserContext:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
+        }
 
         List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, changeRequestKey.getChangeRequestId(), type);
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
         ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
+
         RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
         var tideIdp = session.identityProviders().getByAlias("tide");
         boolean hasInitCert = false;
@@ -261,18 +292,30 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
             changeSetType = type;
         }
 
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeRequestKey.getChangeRequestId(), changeSetType));
-        if (changesetRequestEntity == null) {
-            ChangesetRequestEntity entity = new ChangesetRequestEntity();
+        ChangesetRequestEntity.Key key =
+                new ChangesetRequestEntity.Key(changeRequestKey.getChangeRequestId(), changeSetType);
+
+        ChangesetRequestEntity entity = em.find(ChangesetRequestEntity.class, key);
+
+        if (entity == null) {
+            entity = new ChangesetRequestEntity();
             entity.setChangesetRequestId(changeRequestKey.getChangeRequestId());
-            entity.setDraftRequest(draft);
             entity.setChangesetType(type);
             em.persist(entity);
-            em.flush();
-        } else {
-            changesetRequestEntity.setDraftRequest(draft);
-            em.flush();
         }
+
+        entity.setDraftRequest(draft);
+
+        if ("Policy:1".equalsIgnoreCase(authFlow)) {
+            String encodedModel = Base64.getEncoder()
+                    .encodeToString(modelReq.Encode());
+            entity.setRequestModel(encodedModel);
+        }
+
+        // Usually you can rely on transaction commit to flush;
+        // only do this if you *really* need an immediate flush.
+        em.flush();
+
     }
 
     @Override

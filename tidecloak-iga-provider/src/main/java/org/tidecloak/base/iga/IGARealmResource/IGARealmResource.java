@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.NoResultException;
+import jakarta.persistence.TypedQuery;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -260,6 +261,69 @@ public class IGARealmResource {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
         }
     }
+
+    @GET
+    @Path("change-set/requests")
+    public Response getChangeRequests(
+            @QueryParam("id") String changesetRequestId,
+            @QueryParam("type") String changesetTypeParam
+    ) {
+        auth.realm().requireManageRealm();
+
+        if (!BasicIGAUtils.isIGAEnabled(realm)) {
+            return Response.ok(Collections.emptyList()).build();
+        }
+
+        if ((changesetRequestId == null || changesetRequestId.isBlank()) &&
+                (changesetTypeParam == null || changesetTypeParam.isBlank())) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity("Either 'id' or 'type' query parameter must be provided")
+                    .build();
+        }
+
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<ChangesetRequestEntity> entities;
+
+        try {
+            if (changesetRequestId != null && !changesetRequestId.isBlank()) {
+
+                TypedQuery<ChangesetRequestEntity> query =
+                        (TypedQuery<ChangesetRequestEntity>) em.createNamedQuery("getAllChangeRequestsByRecordId"
+                        );
+                query.setParameter("changesetRequestId", changesetRequestId);
+
+                entities = query.getResultList();
+            } else {
+
+                ChangeSetType type;
+                try {
+                    type = ChangeSetType.valueOf(changesetTypeParam);
+                } catch (IllegalArgumentException ex) {
+                    return Response.status(Response.Status.BAD_REQUEST)
+                            .entity("Invalid ChangeSetType: " + changesetTypeParam)
+                            .build();
+                }
+
+                TypedQuery<ChangesetRequestEntity> query =
+                        em.createNamedQuery("getAllChangeRequestsByChangeSetType",
+                                ChangesetRequestEntity.class);
+                query.setParameter("changesetType", type);
+
+                entities = query.getResultList();
+            }
+        } catch (Exception e) {
+            return Response.serverError()
+                    .entity("Error retrieving change-set requests: " + e.getMessage())
+                    .build();
+        }
+
+        List<ChangesetRequestRepresentation> results = entities.stream()
+                .map(ChangesetRequestRepresentation::fromEntity)
+                .collect(Collectors.toList());
+
+        return Response.ok(results).build();
+    }
+
 
 
     @GET
@@ -827,6 +891,31 @@ public class IGARealmResource {
 
         // Return success message after approving the change sets
         return Response.ok("Change set request has been canceled").build();
+    }
+
+    /**
+     * Lightweight REST representation of the JPA entity
+     */
+    public static class ChangesetRequestRepresentation {
+        public String changesetRequestId;
+        public String changesetType;
+        public String draftRequest;
+        public Long timestamp;
+        public int adminAuthorizationsCount;
+
+        public static ChangesetRequestRepresentation fromEntity(ChangesetRequestEntity entity) {
+            ChangesetRequestRepresentation rep = new ChangesetRequestRepresentation();
+            rep.changesetRequestId = entity.getChangesetRequestId();
+            rep.changesetType = entity.getChangesetType() != null
+                    ? entity.getChangesetType().name()
+                    : null;
+            rep.draftRequest = entity.getDraftRequest();
+            rep.timestamp = entity.getTimestamp();
+            rep.adminAuthorizationsCount = entity.getAdminAuthorizations() != null
+                    ? entity.getAdminAuthorizations().size()
+                    : 0;
+            return rep;
+        }
     }
 
 }

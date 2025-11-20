@@ -196,7 +196,6 @@ public class AccessProofDetailEntity {
         this.signature = signature;
     }
 
-
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;

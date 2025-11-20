@@ -51,7 +51,7 @@ public class MultiAdmin implements Authorizer{
         ObjectMapper objectMapper = new ObjectMapper();
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
 
-        if (changesetRequestEntity == null){
+        if (changesetRequestEntity == null) {
             throw new BadRequestException("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
         }
 
@@ -109,9 +109,10 @@ public class MultiAdmin implements Authorizer{
         Map<String, String> response = new HashMap<>();
         response.put("message", "Opening Enclave to request approval.");
         response.put("uri", String.valueOf(uri));
-        response.put("changeSetRequests", changesetRequestEntity.getDraftRequest());
+        response.put("changeSetDraftRequests", changesetRequestEntity.getDraftRequest());
         response.put("requiresApprovalPopup", "true");
         response.put("expiry", String.valueOf(changesetRequestEntity.getTimestamp() + 2628000)); // month expiry
+        response.put("changeSetRequests", changesetRequestEntity.getRequestModel());
         if(customAdminUiDomain != null) {
             response.put("customDomainUri", String.valueOf(customDomainUri));
         }

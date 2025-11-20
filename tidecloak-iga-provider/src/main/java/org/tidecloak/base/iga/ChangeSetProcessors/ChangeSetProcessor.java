@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import org.keycloak.common.ClientConnection;
+import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
@@ -44,10 +45,13 @@ import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.utils.JsonSorter;
+import org.midgard.models.*;
+import org.tidecloak.tide.iga.AdminResource.TideAdminRealmResource;
 
 
 import java.lang.reflect.Constructor;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
@@ -55,6 +59,8 @@ import java.util.stream.Stream;
 
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.*;
+import static org.tidecloak.tide.iga.AdminResource.TideAdminRealmResource.ConstructSignSettings;
+import static org.tidecloak.tide.iga.AdminResource.TideAdminRealmResource.findVendorComponent;
 
 public interface ChangeSetProcessor<T> {
 
@@ -471,7 +477,6 @@ public interface ChangeSetProcessor<T> {
 
         ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);
         AccessToken userContextToken = processorFactory.getProcessor(changeSetRequest.getType()).transformUserContext(accessToken, session, entity, user, client);
-
         boolean isFullScopeAllowed = client.isFullScopeAllowed();
         if( entity instanceof TideClientDraftEntity) {
             isFullScopeAllowed = changeSetRequest.getActionType().equals(ActionType.CREATE);

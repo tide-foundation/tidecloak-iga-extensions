@@ -40,6 +40,9 @@ public class ChangesetRequestEntity {
     @Column(name = "TIMESTAMP")
     protected Long timestamp = System.currentTimeMillis() / 1000;
 
+    @Column(name = "REQUEST_MODEL")
+    protected String requestModel;
+
     public ChangeSetType getChangesetType() {
         return changesetType;
     }
@@ -76,6 +79,13 @@ public class ChangesetRequestEntity {
         this.draftRequest = draftRequest;
     }
 
+    public String getRequestModel() {
+        return requestModel;
+    }
+
+    public void setRequestModel(String requestModel) {
+        this.requestModel = requestModel;
+    }
 
     public Long getTimestamp() {
         return timestamp;
