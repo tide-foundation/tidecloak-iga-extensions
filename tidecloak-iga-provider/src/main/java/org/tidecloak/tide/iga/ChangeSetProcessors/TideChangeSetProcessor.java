@@ -12,6 +12,7 @@ import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
 import org.midgard.models.*;
 import org.midgard.Midgard;
+import org.midgard.models.Policy.*;
 
 
 import org.keycloak.models.jpa.entities.RoleEntity;
@@ -82,7 +83,7 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
                 }
 
                 // Create UserContextSignRequest
-                UserContextSignRequest updatedReq = new UserContextSignRequest("Admin:1");
+                UserContextSignRequest updatedReq = new UserContextSignRequest("Policy:1");
                 updatedReq.SetUserContexts(userContexts.toArray(new UserContext[0]));
 
                 ChangeSetType changeSetType;
@@ -253,24 +254,24 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
         ModelRequest modelReq = null;
         var authFlow = realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") ? "VRK:1" : "Policy:1";
         if(authFlow.equalsIgnoreCase("Policy:1")) {
+            ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
+
+            RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+            TideRoleDraftEntity tideAdmin = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+                    .setParameter("roleId", tideRole.getId())
+                    .getSingleResult();
+            var policyString = tideAdmin.getInitCert();
+            Policy policy = Policy.FromString(policyString);
             SignRequestSettingsMidgard signedSettings = ConstructSignSettings(config, secretKeys.activeVrk);
-            modelReq = ModelRequest.New("UserContext", "1", authFlow, proofDraft.getBytes(StandardCharsets.UTF_8));
-            modelReq = ModelRequest.InitializeTideRequestWithVrk(modelReq, signedSettings, "UserContext:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
+            ModelRequest newModelReq = ModelRequest.New("UserContext", "1", authFlow, proofDraft.getBytes(StandardCharsets.UTF_8), policy.ToBytes());
+            modelReq = newModelReq.InitializeTideRequestWithVrk(newModelReq, signedSettings, "UserContext:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
         }
 
         List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, changeRequestKey.getChangeRequestId(), type);
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
-        ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
-
-        RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-        var tideIdp = session.identityProviders().getByAlias("tide");
-        boolean hasInitCert = false;
-        boolean isTideAdminRole = false;
-        boolean isUnassignRole = false;
-        UserModel originalUser = null;
 
         List<UserContext> userContexts = new ArrayList<>();
-        UserContextSignRequest req = new UserContextSignRequest("Admin:1");
+        UserContextSignRequest req = new UserContextSignRequest("Policy:1");
 
 
         proofDetails.forEach(p -> {

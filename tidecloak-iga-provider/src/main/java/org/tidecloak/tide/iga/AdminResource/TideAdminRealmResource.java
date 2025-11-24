@@ -7,6 +7,7 @@ import jakarta.persistence.LockModeType;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import liquibase.change.Change;
 import org.eclipse.microprofile.openapi.annotations.parameters.Parameter;
 import org.jboss.logging.Logger;
 import org.keycloak.authentication.actiontoken.execactions.ExecuteActionsActionToken;
@@ -31,14 +32,13 @@ import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.base.iga.ChangeSetProcessors.processors.RealmLicenseProcessor;
 import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
+import org.tidecloak.base.iga.interfaces.models.ChangeSetTypeEntity;
 import org.tidecloak.base.iga.interfaces.models.RequestType;
 import org.tidecloak.base.iga.interfaces.models.RequestedChanges;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
-import org.tidecloak.jpa.entities.AuthorizerEntity;
+import org.tidecloak.jpa.entities.*;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.Licensing.LicenseHistoryEntity;
-import org.tidecloak.jpa.entities.LicensingDraftEntity;
-import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -220,6 +220,65 @@ public class TideAdminRealmResource {
                     return !g.equals(active);
                 })
                 .collect(Collectors.toList());
+    }
+
+    @POST
+    @Path("add-review")
+    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
+    @Produces(MediaType.TEXT_PLAIN)
+    public Response addApproval(
+            @FormParam("changeSetId") String changeSetId,
+            @FormParam("changeSetType") String changeSetType,
+            @FormParam("actionType") String actionType,
+            @FormParam("requests") List<String> requests
+
+    ) {
+        try {
+            // Check admin role
+            RoleModel role = session.getContext()
+                    .getRealm()
+                    .getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID)
+                    .getRole(tideRealmAdminRole);
+
+            if (!auth.adminAuth().getUser().hasRole(role)) {
+                return buildResponse(403, "Not authorized to add approvals");
+            }
+
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+            ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeSetId, ChangeSetType.valueOf(changeSetType));
+
+            // Optional: sanity check
+            if (requests == null || requests.isEmpty()) {
+                return buildResponse(400, "No requests provided");
+            }
+
+            // Map requests to entities one-to-one (up to the shortest list)
+                requests.forEach(req -> {
+                    changesetRequestEntity.setRequestModel(req);
+                    try {
+                        ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSetType, changeSetId, actionType,
+                                auth.adminAuth().getUser());
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+
+
+
+            return buildResponse(
+                    200,
+                    "Successfully added admin approval to changeSetRequest with id " + changeSetId
+            );
+
+        } catch (Exception e) {
+            logger.error("Error adding approval to change set request with ID: " + changeSetId, e);
+            return buildResponse(
+                    500,
+                    "Error adding approval to change set request with ID: "
+                            + changeSetId + " . " + e.getMessage()
+            );
+        }
     }
 
     @POST

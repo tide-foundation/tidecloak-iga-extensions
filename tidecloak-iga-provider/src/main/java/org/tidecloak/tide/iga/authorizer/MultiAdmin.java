@@ -108,7 +108,7 @@ public class MultiAdmin implements Authorizer{
 
         Map<String, String> response = new HashMap<>();
         response.put("message", "Opening Enclave to request approval.");
-        response.put("uri", String.valueOf(uri));
+        response.put("changesetId", changesetRequestEntity.getChangesetRequestId());
         response.put("changeSetDraftRequests", changesetRequestEntity.getDraftRequest());
         response.put("requiresApprovalPopup", "true");
         response.put("expiry", String.valueOf(changesetRequestEntity.getTimestamp() + 2628000)); // month expiry
@@ -153,10 +153,11 @@ public class MultiAdmin implements Authorizer{
                 .setParameter("role", role).getSingleResult();
 
         Policy policy = Policy.FromString(tideRoleEntity.getInitCert());
-        UserContextSignRequest req = new UserContextSignRequest("Admin:1");
+        UserContextSignRequest req = new UserContextSignRequest("Policy:1");
         req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
         req.SetUserContexts(orderedContext.toArray(new UserContext[0]));
         req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000); // expiry in 1 month
+        req.SetPolicy(policy.ToBytes());
 
         int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
         int max = Integer.parseInt(System.getenv("THRESHOLD_N"));

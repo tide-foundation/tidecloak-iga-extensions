@@ -128,7 +128,7 @@ public class BasicIGAUtils {
             proofDetails.get(i).setSignature(adminUser.getId());
         }
 
-        ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSet.getType().name(), changeSet.getChangeSetId(), changeSet.getActionType().name(), adminUser, "", "", "");
+        ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSet.getType().name(), changeSet.getChangeSetId(), changeSet.getActionType().name(), adminUser);
     }
 
 
