@@ -10,6 +10,7 @@ import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
+import org.midgard.Serialization.Tools;
 import org.midgard.Midgard;
 import org.midgard.models.*;
 import org.midgard.models.Policy.*;
@@ -36,6 +37,8 @@ import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvi
 
 import javax.xml.bind.DatatypeConverter;
 import java.net.URI;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.*;
 
 import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.commitRolePolicy;
@@ -111,8 +114,7 @@ public class MultiAdmin implements Authorizer{
         response.put("changesetId", changesetRequestEntity.getChangesetRequestId());
         response.put("changeSetDraftRequests", changesetRequestEntity.getDraftRequest());
         response.put("requiresApprovalPopup", "true");
-        response.put("expiry", String.valueOf(changesetRequestEntity.getTimestamp() + 2628000)); // month expiry
-        response.put("changeSetRequests", changesetRequestEntity.getRequestModel());
+        response.put("changeSetRequests", Base64.getEncoder().encodeToString(ModelRequest.FromString(changesetRequestEntity.getRequestModel()).Encode()));
         if(customAdminUiDomain != null) {
             response.put("customDomainUri", String.valueOf(customDomainUri));
         }
@@ -147,18 +149,6 @@ public class MultiAdmin implements Authorizer{
         List<AccessProofDetailEntity> orderedProofDetails = sortAccessProof(proofDetails);
         List<UserContext> orderedContext = orderedProofDetails.stream().map(a -> new UserContext(a.getProofDraft())).toList();
 
-        RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-        RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
-        TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                .setParameter("role", role).getSingleResult();
-
-        Policy policy = Policy.FromString(tideRoleEntity.getInitCert());
-        UserContextSignRequest req = new UserContextSignRequest("Policy:1");
-        req.SetDraft(Base64.getDecoder().decode(changesetRequestEntity.getDraftRequest()));
-        req.SetUserContexts(orderedContext.toArray(new UserContext[0]));
-        req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000); // expiry in 1 month
-        req.SetPolicy(policy.ToBytes());
-
         int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
         int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
 
@@ -177,7 +167,8 @@ public class MultiAdmin implements Authorizer{
         settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
         settings.Threshold_T = threshold;
         settings.Threshold_N = max;
-
+        
+        ModelRequest req = ModelRequest.FromString(changesetRequestEntity.getRequestModel());
         boolean isAuthorityAssignment = isAuthorityAssignment(session, draftEntity, em);
 
         if(isAuthorityAssignment) {
@@ -222,7 +213,7 @@ public class MultiAdmin implements Authorizer{
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", role).getSingleResult();
 
-        Policy policy = Policy.FromString(tideRoleEntity.getInitCert());
+        Policy policy = new Policy(Base64.getDecoder().decode(tideRoleEntity.getInitCert()));
 
         ComponentModel componentModel = realm.getComponentsStream()
                 .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison

@@ -54,7 +54,7 @@ public class FirstAdmin implements Authorizer {
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", role).getSingleResult();
 
-        Policy policy = Policy.FromString(tideRoleEntity.getInitCert());
+        Policy policy = new Policy(Base64.getDecoder().decode(tideRoleEntity.getInitCert()));
 
         if(isAssigningTideRealmAdminRole(draftEntity, session)) {
 
@@ -67,7 +67,11 @@ public class FirstAdmin implements Authorizer {
             }
 
             List<String> signatures = IGAUtils.signInitialTideAdmin(componentModel.getConfig(), userContexts.toArray(new UserContext[0]), policy, authorizer, changesetRequestEntity);
-            tideRoleEntity.setInitCertSig(signatures.get(proofDetails.size() - 1)); // add policy sig
+            tideRoleEntity.setInitCertSig(signatures.getLast()); // add policy sig
+            policy.AddSignature(Base64.getDecoder().decode(signatures.getLast()));
+            String rolePolicyString =  Base64.getEncoder().encodeToString(policy.ToBytes());
+            tideRoleEntity.setInitCert(rolePolicyString); // add policy sig
+
             for(int i = 0; i < proofDetails.size(); i++){
                 proofDetails.get(i).setSignature(signatures.get(i));
             }

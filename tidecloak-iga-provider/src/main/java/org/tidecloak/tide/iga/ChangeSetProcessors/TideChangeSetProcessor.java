@@ -251,6 +251,18 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
         ObjectMapper objectMapper = new ObjectMapper();
         TideAdminRealmResource.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, TideAdminRealmResource.SecretKeys.class);
 
+        List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, changeRequestKey.getChangeRequestId(), type);
+        proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
+
+        List<UserContext> userContexts = new ArrayList<>();
+        UserContextSignRequest req = new UserContextSignRequest("Policy:1");
+        proofDetails.forEach(p -> {
+            UserContext userContext = new UserContext(p.getProofDraft());
+            userContexts.add(userContext);
+        });
+        req.SetUserContexts(userContexts.toArray(new UserContext[0]));
+        String draft = Base64.getEncoder().encodeToString(req.GetDraft());
+
         ModelRequest modelReq = null;
         var authFlow = realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") ? "VRK:1" : "Policy:1";
         if(authFlow.equalsIgnoreCase("Policy:1")) {
@@ -261,26 +273,11 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
                     .setParameter("roleId", tideRole.getId())
                     .getSingleResult();
             var policyString = tideAdmin.getInitCert();
-            Policy policy = Policy.FromString(policyString);
+            Policy policy = new Policy(Base64.getDecoder().decode(policyString));
             SignRequestSettingsMidgard signedSettings = ConstructSignSettings(config, secretKeys.activeVrk);
-            ModelRequest newModelReq = ModelRequest.New("UserContext", "1", authFlow, proofDraft.getBytes(StandardCharsets.UTF_8), policy.ToBytes());
+            ModelRequest newModelReq = ModelRequest.New("UserContext", "1", authFlow, req.GetDraft(), policy.ToBytes());
             modelReq = newModelReq.InitializeTideRequestWithVrk(newModelReq, signedSettings, "UserContext:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
         }
-
-        List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, changeRequestKey.getChangeRequestId(), type);
-        proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
-
-        List<UserContext> userContexts = new ArrayList<>();
-        UserContextSignRequest req = new UserContextSignRequest("Policy:1");
-
-
-        proofDetails.forEach(p -> {
-            UserContext userContext = new UserContext(p.getProofDraft());
-            userContexts.add(userContext);
-        });
-
-        req.SetUserContexts(userContexts.toArray(new UserContext[0]));
-        String draft = Base64.getEncoder().encodeToString(req.GetDraft());
 
         ChangeSetType changeSetType;
         if(type.equals(ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT)){
@@ -308,8 +305,7 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
         entity.setDraftRequest(draft);
 
         if ("Policy:1".equalsIgnoreCase(authFlow)) {
-            String encodedModel = Base64.getEncoder()
-                    .encodeToString(modelReq.Encode());
+            String encodedModel = modelReq.ToString();
             entity.setRequestModel(encodedModel);
         }
 

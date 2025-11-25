@@ -74,7 +74,6 @@ public class IGAUtils {
         pSignReq.SetAuthorization(
                 Midgard.SignWithVrk(pSignReq.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
         );
-        pSignReq.ToString();
         pSignReq.SetAuthorizer(HexFormat.of().parseHex(authorizer.getAuthorizer()));
         pSignReq.SetAuthorizerCertificate(Base64.getDecoder().decode(authorizer.getAuthorizerCertificate()));
         SignatureResponse res = Midgard.SignModel(settings, pSignReq);

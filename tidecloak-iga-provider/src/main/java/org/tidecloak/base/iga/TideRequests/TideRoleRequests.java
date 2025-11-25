@@ -37,7 +37,14 @@ public class TideRoleRequests {
 
         ArrayList<String> signModels = new ArrayList<String>(List.of("UserContext:1", "Policy:1", "Offboard:1", "RotateVRK:1"));
 
-        Policy policy = createRolePolicy(session, tideRealmAdmin);
+        String tideThreshold = tideRealmAdmin.getFirstAttribute("tideThreshold");
+        int threshold = Integer.parseInt(tideThreshold);
+
+        PolicyParameters params = new PolicyParameters();
+        params.put("threshold", threshold);
+        params.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        params.put("resource", Constants.REALM_MANAGEMENT_CLIENT_ID);
+        Policy policy = createRolePolicy(session, tideRealmAdmin, "any", params);
 
         if (policy == null){
             throw new Exception("Unable to create initCert for TideRealmAdminRole, tideThreshold needs to be set");
@@ -49,7 +56,7 @@ public class TideRoleRequests {
                 .getSingleResult();
 
         ObjectMapper objectMapper = new ObjectMapper();
-        String rolePolicyString =  policy.ToString();
+        String rolePolicyString =  Base64.getEncoder().encodeToString(policy.ToBytes());
         roleDraft.setInitCert(rolePolicyString);
 
         em.flush();
@@ -58,8 +65,6 @@ public class TideRoleRequests {
     public static void createRolePolicyDraft(KeycloakSession session, String policyString, String recordId ) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<PolicyDraftEntity> policyDraftEntity = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", recordId).getResultList();
-        Policy.FromString(policyString);
-
         if(!policyDraftEntity.isEmpty()){
             throw new Exception("There is already a pending change request with this record ID, " + recordId);
         }
@@ -104,7 +109,8 @@ public class TideRoleRequests {
         PolicyParameters params = new PolicyParameters();
         params.put("threshold", threshold);
         params.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-        Policy policy = new Policy("GenericRealmAccessThresholdRole:1", "any", vvkId, params);
+        params.put("resource", Constants.REALM_MANAGEMENT_CLIENT_ID);
+        Policy policy = new Policy("GenericResourceAccessThresholdRole:1", "any", vvkId, params);
 
         List<PolicyDraftEntity> policyDraftEntities = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", recordId).getResultList();
 
@@ -151,9 +157,10 @@ public class TideRoleRequests {
             return;
         }
 
-        roleDraftEntity.get(0).setInitCert(policyDraftEntity.getPolicy());
         roleDraftEntity.get(0).setInitCertSig(signature);
-        Policy policy = Policy.FromString(policyDraftEntity.getPolicy());
+        Policy policy =  new Policy(Base64.getDecoder().decode(policyDraftEntity.getPolicy()));
+        policy.AddSignature(Base64.getDecoder().decode(signature));
+        roleDraftEntity.get(0).setInitCert(policy.ToString());
 
         roleModel.setSingleAttribute("tideThreshold", policy.GetParameter("threshold", String.class).toString());
         roleModel.removeAttribute("InitCertDraftId");
@@ -163,7 +170,7 @@ public class TideRoleRequests {
 
     }
 
-    public static Policy createRolePolicy(KeycloakSession session, int threshold) throws JsonProcessingException {
+    public static Policy createRolePolicy(KeycloakSession session, int threshold, String modelId, PolicyParameters params) throws JsonProcessingException {
         // Grab from tide key provider
         ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
                 .filter(x -> x.getProviderId().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_VENDOR_KEY))
@@ -172,14 +179,11 @@ public class TideRoleRequests {
         MultivaluedHashMap<String, String> config = componentModel.getConfig();
         String vvkId = config.getFirst("vvkId");
 
-        PolicyParameters params = new PolicyParameters();
-        params.put("threshold", threshold);
-        params.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
 
-        return new Policy("GenericRealmAccessThresholdRole:1", "Policy",  vvkId, params);
+        return new Policy("GenericResourceAccessThresholdRole:1", modelId,  vvkId, params);
     }
 
-    public static Policy createRolePolicy(KeycloakSession session, RoleModel role ) throws JsonProcessingException {
+    public static Policy createRolePolicy(KeycloakSession session, RoleModel role, String modelId, PolicyParameters params ) throws JsonProcessingException {
         // Grab from tide key provider
         ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
                 .filter(x -> x.getProviderId().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_VENDOR_KEY))
@@ -188,18 +192,8 @@ public class TideRoleRequests {
         MultivaluedHashMap<String, String> config = componentModel.getConfig();
         String vvkId = config.getFirst("vvkId");
 
+        return new Policy("GenericResourceAccessThresholdRole:1", modelId,  vvkId, params);
 
-        String tideThreshold = role.getFirstAttribute("tideThreshold");
-        if (tideThreshold == null ) {
-            return null;
-        }
-        int threshold = Integer.parseInt(tideThreshold);
-
-        PolicyParameters params = new PolicyParameters();
-        params.put("threshold", threshold);
-        params.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-
-        return new Policy("GenericRealmAccessThresholdRole:1", "any",  vvkId, params);
     }
 
     private static Map<String, Object> expandCompositeRolesAsNestedStructure(RoleModel rootRole) {

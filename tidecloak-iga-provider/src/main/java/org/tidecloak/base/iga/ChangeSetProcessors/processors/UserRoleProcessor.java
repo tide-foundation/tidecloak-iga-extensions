@@ -38,7 +38,6 @@ import java.util.stream.Collectors;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.addRoleToAccessToken;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.removeRoleFromAccessToken;
-import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.createRolePolicy;
 import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.createRolePolicyDraft;
 
 public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMappingDraftEntity> {
@@ -521,14 +520,9 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 boolean isAdminClient = client.getClientId().equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID) || client.getClientId().equalsIgnoreCase(Constants.ADMIN_CLI_CLIENT_ID);
                 adminUsers.forEach(u -> {
                     try {
-                        if (isAdminClient){
-                            // Create empty user contexts for ADMIN-CLI and SECURITY-ADMIN-CONSOLE
-                            ChangeSetProcessor.super.generateAndSaveDefaultUserContextDraft(session, em, realm, client, u, new ChangeRequestKey(entity.getId() ,entity.getChangeRequestId()),
-                                    ChangeSetType.USER_ROLE);
-                        } else {
-                            ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, u, new ChangeRequestKey(entity.getId() ,entity.getChangeRequestId()),
-                                    ChangeSetType.USER_ROLE, entity);
-                        }
+                        ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, u, new ChangeRequestKey(entity.getId() ,entity.getChangeRequestId()),
+                                ChangeSetType.USER_ROLE, entity);
+
                     }catch (Exception e) {
                         throw new RuntimeException("Error processing client: " + client.getClientId(), e);
                     }
