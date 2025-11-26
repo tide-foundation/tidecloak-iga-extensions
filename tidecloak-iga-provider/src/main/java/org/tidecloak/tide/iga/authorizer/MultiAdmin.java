@@ -17,6 +17,7 @@ import org.midgard.models.*;
 import org.midgard.models.Policy.*;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
+import org.midgard.models.RequestExtensions.PolicySignRequest;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
@@ -138,7 +139,23 @@ public class MultiAdmin implements Authorizer{
             for ( int i = 0; i < orderedProofDetails.size() ; i++){
                 orderedProofDetails.get(i).setSignature(response.Signatures[i]);
             }
-            commitRolePolicy(session, changeSet.getChangeSetId(), draftEntity, response.Signatures[response.Signatures.length - 1]); // get the last one
+
+            // now sign the admin policy
+            RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+            RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
+            TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                    .setParameter("role", role).getSingleResult();
+
+            Policy policy = new Policy(Base64.getDecoder().decode(tideRoleEntity.getInitCert()));
+            PolicySignRequest pSignReq = new PolicySignRequest(policy.ToBytes(), "VRK:1");
+            pSignReq.SetAuthorization(
+                    Midgard.SignWithVrk(pSignReq.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
+            );
+            pSignReq.SetAuthorizer(HexFormat.of().parseHex(authorizer.getAuthorizer()));
+            pSignReq.SetAuthorizerCertificate(Base64.getDecoder().decode(authorizer.getAuthorizerCertificate()));
+            SignatureResponse res = Midgard.SignModel(settings, pSignReq);
+
+            commitRolePolicy(session, changeSet.getChangeSetId(), draftEntity, res.Signatures[0]); // get the last one
 
         } else {
             SignatureResponse response = Midgard.SignModel(settings, req);
