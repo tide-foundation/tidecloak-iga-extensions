@@ -136,7 +136,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                         em.remove(policyDraftEntities.get(0));
                         em.flush();
                     }
-                    //createRoleInitCertDraft(session, request.getId(), "1", 0.7, 1);
+                    createRolePolicyDraft(session, request.getId(), 0.7, 1, role);
                     processRealmManagementRoleAssignment(session, em, realm, clientList, request, u);
 
                 } catch (Exception e) {

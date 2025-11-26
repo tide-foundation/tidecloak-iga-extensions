@@ -276,7 +276,10 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
             Policy policy = new Policy(Base64.getDecoder().decode(policyString));
             SignRequestSettingsMidgard signedSettings = ConstructSignSettings(config, secretKeys.activeVrk);
             ModelRequest newModelReq = ModelRequest.New("UserContext", "1", authFlow, req.GetDraft(), policy.ToBytes());
+            var expireAtTime = (System.currentTimeMillis() / 1000) + 2628000; // 1 month from now
+            newModelReq.SetCustomExpiry(expireAtTime);
             modelReq = newModelReq.InitializeTideRequestWithVrk(newModelReq, signedSettings, "UserContext:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
+
         }
 
         ChangeSetType changeSetType;
@@ -305,7 +308,7 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
         entity.setDraftRequest(draft);
 
         if ("Policy:1".equalsIgnoreCase(authFlow)) {
-            String encodedModel = modelReq.ToString();
+            String encodedModel = Base64.getEncoder().encodeToString(modelReq.Encode());
             entity.setRequestModel(encodedModel);
         }
 

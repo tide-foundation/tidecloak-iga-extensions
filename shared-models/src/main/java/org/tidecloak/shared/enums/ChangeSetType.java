@@ -13,6 +13,7 @@ public enum ChangeSetType {
     GROUP_ROLE,
     CLIENT_FULLSCOPE,
     RAGNAROK,
-    REALM_LICENSING
+    REALM_LICENSING,
+    POLICY
     ;
 }

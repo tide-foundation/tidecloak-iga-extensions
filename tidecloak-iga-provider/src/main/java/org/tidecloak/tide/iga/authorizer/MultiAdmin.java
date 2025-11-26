@@ -2,6 +2,7 @@ package org.tidecloak.tide.iga.authorizer;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.core.Response;
@@ -34,6 +35,7 @@ import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
+import org.tidecloak.tide.iga.utils.IGAUtils;
 
 import javax.xml.bind.DatatypeConverter;
 import java.net.URI;
@@ -50,74 +52,29 @@ public class MultiAdmin implements Authorizer{
 
     @Override
     public Response signWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, List<?> draftEntities, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
-        IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
         ObjectMapper objectMapper = new ObjectMapper();
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
 
         if (changesetRequestEntity == null) {
             throw new BadRequestException("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
         }
+        Object draftEntity = draftEntities.get(0);
 
-        var config = componentModel.getConfig();
-
-        String defaultAdminUiDomain = tideIdp.getConfig().get("changeSetEndpoint");
-        String customAdminUiDomain = tideIdp.getConfig().get("CustomAdminUIDomain");
-        String redirectUrlSig = tideIdp.getConfig().get("changeSetURLSig");
-
-        URI redirectURI = new URI(defaultAdminUiDomain);
-        UserSessionModel userSession = session.sessions().getUserSession(realm, auth.getToken().getSessionId());
-        String port = redirectURI.getPort() == -1 ? "" : ":" + redirectURI.getPort();
-        String voucherURL = redirectURI.getScheme() + "://" + redirectURI.getHost() + port + "/realms/" +
-                session.getContext().getRealm().getName() + "/tidevouchers/fromUserSession?sessionId=" +userSession.getId();
-
-        URI uri = Midgard.CreateURL(
-                auth.getToken().getSessionId(),
-                redirectURI.toString(),//userSession.getNote("redirectUri"),
-                redirectUrlSig,
-                tideIdp.getConfig().get("homeORKurl"),
-                config.getFirst("clientId"),
-                config.getFirst("gVRK"),
-                config.getFirst("gVRKCertificate"),
-                realm.isRegistrationAllowed(),
-                Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
-                tideIdp.getConfig().get("LogoURL"),
-                tideIdp.getConfig().get("ImageURL"),
-                "approval",
-                tideIdp.getConfig().get("settingsSig"),
-                voucherURL, //voucherURL,
-                ""
-        );
-
-        URI customDomainUri = null;
-        if(customAdminUiDomain != null) {
-            customDomainUri = Midgard.CreateURL(
-                    auth.getToken().getSessionId(),
-                    customAdminUiDomain,//userSession.getNote("redirectUri"),
-                    tideIdp.getConfig().get("customAdminUIDomainSig"),
-                    tideIdp.getConfig().get("homeORKurl"),
-                    config.getFirst("clientId"),
-                    config.getFirst("gVRK"),
-                    config.getFirst("gVRKCertificate"),
-                    realm.isRegistrationAllowed(),
-                    Boolean.valueOf(tideIdp.getConfig().get("backupOn")),
-                    tideIdp.getConfig().get("LogoURL"),
-                    tideIdp.getConfig().get("ImageURL"),
-                    "approval",
-                    tideIdp.getConfig().get("settingsSig"),
-                    voucherURL, //voucherURL,
-                    ""
-            );
-        }
+        var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
 
         Map<String, String> response = new HashMap<>();
         response.put("message", "Opening Enclave to request approval.");
         response.put("changesetId", changesetRequestEntity.getChangesetRequestId());
         response.put("changeSetDraftRequests", changesetRequestEntity.getDraftRequest());
         response.put("requiresApprovalPopup", "true");
-        response.put("changeSetRequests", Base64.getEncoder().encodeToString(ModelRequest.FromString(changesetRequestEntity.getRequestModel()).Encode()));
-        if(customAdminUiDomain != null) {
-            response.put("customDomainUri", String.valueOf(customDomainUri));
+        List<String> request = new ArrayList<>(List.of(changesetRequestEntity.getRequestModel()));
+        if(authorityAssignment != null){
+            var id = authorityAssignment.getChangesetRequestId();
+            PolicyDraftEntity policyDraftEntity = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", id).getSingleResult();
+            ChangesetRequestEntity policyReqEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(policyDraftEntity.getId(), ChangeSetType.POLICY));
+            request.add(policyReqEntity.getRequestModel());
         }
+        response.put("changeSetRequests", objectMapper.writeValueAsString(request));
 
 
 
@@ -147,7 +104,6 @@ public class MultiAdmin implements Authorizer{
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
 
         List<AccessProofDetailEntity> orderedProofDetails = sortAccessProof(proofDetails);
-        List<UserContext> orderedContext = orderedProofDetails.stream().map(a -> new UserContext(a.getProofDraft())).toList();
 
         int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
         int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
@@ -168,7 +124,8 @@ public class MultiAdmin implements Authorizer{
         settings.Threshold_T = threshold;
         settings.Threshold_N = max;
         
-        ModelRequest req = ModelRequest.FromString(changesetRequestEntity.getRequestModel());
+        ModelRequest req = ModelRequest.FromBytes(Base64.getDecoder().decode(changesetRequestEntity.getRequestModel()));
+
         boolean isAuthorityAssignment = isAuthorityAssignment(session, draftEntity, em);
 
         if(isAuthorityAssignment) {
@@ -178,10 +135,10 @@ public class MultiAdmin implements Authorizer{
             }
             SignatureResponse response = Midgard.SignModel(settings, req);
 
-            for ( int i = 0; i < orderedProofDetails.size(); i++){
-                orderedProofDetails.get(i).setSignature(response.Signatures[i + 1]);
+            for ( int i = 0; i < orderedProofDetails.size() ; i++){
+                orderedProofDetails.get(i).setSignature(response.Signatures[i]);
             }
-            commitRolePolicy(session, changeSet.getChangeSetId(), draftEntity, response.Signatures[0]);
+            commitRolePolicy(session, changeSet.getChangeSetId(), draftEntity, response.Signatures[response.Signatures.length - 1]); // get the last one
 
         } else {
             SignatureResponse response = Midgard.SignModel(settings, req);
@@ -227,6 +184,7 @@ public class MultiAdmin implements Authorizer{
         MultivaluedHashMap<String, String> config = componentModel.getConfig();
         ModelRequest req =  ModelRequest.New("RotateVRK", "1", "Admin:1", DatatypeConverter.parseHexBinary(changesetRequestEntity.getDraftRequest()));
 
+        req.SetPolicy(policy.ToBytes());
         req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000); // expiry in 1 month
 
         int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));

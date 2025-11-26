@@ -3,23 +3,36 @@ package org.tidecloak.base.iga.TideRequests;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
+import jakarta.xml.bind.DatatypeConverter;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.midgard.models.Policy.*;
+import org.midgard.models.*;
+import org.midgard.models.RequestExtensions.*;
+import org.midgard.Midgard;
+
+
+
 
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
+import org.tidecloak.jpa.entities.ChangeRequestKey;
+import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.PolicyDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
+import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
+import org.tidecloak.tide.iga.AdminResource.TideAdminRealmResource;
 
 
 import java.util.*;
 
 import static org.tidecloak.base.iga.utils.BasicIGAUtils.getRoleIdFromEntity;
+import static org.tidecloak.tide.iga.AdminResource.TideAdminRealmResource.ConstructSignSettings;
+import static org.tidecloak.tide.iga.AdminResource.TideAdminRealmResource.tideRealmAdminRole;
 
 
 public class TideRoleRequests {
@@ -78,6 +91,7 @@ public class TideRoleRequests {
 
     public static void createRolePolicyDraft(KeycloakSession session,  String recordId, double thresholdPercentage, int numberOfAdditionalAdmins, RoleModel role) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        RoleModel tideRole = session.clients().getClientByClientId(session.getContext().getRealm(), Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
         String algorithm = "EdDSA";
         List<TideRoleDraftEntity> roleDraft = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
                 .setParameter("roleId", role.getId())
@@ -85,6 +99,7 @@ public class TideRoleRequests {
         if(roleDraft.isEmpty()){
             throw new Exception("This authorizer role does not have an role draft entity, " + role.getName());
         }
+
 
         List<TideUserRoleMappingDraftEntity> users = em.createNamedQuery("getUserRoleMappingsByStatusAndRole", TideUserRoleMappingDraftEntity.class)
                 .setParameter("draftStatus", DraftStatus.ACTIVE)
@@ -106,6 +121,10 @@ public class TideRoleRequests {
         String vvkId = config.getFirst("vvkId");
         String vendor = session.getContext().getRealm().getName();;
 
+        String currentSecretKeys = config.getFirst("clientSecret");
+        ObjectMapper objectMapper = new ObjectMapper();
+        TideAdminRealmResource.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, TideAdminRealmResource.SecretKeys.class);
+
         PolicyParameters params = new PolicyParameters();
         params.put("threshold", threshold);
         params.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
@@ -117,14 +136,46 @@ public class TideRoleRequests {
         if(!policyDraftEntities.isEmpty()){
             throw new Exception("There is already a pending change request with this record ID, " + recordId);
         }
-        ObjectMapper objectMapper = new ObjectMapper();
-        String policyString =  policy.ToString();
+        String policyString =  Base64.getEncoder().encodeToString(policy.ToBytes());
+
+        //check if policy has changed
+        TideRoleDraftEntity tideAdmin = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+                .setParameter("roleId", tideRole.getId())
+                .getSingleResult();
+
+
+        Policy currentPolicy = new Policy(Base64.getDecoder().decode(tideAdmin.getInitCert()));
+        if(currentPolicy.IsEqualTo(policy.ToBytes())){
+            return; // hash is the same, dont need to recreate
+        }
+
         PolicyDraftEntity policyDraftEntity = new PolicyDraftEntity();
-        policyDraftEntity.setId(KeycloakModelUtils.generateId());
+        String id = KeycloakModelUtils.generateId();
+        policyDraftEntity.setId(id);
         policyDraftEntity.setChangesetRequestId(recordId);
         policyDraftEntity.setPolicy(policyString);
         em.persist(policyDraftEntity);
+        SignRequestSettingsMidgard signedSettings = ConstructSignSettings(config, secretKeys.activeVrk);
+
+        PolicySignRequest pSignReq = new PolicySignRequest(policy.ToBytes(), "VRK:1");
+        pSignReq.SetAuthorization(
+                Midgard.SignWithVrk(pSignReq.GetDataToAuthorize(), signedSettings.VendorRotatingPrivateKey)
+        );
+        ModelRequest modelReq = ModelRequest.New("Policy", "1", "Policy:1", pSignReq.GetDraft(), policy.ToBytes());
+        modelReq = modelReq.InitializeTideRequestWithVrk(modelReq, signedSettings, "Policy:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
+
+        // create change request entity here too
+        ChangesetRequestEntity changesetRequestEntity = new ChangesetRequestEntity();
+        changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(policy.getDataToVerify()));
+        changesetRequestEntity.setChangesetType(ChangeSetType.POLICY);
+        changesetRequestEntity.setChangesetRequestId(id);
+        String encodedModel = Base64.getEncoder().encodeToString(modelReq.Encode());
+        changesetRequestEntity.setRequestModel(encodedModel);
+        em.persist(changesetRequestEntity);
+
         em.flush();
+
+
     }
 
     public static PolicyDraftEntity getDraftRolePolicy(KeycloakSession session, String recordId){
@@ -160,10 +211,12 @@ public class TideRoleRequests {
         roleDraftEntity.get(0).setInitCertSig(signature);
         Policy policy =  new Policy(Base64.getDecoder().decode(policyDraftEntity.getPolicy()));
         policy.AddSignature(Base64.getDecoder().decode(signature));
-        roleDraftEntity.get(0).setInitCert(policy.ToString());
+        roleDraftEntity.get(0).setInitCert(Base64.getEncoder().encodeToString(policy.ToBytes()));
 
-        roleModel.setSingleAttribute("tideThreshold", policy.GetParameter("threshold", String.class).toString());
-        roleModel.removeAttribute("InitCertDraftId");
+        roleModel.setSingleAttribute(
+                "tideThreshold",
+                String.valueOf(policy.GetParameter("threshold", Integer.class))
+        );        roleModel.removeAttribute("InitCertDraftId");
 
         em.remove(policyDraftEntity);
         em.flush();

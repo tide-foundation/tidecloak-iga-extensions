@@ -76,6 +76,13 @@ public class BasicIGAUtils {
         }
         return false;
     }
+    public static PolicyDraftEntity authorityAssignment(KeycloakSession session, Object mapping, EntityManager em){
+        if ( mapping instanceof  TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
+
+            return getDraftRolePolicy(session, tideUserRoleMappingDraftEntity.getChangeRequestId());
+        }
+        return null;
+    }
 
     public static boolean isIGAEnabled(RealmModel realm) {
         String isIGAEnabled = realm.getAttribute("isIGAEnabled");

@@ -255,6 +255,7 @@ public class TideAdminRealmResource {
 
             // Map requests to entities one-to-one (up to the shortest list)
                 requests.forEach(req -> {
+                    ModelRequest test = ModelRequest.FromBytes(Base64.getDecoder().decode(req));
                     changesetRequestEntity.setRequestModel(req);
                     try {
                         ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSetType, changeSetId, actionType,
