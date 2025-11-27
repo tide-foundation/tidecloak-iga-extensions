@@ -38,7 +38,9 @@ public class ChangesetRequestAdapter {
         String json = "{\"id\":\"" + adminUser.getId() + "\"}";
         AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), json, adminUser.getId(), em);
         changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
-        List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
+        var id = changeSetRequestID.contains("policy") ? changeSetRequestID.split("policy")[0] : changeSetRequestID;
+        var type =  changeSetRequestID.contains("policy") ? "USER_ROLE" : changeSetType;
+        List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(type), id);
         draftRecordEntity.forEach(d -> {
             try {
                 BasicIGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), d);

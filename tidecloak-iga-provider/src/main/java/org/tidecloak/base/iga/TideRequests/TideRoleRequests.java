@@ -152,7 +152,7 @@ public class TideRoleRequests {
         PolicyDraftEntity policyDraftEntity = new PolicyDraftEntity();
         String id = KeycloakModelUtils.generateId();
         policyDraftEntity.setId(id);
-        policyDraftEntity.setChangesetRequestId(recordId);
+        policyDraftEntity.setChangesetRequestId(recordId + "policy");
         policyDraftEntity.setPolicy(policyString);
         em.persist(policyDraftEntity);
         SignRequestSettingsMidgard signedSettings = ConstructSignSettings(config, secretKeys.activeVrk);
@@ -168,7 +168,7 @@ public class TideRoleRequests {
         ChangesetRequestEntity changesetRequestEntity = new ChangesetRequestEntity();
         changesetRequestEntity.setDraftRequest(Base64.getEncoder().encodeToString(policy.getDataToVerify()));
         changesetRequestEntity.setChangesetType(ChangeSetType.POLICY);
-        changesetRequestEntity.setChangesetRequestId(id);
+        changesetRequestEntity.setChangesetRequestId(recordId + "policy");
         String encodedModel = Base64.getEncoder().encodeToString(modelReq.Encode());
         changesetRequestEntity.setRequestModel(encodedModel);
         em.persist(changesetRequestEntity);
@@ -180,7 +180,7 @@ public class TideRoleRequests {
 
     public static PolicyDraftEntity getDraftRolePolicy(KeycloakSession session, String recordId){
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        List<PolicyDraftEntity> policyDraftEntities = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", recordId).getResultList();
+        List<PolicyDraftEntity> policyDraftEntities = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", recordId + "policy").getResultList();
         if(policyDraftEntities.isEmpty()){
             return null;
         }
@@ -204,7 +204,7 @@ public class TideRoleRequests {
         }
         PolicyDraftEntity policyDraftEntity = getDraftRolePolicy(session, recordId);
         if(policyDraftEntity == null) {
-            System.out.println("No policyto commit");
+            System.out.println("No policy to commit");
             return;
         }
 

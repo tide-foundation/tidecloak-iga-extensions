@@ -245,8 +245,11 @@ public class TideAdminRealmResource {
             }
 
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            var test = changeSetId.contains("policy") ? changeSetId.split("policy")[0] : changeSetId;
+            var type = changeSetId.contains("policy") ? ChangeSetType.POLICY : ChangeSetType.valueOf(changeSetType);
 
-            ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeSetId, ChangeSetType.valueOf(changeSetType));
+
+            ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeSetId, type);
 
             // Optional: sanity check
             if (requests == null || requests.isEmpty()) {
@@ -255,10 +258,13 @@ public class TideAdminRealmResource {
 
             // Map requests to entities one-to-one (up to the shortest list)
                 requests.forEach(req -> {
-                    ModelRequest test = ModelRequest.FromBytes(Base64.getDecoder().decode(req));
                     changesetRequestEntity.setRequestModel(req);
+                    em.flush();
+                    System.out.println("ADD TO THIS CHANGE REQUEST ENTITY " + changeSetId + " " + type);
+                    ModelRequest testing = ModelRequest.FromBytes(Base64.getDecoder().decode(req));
+                    System.out.println(testing.ToString());
                     try {
-                        ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSetType, changeSetId, actionType,
+                        ChangesetRequestAdapter.saveAdminAuthorizaton(session, String.valueOf(type), changeSetId, actionType,
                                 auth.adminAuth().getUser());
                     } catch (Exception e) {
                         throw new RuntimeException(e);

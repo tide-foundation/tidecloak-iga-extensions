@@ -22,11 +22,8 @@ import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.base.iga.utils.LicenseHistory;
-import org.tidecloak.jpa.entities.AccessProofDetailEntity;
-import org.tidecloak.jpa.entities.AuthorizerEntity;
-import org.tidecloak.jpa.entities.ChangesetRequestEntity;
+import org.tidecloak.jpa.entities.*;
 import org.tidecloak.jpa.entities.Licensing.LicenseHistoryEntity;
-import org.tidecloak.jpa.entities.LicensingDraftEntity;
 import org.tidecloak.jpa.entities.drafting.PolicyDraftEntity;
 import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
@@ -63,35 +60,50 @@ public class MultiAdmin implements Authorizer{
 
         var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
 
-        Map<String, String> response = new HashMap<>();
-        response.put("message", "Opening Enclave to request approval.");
-        response.put("changesetId", changesetRequestEntity.getChangesetRequestId());
-        response.put("changeSetDraftRequests", changesetRequestEntity.getDraftRequest());
-        response.put("requiresApprovalPopup", "true");
-        List<String> request = new ArrayList<>(List.of(changesetRequestEntity.getRequestModel()));
+        List<Map<String, String>> responses = new ArrayList<>();
+
+        // First response
+        Map<String, String> firstResponse = new HashMap<>();
+        firstResponse.put("message", "Opening Enclave to request approval.");
+        firstResponse.put("changesetId", changesetRequestEntity.getChangesetRequestId());
+        firstResponse.put("requiresApprovalPopup", "true");
+        firstResponse.put("changeSetDraftRequests", changesetRequestEntity.getRequestModel());
+        responses.add(firstResponse);
+
+        // Second response if authorityAssignment is not null
         if(authorityAssignment != null){
-            var id = authorityAssignment.getChangesetRequestId();
-            PolicyDraftEntity policyDraftEntity = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", id).getSingleResult();
-            ChangesetRequestEntity policyReqEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(policyDraftEntity.getId(), ChangeSetType.POLICY));
-            request.add(policyReqEntity.getRequestModel());
+            ChangesetRequestEntity policyReqEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(authorityAssignment.getChangesetRequestId(), ChangeSetType.POLICY));
+
+            Map<String, String> secondResponse = new HashMap<>();
+            secondResponse.put("message", "Opening Enclave to request approval.");
+            secondResponse.put("changesetId", authorityAssignment.getChangesetRequestId());
+            secondResponse.put("requiresApprovalPopup", "true");
+            secondResponse.put("changeSetDraftRequests", policyReqEntity.getRequestModel());
+            responses.add(secondResponse);
         }
-        response.put("changeSetRequests", objectMapper.writeValueAsString(request));
 
-
-
-        return Response.ok(objectMapper.writeValueAsString(response)).build();
+        return Response.ok(objectMapper.writeValueAsString(responses)).build();
     }
-
     @Override
     public Response commitWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, Object draftEntity, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
         IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
+        ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
+
+        RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        TideRoleDraftEntity tideAdmin = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+                .setParameter("roleId", tideRole.getId())
+                .getSingleResult();
+        var policyString = tideAdmin.getInitCert();
+        boolean isAuthorityAssignment = isAuthorityAssignment(session, draftEntity, em);
+
         ObjectMapper objectMapper = new ObjectMapper();
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
+        var id = changeSet.getChangeSetId();
+        var type = changeSet.getChangeSetId().contains("policy") ? ChangeSetType.POLICY : changeSet.getType();
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(id, type));
 
         if (changesetRequestEntity == null){
             throw new BadRequestException("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
         }
-
 
         var config = componentModel.getConfig();
         String authorizerType = authorizer.getType();
@@ -124,12 +136,12 @@ public class MultiAdmin implements Authorizer{
         settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
         settings.Threshold_T = threshold;
         settings.Threshold_N = max;
-        
+
+
         ModelRequest req = ModelRequest.FromBytes(Base64.getDecoder().decode(changesetRequestEntity.getRequestModel()));
+        var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
 
-        boolean isAuthorityAssignment = isAuthorityAssignment(session, draftEntity, em);
-
-        if(isAuthorityAssignment) {
+        if(authorityAssignment != null) {
             PolicyDraftEntity roleInitCert = getDraftRolePolicy(session, changeSet.getChangeSetId());
             if(roleInitCert == null) {
                 throw new BadRequestException("Role Init Cert draft not found for changeSet, " + changeSet.getChangeSetId());
@@ -137,26 +149,17 @@ public class MultiAdmin implements Authorizer{
             SignatureResponse response = Midgard.SignModel(settings, req);
 
             for ( int i = 0; i < orderedProofDetails.size() ; i++){
-                orderedProofDetails.get(i).setSignature(response.Signatures[i]);
+                    orderedProofDetails.get(i).setSignature(response.Signatures[i]);
             }
 
-            // now sign the admin policy
-            RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-            RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
-            TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                    .setParameter("role", role).getSingleResult();
+            // sign policy now
+            ChangesetRequestEntity changesetRequest = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(authorityAssignment.getChangesetRequestId(), ChangeSetType.POLICY));
+            ModelRequest pReq = ModelRequest.FromBytes(Base64.getDecoder().decode(changesetRequest.getRequestModel()));
+            Policy policy = new Policy(Base64.getDecoder().decode(policyString));
 
-            Policy policy = new Policy(Base64.getDecoder().decode(tideRoleEntity.getInitCert()));
-            PolicySignRequest pSignReq = new PolicySignRequest(policy.ToBytes(), "VRK:1");
-            pSignReq.SetAuthorization(
-                    Midgard.SignWithVrk(pSignReq.GetDataToAuthorize(), settings.VendorRotatingPrivateKey)
-            );
-            pSignReq.SetAuthorizer(HexFormat.of().parseHex(authorizer.getAuthorizer()));
-            pSignReq.SetAuthorizerCertificate(Base64.getDecoder().decode(authorizer.getAuthorizerCertificate()));
-            SignatureResponse res = Midgard.SignModel(settings, pSignReq);
-
-            commitRolePolicy(session, changeSet.getChangeSetId(), draftEntity, res.Signatures[0]); // get the last one
-
+            pReq.SetPolicy(policy.ToBytes());
+            SignatureResponse pResp = Midgard.SignModel(settings, pReq);
+            commitRolePolicy(session, changeSet.getChangeSetId(), draftEntity, pResp.Signatures[0]); // get the last one
         } else {
             SignatureResponse response = Midgard.SignModel(settings, req);
 
@@ -169,6 +172,7 @@ public class MultiAdmin implements Authorizer{
 
         WorkflowParams workflowParams = new WorkflowParams(null, false, null, changeSet.getType());
         processorFactory.getProcessor(changeSet.getType()).executeWorkflow(session, draftEntity, em, WorkflowType.COMMIT, workflowParams, null);
+
         if (isAuthorityAssignment) {
             if (authorizer.getType().equals(org.tidecloak.shared.Constants.TIDE_INITIAL_AUTHORIZER)){
                 authorizer.setType(org.tidecloak.shared.Constants.TIDE_MULTI_ADMIN_AUTHORIZER);
