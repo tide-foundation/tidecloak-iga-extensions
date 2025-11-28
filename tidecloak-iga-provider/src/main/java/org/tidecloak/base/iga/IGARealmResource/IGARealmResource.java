@@ -242,7 +242,7 @@ public class IGARealmResource {
     @Path("change-set/sign")
     public Response signChangeset(ChangeSetRequest changeSet) throws Exception {
         try{
-            List<String> result = signChangeSets(Collections.singletonList(changeSet));
+            List<Object> result = signChangeSets(Collections.singletonList(changeSet));
             return Response.ok(result.get(0)).build();
         }catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
@@ -250,15 +250,16 @@ public class IGARealmResource {
     }
 
     @POST
-    @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign/batch")
     public Response signMultipleChangeSets(ChangeSetRequestList changeSets) throws Exception {
-        try{
+        try {
+            List<Object> result = signChangeSets(changeSets.getChangeSets());
             ObjectMapper objectMapper = new ObjectMapper();
-            List<String> result =  signChangeSets(changeSets.getChangeSets());
             return Response.ok(objectMapper.writeValueAsString(result)).build();
-        }catch (Exception ex) {
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
+        } catch (Exception ex) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity(ex.getMessage())
+                    .build();
         }
     }
 
@@ -740,12 +741,12 @@ public class IGARealmResource {
                 .build();
     }
 
-    public List<String> signChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
+    public List<Object> signChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
         auth.realm().requireManageRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
         ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
-        List<String> signedJsonList = new ArrayList<>();
+        List<Object> signedList = new ArrayList<>();
         ObjectMapper objectMapper = new ObjectMapper();
 
         if (changeSets.size() > 1) {
@@ -769,7 +770,6 @@ public class IGARealmResource {
                         ChangeSetType requestType = entry.getKey();
                         List<Object> entities = entry.getValue();
                         try {
-                            // Return a stream of results from each processor
                             return processorFactory.getProcessor(requestType)
                                     .combineChangeRequests(session, entities, em)
                                     .stream();
@@ -794,17 +794,17 @@ public class IGARealmResource {
                     ActionType actionType = allDelete ? ActionType.DELETE : ActionType.CREATE;
 
                     Response singleResp = signer.sign(new ChangeSetRequest(changeSet.getChangesetRequestId(), changeSet.getChangesetType(), actionType), em, session, realm, draftRecordEntities, auth.adminAuth());
-                    // extract that JSON payload
-                    String jsonBody = singleResp.readEntity(String.class);
 
-                    // collect it
-                    signedJsonList.add(jsonBody);
+                    String jsonBody = singleResp.readEntity(String.class);
+                    List<Object> parsed = objectMapper.readValue(jsonBody, List.class);
+
+                    // Add all items from the list (flatten)
+                    signedList.addAll(parsed);
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
-            };
-        }
-        else {
+            }
+        } else {
             for (ChangeSetRequest changeSet : changeSets) {
                 List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
                 if (draftRecordEntities == null || draftRecordEntities.isEmpty()) {
@@ -812,18 +812,19 @@ public class IGARealmResource {
                 }
                 try {
                     Response singleResp = signer.sign(changeSet, em, session, realm, draftRecordEntities, auth.adminAuth());
-                    // extract that JSON payload
-                    String jsonBody = singleResp.readEntity(String.class);
 
-                    // collect it
-                    signedJsonList.add(jsonBody);
+                    String jsonBody = singleResp.readEntity(String.class);
+                    List<Object> parsed = objectMapper.readValue(jsonBody, List.class);
+
+                    // Add all items from the list (flatten)
+                    signedList.addAll(parsed);
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
             }
         }
 
-        return signedJsonList;
+        return signedList;
     }
 
     private Response commitChangeSets(List<ChangeSetRequest> changeSets) throws Exception {

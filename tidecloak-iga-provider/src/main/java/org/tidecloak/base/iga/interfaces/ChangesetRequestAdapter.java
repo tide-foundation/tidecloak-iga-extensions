@@ -41,6 +41,7 @@ public class ChangesetRequestAdapter {
         var id = changeSetRequestID.contains("policy") ? changeSetRequestID.split("policy")[0] : changeSetRequestID;
         var type =  changeSetRequestID.contains("policy") ? "USER_ROLE" : changeSetType;
         List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(type), id);
+        if(draftRecordEntity == null || draftRecordEntity.isEmpty()) return;
         draftRecordEntity.forEach(d -> {
             try {
                 BasicIGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), d);

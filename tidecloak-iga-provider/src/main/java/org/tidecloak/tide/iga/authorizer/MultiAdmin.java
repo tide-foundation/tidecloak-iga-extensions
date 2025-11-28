@@ -1,31 +1,24 @@
 package org.tidecloak.tide.iga.authorizer;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
-import org.midgard.Serialization.Tools;
 import org.midgard.Midgard;
 import org.midgard.models.*;
 import org.midgard.models.Policy.*;
-import org.midgard.models.RequestExtensions.UserContextSignRequest;
-import org.midgard.models.UserContext.UserContext;
-import org.midgard.models.RequestExtensions.PolicySignRequest;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
-import org.tidecloak.base.iga.utils.LicenseHistory;
 import org.tidecloak.jpa.entities.*;
 import org.tidecloak.jpa.entities.Licensing.LicenseHistoryEntity;
 import org.tidecloak.jpa.entities.drafting.PolicyDraftEntity;
-import org.tidecloak.jpa.entities.drafting.RoleInitializerCertificateDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -33,12 +26,8 @@ import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
-import org.tidecloak.tide.iga.utils.IGAUtils;
 
 import javax.xml.bind.DatatypeConverter;
-import java.net.URI;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.util.*;
 
 import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.commitRolePolicy;
@@ -49,41 +38,60 @@ import static org.tidecloak.base.iga.utils.BasicIGAUtils.sortAccessProof;
 public class MultiAdmin implements Authorizer{
 
     @Override
-    public Response signWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, List<?> draftEntities, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
-        ObjectMapper objectMapper = new ObjectMapper();
-        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
+    public Response signWithAuthorizer(ChangeSetRequest changeSet,
+                                       EntityManager em,
+                                       KeycloakSession session,
+                                       RealmModel realm,
+                                       List<?> draftEntities,
+                                       AdminAuth auth,
+                                       AuthorizerEntity authorizer,
+                                       ComponentModel componentModel) throws Exception {
+
+        ObjectMapper mapper = new ObjectMapper();
+
+        ChangesetRequestEntity changesetRequestEntity = em.find(
+                ChangesetRequestEntity.class,
+                new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType())
+        );
 
         if (changesetRequestEntity == null) {
-            throw new BadRequestException("No change-set request entity found with this recordId and type " + changeSet.getChangeSetId() + " , " + changeSet.getType());
+            throw new BadRequestException("No change-set request entity found with this recordId and type "
+                    + changeSet.getChangeSetId() + " , " + changeSet.getType());
         }
-        Object draftEntity = draftEntities.get(0);
 
+        Object draftEntity = draftEntities.get(0);
         var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
 
-        List<Map<String, String>> responses = new ArrayList<>();
+        List<Map<String, Object>> responses = new ArrayList<>();
 
-        // First response
-        Map<String, String> firstResponse = new HashMap<>();
+        // --- First ---
+        Map<String, Object> firstResponse = new HashMap<>();
         firstResponse.put("message", "Opening Enclave to request approval.");
         firstResponse.put("changesetId", changesetRequestEntity.getChangesetRequestId());
-        firstResponse.put("requiresApprovalPopup", "true");
+        firstResponse.put("requiresApprovalPopup", true);
         firstResponse.put("changeSetDraftRequests", changesetRequestEntity.getRequestModel());
         responses.add(firstResponse);
 
-        // Second response if authorityAssignment is not null
-        if(authorityAssignment != null){
-            ChangesetRequestEntity policyReqEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(authorityAssignment.getChangesetRequestId(), ChangeSetType.POLICY));
+        // --- Second ---
+        if (authorityAssignment != null) {
+            ChangesetRequestEntity policyReqEntity = em.find(
+                    ChangesetRequestEntity.class,
+                    new ChangesetRequestEntity.Key(authorityAssignment.getChangesetRequestId(), ChangeSetType.POLICY)
+            );
 
-            Map<String, String> secondResponse = new HashMap<>();
+            Map<String, Object> secondResponse = new HashMap<>();
             secondResponse.put("message", "Opening Enclave to request approval.");
             secondResponse.put("changesetId", authorityAssignment.getChangesetRequestId());
-            secondResponse.put("requiresApprovalPopup", "true");
+            secondResponse.put("requiresApprovalPopup", true);
             secondResponse.put("changeSetDraftRequests", policyReqEntity.getRequestModel());
             responses.add(secondResponse);
         }
 
-        return Response.ok(objectMapper.writeValueAsString(responses)).build();
+        // Serialize to JSON string
+        String jsonString = mapper.writeValueAsString(responses);
+        return Response.ok(jsonString, MediaType.APPLICATION_JSON).build();
     }
+
     @Override
     public Response commitWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, Object draftEntity, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
         IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
