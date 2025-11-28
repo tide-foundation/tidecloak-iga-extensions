@@ -211,7 +211,7 @@ public class MultiAdmin implements Authorizer{
         }
 
         MultivaluedHashMap<String, String> config = componentModel.getConfig();
-        ModelRequest req =  ModelRequest.New("RotateVRK", "1", "Admin:1", DatatypeConverter.parseHexBinary(changesetRequestEntity.getDraftRequest()));
+        var req = ModelRequest.FromBytes(Base64.getDecoder().decode(changesetRequestEntity.getRequestModel()));
 
         req.SetPolicy(policy.ToBytes());
         req.SetCustomExpiry(changesetRequestEntity.getTimestamp() + 2628000); // expiry in 1 month

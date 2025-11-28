@@ -101,6 +101,75 @@ public class IGARealmResource {
                             throw new RuntimeException(e);
                         }
                     });
+
+                    // Get the admin console client
+                    ClientModel secAdminConsole =
+                            session.clients().getClientByClientId(realm, Constants.ADMIN_CONSOLE_CLIENT_ID);
+
+                    // Ensure current auth server URL is in web origins
+                    Set<String> currentWebOrigins = new HashSet<>(secAdminConsole.getWebOrigins());
+                    currentWebOrigins.add(session.getContext().getAuthServerUrl().toString());
+                    secAdminConsole.setWebOrigins(currentWebOrigins);
+
+                    // Find the "roles" client scope
+                    ClientScopeModel rolesScope =
+                            session.clientScopes()
+                                    .getClientScopesStream(realm)
+                                    .filter(cs -> "roles".equalsIgnoreCase(cs.getName()))
+                                    .findFirst()
+                                    .orElse(null);
+
+                    if (rolesScope == null) {
+                        throw new IllegalStateException("roles client scope not found");
+                    }
+
+                    // Get predefined mappers from the roles scope
+                    ProtocolMapperModel scopeClientRole =
+                            rolesScope.getProtocolMapperByName("openid-connect", "client roles");
+                    ProtocolMapperModel scopeRealmRole =
+                            rolesScope.getProtocolMapperByName("openid-connect", "realm roles");
+
+                    if (scopeClientRole == null || scopeRealmRole == null) {
+                        throw new IllegalStateException("Expected predefined mappers 'client roles' / 'realm roles' not found on roles scope");
+                    }
+
+                    // Clone mappers like the Admin Console would when "Add predefined mapper" is used
+                    ProtocolMapperModel clientRoleMapper = cloneMapper(scopeClientRole);
+                    ProtocolMapperModel realmRoleMapper  = cloneMapper(scopeRealmRole);
+
+                    // Apply your config changes on the clones
+                    Map<String, String> clientRoleConfig = new HashMap<>(clientRoleMapper.getConfig());
+                    clientRoleConfig.put("lightweight.claim", "true");
+                    clientRoleMapper.setConfig(clientRoleConfig);
+
+                    Map<String, String> realmRoleConfig = new HashMap<>(realmRoleMapper.getConfig());
+                    realmRoleConfig.put("lightweight.claim", "true");
+                    realmRoleMapper.setConfig(realmRoleConfig);
+
+                    // Check if the client already has mappers with these names
+                    ProtocolMapperModel existingClientRole =
+                            secAdminConsole.getProtocolMapperByName("openid-connect", clientRoleMapper.getName());
+                    ProtocolMapperModel existingRealmRole =
+                            secAdminConsole.getProtocolMapperByName("openid-connect", realmRoleMapper.getName());
+
+                    // If mapper exists, just update its config; if not, add the cloned mapper
+                    if (existingClientRole == null) {
+                        secAdminConsole.addProtocolMapper(clientRoleMapper);
+                    } else {
+                        Map<String, String> cfg = new HashMap<>(existingClientRole.getConfig());
+                        cfg.put("lightweight.claim", "true");
+                        existingClientRole.setConfig(cfg);
+                    }
+
+                    if (existingRealmRole == null) {
+                        secAdminConsole.addProtocolMapper(realmRoleMapper);
+                    } else {
+                        Map<String, String> cfg = new HashMap<>(existingRealmRole.getConfig());
+                        cfg.put("lightweight.claim", "true");
+                        existingRealmRole.setConfig(cfg);
+                    }
+
+
                 } else {
                     // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA
                     // TODO: Fix error: Uncaught server error: java.lang.RuntimeException: org.keycloak.crypto.SignatureException:
@@ -117,6 +186,17 @@ public class IGARealmResource {
             throw e;
         }
     }
+
+    // --- Helper: clone a mapper from the scope to use on the client ---
+    ProtocolMapperModel cloneMapper(ProtocolMapperModel source) {
+        ProtocolMapperModel clone = new ProtocolMapperModel();
+        clone.setName(source.getName());                 // same name as predefined
+        clone.setProtocol(source.getProtocol());         // e.g. "openid-connect"
+        clone.setProtocolMapper(source.getProtocolMapper());
+        clone.setConfig(new HashMap<>(source.getConfig()));
+        return clone;
+    }
+
 
     @POST
     @Path("add-rejection")
