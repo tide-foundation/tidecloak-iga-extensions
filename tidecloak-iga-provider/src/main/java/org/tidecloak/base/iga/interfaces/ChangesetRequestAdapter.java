@@ -40,6 +40,7 @@ public class ChangesetRequestAdapter {
         changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
         var id = changeSetRequestID.contains("policy") ? changeSetRequestID.split("policy")[0] : changeSetRequestID;
         var type =  changeSetRequestID.contains("policy") ? "USER_ROLE" : changeSetType;
+        if(changeSetType.equals("POLICY")) return;
         List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(type), id);
         if(draftRecordEntity == null || draftRecordEntity.isEmpty()) return;
         draftRecordEntity.forEach(d -> {

@@ -1,5 +1,7 @@
 package org.tidecloak.base.iga.IGARealmResource;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
@@ -322,7 +324,7 @@ public class IGARealmResource {
     @Path("change-set/sign")
     public Response signChangeset(ChangeSetRequest changeSet) throws Exception {
         try{
-            List<Object> result = signChangeSets(Collections.singletonList(changeSet));
+            List<Map<String, Object>> result = signChangeSets(Collections.singletonList(changeSet));
             return Response.ok(result.get(0)).build();
         }catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
@@ -333,15 +335,18 @@ public class IGARealmResource {
     @Path("change-set/sign/batch")
     public Response signMultipleChangeSets(ChangeSetRequestList changeSets) throws Exception {
         try {
-            List<Object> result = signChangeSets(changeSets.getChangeSets());
-            ObjectMapper objectMapper = new ObjectMapper();
-            return Response.ok(objectMapper.writeValueAsString(result)).build();
+            // Now returns List<Map<String, Object>>
+            List<Map<String, Object>> result = signChangeSets(changeSets.getChangeSets());
+
+            // Let JAX-RS / Jackson serialize it, no need for manual ObjectMapper
+            return Response.ok(result).build();
         } catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
                     .entity(ex.getMessage())
                     .build();
         }
     }
+
 
     @GET
     @Path("change-set/requests")
@@ -821,12 +826,13 @@ public class IGARealmResource {
                 .build();
     }
 
-    public List<Object> signChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
+    public List<Map<String, Object>> signChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
         auth.realm().requireManageRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
         ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
-        List<Object> signedList = new ArrayList<>();
+
+        List<Map<String, Object>> signedList = new ArrayList<>();
         ObjectMapper objectMapper = new ObjectMapper();
 
         if (changeSets.size() > 1) {
@@ -843,6 +849,7 @@ public class IGARealmResource {
                                             Collectors.toList()
                                     )
                             ));
+
             ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();
 
             List<ChangesetRequestEntity> changeRequests = requests.entrySet().stream()
@@ -860,52 +867,100 @@ public class IGARealmResource {
                     .collect(Collectors.toList());
 
             for (ChangesetRequestEntity changeSet : changeRequests) {
-                try {
-                    List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(
-                            em,
-                            changeSet.getChangesetType(),
-                            changeSet.getChangesetRequestId()
-                    );
+                List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(
+                        em,
+                        changeSet.getChangesetType(),
+                        changeSet.getChangesetRequestId()
+                );
 
-                    boolean allDelete = draftRecordEntities.stream()
-                            .map(BasicIGAUtils::getActionTypeFromEntity)
-                            .allMatch(actionType -> actionType == ActionType.DELETE);
+                boolean allDelete = draftRecordEntities.stream()
+                        .map(BasicIGAUtils::getActionTypeFromEntity)
+                        .allMatch(actionType -> actionType == ActionType.DELETE);
 
-                    ActionType actionType = allDelete ? ActionType.DELETE : ActionType.CREATE;
+                ActionType actionType = allDelete ? ActionType.DELETE : ActionType.CREATE;
 
-                    Response singleResp = signer.sign(new ChangeSetRequest(changeSet.getChangesetRequestId(), changeSet.getChangesetType(), actionType), em, session, realm, draftRecordEntities, auth.adminAuth());
+                Response singleResp = signer.sign(
+                        new ChangeSetRequest(
+                                changeSet.getChangesetRequestId(),
+                                changeSet.getChangesetType(),
+                                actionType
+                        ),
+                        em,
+                        session,
+                        realm,
+                        draftRecordEntities,
+                        auth.adminAuth()
+                );
 
-                    String jsonBody = singleResp.readEntity(String.class);
-                    List<Object> parsed = objectMapper.readValue(jsonBody, List.class);
-
-                    // Add all items from the list (flatten)
-                    signedList.addAll(parsed);
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
+                handleSignerResponse(singleResp, objectMapper, signedList);
             }
         } else {
             for (ChangeSetRequest changeSet : changeSets) {
-                List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
+                List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(
+                        em,
+                        changeSet.getType(),
+                        changeSet.getChangeSetId()
+                );
+
                 if (draftRecordEntities == null || draftRecordEntities.isEmpty()) {
-                    throw new BadRequestException("Unsupported change set type for ID: " + changeSet.getChangeSetId());
+                    throw new BadRequestException(
+                            "Unsupported change set type for ID: " + changeSet.getChangeSetId()
+                    );
                 }
-                try {
-                    Response singleResp = signer.sign(changeSet, em, session, realm, draftRecordEntities, auth.adminAuth());
 
-                    String jsonBody = singleResp.readEntity(String.class);
-                    List<Object> parsed = objectMapper.readValue(jsonBody, List.class);
+                Response singleResp = signer.sign(
+                        changeSet,
+                        em,
+                        session,
+                        realm,
+                        draftRecordEntities,
+                        auth.adminAuth()
+                );
 
-                    // Add all items from the list (flatten)
-                    signedList.addAll(parsed);
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
+                handleSignerResponse(singleResp, objectMapper, signedList);
             }
         }
 
         return signedList;
     }
+
+    /**
+     * Handles both:
+     *  - FirstAdmin: JSON OBJECT -> { ... }
+     *  - MultiAdmin: JSON ARRAY  -> [ { ... }, { ... } ]
+     */
+    private void handleSignerResponse(Response singleResp,
+                                      ObjectMapper objectMapper,
+                                      List<Map<String, Object>> signedList) throws Exception {
+
+        String jsonBody = singleResp.readEntity(String.class);
+        if (jsonBody == null || jsonBody.isBlank()) {
+            return; // or throw, depending on your contract
+        }
+
+        JsonNode root = objectMapper.readTree(jsonBody);
+
+        if (root.isArray()) {
+            // MultiAdmin: List<Map<String,Object>>
+            for (JsonNode node : root) {
+                Map<String, Object> parsed = objectMapper.convertValue(
+                        node,
+                        new TypeReference<Map<String, Object>>() {}
+                );
+                signedList.add(parsed);
+            }
+        } else if (root.isObject()) {
+            // FirstAdmin: single result object
+            Map<String, Object> parsed = objectMapper.convertValue(
+                    root,
+                    new TypeReference<Map<String, Object>>() {}
+            );
+            signedList.add(parsed);
+        } else {
+            throw new BadRequestException("Unsupported signer response JSON shape: " + jsonBody);
+        }
+    }
+
 
     private Response commitChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
         auth.realm().requireManageRealm();
