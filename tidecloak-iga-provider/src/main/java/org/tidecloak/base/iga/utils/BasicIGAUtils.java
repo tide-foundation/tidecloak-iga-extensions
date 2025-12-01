@@ -68,6 +68,23 @@ public class BasicIGAUtils {
         return Stream.concat(adminProofs, userProofs).toList();
     }
 
+    /**
+     * Checks if the role being assigned is tide-realm-admin (regardless of whether policy exists)
+     */
+    public static boolean isTideRealmAdminRoleAssignment(KeycloakSession session, Object mapping){
+        if ( mapping instanceof  TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
+            RealmModel realm = session.getContext().getRealm();
+            RoleModel role = realm.getRoleById(tideUserRoleMappingDraftEntity.getRoleId());
+            if (role != null) {
+                return role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Checks if this assignment has an associated policy (policy already exists)
+     */
     public static boolean isAuthorityAssignment(KeycloakSession session, Object mapping, EntityManager em){
         if ( mapping instanceof  TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
             PolicyDraftEntity rolePolicy = getDraftRolePolicy(session, tideUserRoleMappingDraftEntity.getChangeRequestId());
@@ -226,6 +243,10 @@ public class BasicIGAUtils {
             return ChangeSetType.CLIENT;
         }
 
+        if (entity instanceof PolicyDraftEntity) {
+            return ChangeSetType.POLICY;
+        }
+
         return null;
     }
 
@@ -250,6 +271,10 @@ public class BasicIGAUtils {
 
         if (entity instanceof TideClientDraftEntity) {
             return ((TideClientDraftEntity) entity).getAction();
+        }
+
+        if (entity instanceof PolicyDraftEntity) {
+            return ActionType.CREATE;  // Policies are always CREATE actions
         }
 
         return ActionType.NONE;
@@ -332,6 +357,14 @@ public class BasicIGAUtils {
                                         TideClientDraftEntity.class
                                 )
                                 .setParameter("requestId", changeSetId)
+                                .getResultList();
+
+                case POLICY ->
+                        em.createNamedQuery(
+                                        "getPolicyByChangeSetId",
+                                        PolicyDraftEntity.class
+                                )
+                                .setParameter("changesetId", changeSetId)
                                 .getResultList();
 
                 default -> null;
