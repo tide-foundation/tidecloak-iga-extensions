@@ -92,7 +92,7 @@ public class FirstAdmin implements Authorizer {
 
         draftEntities.forEach(d -> {
 
-            BasicIGAUtils.updateDraftStatus(BasicIGAUtils.getTypeFromEntity(d), BasicIGAUtils.getActionTypeFromEntity(d), d);
+            BasicIGAUtils.updateDraftStatus(changeSet.getType(), BasicIGAUtils.getActionTypeFromEntity(d), d);
         });
 
         return Response.ok(objectMapper.writeValueAsString(response)).build();

@@ -1000,6 +1000,11 @@ public class IGARealmResource {
 
                 List<?> mapping = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, type, changeSet.getChangeSetId());
                 if (mapping != null && mapping.isEmpty()) {
+                    ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), type));
+                    if(changesetRequestEntity != null){
+                        em.remove(changesetRequestEntity);
+                        em.flush();
+                    }
                     return;
                 }
 
