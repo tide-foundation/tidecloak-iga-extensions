@@ -1,9 +1,12 @@
 package org.tidecloak.base.iga.IGARealmResource;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.NoResultException;
+import jakarta.persistence.TypedQuery;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -100,6 +103,75 @@ public class IGARealmResource {
                             throw new RuntimeException(e);
                         }
                     });
+
+                    // Get the admin console client
+                    ClientModel secAdminConsole =
+                            session.clients().getClientByClientId(realm, Constants.ADMIN_CONSOLE_CLIENT_ID);
+
+                    // Ensure current auth server URL is in web origins
+                    Set<String> currentWebOrigins = new HashSet<>(secAdminConsole.getWebOrigins());
+                    currentWebOrigins.add(session.getContext().getAuthServerUrl().toString());
+                    secAdminConsole.setWebOrigins(currentWebOrigins);
+
+                    // Find the "roles" client scope
+                    ClientScopeModel rolesScope =
+                            session.clientScopes()
+                                    .getClientScopesStream(realm)
+                                    .filter(cs -> "roles".equalsIgnoreCase(cs.getName()))
+                                    .findFirst()
+                                    .orElse(null);
+
+                    if (rolesScope == null) {
+                        throw new IllegalStateException("roles client scope not found");
+                    }
+
+                    // Get predefined mappers from the roles scope
+                    ProtocolMapperModel scopeClientRole =
+                            rolesScope.getProtocolMapperByName("openid-connect", "client roles");
+                    ProtocolMapperModel scopeRealmRole =
+                            rolesScope.getProtocolMapperByName("openid-connect", "realm roles");
+
+                    if (scopeClientRole == null || scopeRealmRole == null) {
+                        throw new IllegalStateException("Expected predefined mappers 'client roles' / 'realm roles' not found on roles scope");
+                    }
+
+                    // Clone mappers like the Admin Console would when "Add predefined mapper" is used
+                    ProtocolMapperModel clientRoleMapper = cloneMapper(scopeClientRole);
+                    ProtocolMapperModel realmRoleMapper  = cloneMapper(scopeRealmRole);
+
+                    // Apply your config changes on the clones
+                    Map<String, String> clientRoleConfig = new HashMap<>(clientRoleMapper.getConfig());
+                    clientRoleConfig.put("lightweight.claim", "true");
+                    clientRoleMapper.setConfig(clientRoleConfig);
+
+                    Map<String, String> realmRoleConfig = new HashMap<>(realmRoleMapper.getConfig());
+                    realmRoleConfig.put("lightweight.claim", "true");
+                    realmRoleMapper.setConfig(realmRoleConfig);
+
+                    // Check if the client already has mappers with these names
+                    ProtocolMapperModel existingClientRole =
+                            secAdminConsole.getProtocolMapperByName("openid-connect", clientRoleMapper.getName());
+                    ProtocolMapperModel existingRealmRole =
+                            secAdminConsole.getProtocolMapperByName("openid-connect", realmRoleMapper.getName());
+
+                    // If mapper exists, just update its config; if not, add the cloned mapper
+                    if (existingClientRole == null) {
+                        secAdminConsole.addProtocolMapper(clientRoleMapper);
+                    } else {
+                        Map<String, String> cfg = new HashMap<>(existingClientRole.getConfig());
+                        cfg.put("lightweight.claim", "true");
+                        existingClientRole.setConfig(cfg);
+                    }
+
+                    if (existingRealmRole == null) {
+                        secAdminConsole.addProtocolMapper(realmRoleMapper);
+                    } else {
+                        Map<String, String> cfg = new HashMap<>(existingRealmRole.getConfig());
+                        cfg.put("lightweight.claim", "true");
+                        existingRealmRole.setConfig(cfg);
+                    }
+
+
                 } else {
                     // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA
                     // TODO: Fix error: Uncaught server error: java.lang.RuntimeException: org.keycloak.crypto.SignatureException:
@@ -116,6 +188,17 @@ public class IGARealmResource {
             throw e;
         }
     }
+
+    // --- Helper: clone a mapper from the scope to use on the client ---
+    ProtocolMapperModel cloneMapper(ProtocolMapperModel source) {
+        ProtocolMapperModel clone = new ProtocolMapperModel();
+        clone.setName(source.getName());                 // same name as predefined
+        clone.setProtocol(source.getProtocol());         // e.g. "openid-connect"
+        clone.setProtocolMapper(source.getProtocolMapper());
+        clone.setConfig(new HashMap<>(source.getConfig()));
+        return clone;
+    }
+
 
     @POST
     @Path("add-rejection")
@@ -241,7 +324,7 @@ public class IGARealmResource {
     @Path("change-set/sign")
     public Response signChangeset(ChangeSetRequest changeSet) throws Exception {
         try{
-            List<String> result = signChangeSets(Collections.singletonList(changeSet));
+            List<Map<String, Object>> result = signChangeSets(Collections.singletonList(changeSet));
             return Response.ok(result.get(0)).build();
         }catch (Exception ex) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
@@ -249,17 +332,84 @@ public class IGARealmResource {
     }
 
     @POST
-    @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/sign/batch")
     public Response signMultipleChangeSets(ChangeSetRequestList changeSets) throws Exception {
-        try{
-            ObjectMapper objectMapper = new ObjectMapper();
-            List<String> result =  signChangeSets(changeSets.getChangeSets());
-            return Response.ok(objectMapper.writeValueAsString(result)).build();
-        }catch (Exception ex) {
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(ex.getMessage()).build();
+        try {
+            // Now returns List<Map<String, Object>>
+            List<Map<String, Object>> result = signChangeSets(changeSets.getChangeSets());
+
+            // Let JAX-RS / Jackson serialize it, no need for manual ObjectMapper
+            return Response.ok(result).build();
+        } catch (Exception ex) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity(ex.getMessage())
+                    .build();
         }
     }
+
+
+    @GET
+    @Path("change-set/requests")
+    public Response getChangeRequests(
+            @QueryParam("id") String changesetRequestId,
+            @QueryParam("type") String changesetTypeParam
+    ) {
+        auth.realm().requireManageRealm();
+
+        if (!BasicIGAUtils.isIGAEnabled(realm)) {
+            return Response.ok(Collections.emptyList()).build();
+        }
+
+        if ((changesetRequestId == null || changesetRequestId.isBlank()) &&
+                (changesetTypeParam == null || changesetTypeParam.isBlank())) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity("Either 'id' or 'type' query parameter must be provided")
+                    .build();
+        }
+
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<ChangesetRequestEntity> entities;
+
+        try {
+            if (changesetRequestId != null && !changesetRequestId.isBlank()) {
+
+                TypedQuery<ChangesetRequestEntity> query =
+                        (TypedQuery<ChangesetRequestEntity>) em.createNamedQuery("getAllChangeRequestsByRecordId"
+                        );
+                query.setParameter("changesetRequestId", changesetRequestId);
+
+                entities = query.getResultList();
+            } else {
+
+                ChangeSetType type;
+                try {
+                    type = ChangeSetType.valueOf(changesetTypeParam);
+                } catch (IllegalArgumentException ex) {
+                    return Response.status(Response.Status.BAD_REQUEST)
+                            .entity("Invalid ChangeSetType: " + changesetTypeParam)
+                            .build();
+                }
+
+                TypedQuery<ChangesetRequestEntity> query =
+                        em.createNamedQuery("getAllChangeRequestsByChangeSetType",
+                                ChangesetRequestEntity.class);
+                query.setParameter("changesetType", type);
+
+                entities = query.getResultList();
+            }
+        } catch (Exception e) {
+            return Response.serverError()
+                    .entity("Error retrieving change-set requests: " + e.getMessage())
+                    .build();
+        }
+
+        List<ChangesetRequestRepresentation> results = entities.stream()
+                .map(ChangesetRequestRepresentation::fromEntity)
+                .collect(Collectors.toList());
+
+        return Response.ok(results).build();
+    }
+
 
 
     @GET
@@ -676,12 +826,13 @@ public class IGARealmResource {
                 .build();
     }
 
-    public List<String> signChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
+    public List<Map<String, Object>> signChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
         auth.realm().requireManageRealm();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
         ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
-        List<String> signedJsonList = new ArrayList<>();
+
+        List<Map<String, Object>> signedList = new ArrayList<>();
         ObjectMapper objectMapper = new ObjectMapper();
 
         if (changeSets.size() > 1) {
@@ -698,6 +849,7 @@ public class IGARealmResource {
                                             Collectors.toList()
                                     )
                             ));
+
             ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();
 
             List<ChangesetRequestEntity> changeRequests = requests.entrySet().stream()
@@ -705,7 +857,6 @@ public class IGARealmResource {
                         ChangeSetType requestType = entry.getKey();
                         List<Object> entities = entry.getValue();
                         try {
-                            // Return a stream of results from each processor
                             return processorFactory.getProcessor(requestType)
                                     .combineChangeRequests(session, entities, em)
                                     .stream();
@@ -716,51 +867,100 @@ public class IGARealmResource {
                     .collect(Collectors.toList());
 
             for (ChangesetRequestEntity changeSet : changeRequests) {
-                try {
-                    List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(
-                            em,
-                            changeSet.getChangesetType(),
-                            changeSet.getChangesetRequestId()
-                    );
+                List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(
+                        em,
+                        changeSet.getChangesetType(),
+                        changeSet.getChangesetRequestId()
+                );
 
-                    boolean allDelete = draftRecordEntities.stream()
-                            .map(BasicIGAUtils::getActionTypeFromEntity)
-                            .allMatch(actionType -> actionType == ActionType.DELETE);
+                boolean allDelete = draftRecordEntities.stream()
+                        .map(BasicIGAUtils::getActionTypeFromEntity)
+                        .allMatch(actionType -> actionType == ActionType.DELETE);
 
-                    ActionType actionType = allDelete ? ActionType.DELETE : ActionType.CREATE;
+                ActionType actionType = allDelete ? ActionType.DELETE : ActionType.CREATE;
 
-                    Response singleResp = signer.sign(new ChangeSetRequest(changeSet.getChangesetRequestId(), changeSet.getChangesetType(), actionType), em, session, realm, draftRecordEntities, auth.adminAuth());
-                    // extract that JSON payload
-                    String jsonBody = singleResp.readEntity(String.class);
+                Response singleResp = signer.sign(
+                        new ChangeSetRequest(
+                                changeSet.getChangesetRequestId(),
+                                changeSet.getChangesetType(),
+                                actionType
+                        ),
+                        em,
+                        session,
+                        realm,
+                        draftRecordEntities,
+                        auth.adminAuth()
+                );
 
-                    // collect it
-                    signedJsonList.add(jsonBody);
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-            };
-        }
-        else {
+                handleSignerResponse(singleResp, objectMapper, signedList);
+            }
+        } else {
             for (ChangeSetRequest changeSet : changeSets) {
-                List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
-                if (draftRecordEntities == null || draftRecordEntities.isEmpty()) {
-                    throw new BadRequestException("Unsupported change set type for ID: " + changeSet.getChangeSetId());
-                }
-                try {
-                    Response singleResp = signer.sign(changeSet, em, session, realm, draftRecordEntities, auth.adminAuth());
-                    // extract that JSON payload
-                    String jsonBody = singleResp.readEntity(String.class);
+                List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(
+                        em,
+                        changeSet.getType(),
+                        changeSet.getChangeSetId()
+                );
 
-                    // collect it
-                    signedJsonList.add(jsonBody);
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
+                if (draftRecordEntities == null || draftRecordEntities.isEmpty()) {
+                    throw new BadRequestException(
+                            "Unsupported change set type for ID: " + changeSet.getChangeSetId()
+                    );
                 }
+
+                Response singleResp = signer.sign(
+                        changeSet,
+                        em,
+                        session,
+                        realm,
+                        draftRecordEntities,
+                        auth.adminAuth()
+                );
+
+                handleSignerResponse(singleResp, objectMapper, signedList);
             }
         }
 
-        return signedJsonList;
+        return signedList;
     }
+
+    /**
+     * Handles both:
+     *  - FirstAdmin: JSON OBJECT -> { ... }
+     *  - MultiAdmin: JSON ARRAY  -> [ { ... }, { ... } ]
+     */
+    private void handleSignerResponse(Response singleResp,
+                                      ObjectMapper objectMapper,
+                                      List<Map<String, Object>> signedList) throws Exception {
+
+        String jsonBody = singleResp.readEntity(String.class);
+        if (jsonBody == null || jsonBody.isBlank()) {
+            return; // or throw, depending on your contract
+        }
+
+        JsonNode root = objectMapper.readTree(jsonBody);
+
+        if (root.isArray()) {
+            // MultiAdmin: List<Map<String,Object>>
+            for (JsonNode node : root) {
+                Map<String, Object> parsed = objectMapper.convertValue(
+                        node,
+                        new TypeReference<Map<String, Object>>() {}
+                );
+                signedList.add(parsed);
+            }
+        } else if (root.isObject()) {
+            // FirstAdmin: single result object
+            Map<String, Object> parsed = objectMapper.convertValue(
+                    root,
+                    new TypeReference<Map<String, Object>>() {}
+            );
+            signedList.add(parsed);
+        } else {
+            throw new BadRequestException("Unsupported signer response JSON shape: " + jsonBody);
+        }
+    }
+
 
     private Response commitChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
         auth.realm().requireManageRealm();
@@ -827,6 +1027,31 @@ public class IGARealmResource {
 
         // Return success message after approving the change sets
         return Response.ok("Change set request has been canceled").build();
+    }
+
+    /**
+     * Lightweight REST representation of the JPA entity
+     */
+    public static class ChangesetRequestRepresentation {
+        public String changesetRequestId;
+        public String changesetType;
+        public String draftRequest;
+        public Long timestamp;
+        public int adminAuthorizationsCount;
+
+        public static ChangesetRequestRepresentation fromEntity(ChangesetRequestEntity entity) {
+            ChangesetRequestRepresentation rep = new ChangesetRequestRepresentation();
+            rep.changesetRequestId = entity.getChangesetRequestId();
+            rep.changesetType = entity.getChangesetType() != null
+                    ? entity.getChangesetType().name()
+                    : null;
+            rep.draftRequest = entity.getDraftRequest();
+            rep.timestamp = entity.getTimestamp();
+            rep.adminAuthorizationsCount = entity.getAdminAuthorizations() != null
+                    ? entity.getAdminAuthorizations().size()
+                    : 0;
+            return rep;
+        }
     }
 
 }

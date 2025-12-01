@@ -4,14 +4,15 @@ import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.core.Response;
 import org.keycloak.component.ComponentModel;
+import org.keycloak.models.*;
 import org.keycloak.models.Constants;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
-import org.midgard.models.InitializerCertificateModel.InitializerCertifcate;
 import org.midgard.models.UserContext.UserContext;
+import org.midgard.models.Policy.*;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
@@ -48,16 +49,12 @@ public class FirstAdmin implements Authorizer {
         proofDetails.forEach(p -> {
             userContexts.add(new UserContext(p.getProofDraft()));
         });
-        Stream<UserContext> adminContexts = userContexts.stream().filter(x -> x.getInitCertHash() != null);
-        Stream<UserContext> normalUserContext = userContexts.stream().filter(x -> x.getInitCertHash() == null);
-        List<UserContext> orderedContext = Stream.concat(adminContexts, normalUserContext).toList();
-
         RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
         RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", role).getSingleResult();
 
-        InitializerCertifcate cert = InitializerCertifcate.FromString(tideRoleEntity.getInitCert());
+        Policy policy = new Policy(Base64.getDecoder().decode(tideRoleEntity.getInitCert()));
 
         if(isAssigningTideRealmAdminRole(draftEntity, session)) {
 
@@ -69,29 +66,17 @@ public class FirstAdmin implements Authorizer {
 
             }
 
-            List<String> signatures = IGAUtils.signInitialTideAdmin(componentModel.getConfig(), orderedContext.toArray(new UserContext[0]), cert, authorizer, changesetRequestEntity);
-            Stream<AccessProofDetailEntity> adminproofs = proofDetails.stream().filter(x -> {
-                UserContext userContext = new UserContext(x.getProofDraft());
-                if(userContext.getInitCertHash() != null) {
-                    return true;
-                }
-                return false;
-            });
-            Stream<AccessProofDetailEntity> normalProofs = proofDetails.stream().filter(x -> {
-                UserContext userContext = new UserContext(x.getProofDraft());
-                if(userContext.getInitCertHash() == null) {
-                    return true;
-                }
-                return false;
-            });
+            List<String> signatures = IGAUtils.signInitialTideAdmin(componentModel.getConfig(), userContexts.toArray(new UserContext[0]), policy, authorizer, changesetRequestEntity);
+            tideRoleEntity.setInitCertSig(signatures.getLast()); // add policy sig
+            policy.AddSignature(Base64.getDecoder().decode(signatures.getLast()));
+            String rolePolicyString =  Base64.getEncoder().encodeToString(policy.ToBytes());
+            tideRoleEntity.setInitCert(rolePolicyString); // add policy sig
 
-            List<AccessProofDetailEntity> orderedProofDetails = Stream.concat(adminproofs, normalProofs).toList();
-            tideRoleEntity.setInitCertSig(signatures.get(0));
-            for(int i = 0; i < orderedProofDetails.size(); i++){
-                orderedProofDetails.get(i).setSignature(signatures.get(i + 1));
+            for(int i = 0; i < proofDetails.size(); i++){
+                proofDetails.get(i).setSignature(signatures.get(i));
             }
         } else {
-            List<String> signatures = IGAUtils.signContextsWithVrk(componentModel.getConfig(), orderedContext.toArray(new UserContext[0]), authorizer, changesetRequestEntity);
+            List<String> signatures = IGAUtils.signContextsWithVrk(componentModel.getConfig(), userContexts.toArray(new UserContext[0]), authorizer, changesetRequestEntity);
             for(int i = 0; i < userContexts.size(); i++){
                 proofDetails.get(i).setSignature(signatures.get(i));
             }
