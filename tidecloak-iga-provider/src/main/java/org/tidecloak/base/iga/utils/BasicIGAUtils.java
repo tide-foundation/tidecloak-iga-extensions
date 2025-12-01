@@ -673,7 +673,8 @@ public class BasicIGAUtils {
                         try {
                             List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, cre.getChangesetType(), cre.getChangesetRequestId());
                             if(draftRecordEntities == null || draftRecordEntities.isEmpty()){
-                                throw new Exception("Unsupported change set type for ID: " + cre.getChangesetRequestId());
+                                em.remove(cre);
+                                throw new Exception("No records found: " + cre.getChangesetRequestId());
                             }
                             signer.sign(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntities, auth);
                             committer.commit(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntities.get(0), auth);

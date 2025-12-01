@@ -59,6 +59,20 @@ public class MultiAdmin implements Authorizer{
                     + changeSet.getChangeSetId() + " , " + changeSet.getType());
         }
 
+        // Check if the current user has already approved this request
+        String currentUserId = auth.getUser().getId();
+        boolean hasAlreadyApproved = changesetRequestEntity.getAdminAuthorizations()
+                .stream()
+                .anyMatch(authEntity -> authEntity.getUserId().equals(currentUserId) && authEntity.getIsApproval());
+
+        if (hasAlreadyApproved) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("message", "You have already approved this request. Users can only approve a request once.");
+            errorResponse.put("requiresApprovalPopup", false);
+            String jsonString = mapper.writeValueAsString(errorResponse);
+            return Response.status(Response.Status.BAD_REQUEST).entity(jsonString).type(MediaType.APPLICATION_JSON).build();
+        }
+
         Object draftEntity = draftEntities.get(0);
         var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
 

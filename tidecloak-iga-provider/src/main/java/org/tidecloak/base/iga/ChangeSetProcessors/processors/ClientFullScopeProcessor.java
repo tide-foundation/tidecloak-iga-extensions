@@ -455,8 +455,15 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
                 clientModel.setFullScopeAllowed(false);
             }
 
-            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT));
-            if(entity.getDraftStatus().equals(DraftStatus.DRAFT) && changesetRequestEntity != null){
+            if(entity.getDraftStatus().equals(DraftStatus.DRAFT)) {
+                entity.setDraftStatus(DraftStatus.ACTIVE);
+            }
+
+            ChangesetRequestEntity changesetRequestEntityC = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT));
+            ChangesetRequestEntity changesetRequestEntityFS = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT_FULLSCOPE));
+            ChangesetRequestEntity changesetRequestEntityDF = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT));
+
+            if(entity.getDraftStatus().equals(DraftStatus.DRAFT)){
                 entity.setDraftStatus(DraftStatus.ACTIVE);
                 // Find any pending changes
                 List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
@@ -464,9 +471,18 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
                         .setParameter("changesetTypes", List.of(ChangeSetType.CLIENT))
                         .getResultList();
                 pendingChanges.forEach(em::remove);
-                em.remove(changesetRequestEntity);
 
+                if(changesetRequestEntityC != null){
+                    em.remove(changesetRequestEntityC);
+                }
+                if(changesetRequestEntityDF != null) {
+                    em.remove(changesetRequestEntityDF);
+                }
+                if(changesetRequestEntityFS != null) {
+                    em.remove(changesetRequestEntityFS);
+                }
             }
+            em.flush();
         });
     }
 
