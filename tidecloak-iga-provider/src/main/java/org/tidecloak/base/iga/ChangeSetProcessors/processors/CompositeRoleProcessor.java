@@ -480,7 +480,6 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
     }
 
     private String generateRealmDefaultUserContext(KeycloakSession session, RealmModel realm, ClientModel client, RoleModel childRole, EntityManager em, Boolean isDelete) throws Exception {
-        List<String> clients = List.of(Constants.ADMIN_CLI_CLIENT_ID, Constants.ADMIN_CONSOLE_CLIENT_ID);
         String id = KeycloakModelUtils.generateId();
         UserModel dummyUser = session.users().addUser(realm, id, id, true, false);
 
@@ -495,26 +494,20 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
             }
         });
 
-        if(clients.contains(client.getClientId())){
-            accessToken.subject(null);
-            session.users().removeUser(realm, dummyUser);
-            return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username"), client.isFullScopeAllowed());
-        } else {
-            if(isDelete){
-                Set<RoleModel> rolesToDelete = expandCompositeRoles(session, Set.of(childRole));
-                rolesToDelete.add(childRole);
-                rolesToDelete.forEach(r -> {
-                    if ( realm.getName().equalsIgnoreCase(Config.getAdminRealm())){
-                        removeRoleFromAccessTokenMasterRealm(accessToken, r, realm, em);
-                    }
-                    else{
-                        removeRoleFromAccessToken(accessToken, r);
-                    }
-                });
-            }
-            accessToken.subject(null);
-            session.users().removeUser(realm, dummyUser);
-            return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username"), client.isFullScopeAllowed());
+        if(isDelete){
+            Set<RoleModel> rolesToDelete = expandCompositeRoles(session, Set.of(childRole));
+            rolesToDelete.add(childRole);
+            rolesToDelete.forEach(r -> {
+                if ( realm.getName().equalsIgnoreCase(Config.getAdminRealm())){
+                    removeRoleFromAccessTokenMasterRealm(accessToken, r, realm, em);
+                }
+                else{
+                    removeRoleFromAccessToken(accessToken, r);
+                }
+            });
         }
+        accessToken.subject(null);
+        session.users().removeUser(realm, dummyUser);
+        return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username"), client.isFullScopeAllowed());
     }
 }
