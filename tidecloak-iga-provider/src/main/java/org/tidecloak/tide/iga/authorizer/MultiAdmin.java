@@ -20,6 +20,7 @@ import org.tidecloak.jpa.entities.*;
 import org.tidecloak.jpa.entities.Licensing.LicenseHistoryEntity;
 import org.tidecloak.jpa.entities.drafting.PolicyDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.shared.enums.WorkflowType;
@@ -59,20 +60,63 @@ public class MultiAdmin implements Authorizer{
                     + changeSet.getChangeSetId() + " , " + changeSet.getType());
         }
 
+        // Check if the current user has already approved this request
+        String currentUserId = auth.getUser().getId();
+        boolean hasAlreadyApproved = changesetRequestEntity.getAdminAuthorizations()
+                .stream()
+                .anyMatch(authEntity -> authEntity.getUserId().equals(currentUserId) && authEntity.getIsApproval());
+
+        if (hasAlreadyApproved) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("message", "You have already approved this request. Users can only approve a request once.");
+            errorResponse.put("requiresApprovalPopup", false);
+            String jsonString = mapper.writeValueAsString(errorResponse);
+            return Response.status(Response.Status.BAD_REQUEST).entity(jsonString).type(MediaType.APPLICATION_JSON).build();
+        }
+
         Object draftEntity = draftEntities.get(0);
         var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
 
         List<Map<String, Object>> responses = new ArrayList<>();
 
-        // --- First ---
-        Map<String, Object> firstResponse = new HashMap<>();
-        firstResponse.put("message", "Opening Enclave to request approval.");
-        firstResponse.put("changesetId", changesetRequestEntity.getChangesetRequestId());
-        firstResponse.put("requiresApprovalPopup", true);
-        firstResponse.put("changeSetDraftRequests", changesetRequestEntity.getRequestModel());
-        responses.add(firstResponse);
+        // For bundled tide-realm-admin assignments, there are multiple users sharing the same changeset ID
+        // We need to return one response per user with their individual proof data
+        List<?> allDraftEntitiesForChangeset = BasicIGAUtils.fetchDraftRecordEntityByRequestId(
+            em,
+            ChangeSetType.USER_ROLE,
+            changeSet.getChangeSetId()
+        );
 
-        // --- Second ---
+        // Return one response per user in the changeset
+        for (Object draftObj : allDraftEntitiesForChangeset) {
+            if (draftObj instanceof TideUserRoleMappingDraftEntity) {
+                TideUserRoleMappingDraftEntity userRoleMapping = (TideUserRoleMappingDraftEntity) draftObj;
+
+                // Fetch the AccessProofDetailEntity for this specific user to get their individual proof
+                List<AccessProofDetailEntity> userProofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", changeSet.getChangeSetId())
+                    .getResultList();
+
+                // Find the proof for this specific user
+                AccessProofDetailEntity userProof = userProofs.stream()
+                    .filter(p -> p.getUser().getId().equals(userRoleMapping.getUser().getId()))
+                    .findFirst()
+                    .orElse(null);
+
+                if (userProof != null) {
+                    Map<String, Object> userResponse = new HashMap<>();
+                    userResponse.put("message", "Opening Enclave to request approval.");
+                    userResponse.put("changesetId", changeSet.getChangeSetId());
+                    userResponse.put("requiresApprovalPopup", true);
+                    userResponse.put("changeSetDraftRequests", changesetRequestEntity.getRequestModel());
+                    userResponse.put("userId", userRoleMapping.getUser().getId());
+                    userResponse.put("roleId", userRoleMapping.getRoleId());
+                    responses.add(userResponse);
+                }
+            }
+        }
+
+        // Add the policy response
         if (authorityAssignment != null) {
             ChangesetRequestEntity policyReqEntity = em.find(
                     ChangesetRequestEntity.class,

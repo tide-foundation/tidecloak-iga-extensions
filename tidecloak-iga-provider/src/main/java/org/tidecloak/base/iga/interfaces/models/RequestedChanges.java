@@ -38,6 +38,9 @@ public class RequestedChanges {
     @JsonProperty("deleteStatus")
     protected DraftStatus deleteStatus;
 
+    @JsonProperty("requesterUserId")
+    protected String requesterUserId;
+
     public RequestedChanges(String action, ChangeSetType changeSetType, RequestType requestType, String clientId, String realmId, ActionType actionType, String draftRecordId, List<RequestChangesUserRecord> userRecord, DraftStatus status, DraftStatus deleteStatus) {
         this.action = action;
         this.requestType = requestType;
@@ -93,5 +96,12 @@ public class RequestedChanges {
         this.deleteStatus = draftStatus;
     }
 
+    public String getRequesterUserId() {
+        return requesterUserId;
+    }
+
+    public void setRequesterUserId(String requesterUserId) {
+        this.requesterUserId = requesterUserId;
+    }
 
 }
