@@ -504,26 +504,19 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
     }
 
     private String generateRealmDefaultUserContext(KeycloakSession session, RealmModel realm, ClientModel client, EntityManager em, ChangeSetRequest change) throws Exception {
-        List<String> clients = List.of(Constants.ADMIN_CLI_CLIENT_ID, Constants.ADMIN_CONSOLE_CLIENT_ID, Constants.ACCOUNT_CONSOLE_CLIENT_ID);
         String id = KeycloakModelUtils.generateId();
         UserModel dummyUser = session.users().addUser(realm, id, id, true, false);
         AccessToken accessToken = ChangeSetProcessor.super.generateAccessToken(session, realm, client, dummyUser);
         boolean isFullscope = change.getActionType().equals(ActionType.CREATE);
-        if(clients.contains(client.getClientId())){
-            accessToken.subject(null);
-            session.users().removeUser(realm, dummyUser);
-            return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username", "scope"), isFullscope);
-        } else {
-            Set<RoleModel> rolesToAdd = getAllAccess(session, Set.of(realm.getDefaultRole()), client, client.getClientScopes(true).values().stream(), isFullscope, null);
-            rolesToAdd.forEach(r -> {
-                if ( realm.getName().equalsIgnoreCase(Config.getAdminRealm())){
-                    addRoleToAccessTokenMasterRealm(accessToken, r, realm, em);
-                }
-                else{
-                    addRoleToAccessToken(accessToken, r);
-                }
-            });
-        }
+        Set<RoleModel> rolesToAdd = getAllAccess(session, Set.of(realm.getDefaultRole()), client, client.getClientScopes(true).values().stream(), isFullscope, null);
+        rolesToAdd.forEach(r -> {
+            if ( realm.getName().equalsIgnoreCase(Config.getAdminRealm())){
+                addRoleToAccessTokenMasterRealm(accessToken, r, realm, em);
+            }
+            else{
+                addRoleToAccessToken(accessToken, r);
+            }
+        });
         accessToken.subject(null);
         session.users().removeUser(realm, dummyUser);
         return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username", "scope"), isFullscope);

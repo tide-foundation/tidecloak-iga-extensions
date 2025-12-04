@@ -42,7 +42,6 @@ public class TideRoleRequests {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         ClientModel realmManagement = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
 
-        String resource = Constants.ADMIN_CONSOLE_CLIENT_ID;
         RoleModel realmAdmin = session.getContext().getRealm().getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(AdminRoles.REALM_ADMIN);
         RoleModel tideRealmAdmin = realmManagement.addRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
         tideRealmAdmin.addCompositeRole(realmAdmin);
@@ -90,6 +89,10 @@ public class TideRoleRequests {
     }
 
     public static void createRolePolicyDraft(KeycloakSession session,  String recordId, double thresholdPercentage, int numberOfAdditionalAdmins, RoleModel role) throws Exception {
+        createRolePolicyDraft(session, recordId, thresholdPercentage, numberOfAdditionalAdmins, role, false);
+    }
+
+    public static void createRolePolicyDraft(KeycloakSession session,  String recordId, double thresholdPercentage, int numberOfAdditionalAdmins, RoleModel role, boolean forceCreate) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RoleModel tideRole = session.clients().getClientByClientId(session.getContext().getRealm(), Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
         String algorithm = "EdDSA";
@@ -108,8 +111,16 @@ public class TideRoleRequests {
 
         int numberOfActiveAdmins = users.size();
 
-        // TODO: update to be able to change additional admin value when we can approve multiple admins at a time. ATM its one at a time.
-        int threshold = Math.max(1, (int) (thresholdPercentage * (numberOfActiveAdmins + numberOfAdditionalAdmins)));
+        // Calculate threshold based on total admins after this change
+        int totalAdminsAfterChange = numberOfActiveAdmins + numberOfAdditionalAdmins;
+
+        // Special case: if there are no active admins (bootstrapping), require all new admins to approve
+        int threshold;
+        if (numberOfActiveAdmins == 0 && numberOfAdditionalAdmins > 0) {
+            threshold = numberOfAdditionalAdmins; // All new admins must approve when bootstrapping
+        } else {
+            threshold = Math.max(1, (int) (thresholdPercentage * totalAdminsAfterChange));
+        }
 
         // Grab from tide key provider
         ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
@@ -144,9 +155,12 @@ public class TideRoleRequests {
                 .getSingleResult();
 
 
-        Policy currentPolicy = new Policy(Base64.getDecoder().decode(tideAdmin.getInitCert()));
-        if(currentPolicy.IsEqualTo(policy.ToBytes())){
-            return; // hash is the same, dont need to recreate
+        // Only skip creation if policy hasn't changed and forceCreate is false
+        if (!forceCreate) {
+            Policy currentPolicy = new Policy(Base64.getDecoder().decode(tideAdmin.getInitCert()));
+            if(currentPolicy.IsEqualTo(policy.ToBytes())){
+                return; // hash is the same, dont need to recreate
+            }
         }
 
         PolicyDraftEntity policyDraftEntity = new PolicyDraftEntity();
@@ -171,6 +185,16 @@ public class TideRoleRequests {
         changesetRequestEntity.setChangesetRequestId(recordId + "policy");
         String encodedModel = Base64.getEncoder().encodeToString(modelReq.Encode());
         changesetRequestEntity.setRequestModel(encodedModel);
+        // Policy changeset requests inherit the same requester as the parent changeset
+        // We'll look up the parent changeset to get the requester ID
+        ChangesetRequestEntity parentChangeset = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                .setParameter("changesetRequestId", recordId)
+                .getResultStream()
+                .findFirst()
+                .orElse(null);
+        if (parentChangeset != null && parentChangeset.getRequesterUserId() != null) {
+            changesetRequestEntity.setRequesterUserId(parentChangeset.getRequesterUserId());
+        }
         em.persist(changesetRequestEntity);
 
         em.flush();
