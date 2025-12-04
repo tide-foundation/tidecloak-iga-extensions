@@ -43,9 +43,6 @@ public class ChangesetRequestEntity {
     @Column(name = "REQUEST_MODEL")
     protected String requestModel;
 
-    @Column(name = "REQUESTER_USER_ID")
-    private String requesterUserId;
-
     public ChangeSetType getChangesetType() {
         return changesetType;
     }
@@ -96,14 +93,6 @@ public class ChangesetRequestEntity {
 
     public void setTimestamp(Long timestamp) {
         this.timestamp = timestamp;
-    }
-
-    public String getRequesterUserId() {
-        return requesterUserId;
-    }
-
-    public void setRequesterUserId(String requesterUserId) {
-        this.requesterUserId = requesterUserId;
     }
 
     public static class Key implements Serializable {

@@ -455,15 +455,8 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
                 clientModel.setFullScopeAllowed(false);
             }
 
-            if(entity.getDraftStatus().equals(DraftStatus.DRAFT)) {
-                entity.setDraftStatus(DraftStatus.ACTIVE);
-            }
-
-            ChangesetRequestEntity changesetRequestEntityC = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT));
-            ChangesetRequestEntity changesetRequestEntityFS = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT_FULLSCOPE));
-            ChangesetRequestEntity changesetRequestEntityDF = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT_DEFAULT_USER_CONTEXT));
-
-            if(entity.getDraftStatus().equals(DraftStatus.DRAFT)){
+            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), ChangeSetType.CLIENT));
+            if(entity.getDraftStatus().equals(DraftStatus.DRAFT) && changesetRequestEntity != null){
                 entity.setDraftStatus(DraftStatus.ACTIVE);
                 // Find any pending changes
                 List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypesAndId", AccessProofDetailEntity.class)
@@ -471,18 +464,9 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
                         .setParameter("changesetTypes", List.of(ChangeSetType.CLIENT))
                         .getResultList();
                 pendingChanges.forEach(em::remove);
+                em.remove(changesetRequestEntity);
 
-                if(changesetRequestEntityC != null){
-                    em.remove(changesetRequestEntityC);
-                }
-                if(changesetRequestEntityDF != null) {
-                    em.remove(changesetRequestEntityDF);
-                }
-                if(changesetRequestEntityFS != null) {
-                    em.remove(changesetRequestEntityFS);
-                }
             }
-            em.flush();
         });
     }
 
@@ -504,19 +488,26 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
     }
 
     private String generateRealmDefaultUserContext(KeycloakSession session, RealmModel realm, ClientModel client, EntityManager em, ChangeSetRequest change) throws Exception {
+        List<String> clients = List.of(Constants.ADMIN_CLI_CLIENT_ID, Constants.ADMIN_CONSOLE_CLIENT_ID, Constants.ACCOUNT_CONSOLE_CLIENT_ID);
         String id = KeycloakModelUtils.generateId();
         UserModel dummyUser = session.users().addUser(realm, id, id, true, false);
         AccessToken accessToken = ChangeSetProcessor.super.generateAccessToken(session, realm, client, dummyUser);
         boolean isFullscope = change.getActionType().equals(ActionType.CREATE);
-        Set<RoleModel> rolesToAdd = getAllAccess(session, Set.of(realm.getDefaultRole()), client, client.getClientScopes(true).values().stream(), isFullscope, null);
-        rolesToAdd.forEach(r -> {
-            if ( realm.getName().equalsIgnoreCase(Config.getAdminRealm())){
-                addRoleToAccessTokenMasterRealm(accessToken, r, realm, em);
-            }
-            else{
-                addRoleToAccessToken(accessToken, r);
-            }
-        });
+        if(clients.contains(client.getClientId())){
+            accessToken.subject(null);
+            session.users().removeUser(realm, dummyUser);
+            return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username", "scope"), isFullscope);
+        } else {
+            Set<RoleModel> rolesToAdd = getAllAccess(session, Set.of(realm.getDefaultRole()), client, client.getClientScopes(true).values().stream(), isFullscope, null);
+            rolesToAdd.forEach(r -> {
+                if ( realm.getName().equalsIgnoreCase(Config.getAdminRealm())){
+                    addRoleToAccessTokenMasterRealm(accessToken, r, realm, em);
+                }
+                else{
+                    addRoleToAccessToken(accessToken, r);
+                }
+            });
+        }
         accessToken.subject(null);
         session.users().removeUser(realm, dummyUser);
         return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username", "scope"), isFullscope);

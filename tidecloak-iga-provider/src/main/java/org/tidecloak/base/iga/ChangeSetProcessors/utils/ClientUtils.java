@@ -43,6 +43,13 @@ public class ClientUtils {
             }
         });
 
+        if (!role.getName().equalsIgnoreCase(Constants.TIDE_REALM_ADMIN)) {
+            clientList.removeIf(r ->
+                    r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.ADMIN_CONSOLE_CLIENT_ID) ||
+                            r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.ADMIN_CLI_CLIENT_ID) ||
+                            r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
+            );
+        }
         clientList.removeIf(r -> r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.BROKER_SERVICE_CLIENT_ID));
 
         return clientList.stream().distinct().collect(Collectors.toList());
@@ -72,6 +79,15 @@ public class ClientUtils {
                 clientList.add((ClientModel) activeCompRole.getContainer());
             }
         });
+
+        // TODO: remove this temp method once we create empty userContexts on client creation for all users in a realm
+        if (!role.getName().equalsIgnoreCase(Constants.TIDE_REALM_ADMIN)) {
+            clientList.removeIf(r ->
+                    r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.ADMIN_CONSOLE_CLIENT_ID) ||
+                            r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.ADMIN_CLI_CLIENT_ID) ||
+                            r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
+            );
+        }
 
         clientList.removeIf(r -> r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.BROKER_SERVICE_CLIENT_ID));
 

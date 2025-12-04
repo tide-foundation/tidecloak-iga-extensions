@@ -30,7 +30,6 @@ import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.base.iga.ChangeSetSigner.ChangeSetSigner;
 import org.tidecloak.base.iga.ChangeSetSigner.ChangeSetSignerFactory;
 import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
-import org.tidecloak.base.iga.TideRequests.TideRoleRequests;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -652,14 +651,6 @@ public class IGARealmResource {
             String actionDescription = isDeleteRequest ? "Unassigning Role from User" : "Granting Role to User";
             ActionType action = isDeleteRequest ? ActionType.DELETE : ActionType.CREATE;
             RequestedChanges requestChange = new RoleChangeRequest(realm.getRoleById(m.getRoleId()).getName(), actionDescription, ChangeSetType.USER_ROLE, RequestType.USER, clientId, realm.getName(), action, m.getChangeRequestId(), new ArrayList<>(), m.getDraftStatus(), m.getDeleteStatus());
-
-            // Fetch the ChangesetRequestEntity to get requesterUserId
-            ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class,
-                new ChangesetRequestEntity.Key(m.getChangeRequestId(), ChangeSetType.USER_ROLE));
-            if (changesetRequestEntity != null) {
-                requestChange.setRequesterUserId(changesetRequestEntity.getRequesterUserId());
-            }
-
             proofs.forEach(p -> {
                 em.lock(p, LockModeType.PESSIMISTIC_WRITE);
                 requestChange.getUserRecord().add(new RequestChangesUserRecord(p.getUser().getUsername(), p.getId(), realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
@@ -875,14 +866,6 @@ public class IGARealmResource {
                     })
                     .collect(Collectors.toList());
 
-            // Set the requester user ID for all changeset requests
-            String requesterUserId = auth.adminAuth().getUser().getId();
-            for (ChangesetRequestEntity changeRequest : changeRequests) {
-                if (changeRequest.getRequesterUserId() == null) {
-                    changeRequest.setRequesterUserId(requesterUserId);
-                }
-            }
-
             for (ChangesetRequestEntity changeSet : changeRequests) {
                 List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(
                         em,
@@ -1010,27 +993,13 @@ public class IGARealmResource {
     private Response cancelChangeSets(List<ChangeSetRequest> changeSets){
             auth.realm().requireManageRealm();
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-            String currentUserId = auth.adminAuth().getUser().getId();
 
             changeSets.forEach(changeSet -> {
 
                 ChangeSetType type = changeSet.getType();
 
-                // Check authorization: only the requester can cancel their own request
-                ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), type));
-                if (changesetRequestEntity != null) {
-                    String requesterUserId = changesetRequestEntity.getRequesterUserId();
-                    if (requesterUserId != null && !requesterUserId.equals(currentUserId)) {
-                        throw new BadRequestException("You are not authorized to cancel this request. Only the user who created the request can cancel it.");
-                    }
-                }
-
                 List<?> mapping = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, type, changeSet.getChangeSetId());
                 if (mapping != null && mapping.isEmpty()) {
-                    if(changesetRequestEntity != null){
-                        em.remove(changesetRequestEntity);
-                        em.flush();
-                    }
                     return;
                 }
 
@@ -1045,11 +1014,10 @@ public class IGARealmResource {
                     }
                 });
 
-                // Re-fetch to ensure we have the latest state after workflow execution
-                ChangesetRequestEntity finalChangesetEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
-                if(finalChangesetEntity != null ) {
-                    finalChangesetEntity.getAdminAuthorizations().clear();
-                    em.remove(finalChangesetEntity);
+                ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), changeSet.getType()));
+                if(changesetRequestEntity != null ) {
+                    changesetRequestEntity.getAdminAuthorizations().clear();
+                    em.remove(changesetRequestEntity);
                 }
                 em.flush();
                 UserCache userCache = session.getProvider(UserCache.class);
@@ -1070,7 +1038,6 @@ public class IGARealmResource {
         public String draftRequest;
         public Long timestamp;
         public int adminAuthorizationsCount;
-        public String requesterUserId;
 
         public static ChangesetRequestRepresentation fromEntity(ChangesetRequestEntity entity) {
             ChangesetRequestRepresentation rep = new ChangesetRequestRepresentation();
@@ -1083,7 +1050,6 @@ public class IGARealmResource {
             rep.adminAuthorizationsCount = entity.getAdminAuthorizations() != null
                     ? entity.getAdminAuthorizations().size()
                     : 0;
-            rep.requesterUserId = entity.getRequesterUserId();
             return rep;
         }
     }

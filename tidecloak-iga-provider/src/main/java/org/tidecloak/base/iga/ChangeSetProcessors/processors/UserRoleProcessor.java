@@ -212,9 +212,24 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         String changeSetId = KeycloakModelUtils.generateId();
         mapping.setChangeRequestId(changeSetId);
 
-        // Policy creation for tide-realm-admin is deferred to combineChangeRequests()
-        // to allow proper bundling when multiple admins are assigned together
-        // Skip policy creation here - it will be created during the combine phase
+        if(role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+            ComponentModel componentModel = realm.getComponentsStream()
+                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
+
+            if(componentModel == null) {
+                throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
+            }
+            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
+                    .setParameter("ID", componentModel.getId()).getResultList();
+            if (realmAuthorizers.isEmpty()){
+                throw new Exception("Authorizer not found for this realm.");
+            }
+            if (realmAuthorizers.get(0).getType().equalsIgnoreCase("multiAdmin")) {
+                createRolePolicyDraft(session, changeSetId, 0.7, 1, role);
+            }
+        }
 
         Set<RoleModel> roleMappings = Collections.singleton(role);
         List<ClientModel> clientList = ClientUtils.getUniqueClientList(session, realm, role, em);
@@ -389,36 +404,13 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
         List<ChangesetRequestEntity> results = new ArrayList<>(byUserClient.size());
 
-        // Track tide-realm-admin assignments for policy bundling
-        // Key: changesetRequestId, Value: 1 (placeholder, actual count is totalAdminsAcrossAllChangesets)
-        Map<String, Integer> adminRoleAssignmentsByRequestId = new HashMap<>();
-
-        // Check if all assignments are tide-realm-admin for shared threshold calculation
-        RoleModel tideRealmAdminRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID)
-                .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-
-        boolean allAreTideAdminAssignments = userRoleEntities.stream()
-                .allMatch(entity -> entity.getRoleId().equals(tideRealmAdminRole.getId()));
-
-        int totalAdminsAcrossAllChangesets = 0;
-
-        // Track all changeset IDs for bundled tide-realm-admin assignments
-        Set<String> processedChangesetIds = new HashSet<>();
-
-        // For bundled tide-realm-admin: generate ONE shared changeset ID upfront
-        String sharedBundledChangesetId = allAreTideAdminAssignments ? KeycloakModelUtils.generateId() : null;
-
         // Iterate over each user group to merge proofs and retrieve change requests
         for (var userEntry : byUserClient.entrySet()) {
             String userId = userEntry.getKey();
             UserEntity ue = userById.get(userId);
             UserModel um = session.users().getUserById(realm, userId);
 
-            // If all are tide-realm-admin, use shared ID; otherwise generate unique ID per user
-            String combinedRequestId = sharedBundledChangesetId != null
-                ? sharedBundledChangesetId
-                : KeycloakModelUtils.generateId();
-            boolean isTideAdminRole = false;
+            String combinedRequestId = KeycloakModelUtils.generateId();
 
             List<AccessProofDetailEntity> toRemoveProofs = new ArrayList<>();
             List<ChangesetRequestEntity> toRemoveRequests = new ArrayList<>();
@@ -441,12 +433,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                     if (draft == null) {
                         throw new IllegalStateException(
                                 "Missing draft for request " + proof.getChangeRequestKey().getMappingId());
-                    }
-
-                    // Check if this is a tide-realm-admin role assignment
-                    RoleModel role = realm.getRoleById(draft.getRoleId());
-                    if (role != null && role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
-                        isTideAdminRole = true;
                     }
 
                     draft.setChangeRequestId(combinedRequestId);
@@ -480,36 +466,13 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             toRemoveProofs.forEach(em::remove);
             toRemoveRequests.forEach(em::remove);
 
-            // Track if this user is being assigned tide-realm-admin
-            if (isTideAdminRole) {
-                adminRoleAssignmentsByRequestId.put(combinedRequestId, 1);
-                totalAdminsAcrossAllChangesets++;
-            }
 
             // Retrieve the recreated ChangeRequestEntity(ies) for this combinedRequestId
-            // Only add if we haven't processed this changeset ID yet (avoid duplicates for bundled requests)
-            if (!processedChangesetIds.contains(combinedRequestId)) {
-                List<ChangesetRequestEntity> created = em.createNamedQuery(
-                                "getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
-                        .setParameter("changesetRequestId", combinedRequestId)
-                        .getResultList();
-                results.addAll(created);
-                processedChangesetIds.add(combinedRequestId);
-            }
-        }
-
-        // Create policy for tide-realm-admin assignments if threshold will change
-        if (allAreTideAdminAssignments && totalAdminsAcrossAllChangesets > 0) {
-            // All assignments are tide-realm-admin - they share one changeset ID
-            // Create ONE policy for the shared changeset with threshold reflecting ALL admins being added
-            createCombinedPolicyForBundledAdmins(session, em, sharedBundledChangesetId, totalAdminsAcrossAllChangesets);
-        } else if (!adminRoleAssignmentsByRequestId.isEmpty()) {
-            // Mixed assignments - create individual policies per changeset
-            for (Map.Entry<String, Integer> entry : adminRoleAssignmentsByRequestId.entrySet()) {
-                String combinedRequestId = entry.getKey();
-                int numberOfAdminsInBundle = entry.getValue();
-                createCombinedPolicyForBundledAdmins(session, em, combinedRequestId, numberOfAdminsInBundle);
-            }
+            List<ChangesetRequestEntity> created = em.createNamedQuery(
+                            "getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                    .setParameter("changesetRequestId", combinedRequestId)
+                    .getResultList();
+            results.addAll(created);
         }
 
         // Flush all pending changes once at the end
@@ -554,6 +517,7 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         adminUsers.add(userModel);
         clientList.forEach(client -> {
             try {
+                boolean isAdminClient = client.getClientId().equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID) || client.getClientId().equalsIgnoreCase(Constants.ADMIN_CLI_CLIENT_ID);
                 adminUsers.forEach(u -> {
                     try {
                         ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, u, new ChangeRequestKey(entity.getId() ,entity.getChangeRequestId()),
@@ -573,12 +537,20 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                                                   Set<RoleModel> roleMappings, TideUserRoleMappingDraftEntity entity, UserModel userModel) {
         clientList.forEach(client -> {
             try {
+                if (isAdminClient(client)) {
+                    return;
+                }
                 ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, userModel, new ChangeRequestKey(entity.getId() ,entity.getChangeRequestId()),
                         ChangeSetType.USER_ROLE, entity);
             } catch (Exception e) {
                 throw new RuntimeException("Error processing client: " + client.getClientId(), e);
             }
         });
+    }
+
+    private boolean isAdminClient(ClientModel client) {
+        return client.getClientId().equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID) ||
+                client.getClientId().equalsIgnoreCase(Constants.ADMIN_CLI_CLIENT_ID);
     }
 
 
@@ -614,59 +586,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 .setParameter("changesetId", changeSetId)
                 .setParameter("realmId", realm.getId())
                 .getResultList();
-    }
-
-    /**
-     * Creates a combined policy draft for bundled tide-realm-admin role assignments.
-     * This method should be called after user contexts have been combined to create ONE policy
-     * that reflects the final threshold after ALL admins in the bundle are added.
-     *
-     * @param session Keycloak session
-     * @param em Entity manager
-     * @param combinedRequestId The combined request ID that all bundled mappings share
-     * @param numberOfAdminsBeingAdded Total number of admins being added in this bundle
-     * @throws Exception if policy creation fails
-     */
-    private void createCombinedPolicyForBundledAdmins(
-            KeycloakSession session,
-            EntityManager em,
-            String combinedRequestId,
-            int numberOfAdminsBeingAdded) throws Exception {
-
-        RealmModel realm = session.getContext().getRealm();
-        RoleModel tideAdminRole = session.clients()
-                .getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID)
-                .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-
-        if (tideAdminRole == null) {
-            throw new Exception("tide-realm-admin role not found");
-        }
-
-        // Check if multiAdmin authorizer is configured
-        ComponentModel componentModel = realm.getComponentsStream()
-                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))
-                .findFirst()
-                .orElse(null);
-
-        if (componentModel == null) {
-            throw new Exception("There is no tide-vendor-key component set up for this realm, " + realm.getName());
-        }
-
-        List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderId", AuthorizerEntity.class)
-                .setParameter("ID", componentModel.getId())
-                .getResultList();
-
-        if (realmAuthorizers.isEmpty()) {
-            throw new Exception("Authorizer not found for this realm.");
-        }
-
-        // Only create policy for multiAdmin and firstAdmin authorizers
-        String authorizerType = realmAuthorizers.get(0).getType();
-        if (authorizerType.equalsIgnoreCase("multiAdmin") || authorizerType.equalsIgnoreCase("firstAdmin")) {
-            // Create ONE combined policy with the correct total number of admins being added
-            // Use forceCreate=true to always create the policy for bundling, even if threshold matches current
-            createRolePolicyDraft(session, combinedRequestId, 0.7, numberOfAdminsBeingAdded, tideAdminRole, true);
-        }
     }
 
 }
