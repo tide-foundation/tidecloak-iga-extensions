@@ -320,12 +320,16 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
     public void updateAffectedUserContextDrafts(KeycloakSession session, AccessProofDetailEntity affectedUserContextDraft, Set<RoleModel> roles, ClientModel client, TideUserAdapter userChangesMadeTo, EntityManager em) throws Exception {
         RealmModel realm = session.getContext().getRealm();
         TideUserRoleMappingDraftEntity affectedUserRoleEntity = em.find(TideUserRoleMappingDraftEntity.class, affectedUserContextDraft.getChangeRequestKey().getMappingId());
+
+        // Skip if entity not found, user doesn't match, or already active with no pending delete
         if (affectedUserRoleEntity == null || !Objects.equals(userChangesMadeTo.getId(), affectedUserRoleEntity.getUser().getId()) || affectedUserRoleEntity.getDraftStatus() == DraftStatus.ACTIVE && (affectedUserRoleEntity.getDeleteStatus() == null || affectedUserRoleEntity.getDeleteStatus().equals(DraftStatus.NULL))){
             return;
         }
 
         ChangeSetRequest affectedChangeRequest = getChangeSetRequestFromEntity(session, affectedUserRoleEntity);
 
+        // Update draft status based on action type
+        // Note: Policy updates for authority assignments are handled separately by updateOtherAuthorityRequests
         if(affectedChangeRequest.getActionType() == ActionType.DELETE) {
             affectedUserRoleEntity.setDeleteStatus(DraftStatus.DRAFT);
         }else if (affectedChangeRequest.getActionType() == ActionType.CREATE) {

@@ -150,6 +150,15 @@ public interface ChangeSetProcessor<T> {
         if(change.getType().equals(ChangeSetType.CLIENT)){
             return;
         }
+
+        // If the current entity is for the tide-realm-admin role, update other authority requests for the same role
+        if (entity instanceof TideUserRoleMappingDraftEntity tideUserRoleMappingDraft) {
+            RoleModel role = realm.getRoleById(tideUserRoleMappingDraft.getRoleId());
+            if (role != null && role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+                updateOtherAuthorityRequests(session, realm, change, tideUserRoleMappingDraft, em);
+            }
+        }
+
         List<ClientModel> affectedClients = getAffectedClients(session, realm, entity, em);
         ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();// Initialize the processor factory
 
@@ -159,7 +168,6 @@ public interface ChangeSetProcessor<T> {
                     .stream()
                     .filter(proof -> !Objects.equals(proof.getChangeRequestKey().getChangeRequestId(), change.getChangeSetId()))
                     .toList();
-
 
             for(AccessProofDetailEntity userContextDraft : userContextDrafts) {
                 em.lock(userContextDraft, LockModeType.PESSIMISTIC_WRITE);
@@ -196,6 +204,69 @@ public interface ChangeSetProcessor<T> {
         ChangeSetProcessor<T> processor = loadTideProcessor();
         if (processor != null) {
             processor.updateAffectedUserContexts(session, realm, change, entity, em);
+        }
+    }
+
+    /**
+     * Updates other authority requests for the same role when the current entity is an authority request.
+     * This recalculates the policy threshold for pending authority requests since the number of active admins has changed.
+     */
+    default void updateOtherAuthorityRequests(KeycloakSession session, RealmModel realm, ChangeSetRequest change, TideUserRoleMappingDraftEntity currentEntity, EntityManager em) throws Exception {
+        String roleId = currentEntity.getRoleId();
+        String currentUserId = currentEntity.getUser().getId();
+
+        // Find all pending authority requests for the same role (excluding the current one)
+        List<TideUserRoleMappingDraftEntity> pendingAuthorityRequests = em.createNamedQuery("getUserRoleMappingDraftsByRoleAndStatusNotEqualTo", TideUserRoleMappingDraftEntity.class)
+                .setParameter("roleId", roleId)
+                .setParameter("draftStatus", DraftStatus.ACTIVE)
+                .getResultList()
+                .stream()
+                .filter(draft -> !Objects.equals(draft.getUser().getId(), currentUserId)) // Exclude current user
+                .filter(draft -> !Objects.equals(draft.getChangeRequestId(), change.getChangeSetId())) // Exclude current change request
+                .toList();
+
+        RoleModel role = realm.getRoleById(roleId);
+
+        // Track processed change request IDs to avoid duplicate policy creation
+        Set<String> processedChangeRequestIds = new HashSet<>();
+
+        for (TideUserRoleMappingDraftEntity pendingRequest : pendingAuthorityRequests) {
+            String changeRequestId = pendingRequest.getChangeRequestId();
+
+            // Skip if no changeRequestId or we've already processed this change request ID
+            if (changeRequestId == null || processedChangeRequestIds.contains(changeRequestId)) {
+                continue;
+            }
+            processedChangeRequestIds.add(changeRequestId);
+
+            // Determine the action type for the pending request
+            ChangeSetRequest pendingChangeRequest = getChangeSetRequestFromEntity(session, pendingRequest);
+            int additionalAdmins = pendingChangeRequest.getActionType() == ActionType.CREATE ? 1 : -1;
+
+            // Check if this pending request already has a policy draft
+            PolicyDraftEntity policyDraft = BasicIGAUtils.authorityAssignment(session, pendingRequest, em);
+            if (policyDraft != null) {
+                // Remove existing policy draft to recreate with updated threshold
+                em.remove(policyDraft);
+
+                // Remove associated changeset request entity for the policy
+                ChangesetRequestEntity policyChangeRequest = em.find(ChangesetRequestEntity.class,
+                        new ChangesetRequestEntity.Key(changeRequestId + "policy", ChangeSetType.POLICY));
+                if (policyChangeRequest != null) {
+                    em.remove(policyChangeRequest);
+                }
+
+                em.flush();
+            }
+
+            // Clear admin authorizations for the pending request (uses entity id as key)
+            ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, pendingRequest.getId(), ChangeSetType.USER_ROLE);
+            if (changesetRequestEntity != null) {
+                changesetRequestEntity.getAdminAuthorizations().clear();
+            }
+
+            // Create (or recreate) policy draft with updated threshold
+            org.tidecloak.base.iga.TideRequests.TideRoleRequests.createRolePolicyDraft(session, changeRequestId, 0.7, additionalAdmins, role);
         }
     }
 
