@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
+import jakarta.xml.bind.DatatypeConverter;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
@@ -24,6 +25,9 @@ import org.keycloak.services.managers.AuthenticationSessionManager;
 import org.keycloak.services.managers.UserSessionManager;
 import org.keycloak.sessions.RootAuthenticationSessionModel;
 
+import org.midgard.models.Policy.Policy;
+import org.midgard.models.RequestExtensions.UserContextSignRequest;
+import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.keys.UserClientKey;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.keycloak.representations.AccessToken;
@@ -196,7 +200,49 @@ public interface ChangeSetProcessor<T> {
                 ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, userContextDraft.getChangeRequestKey().getChangeRequestId(), userContextDraft.getChangesetType());
                 if (changesetRequestEntity != null){
                     changesetRequestEntity.getAdminAuthorizations().clear(); // empty sigs!
+
+                    ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
+                            .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                            .findFirst()
+                            .orElse(null);
+                    MultivaluedHashMap<String, String> config = componentModel.getConfig();
+                    String currentSecretKeys = config.getFirst("clientSecret");
+                    ObjectMapper objectMapper = new ObjectMapper();
+                    TideAdminRealmResource.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, TideAdminRealmResource.SecretKeys.class);
+
+
+                    ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
+                    RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+                    TideRoleDraftEntity tideAdmin = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+                            .setParameter("roleId", tideRole.getId())
+                            .getSingleResult();
+                    var policyString = tideAdmin.getInitCert();
+                    Policy policy = new Policy(Base64.getDecoder().decode(policyString));
+
+                    List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, changesetRequestEntity.getChangesetRequestId(), changesetRequestEntity.getChangesetType());
+                    proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
+                    List<UserContext> userContexts = new ArrayList<>();
+                    UserContextSignRequest req = new UserContextSignRequest("Policy:1");
+                    proofDetails.forEach(p -> {
+                        UserContext userContext = new UserContext(p.getProofDraft());
+                        userContexts.add(userContext);
+                    });
+                    req.SetUserContexts(userContexts.toArray(new UserContext[0]));
+                    String draft = Base64.getEncoder().encodeToString(req.GetDraft());
+
+
+                    ModelRequest newModelReq =  ModelRequest.New("UserContext", "1", "Policy:1", req.GetDraft(),  policy.ToBytes());
+                    SignRequestSettingsMidgard signedSettings = ConstructSignSettings(config, secretKeys.activeVrk);
+                    var expireAtTime = (System.currentTimeMillis() / 1000) + 2628000; // 1 month from now
+                    newModelReq.SetCustomExpiry(expireAtTime);
+                    newModelReq = newModelReq.InitializeTideRequestWithVrk(newModelReq, signedSettings, "UserContext:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
+                    String encodedModel = Base64.getEncoder().encodeToString(newModelReq.Encode());
+                    changesetRequestEntity.setRequestModel(encodedModel);
+                    changesetRequestEntity.setDraftRequest(draft);
+                    em.flush();
                 }
+
+
             }
         }
         em.flush();
