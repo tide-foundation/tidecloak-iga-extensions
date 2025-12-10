@@ -182,6 +182,8 @@ public class IGARealmResource {
                     }
                 }
             }
+            // enable events by default
+            realm.setEventsEnabled(true);
             return buildResponse(200, "IGA has been toggled to : " + isEnabled);
         }catch(Exception e) {
             logger.error("Error toggling IGA on realm: ", e);
