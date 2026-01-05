@@ -162,6 +162,8 @@ public class TideRoleRequests {
                 Midgard.SignWithVrk(pSignReq.GetDataToAuthorize(), signedSettings.VendorRotatingPrivateKey)
         );
         ModelRequest modelReq = ModelRequest.New("Policy", "1", "Policy:1", pSignReq.GetDraft(), policy.ToBytes());
+        var expireAtTime = (System.currentTimeMillis() / 1000) + 2628000; // 1 month from now
+        modelReq.SetCustomExpiry(expireAtTime);
         modelReq = modelReq.InitializeTideRequestWithVrk(modelReq, signedSettings, "Policy:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
 
         // create change request entity here too
