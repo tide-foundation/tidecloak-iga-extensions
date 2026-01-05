@@ -129,7 +129,7 @@ public class TideRoleRequests {
         params.put("threshold", threshold);
         params.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
         params.put("resource", Constants.REALM_MANAGEMENT_CLIENT_ID);
-        Policy policy = new Policy("GenericResourceAccessThresholdRole:1", "any", vvkId, params);
+        Policy policy = new Policy("GenericResourceAccessThresholdRole:1", "any", vvkId, ApprovalType.EXPLICIT, ExecutionType.Public, params);
 
         List<PolicyDraftEntity> policyDraftEntities = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", recordId).getResultList();
 
@@ -144,7 +144,7 @@ public class TideRoleRequests {
                 .getSingleResult();
 
 
-        Policy currentPolicy = new Policy(Base64.getDecoder().decode(tideAdmin.getInitCert()));
+        Policy currentPolicy = Policy.From(Base64.getDecoder().decode(tideAdmin.getInitCert()));
         if(currentPolicy.IsEqualTo(policy.ToBytes())){
             return; // hash is the same, dont need to recreate
         }
@@ -209,7 +209,7 @@ public class TideRoleRequests {
         }
 
         roleDraftEntity.get(0).setInitCertSig(signature);
-        Policy policy =  new Policy(Base64.getDecoder().decode(policyDraftEntity.getPolicy()));
+        Policy policy = Policy.From(Base64.getDecoder().decode(policyDraftEntity.getPolicy()));
         policy.AddSignature(Base64.getDecoder().decode(signature));
         roleDraftEntity.get(0).setInitCert(Base64.getEncoder().encodeToString(policy.ToBytes()));
 
@@ -233,7 +233,7 @@ public class TideRoleRequests {
         String vvkId = config.getFirst("vvkId");
 
 
-        return new Policy("GenericResourceAccessThresholdRole:1", modelId,  vvkId, params);
+        return new Policy("GenericResourceAccessThresholdRole:1", modelId,  vvkId, ApprovalType.EXPLICIT, ExecutionType.Public, params);
     }
 
     public static Policy createRolePolicy(KeycloakSession session, RoleModel role, String modelId, PolicyParameters params ) throws JsonProcessingException {
@@ -245,7 +245,7 @@ public class TideRoleRequests {
         MultivaluedHashMap<String, String> config = componentModel.getConfig();
         String vvkId = config.getFirst("vvkId");
 
-        return new Policy("GenericResourceAccessThresholdRole:1", modelId,  vvkId, params);
+        return new Policy("GenericResourceAccessThresholdRole:1", modelId,  vvkId,  ApprovalType.EXPLICIT,ExecutionType.Public, params);
 
     }
 

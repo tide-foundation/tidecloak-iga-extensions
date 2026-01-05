@@ -217,7 +217,7 @@ public interface ChangeSetProcessor<T> {
                             .setParameter("roleId", tideRole.getId())
                             .getSingleResult();
                     var policyString = tideAdmin.getInitCert();
-                    Policy policy = new Policy(Base64.getDecoder().decode(policyString));
+                    Policy policy = Policy.From(Base64.getDecoder().decode(policyString));
 
                     List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, changesetRequestEntity.getChangesetRequestId(), changesetRequestEntity.getChangesetType());
                     proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());

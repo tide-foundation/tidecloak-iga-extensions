@@ -58,7 +58,7 @@ public class FirstAdmin implements Authorizer {
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", role).getSingleResult();
 
-        Policy policy = new Policy(Base64.getDecoder().decode(tideRoleEntity.getInitCert()));
+        Policy policy = Policy.From(Base64.getDecoder().decode(tideRoleEntity.getInitCert()));
 
         if(isAssigningTideRealmAdminRole(draftEntity, session)) {
 
