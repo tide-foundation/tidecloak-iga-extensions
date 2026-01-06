@@ -484,13 +484,6 @@ public interface ChangeSetProcessor<T> {
                 .findFirst()
                 .orElse(null);
 
-        if (componentModel != null) {
-            affectedClients.removeIf(client ->
-                    Constants.ADMIN_CONSOLE_CLIENT_ID.equalsIgnoreCase(client.getClientId()) ||
-                            Constants.ADMIN_CLI_CLIENT_ID.equalsIgnoreCase(client.getClientId()) ||
-                            Constants.REALM_MANAGEMENT_CLIENT_ID.equalsIgnoreCase(client.getClientId())
-            );
-        }
         affectedClients.removeIf(r -> r.getClientId().equalsIgnoreCase(Constants.BROKER_SERVICE_CLIENT_ID));
 
         return new ArrayList<>(affectedClients);
