@@ -177,7 +177,7 @@ public class MultiAdmin implements Authorizer{
             // sign policy now
             ChangesetRequestEntity changesetRequest = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(authorityAssignment.getChangesetRequestId(), ChangeSetType.POLICY));
             ModelRequest pReq = ModelRequest.FromBytes(Base64.getDecoder().decode(changesetRequest.getRequestModel()));
-            Policy policy = new Policy(Base64.getDecoder().decode(policyString));
+            Policy policy = Policy.From(Base64.getDecoder().decode(policyString));
 
             pReq.SetPolicy(policy.ToBytes());
             SignatureResponse pResp = Midgard.SignModel(settings, pReq);
@@ -213,7 +213,7 @@ public class MultiAdmin implements Authorizer{
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", role).getSingleResult();
 
-        Policy policy = new Policy(Base64.getDecoder().decode(tideRoleEntity.getInitCert()));
+        Policy policy = Policy.From(Base64.getDecoder().decode(tideRoleEntity.getInitCert()));
 
         ComponentModel componentModel = realm.getComponentsStream()
                 .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison

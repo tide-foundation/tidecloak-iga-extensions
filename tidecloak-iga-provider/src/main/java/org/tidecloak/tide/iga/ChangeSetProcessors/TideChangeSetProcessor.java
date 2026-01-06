@@ -273,7 +273,7 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
                     .setParameter("roleId", tideRole.getId())
                     .getSingleResult();
             var policyString = tideAdmin.getInitCert();
-            Policy policy = new Policy(Base64.getDecoder().decode(policyString));
+            Policy policy = Policy.From(Base64.getDecoder().decode(policyString));
             SignRequestSettingsMidgard signedSettings = ConstructSignSettings(config, secretKeys.activeVrk);
             ModelRequest newModelReq = ModelRequest.New("UserContext", "1", authFlow, req.GetDraft(), policy.ToBytes());
             var expireAtTime = (System.currentTimeMillis() / 1000) + 2628000; // 1 month from now
