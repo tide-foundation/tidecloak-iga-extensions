@@ -129,7 +129,7 @@ public class TideRoleRequests {
         params.put("threshold", threshold);
         params.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
         params.put("resource", Constants.REALM_MANAGEMENT_CLIENT_ID);
-        Policy policy = new Policy("GenericResourceAccessThresholdRole:1", "any", vvkId, ApprovalType.EXPLICIT, ExecutionType.Public, params);
+        Policy policy = new Policy("GenericResourceAccessThresholdRole:1", "any", vvkId, ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params);
 
         List<PolicyDraftEntity> policyDraftEntities = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", recordId).getResultList();
 
@@ -235,7 +235,7 @@ public class TideRoleRequests {
         String vvkId = config.getFirst("vvkId");
 
 
-        return new Policy("GenericResourceAccessThresholdRole:1", modelId,  vvkId, ApprovalType.EXPLICIT, ExecutionType.Public, params);
+        return new Policy("GenericResourceAccessThresholdRole:1", modelId,  vvkId, ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params);
     }
 
     public static Policy createRolePolicy(KeycloakSession session, RoleModel role, String modelId, PolicyParameters params ) throws JsonProcessingException {
@@ -247,7 +247,7 @@ public class TideRoleRequests {
         MultivaluedHashMap<String, String> config = componentModel.getConfig();
         String vvkId = config.getFirst("vvkId");
 
-        return new Policy("GenericResourceAccessThresholdRole:1", modelId,  vvkId,  ApprovalType.EXPLICIT,ExecutionType.Public, params);
+        return new Policy("GenericResourceAccessThresholdRole:1", modelId,  vvkId,  ApprovalType.EXPLICIT,ExecutionType.PUBLIC, params);
 
     }
 
