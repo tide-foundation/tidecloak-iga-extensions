@@ -521,7 +521,6 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
         adminUsers.add(userModel);
         clientList.forEach(client -> {
             try {
-                boolean isAdminClient = client.getClientId().equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID) || client.getClientId().equalsIgnoreCase(Constants.ADMIN_CLI_CLIENT_ID);
                 adminUsers.forEach(u -> {
                     try {
                         ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, u, new ChangeRequestKey(entity.getId() ,entity.getChangeRequestId()),
@@ -541,20 +540,12 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                                                   Set<RoleModel> roleMappings, TideUserRoleMappingDraftEntity entity, UserModel userModel) {
         clientList.forEach(client -> {
             try {
-                if (isAdminClient(client)) {
-                    return;
-                }
                 ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(session, em, realm, client, userModel, new ChangeRequestKey(entity.getId() ,entity.getChangeRequestId()),
                         ChangeSetType.USER_ROLE, entity);
             } catch (Exception e) {
                 throw new RuntimeException("Error processing client: " + client.getClientId(), e);
             }
         });
-    }
-
-    private boolean isAdminClient(ClientModel client) {
-        return client.getClientId().equalsIgnoreCase(Constants.ADMIN_CONSOLE_CLIENT_ID) ||
-                client.getClientId().equalsIgnoreCase(Constants.ADMIN_CLI_CLIENT_ID);
     }
 
 
