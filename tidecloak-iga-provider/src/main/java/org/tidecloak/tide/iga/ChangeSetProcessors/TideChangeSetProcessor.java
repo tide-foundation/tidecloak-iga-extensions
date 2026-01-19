@@ -240,17 +240,6 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
                 .findFirst()
                 .orElse(null);
 
-        List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery(
-                        "getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)
-                .setParameter("ID", componentModel.getId())
-                .setParameter("types", List.of("firstAdmin", "multiAdmin"))
-                .getResultList();
-        MultivaluedHashMap<String, String> config = componentModel.getConfig();
-
-        String currentSecretKeys = config.getFirst("clientSecret");
-        ObjectMapper objectMapper = new ObjectMapper();
-        TideAdminRealmResource.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, TideAdminRealmResource.SecretKeys.class);
-
         List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, changeRequestKey.getChangeRequestId(), type);
         proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
 
@@ -264,22 +253,38 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
         String draft = Base64.getEncoder().encodeToString(req.GetDraft());
 
         ModelRequest modelReq = null;
-        var authFlow = realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") ? "VRK:1" : "Policy:1";
-        if(authFlow.equalsIgnoreCase("Policy:1")) {
-            ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
+        String authFlow = "VRK:1";
+        if ( componentModel != null) {
+            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery(
+                            "getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)
+                    .setParameter("ID", componentModel.getId())
+                    .setParameter("types", List.of("firstAdmin", "multiAdmin"))
+                    .getResultList();
+            authFlow = realmAuthorizers.get(0).getType().equalsIgnoreCase("firstAdmin") ? "VRK:1" : "Policy:1";
 
-            RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-            TideRoleDraftEntity tideAdmin = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
-                    .setParameter("roleId", tideRole.getId())
-                    .getSingleResult();
-            var policyString = tideAdmin.getInitCert();
-            Policy policy = Policy.From(Base64.getDecoder().decode(policyString));
-            SignRequestSettingsMidgard signedSettings = ConstructSignSettings(config, secretKeys.activeVrk);
-            ModelRequest newModelReq = ModelRequest.New("UserContext", "1", authFlow, req.GetDraft(), policy.ToBytes());
-            var expireAtTime = (System.currentTimeMillis() / 1000) + 2628000; // 1 month from now
-            newModelReq.SetCustomExpiry(expireAtTime);
-            modelReq = newModelReq.InitializeTideRequestWithVrk(newModelReq, signedSettings, "UserContext:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
+            if(authFlow.equalsIgnoreCase("Policy:1")) {
+                MultivaluedHashMap<String, String> config = componentModel.getConfig();
 
+                String currentSecretKeys = config.getFirst("clientSecret");
+                ObjectMapper objectMapper = new ObjectMapper();
+                TideAdminRealmResource.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, TideAdminRealmResource.SecretKeys.class);
+
+
+                ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
+
+                RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+                TideRoleDraftEntity tideAdmin = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+                        .setParameter("roleId", tideRole.getId())
+                        .getSingleResult();
+                var policyString = tideAdmin.getInitCert();
+                Policy policy = Policy.From(Base64.getDecoder().decode(policyString));
+                SignRequestSettingsMidgard signedSettings = ConstructSignSettings(config, secretKeys.activeVrk);
+                ModelRequest newModelReq = ModelRequest.New("UserContext", "1", authFlow, req.GetDraft(), policy.ToBytes());
+                var expireAtTime = (System.currentTimeMillis() / 1000) + 2628000; // 1 month from now
+                newModelReq.SetCustomExpiry(expireAtTime);
+                modelReq = newModelReq.InitializeTideRequestWithVrk(newModelReq, signedSettings, "UserContext:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
+
+            }
         }
 
         ChangeSetType changeSetType;
