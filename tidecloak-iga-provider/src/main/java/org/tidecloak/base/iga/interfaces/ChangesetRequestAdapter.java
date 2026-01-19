@@ -21,7 +21,7 @@ import java.util.List;
 
 public class ChangesetRequestAdapter {
 
-    public static void saveAdminAuthorizaton(KeycloakSession session, String changeSetType, String changeSetRequestID, String changeSetActionType, UserModel adminUser, String adminTideAuthMsg, String adminTideBlindSig, String adminSessionApprovalSig) throws Exception {
+    public static void saveAdminAuthorizaton(KeycloakSession session, String changeSetType, String changeSetRequestID, String changeSetActionType, UserModel adminUser) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
 
@@ -35,22 +35,21 @@ public class ChangesetRequestAdapter {
                 .findFirst()
                 .orElse(null);
 
-        if(BasicIGAUtils.isIGAEnabled(session.getContext().getRealm()) && componentModel == null) {
-            String json = "{\"id\":\"" + adminUser.getId() + "\"}";
-            AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), json, adminUser.getId(), em);
-            changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
-            List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
-            draftRecordEntity.forEach(d -> {
-                try {
-                    BasicIGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), d);
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-            });
-            return;
-        }
-        invokeSaveAdminAuthorizaton(session, changeSetType, changeSetRequestID, changeSetActionType, adminUser, adminTideAuthMsg, adminTideBlindSig, adminSessionApprovalSig);
-
+        String json = "{\"id\":\"" + adminUser.getId() + "\"}";
+        AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), json, adminUser.getId(), em);
+        changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
+        var id = changeSetRequestID.contains("policy") ? changeSetRequestID.split("policy")[0] : changeSetRequestID;
+        var type =  changeSetRequestID.contains("policy") ? "USER_ROLE" : changeSetType;
+        if(changeSetType.equals("POLICY")) return;
+        List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(type), id);
+        if(draftRecordEntity == null || draftRecordEntity.isEmpty()) return;
+        draftRecordEntity.forEach(d -> {
+            try {
+                BasicIGAUtils.updateDraftStatus(session,  ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), d);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
     }
 
     public static void saveAdminRejection(KeycloakSession session, String changeSetType, String changeSetRequestID, String changeSetActionType, UserModel adminUser) throws Exception {
@@ -69,34 +68,9 @@ public class ChangesetRequestAdapter {
                 .findFirst()
                 .orElse(null);
 
-
-        if(BasicIGAUtils.isIGAEnabled(realm) && componentModel == null) {
-            String json = "{\"id\":\"" + adminUser.getId() + "\"}";
-            AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), null, adminUser.getId(), em);
-            changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
-            List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
-            draftRecordEntity.forEach(d -> {
-                try {
-                    BasicIGAUtils.updateDraftStatus(session, ChangeSetType.valueOf(changeSetType), changeSetRequestID, ActionType.valueOf(changeSetActionType), d);
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-            });
-            return;
-        }
-
-        List<UserClientAccessProofEntity> userClientAccessProofEntity = em.createNamedQuery("getAccessProofByUserAndClientId", UserClientAccessProofEntity.class)
-                .setParameter("user", adminEntity)
-                .setParameter("clientId", client.getId()).getResultList();
-
-        if ( userClientAccessProofEntity == null ){
-            throw new Exception("This admin user does not have any realm management roles, " + adminUser.getId());
-        }
-
+        String json = "{\"id\":\"" + adminUser.getId() + "\"}";
         AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), null, adminUser.getId(), em);
         changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
-
-        // Check if change request is no longer valid and process it
         List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
         draftRecordEntity.forEach(d -> {
             try {
@@ -105,6 +79,7 @@ public class ChangesetRequestAdapter {
                 throw new RuntimeException(e);
             }
         });
+
     }
 
     public static DraftStatus getChangeSetStatus(KeycloakSession session, String changeSetId, ChangeSetType changeSetType) throws Exception {
