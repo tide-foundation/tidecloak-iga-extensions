@@ -43,7 +43,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
-import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRoleInitCert;
+import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRolePolicy;
 import static org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter.getChangeSetStatus;
 
 public class BasicIGAUtils {
@@ -70,11 +70,18 @@ public class BasicIGAUtils {
 
     public static boolean isAuthorityAssignment(KeycloakSession session, Object mapping, EntityManager em){
         if ( mapping instanceof  TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
-            RoleInitializerCertificateDraftEntity roleInitCert = getDraftRoleInitCert(session, tideUserRoleMappingDraftEntity.getChangeRequestId());
+            PolicyDraftEntity rolePolicy = getDraftRolePolicy(session, tideUserRoleMappingDraftEntity.getChangeRequestId());
 
-            return roleInitCert != null;
+            return rolePolicy != null;
         }
         return false;
+    }
+    public static PolicyDraftEntity authorityAssignment(KeycloakSession session, Object mapping, EntityManager em){
+        if ( mapping instanceof  TideUserRoleMappingDraftEntity tideUserRoleMappingDraftEntity){
+
+            return getDraftRolePolicy(session, tideUserRoleMappingDraftEntity.getChangeRequestId());
+        }
+        return null;
     }
 
     public static boolean isIGAEnabled(RealmModel realm) {
@@ -128,7 +135,7 @@ public class BasicIGAUtils {
             proofDetails.get(i).setSignature(adminUser.getId());
         }
 
-        ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSet.getType().name(), changeSet.getChangeSetId(), changeSet.getActionType().name(), adminUser, "", "", "");
+        ChangesetRequestAdapter.saveAdminAuthorizaton(session, changeSet.getType().name(), changeSet.getChangeSetId(), changeSet.getActionType().name(), adminUser);
     }
 
 
@@ -666,7 +673,8 @@ public class BasicIGAUtils {
                         try {
                             List<?> draftRecordEntities = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, cre.getChangesetType(), cre.getChangesetRequestId());
                             if(draftRecordEntities == null || draftRecordEntities.isEmpty()){
-                                throw new Exception("Unsupported change set type for ID: " + cre.getChangesetRequestId());
+                                em.remove(cre);
+                                throw new Exception("No records found: " + cre.getChangesetRequestId());
                             }
                             signer.sign(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntities, auth);
                             committer.commit(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntities.get(0), auth);

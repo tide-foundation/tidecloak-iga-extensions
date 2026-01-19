@@ -9,7 +9,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
+import jakarta.xml.bind.DatatypeConverter;
 import org.keycloak.common.ClientConnection;
+import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
@@ -23,6 +25,9 @@ import org.keycloak.services.managers.AuthenticationSessionManager;
 import org.keycloak.services.managers.UserSessionManager;
 import org.keycloak.sessions.RootAuthenticationSessionModel;
 
+import org.midgard.models.Policy.Policy;
+import org.midgard.models.RequestExtensions.UserContextSignRequest;
+import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.keys.UserClientKey;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.keycloak.representations.AccessToken;
@@ -44,10 +49,13 @@ import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.utils.JsonSorter;
+import org.midgard.models.*;
+import org.tidecloak.tide.iga.AdminResource.TideAdminRealmResource;
 
 
 import java.lang.reflect.Constructor;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
@@ -55,6 +63,8 @@ import java.util.stream.Stream;
 
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.ChangeRequestUtils.getChangeSetRequestFromEntity;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.*;
+import static org.tidecloak.tide.iga.AdminResource.TideAdminRealmResource.ConstructSignSettings;
+import static org.tidecloak.tide.iga.AdminResource.TideAdminRealmResource.findVendorComponent;
 
 public interface ChangeSetProcessor<T> {
 
@@ -144,6 +154,15 @@ public interface ChangeSetProcessor<T> {
         if(change.getType().equals(ChangeSetType.CLIENT)){
             return;
         }
+
+        // If the current entity is for the tide-realm-admin role, update other authority requests for the same role
+        if (entity instanceof TideUserRoleMappingDraftEntity tideUserRoleMappingDraft) {
+            RoleModel role = realm.getRoleById(tideUserRoleMappingDraft.getRoleId());
+            if (role != null && role.getName().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN)) {
+                updateOtherAuthorityRequests(session, realm, change, tideUserRoleMappingDraft, em);
+            }
+        }
+
         List<ClientModel> affectedClients = getAffectedClients(session, realm, entity, em);
         ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();// Initialize the processor factory
 
@@ -153,7 +172,6 @@ public interface ChangeSetProcessor<T> {
                     .stream()
                     .filter(proof -> !Objects.equals(proof.getChangeRequestKey().getChangeRequestId(), change.getChangeSetId()))
                     .toList();
-
 
             for(AccessProofDetailEntity userContextDraft : userContextDrafts) {
                 em.lock(userContextDraft, LockModeType.PESSIMISTIC_WRITE);
@@ -182,7 +200,49 @@ public interface ChangeSetProcessor<T> {
                 ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, userContextDraft.getChangeRequestKey().getChangeRequestId(), userContextDraft.getChangesetType());
                 if (changesetRequestEntity != null){
                     changesetRequestEntity.getAdminAuthorizations().clear(); // empty sigs!
+
+                    ComponentModel componentModel = session.getContext().getRealm().getComponentsStream()
+                            .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                            .findFirst()
+                            .orElse(null);
+                    MultivaluedHashMap<String, String> config = componentModel.getConfig();
+                    String currentSecretKeys = config.getFirst("clientSecret");
+                    ObjectMapper objectMapper = new ObjectMapper();
+                    TideAdminRealmResource.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, TideAdminRealmResource.SecretKeys.class);
+
+
+                    ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
+                    RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+                    TideRoleDraftEntity tideAdmin = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+                            .setParameter("roleId", tideRole.getId())
+                            .getSingleResult();
+                    var policyString = tideAdmin.getInitCert();
+                    Policy policy = Policy.From(Base64.getDecoder().decode(policyString));
+
+                    List<AccessProofDetailEntity> proofDetails = getUserContextDrafts(em, changesetRequestEntity.getChangesetRequestId(), changesetRequestEntity.getChangesetType());
+                    proofDetails.sort(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed());
+                    List<UserContext> userContexts = new ArrayList<>();
+                    UserContextSignRequest req = new UserContextSignRequest("Policy:1");
+                    proofDetails.forEach(p -> {
+                        UserContext userContext = new UserContext(p.getProofDraft());
+                        userContexts.add(userContext);
+                    });
+                    req.SetUserContexts(userContexts.toArray(new UserContext[0]));
+                    String draft = Base64.getEncoder().encodeToString(req.GetDraft());
+
+
+                    ModelRequest newModelReq =  ModelRequest.New("UserContext", "1", "Policy:1", req.GetDraft(),  policy.ToBytes());
+                    SignRequestSettingsMidgard signedSettings = ConstructSignSettings(config, secretKeys.activeVrk);
+                    var expireAtTime = (System.currentTimeMillis() / 1000) + 2628000; // 1 month from now
+                    newModelReq.SetCustomExpiry(expireAtTime);
+                    newModelReq = newModelReq.InitializeTideRequestWithVrk(newModelReq, signedSettings, "UserContext:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
+                    String encodedModel = Base64.getEncoder().encodeToString(newModelReq.Encode());
+                    changesetRequestEntity.setRequestModel(encodedModel);
+                    changesetRequestEntity.setDraftRequest(draft);
+                    em.flush();
                 }
+
+
             }
         }
         em.flush();
@@ -190,6 +250,69 @@ public interface ChangeSetProcessor<T> {
         ChangeSetProcessor<T> processor = loadTideProcessor();
         if (processor != null) {
             processor.updateAffectedUserContexts(session, realm, change, entity, em);
+        }
+    }
+
+    /**
+     * Updates other authority requests for the same role when the current entity is an authority request.
+     * This recalculates the policy threshold for pending authority requests since the number of active admins has changed.
+     */
+    default void updateOtherAuthorityRequests(KeycloakSession session, RealmModel realm, ChangeSetRequest change, TideUserRoleMappingDraftEntity currentEntity, EntityManager em) throws Exception {
+        String roleId = currentEntity.getRoleId();
+        String currentUserId = currentEntity.getUser().getId();
+
+        // Find all pending authority requests for the same role (excluding the current one)
+        List<TideUserRoleMappingDraftEntity> pendingAuthorityRequests = em.createNamedQuery("getUserRoleMappingDraftsByRoleAndStatusNotEqualTo", TideUserRoleMappingDraftEntity.class)
+                .setParameter("roleId", roleId)
+                .setParameter("draftStatus", DraftStatus.ACTIVE)
+                .getResultList()
+                .stream()
+                .filter(draft -> !Objects.equals(draft.getUser().getId(), currentUserId)) // Exclude current user
+                .filter(draft -> !Objects.equals(draft.getChangeRequestId(), change.getChangeSetId())) // Exclude current change request
+                .toList();
+
+        RoleModel role = realm.getRoleById(roleId);
+
+        // Track processed change request IDs to avoid duplicate policy creation
+        Set<String> processedChangeRequestIds = new HashSet<>();
+
+        for (TideUserRoleMappingDraftEntity pendingRequest : pendingAuthorityRequests) {
+            String changeRequestId = pendingRequest.getChangeRequestId();
+
+            // Skip if no changeRequestId or we've already processed this change request ID
+            if (changeRequestId == null || processedChangeRequestIds.contains(changeRequestId)) {
+                continue;
+            }
+            processedChangeRequestIds.add(changeRequestId);
+
+            // Determine the action type for the pending request
+            ChangeSetRequest pendingChangeRequest = getChangeSetRequestFromEntity(session, pendingRequest);
+            int additionalAdmins = pendingChangeRequest.getActionType() == ActionType.CREATE ? 1 : -1;
+
+            // Check if this pending request already has a policy draft
+            PolicyDraftEntity policyDraft = BasicIGAUtils.authorityAssignment(session, pendingRequest, em);
+            if (policyDraft != null) {
+                // Remove existing policy draft to recreate with updated threshold
+                em.remove(policyDraft);
+
+                // Remove associated changeset request entity for the policy
+                ChangesetRequestEntity policyChangeRequest = em.find(ChangesetRequestEntity.class,
+                        new ChangesetRequestEntity.Key(changeRequestId + "policy", ChangeSetType.POLICY));
+                if (policyChangeRequest != null) {
+                    em.remove(policyChangeRequest);
+                }
+
+                em.flush();
+            }
+
+            // Clear admin authorizations for the pending request (uses entity id as key)
+            ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, pendingRequest.getId(), ChangeSetType.USER_ROLE);
+            if (changesetRequestEntity != null) {
+                changesetRequestEntity.getAdminAuthorizations().clear();
+            }
+
+            // Create (or recreate) policy draft with updated threshold
+            org.tidecloak.base.iga.TideRequests.TideRoleRequests.createRolePolicyDraft(session, changeRequestId, 0.7, additionalAdmins, role);
         }
     }
 
@@ -361,13 +484,6 @@ public interface ChangeSetProcessor<T> {
                 .findFirst()
                 .orElse(null);
 
-        if (componentModel != null) {
-            affectedClients.removeIf(client ->
-                    Constants.ADMIN_CONSOLE_CLIENT_ID.equalsIgnoreCase(client.getClientId()) ||
-                            Constants.ADMIN_CLI_CLIENT_ID.equalsIgnoreCase(client.getClientId()) ||
-                            Constants.REALM_MANAGEMENT_CLIENT_ID.equalsIgnoreCase(client.getClientId())
-            );
-        }
         affectedClients.removeIf(r -> r.getClientId().equalsIgnoreCase(Constants.BROKER_SERVICE_CLIENT_ID));
 
         return new ArrayList<>(affectedClients);
@@ -471,7 +587,6 @@ public interface ChangeSetProcessor<T> {
 
         ChangeSetRequest changeSetRequest = getChangeSetRequestFromEntity(session, entity);
         AccessToken userContextToken = processorFactory.getProcessor(changeSetRequest.getType()).transformUserContext(accessToken, session, entity, user, client);
-
         boolean isFullScopeAllowed = client.isFullScopeAllowed();
         if( entity instanceof TideClientDraftEntity) {
             isFullScopeAllowed = changeSetRequest.getActionType().equals(ActionType.CREATE);
