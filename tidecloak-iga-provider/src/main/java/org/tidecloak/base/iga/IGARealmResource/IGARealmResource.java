@@ -68,8 +68,6 @@ public class IGARealmResource {
 
     public Response toggleIGA(@FormParam("isIGAEnabled") boolean isEnabled) throws Exception {
         try{
-            System.out.println("HELLLOOO!!!1");
-
             RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
             if(realm.equals(masterRealm)){
                 return buildResponse(400, "Master realm does not support IGA.");
@@ -85,8 +83,6 @@ public class IGARealmResource {
                     .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
                     .findFirst()
                     .orElse(null);
-
-            System.out.println("HELLLOOO!!! 2");
 
             // if IGA is on and tideIdp exists, we need to enable EDDSA as default sig
             if (tideIdp != null && componentModel != null) {
@@ -186,8 +182,6 @@ public class IGARealmResource {
                     }
                 }
             } else {
-                System.out.println("HELLLOOO!!!");
-
                 if (isEnabled){
                     // Get a list of users
                     ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
@@ -195,8 +189,6 @@ public class IGARealmResource {
                     List<UserModel> users = session.users().searchForUserStream(realm, new HashMap<>()).toList();
                     // sign realm-admin roles
                     users.forEach(u -> {
-                        System.out.println(u.getUsername());
-
                         UserEntity ue = em.find(UserEntity.class, u.getId());
                         TideUserRoleMappingDraftEntity userRoleMappingDraft = em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class)
                                 .setParameter("user", ue)
@@ -204,8 +196,6 @@ public class IGARealmResource {
                                 .getSingleResult();
 
                         if (userRoleMappingDraft.getDraftStatus().equals(DraftStatus.DRAFT)) {
-                            System.out.println("SIGNING!!!!");
-
                             ChangeSetRequest cr = new ChangeSetRequest();
                             cr.setChangeSetId(userRoleMappingDraft.getChangeRequestId());
                             cr.setActionType(userRoleMappingDraft.getAction());
