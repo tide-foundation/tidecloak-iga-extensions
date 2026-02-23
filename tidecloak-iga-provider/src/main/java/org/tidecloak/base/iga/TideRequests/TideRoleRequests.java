@@ -64,9 +64,20 @@ public class TideRoleRequests {
         }
 
         RoleEntity roleEntity = em.find(RoleEntity.class, tideRealmAdmin.getId());
-        TideRoleDraftEntity roleDraft = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+        List<TideRoleDraftEntity> roleDrafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", roleEntity)
-                .getSingleResult();
+                .getResultList();
+
+        TideRoleDraftEntity roleDraft;
+        if (roleDrafts.isEmpty()) {
+            roleDraft = new TideRoleDraftEntity();
+            roleDraft.setId(KeycloakModelUtils.generateId());
+            roleDraft.setRole(roleEntity);
+            roleDraft.setDraftStatus(DraftStatus.ACTIVE);
+            em.persist(roleDraft);
+        } else {
+            roleDraft = roleDrafts.get(0);
+        }
 
         ObjectMapper objectMapper = new ObjectMapper();
         String rolePolicyString =  Base64.getEncoder().encodeToString(policy.ToBytes());

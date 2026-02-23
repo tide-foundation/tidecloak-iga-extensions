@@ -19,6 +19,7 @@ import org.keycloak.models.*;
 import org.keycloak.models.cache.UserCache;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.representations.idm.RolesRepresentation;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitter;
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitterFactory;
@@ -171,7 +172,6 @@ public class IGARealmResource {
                         existingRealmRole.setConfig(cfg);
                     }
 
-
                 } else {
                     // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA
                     // TODO: Fix error: Uncaught server error: java.lang.RuntimeException: org.keycloak.crypto.SignatureException:
@@ -181,7 +181,36 @@ public class IGARealmResource {
                         logger.info("IGA has been disabled, default signature algorithm updated to RS256");
                     }
                 }
+            } else {
+                if (isEnabled){
+                    // Get a list of users
+                    ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
+                    RoleModel realmAdmin = session.roles().getClientRole(realmManagement, "realm-admin");
+                    List<UserModel> users = session.users().searchForUserStream(realm, new HashMap<>()).toList();
+                    // sign realm-admin roles
+                    users.forEach(u -> {
+                        UserEntity ue = em.find(UserEntity.class, u.getId());
+                        TideUserRoleMappingDraftEntity userRoleMappingDraft = em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class)
+                                .setParameter("user", ue)
+                                .setParameter("roleId", realmAdmin.getId())
+                                .getSingleResult();
+
+                        if (userRoleMappingDraft.getDraftStatus().equals(DraftStatus.DRAFT)) {
+                            ChangeSetRequest cr = new ChangeSetRequest();
+                            cr.setChangeSetId(userRoleMappingDraft.getChangeRequestId());
+                            cr.setActionType(userRoleMappingDraft.getAction());
+                            cr.setType(ChangeSetType.USER_ROLE);
+                            try {
+                                signChangeSets(Collections.singletonList(cr));
+                                commitChangeSets(Collections.singletonList(cr));
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            }
+                        }
+                    });
+                }
             }
+
             // enable events by default
             realm.setEventsEnabled(true);
             realm.setAdminEventsEnabled(true);
