@@ -853,6 +853,132 @@ public class IGARealmResource {
                 .getResultList();
     }
 
+    // ── Policy Template endpoints ───────────────────────────────────
+
+    @POST
+    @Path("policy-templates")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response createPolicyTemplate(Map<String, Object> body) {
+        auth.realm().requireManageRealm();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        ObjectMapper mapper = new ObjectMapper();
+
+        try {
+            String name = (String) body.get("name");
+            String description = (String) body.get("description");
+            String contractCode = (String) body.get("contractCode");
+            String modelId = (String) body.get("modelId");
+            Object parameters = body.get("parameters");
+
+            if (name == null || name.isBlank()) {
+                return Response.status(Response.Status.BAD_REQUEST).entity("name is required").build();
+            }
+            if (contractCode == null || contractCode.isBlank()) {
+                return Response.status(Response.Status.BAD_REQUEST).entity("contractCode is required").build();
+            }
+
+            PolicyTemplateEntity entity = new PolicyTemplateEntity();
+            entity.setId(UUID.randomUUID().toString());
+            entity.setRealmId(realm.getId());
+            entity.setName(name);
+            entity.setDescription(description);
+            entity.setContractCode(contractCode);
+            entity.setModelId(modelId);
+            entity.setCreatedBy(auth.adminAuth().getUser().getUsername());
+
+            if (parameters != null) {
+                entity.setParameters(mapper.writeValueAsString(parameters));
+            }
+
+            em.persist(entity);
+            em.flush();
+
+            logger.infof("[PolicyTemplate] CREATE realm=%s name=%s id=%s", realm.getName(), name, entity.getId());
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("success", true);
+            result.put("id", entity.getId());
+            result.put("name", name);
+            result.put("description", description);
+            result.put("modelId", modelId);
+            return Response.ok(result, MediaType.APPLICATION_JSON).build();
+        } catch (Exception e) {
+            logger.error("[PolicyTemplate] Error creating template", e);
+            return Response.serverError().entity("Failed to create policy template: " + e.getMessage()).build();
+        }
+    }
+
+    @GET
+    @Path("policy-templates")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response listPolicyTemplates() {
+        auth.realm().requireManageRealm();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        ObjectMapper mapper = new ObjectMapper();
+
+        try {
+            List<PolicyTemplateEntity> entities = em.createNamedQuery("getPolicyTemplatesByRealm", PolicyTemplateEntity.class)
+                    .setParameter("realmId", realm.getId())
+                    .getResultList();
+
+            List<Map<String, Object>> templates = new ArrayList<>();
+            for (PolicyTemplateEntity entity : entities) {
+                Map<String, Object> t = new HashMap<>();
+                t.put("id", entity.getId());
+                t.put("name", entity.getName());
+                t.put("description", entity.getDescription());
+                t.put("contractCode", entity.getContractCode());
+                t.put("modelId", entity.getModelId());
+                t.put("createdBy", entity.getCreatedBy());
+                t.put("timestamp", entity.getTimestamp());
+                t.put("realmId", entity.getRealmId());
+
+                if (entity.getParameters() != null) {
+                    t.put("parameters", mapper.readValue(entity.getParameters(), List.class));
+                } else {
+                    t.put("parameters", new ArrayList<>());
+                }
+
+                templates.add(t);
+            }
+
+            return Response.ok(templates, MediaType.APPLICATION_JSON).build();
+        } catch (Exception e) {
+            logger.error("[PolicyTemplate] Error listing templates", e);
+            return Response.serverError().entity("Failed to list policy templates: " + e.getMessage()).build();
+        }
+    }
+
+    @DELETE
+    @Path("policy-templates/{id}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response deletePolicyTemplate(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        try {
+            PolicyTemplateEntity entity = em.find(PolicyTemplateEntity.class, id);
+            if (entity == null) {
+                return Response.status(Response.Status.NOT_FOUND).entity("Template not found").build();
+            }
+
+            // Only allow deleting templates owned by this realm (not global ones)
+            if (entity.getRealmId() != null && !entity.getRealmId().equals(realm.getId())) {
+                return Response.status(Response.Status.FORBIDDEN).entity("Cannot delete template from another realm").build();
+            }
+
+            em.remove(entity);
+            em.flush();
+
+            logger.infof("[PolicyTemplate] DELETE realm=%s id=%s", realm.getName(), id);
+            return Response.ok(Map.of("success", true)).build();
+        } catch (Exception e) {
+            logger.error("[PolicyTemplate] Error deleting template", e);
+            return Response.serverError().entity("Failed to delete policy template: " + e.getMessage()).build();
+        }
+    }
+
     private Response buildResponse(int status, String message) {
         return Response.status(status)
                 .entity(message)

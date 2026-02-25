@@ -21,10 +21,16 @@ public class PolicyDraftEntity {
     @Column(name = "POLICY")
     private String policy;
 
+    @Column(name = "SCOPE")
+    private String scope;
+
+    @Column(name = "TEMPLATE_ID")
+    private String templateId;
+
     @Column(name = "TIMESTAMP")
     protected Long timestamp = System.currentTimeMillis();
 
-    // Getters and setters for new fields
+    // Getters and setters
     public String getId() {
         return id;
     }
@@ -55,5 +61,21 @@ public class PolicyDraftEntity {
 
     public void setPolicy(String policy) {
         this.policy = policy;
+    }
+
+    public String getScope() {
+        return scope;
+    }
+
+    public void setScope(String scope) {
+        this.scope = scope;
+    }
+
+    public String getTemplateId() {
+        return templateId;
+    }
+
+    public void setTemplateId(String templateId) {
+        this.templateId = templateId;
     }
 }

@@ -3,6 +3,7 @@ package org.tidecloak.base.iga.interfaces;
 import org.keycloak.connections.jpa.entityprovider.JpaEntityProvider;
 import org.tidecloak.jpa.entities.AccessProofDetailDependencyEntity;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
+import org.tidecloak.jpa.entities.PolicyTemplateEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.*;
 
@@ -22,7 +23,8 @@ public class TideEntityProvider implements JpaEntityProvider {
                 TideCompositeRoleDraftEntity.class,
                 AccessProofDetailDependencyEntity.class,
                 AccessProofDetailEntity.class,
-                UserClientAccessProofEntity.class
+                UserClientAccessProofEntity.class,
+                PolicyTemplateEntity.class
                 );
     }
 
