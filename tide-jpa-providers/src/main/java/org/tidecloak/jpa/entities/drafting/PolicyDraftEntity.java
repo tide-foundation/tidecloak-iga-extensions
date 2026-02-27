@@ -4,6 +4,9 @@ import jakarta.persistence.*;
 import org.keycloak.models.jpa.entities.RoleEntity;
 @NamedQueries({
         @NamedQuery(name="getPolicyByChangeSetId", query="select m from PolicyDraftEntity m where m.changesetRequestId = :changesetId"),
+        @NamedQuery(name="getActiveRealmPolicy", query="select m from PolicyDraftEntity m where m.realmId = :realmId and m.scope = 'REALM'"),
+        @NamedQuery(name="getPendingRealmPolicy", query="select m from PolicyDraftEntity m where m.realmId = :realmId and m.scope = 'REALM_PENDING'"),
+        @NamedQuery(name="getDeletePendingRealmPolicy", query="select m from PolicyDraftEntity m where m.realmId = :realmId and m.scope = 'REALM_DELETE_PENDING'"),
 })
 
 @Entity
@@ -20,6 +23,9 @@ public class PolicyDraftEntity {
 
     @Column(name = "POLICY")
     private String policy;
+
+    @Column(name = "REALM_ID")
+    private String realmId;
 
     @Column(name = "SCOPE")
     private String scope;
@@ -61,6 +67,14 @@ public class PolicyDraftEntity {
 
     public void setPolicy(String policy) {
         this.policy = policy;
+    }
+
+    public String getRealmId() {
+        return realmId;
+    }
+
+    public void setRealmId(String realmId) {
+        this.realmId = realmId;
     }
 
     public String getScope() {

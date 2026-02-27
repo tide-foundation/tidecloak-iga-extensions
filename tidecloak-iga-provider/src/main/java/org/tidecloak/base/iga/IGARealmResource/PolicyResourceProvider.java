@@ -50,8 +50,9 @@ public class PolicyResourceProvider implements RealmResourceProvider {
         RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", roleEntity).getSingleResult();
+        Policy policy = Policy.From(Base64.getDecoder().decode(tideRoleEntity.getInitCert()));
 
-        return Response.ok(tideRoleEntity.getInitCert()).build();
+        return Response.ok(policy.toString()).build();
     }
 
     @GET
@@ -63,8 +64,32 @@ public class PolicyResourceProvider implements RealmResourceProvider {
         RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", roleEntity).getSingleResult();
-
         return Response.ok(tideRoleEntity.getInitCert()).build();
+    }
+
+    @GET
+    @Path("admin-policy/bytes")
+    @Produces(MediaType.APPLICATION_OCTET_STREAM)
+    public Response getAdminPolicyBytes() {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        RoleModel role = session.clients().getClientByClientId(session.getContext().getRealm(), Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
+        TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                .setParameter("role", roleEntity).getSingleResult();
+        return Response.ok(Base64.getDecoder().decode(tideRoleEntity.getInitCert())).build();
+    }
+
+    @GET
+    @Path("admin-policy/display")
+    @Produces(MediaType.TEXT_PLAIN)
+    public Response getAdminPolicyDisplay() {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        RoleModel role = session.clients().getClientByClientId(session.getContext().getRealm(), Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
+        TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
+                .setParameter("role", roleEntity).getSingleResult();
+        Policy policy = Policy.From(Base64.getDecoder().decode(tideRoleEntity.getInitCert()));
+        return Response.ok(policy.toString()).build();
     }
 
 }

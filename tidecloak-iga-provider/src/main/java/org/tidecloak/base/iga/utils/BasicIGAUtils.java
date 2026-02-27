@@ -149,6 +149,8 @@ public class BasicIGAUtils {
             return ((TideCompositeRoleMappingDraftEntity) entity).getId();
         } else if (entity instanceof TideClientDraftEntity) {
             return ((TideClientDraftEntity) entity).getId();
+        } else if (entity instanceof PolicyDraftEntity) {
+            return ((PolicyDraftEntity) entity).getId();
         }
         return null;
     }
@@ -162,6 +164,8 @@ public class BasicIGAUtils {
             return ((TideCompositeRoleMappingDraftEntity) entity).getChangeRequestId();
         } else if (entity instanceof TideClientDraftEntity) {
             return ((TideClientDraftEntity) entity).getChangeRequestId();
+        } else if (entity instanceof PolicyDraftEntity) {
+            return ((PolicyDraftEntity) entity).getChangesetRequestId();
         }
         return null;
     }
@@ -199,6 +203,7 @@ public class BasicIGAUtils {
             case ROLE -> em.find(TideRoleDraftEntity.class, entityId);
             case USER -> em.find(TideUserDraftEntity.class, entityId);
             case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, entityId);
+            case POLICY -> em.find(PolicyDraftEntity.class, entityId);
             default -> null;
         };
     }
@@ -224,6 +229,10 @@ public class BasicIGAUtils {
 
         if (entity instanceof TideClientDraftEntity) {
             return ChangeSetType.CLIENT;
+        }
+
+        if (entity instanceof PolicyDraftEntity) {
+            return ChangeSetType.POLICY;
         }
 
         return null;
@@ -334,6 +343,14 @@ public class BasicIGAUtils {
                                 .setParameter("requestId", changeSetId)
                                 .getResultList();
 
+                case POLICY ->
+                        em.createNamedQuery(
+                                        "getPolicyByChangeSetId",
+                                        PolicyDraftEntity.class
+                                )
+                                .setParameter("changesetId", changeSetId)
+                                .getResultList();
+
                 default -> null;
             };
         } catch (NoResultException e) {
@@ -402,6 +419,9 @@ public class BasicIGAUtils {
                 break;
             case CLIENT:
                 ((TideClientDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                break;
+            case POLICY:
+                // PolicyDraftEntity status is driven by scope (REALM_PENDING → REALM), not draftStatus
                 break;
         }
     }
@@ -516,6 +536,10 @@ public class BasicIGAUtils {
 
             case CLIENT:
                 ((TideClientDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
+                break;
+
+            case POLICY:
+                // PolicyDraftEntity status is driven by scope (REALM_PENDING → REALM), not draftStatus
                 break;
 
             default:

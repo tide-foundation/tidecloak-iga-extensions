@@ -87,4 +87,28 @@
         </rollback>
     </changeSet>
 
+    <changeSet id="20260225-add-realm-id-to-policy" author="tidecloak">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <columnExists tableName="POLICY" columnName="REALM_ID"/>
+            </not>
+        </preConditions>
+
+        <addColumn tableName="POLICY">
+            <column name="REALM_ID" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+
+        <createIndex tableName="POLICY" indexName="IDX_POLICY_REALM_SCOPE">
+            <column name="REALM_ID"/>
+            <column name="SCOPE"/>
+        </createIndex>
+
+        <rollback>
+            <dropIndex tableName="POLICY" indexName="IDX_POLICY_REALM_SCOPE"/>
+            <dropColumn tableName="POLICY" columnName="REALM_ID"/>
+        </rollback>
+    </changeSet>
+
 </databaseChangeLog>
