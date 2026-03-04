@@ -19,9 +19,11 @@ import org.keycloak.models.*;
 import org.keycloak.models.cache.UserCache;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
+import org.keycloak.representations.idm.RolesRepresentation;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitter;
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitterFactory;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
@@ -64,134 +66,215 @@ public class IGARealmResource {
     @POST
     @Path("toggle-iga")
     @Produces(MediaType.TEXT_PLAIN)
-
     public Response toggleIGA(@FormParam("isIGAEnabled") boolean isEnabled) throws Exception {
-        try{
+        try {
+            auth.realm().requireManageRealm();
+
             RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
-            if(realm.equals(masterRealm)){
+            if (realm.equals(masterRealm)) {
                 return buildResponse(400, "Master realm does not support IGA.");
             }
 
+            RealmModel currentRealm = session.getContext().getRealm();
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-            auth.realm().requireManageRealm();
-            session.getContext().getRealm().setAttribute("isIGAEnabled", isEnabled);
-            logger.info("IGA has been toggled to : " + isEnabled);
+
+            currentRealm.setAttribute("isIGAEnabled", isEnabled);
+            logger.infof("IGA has been toggled to: %s", isEnabled);
 
             IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
-            ComponentModel componentModel = realm.getComponentsStream()
-                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
-                    .findFirst()
-                    .orElse(null);
+            boolean hasTideVendorKey = realm.getComponentsStream()
+                    .anyMatch(c -> "tide-vendor-key".equals(c.getProviderId()));
 
-            // if IGA is on and tideIdp exists, we need to enable EDDSA as default sig
-            if (tideIdp != null && componentModel != null) {
-                String currentAlgorithm = session.getContext().getRealm().getDefaultSignatureAlgorithm();
+            boolean hasTideSupport = tideIdp != null && hasTideVendorKey;
 
-                if (isEnabled) {
-                    if (!"EdDSA".equalsIgnoreCase(currentAlgorithm)) {
-                        session.getContext().getRealm().setDefaultSignatureAlgorithm("EdDSA");
-                        logger.info("IGA has been enabled, default signature algorithm updated to EdDSA");
-                    }
-                    // Check the TideClientDraft Table and generate and AccessProofDetails that dont exist.
-                    List<TideClientDraftEntity> entities = findDraftsNotInAccessProof(em, realm);
-                    entities.forEach(c -> {
-                        try {
-                            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.CLIENT);
-                            ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
-                            changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT).executeWorkflow(session, c, em, WorkflowType.REQUEST, params, null);
-                        } catch (Exception e) {
-                            throw new RuntimeException(e);
-                        }
-                    });
-
-                    // Get the admin console client
-                    ClientModel secAdminConsole =
-                            session.clients().getClientByClientId(realm, Constants.ADMIN_CONSOLE_CLIENT_ID);
-
-                    // Ensure current auth server URL is in web origins
-                    Set<String> currentWebOrigins = new HashSet<>(secAdminConsole.getWebOrigins());
-                    currentWebOrigins.add(session.getContext().getAuthServerUrl().toString());
-                    secAdminConsole.setWebOrigins(currentWebOrigins);
-
-                    // Find the "roles" client scope
-                    ClientScopeModel rolesScope =
-                            session.clientScopes()
-                                    .getClientScopesStream(realm)
-                                    .filter(cs -> "roles".equalsIgnoreCase(cs.getName()))
-                                    .findFirst()
-                                    .orElse(null);
-
-                    if (rolesScope == null) {
-                        throw new IllegalStateException("roles client scope not found");
-                    }
-
-                    // Get predefined mappers from the roles scope
-                    ProtocolMapperModel scopeClientRole =
-                            rolesScope.getProtocolMapperByName("openid-connect", "client roles");
-                    ProtocolMapperModel scopeRealmRole =
-                            rolesScope.getProtocolMapperByName("openid-connect", "realm roles");
-
-                    if (scopeClientRole == null || scopeRealmRole == null) {
-                        throw new IllegalStateException("Expected predefined mappers 'client roles' / 'realm roles' not found on roles scope");
-                    }
-
-                    // Clone mappers like the Admin Console would when "Add predefined mapper" is used
-                    ProtocolMapperModel clientRoleMapper = cloneMapper(scopeClientRole);
-                    ProtocolMapperModel realmRoleMapper  = cloneMapper(scopeRealmRole);
-
-                    // Apply your config changes on the clones
-                    Map<String, String> clientRoleConfig = new HashMap<>(clientRoleMapper.getConfig());
-                    clientRoleConfig.put("lightweight.claim", "true");
-                    clientRoleMapper.setConfig(clientRoleConfig);
-
-                    Map<String, String> realmRoleConfig = new HashMap<>(realmRoleMapper.getConfig());
-                    realmRoleConfig.put("lightweight.claim", "true");
-                    realmRoleMapper.setConfig(realmRoleConfig);
-
-                    // Check if the client already has mappers with these names
-                    ProtocolMapperModel existingClientRole =
-                            secAdminConsole.getProtocolMapperByName("openid-connect", clientRoleMapper.getName());
-                    ProtocolMapperModel existingRealmRole =
-                            secAdminConsole.getProtocolMapperByName("openid-connect", realmRoleMapper.getName());
-
-                    // If mapper exists, just update its config; if not, add the cloned mapper
-                    if (existingClientRole == null) {
-                        secAdminConsole.addProtocolMapper(clientRoleMapper);
-                    } else {
-                        Map<String, String> cfg = new HashMap<>(existingClientRole.getConfig());
-                        cfg.put("lightweight.claim", "true");
-                        existingClientRole.setConfig(cfg);
-                    }
-
-                    if (existingRealmRole == null) {
-                        secAdminConsole.addProtocolMapper(realmRoleMapper);
-                    } else {
-                        Map<String, String> cfg = new HashMap<>(existingRealmRole.getConfig());
-                        cfg.put("lightweight.claim", "true");
-                        existingRealmRole.setConfig(cfg);
-                    }
-
-
-                } else {
-                    // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA
-                    // TODO: Fix error: Uncaught server error: java.lang.RuntimeException: org.keycloak.crypto.SignatureException:
-                    // Signing failed. java.security.InvalidKeyException: Unsupported key type (tide eddsa key)
-                    if (currentAlgorithm.equalsIgnoreCase("EdDSA")) {
-                        session.getContext().getRealm().setDefaultSignatureAlgorithm("RS256");
-                        logger.info("IGA has been disabled, default signature algorithm updated to RS256");
-                    }
-                }
+            if (isEnabled) {
+                enableIga(currentRealm, em, hasTideSupport);
+            } else {
+                disableIga(currentRealm, hasTideSupport);
             }
-            // enable events by default
-            realm.setEventsEnabled(true);
-            realm.setAdminEventsEnabled(true);
-            realm.setAdminEventsDetailsEnabled(true);
 
-            return buildResponse(200, "IGA has been toggled to : " + isEnabled);
-        }catch(Exception e) {
-            logger.error("Error toggling IGA on realm: ", e);
+            enableRealmEvents(realm);
+
+            return buildResponse(200, "IGA has been toggled to: " + isEnabled);
+        } catch (Exception e) {
+            logger.errorf(e, "Error toggling IGA on realm %s", realm != null ? realm.getName() : "unknown");
             throw e;
         }
+    }
+
+    private void enableIga(RealmModel currentRealm, EntityManager em, boolean hasTideSupport) throws Exception {
+        // Always ensure admin console is configured when enabling IGA
+        configureAdminConsoleForIga();
+
+        if (hasTideSupport) {
+            ensureDefaultSignatureAlgorithm(
+                    currentRealm,
+                    "EdDSA",
+                    "IGA has been enabled, default signature algorithm updated to EdDSA"
+            );
+
+            generateMissingAccessProofs(em);
+        } else {
+            // No tide setup, perform initial realm-admin role signing flow
+            signDraftRealmAdminRoleAssignments(em);
+        }
+    }
+
+    private void disableIga(RealmModel currentRealm, boolean hasTideSupport) {
+        if (!hasTideSupport) {
+            return;
+        }
+
+        String currentAlgorithm = currentRealm.getDefaultSignatureAlgorithm();
+
+        // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA
+        // TODO: Fix error: Uncaught server error: java.lang.RuntimeException:
+        // org.keycloak.crypto.SignatureException: Signing failed.
+        // java.security.InvalidKeyException: Unsupported key type (tide eddsa key)
+        if ("EdDSA".equalsIgnoreCase(currentAlgorithm)) {
+            currentRealm.setDefaultSignatureAlgorithm("RS256");
+            logger.info("IGA has been disabled, default signature algorithm updated to RS256");
+        }
+    }
+
+    private void configureAdminConsoleForIga() {
+        ClientModel adminConsole = session.clients().getClientByClientId(realm, Constants.ADMIN_CONSOLE_CLIENT_ID);
+        if (adminConsole == null) {
+            throw new IllegalStateException("Admin console client not found");
+        }
+
+        // Ensure current auth server URL is in web origins
+        Set<String> webOrigins = new HashSet<>(adminConsole.getWebOrigins());
+        webOrigins.add(session.getContext().getAuthServerUrl().toString());
+        adminConsole.setWebOrigins(webOrigins);
+
+        // Find the "roles" client scope
+        ClientScopeModel rolesScope = session.clientScopes()
+                .getClientScopesStream(realm)
+                .filter(cs -> "roles".equalsIgnoreCase(cs.getName()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("roles client scope not found"));
+
+        // Get predefined mappers from the roles scope
+        ProtocolMapperModel scopeClientRole =
+                rolesScope.getProtocolMapperByName("openid-connect", "client roles");
+        ProtocolMapperModel scopeRealmRole =
+                rolesScope.getProtocolMapperByName("openid-connect", "realm roles");
+
+        if (scopeClientRole == null || scopeRealmRole == null) {
+            throw new IllegalStateException(
+                    "Expected predefined mappers 'client roles' / 'realm roles' not found on roles scope"
+            );
+        }
+
+        upsertLightweightMapper(adminConsole, scopeClientRole);
+        upsertLightweightMapper(adminConsole, scopeRealmRole);
+    }
+
+    private void upsertLightweightMapper(ClientModel client, ProtocolMapperModel predefinedMapper) {
+        ProtocolMapperModel existing =
+                client.getProtocolMapperByName("openid-connect", predefinedMapper.getName());
+
+        if (existing == null) {
+            ProtocolMapperModel cloned = cloneMapper(predefinedMapper);
+            Map<String, String> cfg = new HashMap<>(cloned.getConfig());
+            cfg.put("lightweight.claim", "true");
+            cloned.setConfig(cfg);
+            client.addProtocolMapper(cloned);
+            return;
+        }
+
+        Map<String, String> cfg = new HashMap<>(existing.getConfig());
+        if (!"true".equals(cfg.get("lightweight.claim"))) {
+            cfg.put("lightweight.claim", "true");
+            existing.setConfig(cfg);
+        }
+    }
+
+    private void generateMissingAccessProofs(EntityManager em) throws Exception {
+        List<TideClientDraftEntity> entities = findDraftsNotInAccessProof(em, realm);
+        if (entities == null || entities.isEmpty()) {
+            return;
+        }
+
+        ChangeSetProcessorFactory factory = ChangeSetProcessorFactoryProvider.getFactory();
+        ChangeSetProcessor<Object> processor = factory.getProcessor(ChangeSetType.CLIENT);
+
+        for (TideClientDraftEntity entity : entities) {
+            WorkflowParams params = new WorkflowParams(
+                    DraftStatus.DRAFT,
+                    false,
+                    ActionType.CREATE,
+                    ChangeSetType.CLIENT
+            );
+            processor.executeWorkflow(session, entity, em, WorkflowType.REQUEST, params, null);
+        }
+    }
+
+    private void signDraftRealmAdminRoleAssignments(EntityManager em) throws Exception {
+        ClientModel realmManagement =
+                session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
+        if (realmManagement == null) {
+            throw new IllegalStateException("realm-management client not found");
+        }
+
+        RoleModel realmAdmin = session.roles().getClientRole(realmManagement, "realm-admin");
+        if (realmAdmin == null) {
+            throw new IllegalStateException("realm-admin role not found");
+        }
+
+        List<UserModel> users = session.users().searchForUserStream(realm, Collections.emptyMap()).toList();
+        if (users.isEmpty()) {
+            return;
+        }
+
+        for (UserModel user : users) {
+            UserEntity userEntity = em.find(UserEntity.class, user.getId());
+            if (userEntity == null) {
+                continue;
+            }
+
+            TideUserRoleMappingDraftEntity draft;
+            try {
+                draft = em.createNamedQuery(
+                                "getUserRoleAssignmentDraftEntity",
+                                TideUserRoleMappingDraftEntity.class
+                        )
+                        .setParameter("user", userEntity)
+                        .setParameter("roleId", realmAdmin.getId())
+                        .getSingleResult();
+            } catch (jakarta.persistence.NoResultException ex) {
+                logger.debugf(
+                        "No realm-admin draft role assignment found for user %s",
+                        user.getUsername()
+                );
+                continue;
+            }
+
+            if (DraftStatus.DRAFT.equals(draft.getDraftStatus())) {
+                ChangeSetRequest req = new ChangeSetRequest();
+                req.setChangeSetId(draft.getChangeRequestId());
+                req.setActionType(draft.getAction());
+                req.setType(ChangeSetType.USER_ROLE);
+
+                signChangeSets(Collections.singletonList(req));
+                commitChangeSets(Collections.singletonList(req));
+            }
+        }
+    }
+
+    private void ensureDefaultSignatureAlgorithm(RealmModel realmModel, String algorithm, String logMessage) {
+        String current = realmModel.getDefaultSignatureAlgorithm();
+        if (!algorithm.equalsIgnoreCase(current)) {
+            realmModel.setDefaultSignatureAlgorithm(algorithm);
+            logger.info(logMessage);
+        }
+    }
+
+    private void enableRealmEvents(RealmModel realmModel) {
+        realmModel.setEventsEnabled(true);
+        realmModel.setAdminEventsEnabled(true);
+        realmModel.setAdminEventsDetailsEnabled(true);
     }
 
     // --- Helper: clone a mapper from the scope to use on the client ---
