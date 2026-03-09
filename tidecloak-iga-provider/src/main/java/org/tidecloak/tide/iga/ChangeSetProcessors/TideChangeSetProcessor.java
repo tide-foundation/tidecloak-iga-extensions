@@ -12,6 +12,7 @@ import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
 import org.midgard.models.*;
 import org.midgard.Midgard;
+import org.midgard.Serialization.TideMemory;
 import org.midgard.models.Policy.*;
 
 
@@ -270,18 +271,42 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
                 TideAdminRealmResource.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, TideAdminRealmResource.SecretKeys.class);
 
 
-                ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
-
-                RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-                TideRoleDraftEntity tideAdmin = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
-                        .setParameter("roleId", tideRole.getId())
-                        .getSingleResult();
+                String policyRoleId = session.getAttribute("policyRoleId", String.class);
+                TideRoleDraftEntity tideAdmin = BasicIGAUtils.resolvePolicyRole(em, session, policyRoleId);
                 var policyString = tideAdmin.getInitCert();
                 Policy policy = Policy.From(Base64.getDecoder().decode(policyString));
                 SignRequestSettingsMidgard signedSettings = ConstructSignSettings(config, secretKeys.activeVrk);
                 ModelRequest newModelReq = ModelRequest.New("UserContext", "1", authFlow, req.GetDraft(), policy.ToBytes());
                 var expireAtTime = (System.currentTimeMillis() / 1000) + 2628000; // 1 month from now
                 newModelReq.SetCustomExpiry(expireAtTime);
+
+                // Assemble dynamic data from session if provided (ordered array → raw [len][data] pairs)
+                // Contract's TryReadField expects raw [4-byte LE length][data] pairs without TideMemory version header.
+                @SuppressWarnings("unchecked")
+                List<String> dynamicData = session.getAttribute("dynamicData", List.class);
+                if (dynamicData != null && !dynamicData.isEmpty()) {
+                    int totalSize = 0;
+                    byte[][] parts = new byte[dynamicData.size()][];
+                    for (int i = 0; i < dynamicData.size(); i++) {
+                        String element = dynamicData.get(i);
+                        parts[i] = (element != null) ? element.getBytes(StandardCharsets.UTF_8) : new byte[0];
+                        totalSize += 4 + parts[i].length;
+                    }
+                    byte[] raw = new byte[totalSize];
+                    int offset = 0;
+                    for (byte[] part : parts) {
+                        raw[offset]     = (byte)(part.length & 0xFF);
+                        raw[offset + 1] = (byte)((part.length >> 8) & 0xFF);
+                        raw[offset + 2] = (byte)((part.length >> 16) & 0xFF);
+                        raw[offset + 3] = (byte)((part.length >> 24) & 0xFF);
+                        offset += 4;
+                        System.arraycopy(part, 0, raw, offset, part.length);
+                        offset += part.length;
+                    }
+                    newModelReq.SetDynamicData(raw);
+                    System.out.println("[TideChangeSetProcessor] Injected dynamicData with " + dynamicData.size() + " elements, " + totalSize + " bytes");
+                }
+
                 modelReq = newModelReq.InitializeTideRequestWithVrk(newModelReq, signedSettings, "UserContext:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
 
             }

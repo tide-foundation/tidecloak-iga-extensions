@@ -13,6 +13,7 @@ import org.keycloak.services.resources.admin.AdminAuth;
 import org.midgard.Midgard;
 import org.midgard.models.*;
 import org.midgard.models.Policy.*;
+import org.midgard.models.RequestExtensions.*;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
@@ -76,6 +77,49 @@ public class MultiAdmin implements Authorizer{
         Object draftEntity = draftEntities.get(0);
         var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
 
+        // Set the VVK-signed custom policy on the stored requestModel
+        // The policy in initCert should already be VVK-signed (done by frontend during policy commit, keylessh pattern)
+        String policyRoleId = changeSet.getPolicyRoleId();
+        TideRoleDraftEntity tideAdmin = BasicIGAUtils.resolvePolicyRole(em, session, policyRoleId);
+        if (tideAdmin != null && tideAdmin.getInitCert() != null && changesetRequestEntity.getRequestModel() != null) {
+            Policy policy = Policy.From(Base64.getDecoder().decode(tideAdmin.getInitCert()));
+            System.out.println("[MultiAdmin.sign] Policy loaded from initCert, bytes: " + tideAdmin.getInitCert().length());
+
+            // Set the signed policy on the model request
+            ModelRequest req = ModelRequest.FromBytes(Base64.getDecoder().decode(changesetRequestEntity.getRequestModel()));
+            req.SetPolicy(policy.ToBytes());
+
+            // Inject dynamic data from the changeset request (executor role, previous UC, previous UC sig)
+            // Contract's TryReadField expects raw [4-byte LE length][data] pairs without TideMemory version header.
+            List<String> dynamicData = changeSet.getDynamicData();
+            if (dynamicData != null && !dynamicData.isEmpty()) {
+                // Calculate total size: each element = 4-byte length prefix + data bytes
+                int totalSize = 0;
+                byte[][] parts = new byte[dynamicData.size()][];
+                for (int i = 0; i < dynamicData.size(); i++) {
+                    String element = dynamicData.get(i);
+                    parts[i] = (element != null) ? element.getBytes(java.nio.charset.StandardCharsets.UTF_8) : new byte[0];
+                    totalSize += 4 + parts[i].length;
+                }
+                // Build raw [len][data] pairs — no version header
+                byte[] raw = new byte[totalSize];
+                int offset = 0;
+                for (byte[] part : parts) {
+                    raw[offset]     = (byte)(part.length & 0xFF);
+                    raw[offset + 1] = (byte)((part.length >> 8) & 0xFF);
+                    raw[offset + 2] = (byte)((part.length >> 16) & 0xFF);
+                    raw[offset + 3] = (byte)((part.length >> 24) & 0xFF);
+                    offset += 4;
+                    System.arraycopy(part, 0, raw, offset, part.length);
+                    offset += part.length;
+                }
+                req.SetDynamicData(raw);
+                System.out.println("[MultiAdmin.sign] Injected dynamicData with " + dynamicData.size() + " elements, " + totalSize + " bytes");
+            }
+
+            changesetRequestEntity.setRequestModel(Base64.getEncoder().encodeToString(req.Encode()));
+        }
+
         List<Map<String, Object>> responses = new ArrayList<>();
 
         // --- First ---
@@ -109,12 +153,8 @@ public class MultiAdmin implements Authorizer{
     @Override
     public Response commitWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, Object draftEntity, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
         IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
-        ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
 
-        RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-        TideRoleDraftEntity tideAdmin = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
-                .setParameter("roleId", tideRole.getId())
-                .getSingleResult();
+        TideRoleDraftEntity tideAdmin = BasicIGAUtils.resolvePolicyRole(em, session, changeSet.getPolicyRoleId());
         var policyString = tideAdmin.getInitCert();
         boolean isAuthorityAssignment = isAuthorityAssignment(session, draftEntity, em);
 
@@ -183,11 +223,16 @@ public class MultiAdmin implements Authorizer{
             SignatureResponse pResp = Midgard.SignModel(settings, pReq);
             commitRolePolicy(session, changeSet.getChangeSetId(), draftEntity, pResp.Signatures[0]); // get the last one
         } else {
+            // Set the custom policy on the request so the ORK uses our contract, not the default
+            Policy policy = Policy.From(Base64.getDecoder().decode(policyString));
+            req.SetPolicy(policy.ToBytes());
+
             SignatureResponse response = Midgard.SignModel(settings, req);
 
             for ( int i = 0; i < orderedProofDetails.size(); i++){
                 orderedProofDetails.get(i).setSignature(response.Signatures[i]);
             }
+
         }
 
         ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();// Initialize the processor factory
