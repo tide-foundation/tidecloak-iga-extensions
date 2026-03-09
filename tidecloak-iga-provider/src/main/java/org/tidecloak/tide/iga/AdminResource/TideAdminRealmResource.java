@@ -234,15 +234,8 @@ public class TideAdminRealmResource {
 
     ) {
         try {
-            // Check admin role
-            RoleModel role = session.getContext()
-                    .getRealm()
-                    .getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID)
-                    .getRole(tideRealmAdminRole);
-
-            if (!auth.adminAuth().getUser().hasRole(role)) {
-                return buildResponse(403, "Not authorized to add approvals");
-            }
+            // Check manage-users permission (org owners get this via orgOwner composites)
+            auth.users().requireManage();
 
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
             var test = changeSetId.contains("policy") ? changeSetId.split("policy")[0] : changeSetId;
@@ -295,10 +288,8 @@ public class TideAdminRealmResource {
                                  @FormParam("actionType") String actionType,
                                  @FormParam("changeSetType") String changeSetType) {
         try {
-            RoleModel role = session.getContext().getRealm()
-                    .getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID)
-                    .getRole(tideRealmAdminRole);
-            auth.adminAuth().getUser().hasRole(role);
+            // Check manage-users permission (org owners get this via orgOwner composites)
+            auth.users().requireManage();
 
             ComponentModel componentModel = findVendorComponent(session.getContext().getRealm());
             if (componentModel == null) {

@@ -249,7 +249,7 @@ public class IGARealmResource {
     @Produces(MediaType.TEXT_PLAIN)
     public Response AddRejection(@FormParam("changeSetId") String changeSetId, @FormParam("actionType") String actionType, @FormParam("changeSetType") String changeSetType) throws Exception {
         try {
-            auth.realm().requireManageRealm();
+            auth.users().requireManage();
             ChangesetRequestAdapter.saveAdminRejection(session, changeSetType, changeSetId, actionType, auth.adminAuth().getUser());
             return buildResponse(200, "Successfully added admin rejection to changeSetRequest with id " + changeSetId);
 
@@ -398,7 +398,7 @@ public class IGARealmResource {
             @QueryParam("id") String changesetRequestId,
             @QueryParam("type") String changesetTypeParam
     ) {
-        auth.realm().requireManageRealm();
+        auth.users().requireManage();
 
         if (!BasicIGAUtils.isIGAEnabled(realm)) {
             return Response.ok(Collections.emptyList()).build();
@@ -459,7 +459,7 @@ public class IGARealmResource {
     @GET
     @Path("change-set/users/requests")
     public Response getRequestedChangesForUsers() {
-        auth.realm().requireManageRealm();
+        auth.users().requireManage();
         if(!BasicIGAUtils.isIGAEnabled(realm)){
             return Response.ok().entity(new ArrayList<>()).build();
         }
@@ -471,7 +471,7 @@ public class IGARealmResource {
     @GET
     @Path("change-set/roles/requests")
     public Response getRequestedChanges() {
-        auth.realm().requireManageRealm();
+        auth.users().requireManage();
 
         if(!BasicIGAUtils.isIGAEnabled(realm)){
             return Response.ok().entity(new ArrayList<>()).build();
@@ -485,7 +485,7 @@ public class IGARealmResource {
     @GET
     @Path("change-set/clients/requests")
     public Response getRequestedChangesForClients() {
-        auth.realm().requireManageRealm();
+        auth.users().requireManage();
 
         if(!BasicIGAUtils.isIGAEnabled(realm)){
             return Response.ok().entity(new ArrayList<>()).build();
@@ -1907,10 +1907,24 @@ public class IGARealmResource {
     }
 
     public List<Map<String, Object>> signChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
-        auth.realm().requireManageRealm();
+        auth.users().requireManage();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
         ChangeSetSigner signer = ChangeSetSignerFactory.getSigner(session);
+
+        // Store policyRoleId and dynamicData in session so deep processing methods
+        // (e.g. TideChangeSetProcessor for UserContext signing) can access them
+        if (changeSets != null && !changeSets.isEmpty()) {
+            String policyRoleId = changeSets.get(0).getPolicyRoleId();
+            if (policyRoleId != null) {
+                session.setAttribute("policyRoleId", policyRoleId);
+            }
+            List<String> dynamicData = changeSets.get(0).getDynamicData();
+            if (dynamicData != null && !dynamicData.isEmpty()) {
+                session.setAttribute("dynamicData", dynamicData);
+                System.out.println("[signChangeSets] Stored dynamicData in session: " + dynamicData.size() + " elements");
+            }
+        }
 
         List<Map<String, Object>> signedList = new ArrayList<>();
         ObjectMapper objectMapper = new ObjectMapper();
@@ -2043,7 +2057,7 @@ public class IGARealmResource {
 
 
     private Response commitChangeSets(List<ChangeSetRequest> changeSets) throws Exception {
-        auth.realm().requireManageRealm();
+        auth.users().requireManage();
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RealmModel realm = session.getContext().getRealm();
         List<ChangeSetRequest> filtered = new ArrayList<>(changeSets.stream()
@@ -2071,7 +2085,7 @@ public class IGARealmResource {
     }
 
     private Response cancelChangeSets(List<ChangeSetRequest> changeSets){
-            auth.realm().requireManageRealm();
+            auth.users().requireManage();
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
             changeSets.forEach(changeSet -> {
@@ -2112,6 +2126,127 @@ public class IGARealmResource {
 
         // Return success message after approving the change sets
         return Response.ok("Change set request has been canceled").build();
+    }
+
+    @POST
+    @Path("role-policy/{roleId}/init-cert")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response setRolePolicyInitCert(@PathParam("roleId") String roleId, Map<String, String> body) {
+        auth.users().requireManage();
+
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        TideRoleDraftEntity roleDraft;
+        try {
+            roleDraft = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+                    .setParameter("roleId", roleId)
+                    .getSingleResult();
+        } catch (NoResultException e) {
+            return Response.status(Response.Status.NOT_FOUND)
+                    .entity(Map.of("error", "No TideRoleDraftEntity found for roleId: " + roleId))
+                    .build();
+        }
+
+        String initCert = body.get("initCert");
+        if (initCert == null || initCert.isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "initCert is required"))
+                    .build();
+        }
+
+        roleDraft.setInitCert(initCert);
+
+        String initCertSig = body.get("initCertSig");
+        if (initCertSig != null && !initCertSig.isBlank()) {
+            roleDraft.setInitCertSig(initCertSig);
+        }
+
+        em.flush();
+        return Response.ok(Map.of("message", "initCert updated for role " + roleId)).build();
+    }
+
+    /**
+     * Get a user's committed UserContext and its VVK signature for a given client.
+     * Returns { accessProof, accessProofSig } from USER_CLIENT_ACCESS_PROOF.
+     */
+    @GET
+    @Path("user-context/{userId}/{clientId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getUserContext(@PathParam("userId") String userId, @PathParam("clientId") String clientId) {
+        auth.users().requireManage();
+
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        UserEntity userEntity = em.find(UserEntity.class, userId);
+        if (userEntity == null) {
+            return Response.status(Response.Status.NOT_FOUND)
+                    .entity(Map.of("error", "User not found: " + userId))
+                    .build();
+        }
+
+        UserClientAccessProofEntity proof = em.find(
+                UserClientAccessProofEntity.class,
+                new UserClientAccessProofEntity.Key(userEntity, clientId)
+        );
+
+        if (proof == null) {
+            return Response.ok(Map.of("accessProof", "", "accessProofSig", "")).build();
+        }
+
+        return Response.ok(Map.of(
+                "accessProof", proof.getAccessProof() != null ? proof.getAccessProof() : "",
+                "accessProofSig", proof.getAccessProofSig() != null ? proof.getAccessProofSig() : ""
+        )).build();
+    }
+
+    /**
+     * Resolve the affected user's committed UserContext + sig from a changeSetId.
+     * Looks up the draft entity → user + role → client, then queries USER_CLIENT_ACCESS_PROOF directly.
+     */
+    @GET
+    @Path("change-set/{changeSetId}/user-context")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getChangeSetUserContext(@PathParam("changeSetId") String changeSetId) {
+        auth.users().requireManage();
+
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        // Find the draft entity for this change set to get the affected user + role
+        List<TideUserRoleMappingDraftEntity> drafts = em.createNamedQuery(
+                        "GetUserRoleMappingDraftEntityByRequestId", TideUserRoleMappingDraftEntity.class)
+                .setParameter("requestId", changeSetId)
+                .getResultList();
+
+        if (drafts.isEmpty()) {
+            return Response.ok(Map.of("accessProof", "", "accessProofSig", "")).build();
+        }
+
+        TideUserRoleMappingDraftEntity draft = drafts.get(0);
+        UserEntity user = draft.getUser();
+
+        // Resolve clientId from the role
+        RoleModel role = realm.getRoleById(draft.getRoleId());
+        String clientId = (role != null && role.isClientRole())
+                ? realm.getClientById(role.getContainerId()).getClientId()
+                : null;
+
+        if (clientId == null) {
+            return Response.ok(Map.of("accessProof", "", "accessProofSig", "")).build();
+        }
+
+        // Go directly to committed user context
+        UserClientAccessProofEntity committed = em.find(
+                UserClientAccessProofEntity.class,
+                new UserClientAccessProofEntity.Key(user, clientId)
+        );
+
+        if (committed == null) {
+            return Response.ok(Map.of("accessProof", "", "accessProofSig", "")).build();
+        }
+
+        return Response.ok(Map.of(
+                "accessProof", committed.getAccessProof() != null ? committed.getAccessProof() : "",
+                "accessProofSig", committed.getAccessProofSig() != null ? committed.getAccessProofSig() : ""
+        )).build();
     }
 
     /**

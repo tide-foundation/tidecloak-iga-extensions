@@ -211,11 +211,7 @@ public interface ChangeSetProcessor<T> {
                     TideAdminRealmResource.SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, TideAdminRealmResource.SecretKeys.class);
 
 
-                    ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
-                    RoleModel tideRole = realmManagement.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-                    TideRoleDraftEntity tideAdmin = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
-                            .setParameter("roleId", tideRole.getId())
-                            .getSingleResult();
+                    TideRoleDraftEntity tideAdmin = BasicIGAUtils.resolvePolicyRole(em, session, change.getPolicyRoleId());
                     var policyString = tideAdmin.getInitCert();
                     Policy policy = Policy.From(Base64.getDecoder().decode(policyString));
 
