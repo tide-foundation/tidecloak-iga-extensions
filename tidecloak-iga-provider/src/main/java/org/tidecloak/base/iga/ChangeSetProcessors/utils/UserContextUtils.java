@@ -161,7 +161,10 @@ public class UserContextUtils extends UserContextUtilBase {
                 .collect(Collectors.toSet());
 
         if ( roleToInclude != null) {
-            expanded.add(roleToInclude);
+            Set<RoleModel> roleIncludeExpanded = Set.of(roleToInclude).stream()
+                    .flatMap(r -> UserContextUtils.expandCompositeRolesStream(TideEntityUtils.toTideRoleAdapter(r, session, realm), visited, DraftStatus.ACTIVE))
+                    .collect(Collectors.toSet());
+            expanded.addAll(roleIncludeExpanded);
         }
 
         if (isFullScopeAllowed) {

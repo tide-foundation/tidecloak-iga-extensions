@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.2.xsd">
+
+    <changeSet id="20260225-create-policy-template" author="tidecloak">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <tableExists tableName="POLICY_TEMPLATE"/>
+            </not>
+        </preConditions>
+
+        <createTable tableName="POLICY_TEMPLATE">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="PK_POLICY_TEMPLATE"/>
+            </column>
+            <column name="REALM_ID" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="NAME" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="DESCRIPTION" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="CONTRACT_CODE" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="MODEL_ID" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="PARAMETERS" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="CREATED_BY" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="TIMESTAMP" type="BIGINT">
+                <constraints nullable="true"/>
+            </column>
+        </createTable>
+
+        <createIndex tableName="POLICY_TEMPLATE" indexName="IDX_POLICY_TEMPLATE_REALM">
+            <column name="REALM_ID"/>
+        </createIndex>
+
+        <rollback>
+            <dropTable tableName="POLICY_TEMPLATE"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="20260225-add-scope-to-policy" author="tidecloak">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <columnExists tableName="POLICY" columnName="SCOPE"/>
+            </not>
+        </preConditions>
+
+        <addColumn tableName="POLICY">
+            <column name="SCOPE" type="VARCHAR(64)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+
+        <rollback>
+            <dropColumn tableName="POLICY" columnName="SCOPE"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="20260225-add-template-id-to-policy" author="tidecloak">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <columnExists tableName="POLICY" columnName="TEMPLATE_ID"/>
+            </not>
+        </preConditions>
+
+        <addColumn tableName="POLICY">
+            <column name="TEMPLATE_ID" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+
+        <rollback>
+            <dropColumn tableName="POLICY" columnName="TEMPLATE_ID"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="20260225-add-realm-id-to-policy" author="tidecloak">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <columnExists tableName="POLICY" columnName="REALM_ID"/>
+            </not>
+        </preConditions>
+
+        <addColumn tableName="POLICY">
+            <column name="REALM_ID" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+
+        <createIndex tableName="POLICY" indexName="IDX_POLICY_REALM_SCOPE">
+            <column name="REALM_ID"/>
+            <column name="SCOPE"/>
+        </createIndex>
+
+        <rollback>
+            <dropIndex tableName="POLICY" indexName="IDX_POLICY_REALM_SCOPE"/>
+            <dropColumn tableName="POLICY" columnName="REALM_ID"/>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

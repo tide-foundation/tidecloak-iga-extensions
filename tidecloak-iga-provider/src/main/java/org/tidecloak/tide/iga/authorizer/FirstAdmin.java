@@ -53,11 +53,7 @@ public class FirstAdmin implements Authorizer {
         proofDetails.forEach(p -> {
             userContexts.add(new UserContext(p.getProofDraft()));
         });
-        RoleModel tideRole = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-        RoleEntity role = em.getReference(RoleEntity.class, tideRole.getId());
-        TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
-                .setParameter("role", role).getSingleResult();
-
+        TideRoleDraftEntity tideRoleEntity = BasicIGAUtils.resolvePolicyRole(em, session, changeSet.getPolicyRoleId());
         Policy policy = Policy.From(Base64.getDecoder().decode(tideRoleEntity.getInitCert()));
 
         if(isAssigningTideRealmAdminRole(draftEntity, session)) {

@@ -4,6 +4,8 @@ import org.tidecloak.shared.enums.ActionType;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.tidecloak.shared.enums.ChangeSetType;
 
+import java.util.List;
+
 public class ChangeSetRequest {
 
     @JsonProperty("changeSetId")
@@ -12,6 +14,11 @@ public class ChangeSetRequest {
     protected ChangeSetType changeSetType;
     @JsonProperty("actionType")
     protected ActionType actionType;
+    @JsonProperty("policyRoleId")
+    protected String policyRoleId;
+    /** Ordered dynamic data array — each non-null element is assembled positionally into TideMemory. */
+    @JsonProperty("dynamicData")
+    protected List<String> dynamicData;
 
     public ChangeSetRequest() {}
 
@@ -19,6 +26,13 @@ public class ChangeSetRequest {
         this.changeSetId = changeSetId;
         this.changeSetType = changeSetType;
         this.actionType = actionType;
+    }
+
+    public ChangeSetRequest(String changeSetId, ChangeSetType changeSetType, ActionType actionType, String policyRoleId) {
+        this.changeSetId = changeSetId;
+        this.changeSetType = changeSetType;
+        this.actionType = actionType;
+        this.policyRoleId = policyRoleId;
     }
 
     public ChangeSetType getType() {
@@ -39,6 +53,20 @@ public class ChangeSetRequest {
     }
     public void setActionType(ActionType actionType) {
         this.actionType = actionType;
+    }
+
+    public String getPolicyRoleId() {
+        return policyRoleId;
+    }
+    public void setPolicyRoleId(String policyRoleId) {
+        this.policyRoleId = policyRoleId;
+    }
+
+    public List<String> getDynamicData() {
+        return dynamicData;
+    }
+    public void setDynamicData(List<String> dynamicData) {
+        this.dynamicData = dynamicData;
     }
 
 }

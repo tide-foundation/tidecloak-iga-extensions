@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.2.xsd">
+
+    <changeSet id="20260226-create-forseti-contract" author="tidecloak">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <tableExists tableName="FORSETI_CONTRACT"/>
+            </not>
+        </preConditions>
+
+        <createTable tableName="FORSETI_CONTRACT">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="PK_FORSETI_CONTRACT"/>
+            </column>
+            <column name="REALM_ID" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CONTRACT_HASH" type="VARCHAR(128)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CONTRACT_CODE" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="NAME" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="TIMESTAMP" type="BIGINT">
+                <constraints nullable="true"/>
+            </column>
+        </createTable>
+
+        <addUniqueConstraint tableName="FORSETI_CONTRACT"
+                             columnNames="REALM_ID, CONTRACT_HASH"
+                             constraintName="UQ_FORSETI_CONTRACT_REALM_HASH"/>
+
+        <createIndex tableName="FORSETI_CONTRACT" indexName="IDX_FORSETI_CONTRACT_REALM">
+            <column name="REALM_ID"/>
+        </createIndex>
+
+        <rollback>
+            <dropTable tableName="FORSETI_CONTRACT"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="20260226-create-ssh-policy" author="tidecloak">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <tableExists tableName="SSH_POLICY"/>
+            </not>
+        </preConditions>
+
+        <createTable tableName="SSH_POLICY">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="PK_SSH_POLICY"/>
+            </column>
+            <column name="REALM_ID" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ROLE_ID" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CONTRACT_ID" type="VARCHAR(36)">
+                <constraints nullable="true"
+                             references="FORSETI_CONTRACT(ID)"
+                             foreignKeyName="FK_SSH_POLICY_CONTRACT"/>
+            </column>
+            <column name="APPROVAL_TYPE" type="VARCHAR(64)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="EXECUTION_TYPE" type="VARCHAR(64)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="THRESHOLD" type="INT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="POLICY_DATA" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="TIMESTAMP" type="BIGINT">
+                <constraints nullable="true"/>
+            </column>
+        </createTable>
+
+        <addUniqueConstraint tableName="SSH_POLICY"
+                             columnNames="REALM_ID, ROLE_ID"
+                             constraintName="UQ_SSH_POLICY_REALM_ROLE"/>
+
+        <createIndex tableName="SSH_POLICY" indexName="IDX_SSH_POLICY_REALM">
+            <column name="REALM_ID"/>
+        </createIndex>
+
+        <rollback>
+            <dropTable tableName="SSH_POLICY"/>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

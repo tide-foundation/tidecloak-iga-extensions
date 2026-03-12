@@ -48,6 +48,26 @@ import static org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter.getChang
 
 public class BasicIGAUtils {
 
+    /**
+     * Resolves the TideRoleDraftEntity for a given policyRoleId.
+     * If policyRoleId is null or blank, falls back to tide-realm-admin.
+     */
+    public static TideRoleDraftEntity resolvePolicyRole(EntityManager em, KeycloakSession session, String policyRoleId) {
+        if (policyRoleId != null && !policyRoleId.isBlank()) {
+            return em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+                    .setParameter("roleId", policyRoleId)
+                    .getSingleResult();
+        }
+        // Fallback: tide-realm-admin
+        RealmModel realm = session.getContext().getRealm();
+        RoleModel tideRole = session.clients()
+                .getClientByClientId(realm, org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
+                .getRole(Constants.TIDE_REALM_ADMIN);
+        return em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+                .setParameter("roleId", tideRole.getId())
+                .getSingleResult();
+    }
+
     public static List<AccessProofDetailEntity> sortAccessProof (List<AccessProofDetailEntity> accessProofDetailEntities) {
         Stream<AccessProofDetailEntity> adminProofs = accessProofDetailEntities.stream().filter(x -> {
             UserContext userContext = new UserContext(x.getProofDraft());
@@ -149,6 +169,8 @@ public class BasicIGAUtils {
             return ((TideCompositeRoleMappingDraftEntity) entity).getId();
         } else if (entity instanceof TideClientDraftEntity) {
             return ((TideClientDraftEntity) entity).getId();
+        } else if (entity instanceof PolicyDraftEntity) {
+            return ((PolicyDraftEntity) entity).getId();
         }
         return null;
     }
@@ -162,6 +184,8 @@ public class BasicIGAUtils {
             return ((TideCompositeRoleMappingDraftEntity) entity).getChangeRequestId();
         } else if (entity instanceof TideClientDraftEntity) {
             return ((TideClientDraftEntity) entity).getChangeRequestId();
+        } else if (entity instanceof PolicyDraftEntity) {
+            return ((PolicyDraftEntity) entity).getChangesetRequestId();
         }
         return null;
     }
@@ -199,6 +223,7 @@ public class BasicIGAUtils {
             case ROLE -> em.find(TideRoleDraftEntity.class, entityId);
             case USER -> em.find(TideUserDraftEntity.class, entityId);
             case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, entityId);
+            case POLICY -> em.find(PolicyDraftEntity.class, entityId);
             default -> null;
         };
     }
@@ -224,6 +249,10 @@ public class BasicIGAUtils {
 
         if (entity instanceof TideClientDraftEntity) {
             return ChangeSetType.CLIENT;
+        }
+
+        if (entity instanceof PolicyDraftEntity) {
+            return ChangeSetType.POLICY;
         }
 
         return null;
@@ -334,6 +363,14 @@ public class BasicIGAUtils {
                                 .setParameter("requestId", changeSetId)
                                 .getResultList();
 
+                case POLICY ->
+                        em.createNamedQuery(
+                                        "getPolicyByChangeSetId",
+                                        PolicyDraftEntity.class
+                                )
+                                .setParameter("changesetId", changeSetId)
+                                .getResultList();
+
                 default -> null;
             };
         } catch (NoResultException e) {
@@ -402,6 +439,9 @@ public class BasicIGAUtils {
                 break;
             case CLIENT:
                 ((TideClientDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                break;
+            case POLICY:
+                // PolicyDraftEntity status is driven by scope (REALM_PENDING → REALM), not draftStatus
                 break;
         }
     }
@@ -516,6 +556,10 @@ public class BasicIGAUtils {
 
             case CLIENT:
                 ((TideClientDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
+                break;
+
+            case POLICY:
+                // PolicyDraftEntity status is driven by scope (REALM_PENDING → REALM), not draftStatus
                 break;
 
             default:
@@ -642,6 +686,15 @@ public class BasicIGAUtils {
             throw new IllegalArgumentException("No change sets provided for signing.");
         }
 
+        // Store policyRoleId and dynamicData in session so deep processing methods (saveUserContextDraft) can access them
+        String policyRoleId = changeSets.get(0).getPolicyRoleId();
+        session.setAttribute("policyRoleId", policyRoleId);
+
+        List<String> dynamicData = changeSets.get(0).getDynamicData();
+        if (dynamicData != null && !dynamicData.isEmpty()) {
+            session.setAttribute("dynamicData", dynamicData);
+        }
+
         if (changeSets.size() > 1) {
             // Group by type and map to draft entities
             Map<ChangeSetType, List<Object>> requests =
@@ -676,8 +729,8 @@ public class BasicIGAUtils {
                                 em.remove(cre);
                                 throw new Exception("No records found: " + cre.getChangesetRequestId());
                             }
-                            signer.sign(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntities, auth);
-                            committer.commit(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE), em, session, realm, draftRecordEntities.get(0), auth);
+                            signer.sign(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE, policyRoleId), em, session, realm, draftRecordEntities, auth);
+                            committer.commit(new ChangeSetRequest(cre.getChangesetRequestId(), cre.getChangesetType(), ActionType.NONE, policyRoleId), em, session, realm, draftRecordEntities.get(0), auth);
                         } catch (Exception e) {
                             throw new RuntimeException(e);
                         }
