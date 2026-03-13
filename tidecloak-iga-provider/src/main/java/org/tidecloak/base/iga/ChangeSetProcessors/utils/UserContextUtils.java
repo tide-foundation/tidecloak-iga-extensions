@@ -79,7 +79,8 @@ public class UserContextUtils extends UserContextUtilBase {
         Set<RoleModel> roleMappings = tideUser.getRoleMappingsStreamByStatus(draftStatus).map((x) -> TideEntityUtils.wrapRoleModel(x, session, realm)).collect(Collectors.toSet());
 
         user.getGroupsStream().forEach((group) -> {
-            TideEntityUtils.addGroupRoles(TideEntityUtils.wrapGroupModel(group, session, realm), roleMappings, draftStatus);
+            GroupModel wrapped = TideEntityUtils.wrapGroupModel(group, session, realm);
+            TideEntityUtils.addGroupRoles(wrapped, roleMappings, draftStatus);
         });
         Set<RoleModel> wrappedRoles = roleMappings.stream().map((r) -> (TideRoleAdapter) TideEntityUtils.wrapRoleModel(r, session, realm)).collect(Collectors.toSet());
         return expandCompositeRoles(wrappedRoles, draftStatus);

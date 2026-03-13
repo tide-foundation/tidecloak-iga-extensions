@@ -171,6 +171,12 @@ public class BasicIGAUtils {
             return ((TideClientDraftEntity) entity).getId();
         } else if (entity instanceof PolicyDraftEntity) {
             return ((PolicyDraftEntity) entity).getId();
+        } else if (entity instanceof TideGroupRoleMappingEntity) {
+            return ((TideGroupRoleMappingEntity) entity).getId();
+        } else if (entity instanceof TideGroupDraftEntity) {
+            return ((TideGroupDraftEntity) entity).getId();
+        } else if (entity instanceof TideUserGroupMembershipEntity) {
+            return ((TideUserGroupMembershipEntity) entity).getId();
         }
         return null;
     }
@@ -186,6 +192,12 @@ public class BasicIGAUtils {
             return ((TideClientDraftEntity) entity).getChangeRequestId();
         } else if (entity instanceof PolicyDraftEntity) {
             return ((PolicyDraftEntity) entity).getChangesetRequestId();
+        } else if (entity instanceof TideGroupRoleMappingEntity) {
+            return ((TideGroupRoleMappingEntity) entity).getChangeRequestId();
+        } else if (entity instanceof TideGroupDraftEntity) {
+            return ((TideGroupDraftEntity) entity).getChangeRequestId();
+        } else if (entity instanceof TideUserGroupMembershipEntity) {
+            return ((TideUserGroupMembershipEntity) entity).getChangeRequestId();
         }
         return null;
     }
@@ -212,6 +224,12 @@ public class BasicIGAUtils {
             return getAccessProofs(em, tideCompositeRoleMappingDraftEntity.getChangeRequestId(), ChangeSetType.COMPOSITE_ROLE);
         } else if (entity instanceof TideClientDraftEntity tideClientDraftEntity) {
             return getAccessProofs(em, tideClientDraftEntity.getChangeRequestId(), ChangeSetType.CLIENT_FULLSCOPE);
+        } else if (entity instanceof TideGroupRoleMappingEntity tideGroupRoleMappingEntity) {
+            return getAccessProofs(em, tideGroupRoleMappingEntity.getChangeRequestId(), ChangeSetType.GROUP_ROLE);
+        } else if (entity instanceof TideGroupDraftEntity tideGroupDraftEntity) {
+            return getAccessProofs(em, tideGroupDraftEntity.getChangeRequestId(), ChangeSetType.GROUP);
+        } else if (entity instanceof TideUserGroupMembershipEntity tideUserGroupMembershipEntity) {
+            return getAccessProofs(em, tideUserGroupMembershipEntity.getChangeRequestId(), ChangeSetType.USER_GROUP_MEMBERSHIP);
         }
         return null;
     }
@@ -224,6 +242,9 @@ public class BasicIGAUtils {
             case USER -> em.find(TideUserDraftEntity.class, entityId);
             case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, entityId);
             case POLICY -> em.find(PolicyDraftEntity.class, entityId);
+            case GROUP_ROLE -> em.find(TideGroupRoleMappingEntity.class, entityId);
+            case GROUP -> em.find(TideGroupDraftEntity.class, entityId);
+            case USER_GROUP_MEMBERSHIP -> em.find(TideUserGroupMembershipEntity.class, entityId);
             default -> null;
         };
     }
@@ -255,6 +276,18 @@ public class BasicIGAUtils {
             return ChangeSetType.POLICY;
         }
 
+        if (entity instanceof TideGroupRoleMappingEntity) {
+            return ChangeSetType.GROUP_ROLE;
+        }
+
+        if (entity instanceof TideGroupDraftEntity) {
+            return ChangeSetType.GROUP;
+        }
+
+        if (entity instanceof TideUserGroupMembershipEntity) {
+            return ChangeSetType.USER_GROUP_MEMBERSHIP;
+        }
+
         return null;
     }
 
@@ -279,6 +312,18 @@ public class BasicIGAUtils {
 
         if (entity instanceof TideClientDraftEntity) {
             return ((TideClientDraftEntity) entity).getAction();
+        }
+
+        if (entity instanceof TideGroupRoleMappingEntity) {
+            return ((TideGroupRoleMappingEntity) entity).getAction();
+        }
+
+        if (entity instanceof TideGroupDraftEntity) {
+            return ((TideGroupDraftEntity) entity).getAction();
+        }
+
+        if (entity instanceof TideUserGroupMembershipEntity) {
+            return ((TideUserGroupMembershipEntity) entity).getAction();
         }
 
         return ActionType.NONE;
@@ -371,6 +416,30 @@ public class BasicIGAUtils {
                                 .setParameter("changesetId", changeSetId)
                                 .getResultList();
 
+                case GROUP_ROLE ->
+                        em.createNamedQuery(
+                                        "GetGroupRoleDraftEntityByRequestId",
+                                        TideGroupRoleMappingEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
+
+                case GROUP ->
+                        em.createNamedQuery(
+                                        "GetGroupDraftEntityByRequestId",
+                                        TideGroupDraftEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
+
+                case USER_GROUP_MEMBERSHIP ->
+                        em.createNamedQuery(
+                                        "GetUserGroupMembershipDraftEntityByRequestId",
+                                        TideUserGroupMembershipEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
+
                 default -> null;
             };
         } catch (NoResultException e) {
@@ -440,6 +509,14 @@ public class BasicIGAUtils {
             case CLIENT:
                 ((TideClientDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
                 break;
+            case GROUP_ROLE:
+                ((TideGroupRoleMappingEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                break;
+
+            case USER_GROUP_MEMBERSHIP:
+                ((TideUserGroupMembershipEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                break;
+
             case POLICY:
                 // PolicyDraftEntity status is driven by scope (REALM_PENDING → REALM), not draftStatus
                 break;
@@ -556,6 +633,14 @@ public class BasicIGAUtils {
 
             case CLIENT:
                 ((TideClientDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
+                break;
+
+            case GROUP_ROLE:
+                ((TideGroupRoleMappingEntity) draftRecordEntity).setDraftStatus(draftStatus);
+                break;
+
+            case USER_GROUP_MEMBERSHIP:
+                ((TideUserGroupMembershipEntity) draftRecordEntity).setDraftStatus(draftStatus);
                 break;
 
             case POLICY:

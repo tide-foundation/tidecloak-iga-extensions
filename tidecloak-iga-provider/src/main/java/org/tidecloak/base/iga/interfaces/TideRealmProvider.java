@@ -42,6 +42,16 @@ public class TideRealmProvider extends JpaRealmProvider {
     }
 
     @Override
+    public GroupModel getGroupById(RealmModel realm, String id) {
+        GroupModel group = super.getGroupById(realm, id);
+        if (group == null) return null;
+        if (group instanceof TideGroupAdapter) return group;
+        GroupEntity groupEntity = em.find(GroupEntity.class, id);
+        if (groupEntity == null) return null;
+        return new TideGroupAdapter(realm, em, groupEntity, session);
+    }
+
+    @Override
     public ClientModel addClient(RealmModel realm, String clientId) {
         try {
             String igaAttribute = realm.getAttribute("isIGAEnabled");

@@ -14,7 +14,10 @@ public enum ChangeSetTypeEntity {
     ROLE(ChangeSetType.ROLE, "ROLE_ENTITY_DRAFT", TideRoleDraftEntity.class, RoleProcessor::new),
     USER_ROLE(ChangeSetType.USER_ROLE, "USER_ROLE_MAPPING_DRAFT", TideUserRoleMappingDraftEntity.class, UserRoleProcessor::new),
     COMPOSITE_ROLE(ChangeSetType.COMPOSITE_ROLE, "COMPOSITE_ROLE_MAPPING_DRAFT", TideCompositeRoleMappingDraftEntity.class, CompositeRoleProcessor::new),
-    CLIENT_FULLSCOPE(ChangeSetType.CLIENT_FULLSCOPE, "CLIENT_FULLSCOPE_DRAFT", TideClientDraftEntity.class, ClientFullScopeProcessor::new);
+    CLIENT_FULLSCOPE(ChangeSetType.CLIENT_FULLSCOPE, "CLIENT_FULLSCOPE_DRAFT", TideClientDraftEntity.class, ClientFullScopeProcessor::new),
+    GROUP_ROLE(ChangeSetType.GROUP_ROLE, "GROUP_ROLE_MAPPING_DRAFT", TideGroupRoleMappingEntity.class, GroupRoleProcessor::new),
+    GROUP(ChangeSetType.GROUP, "KEYCLOAK_GROUP_DRAFT", TideGroupDraftEntity.class, GroupProcessor::new),
+    USER_GROUP_MEMBERSHIP(ChangeSetType.USER_GROUP_MEMBERSHIP, "USER_GROUP_MEMBERSHIP_DRAFT", TideUserGroupMembershipEntity.class, UserGroupMembershipProcessor::new);
 
     private final ChangeSetType baseType;
     private final String tableName;

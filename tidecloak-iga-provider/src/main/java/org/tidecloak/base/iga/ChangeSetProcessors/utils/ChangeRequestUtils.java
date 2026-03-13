@@ -10,7 +10,10 @@ import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.jpa.entities.drafting.TideCompositeRoleMappingDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideGroupDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideGroupRoleMappingEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideUserGroupMembershipEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 
 public class ChangeRequestUtils {
@@ -67,6 +70,18 @@ public class ChangeRequestUtils {
             changeSetRequest.setChangeSetId(draftEntity.getChangeRequestId());
             changeSetRequest.setType(ChangeSetType.CLIENT_FULLSCOPE);
             changeSetRequest.setActionType(actionType);
+        } else if (entity instanceof TideGroupRoleMappingEntity groupRoleEntity) {
+            changeSetRequest.setChangeSetId(groupRoleEntity.getChangeRequestId());
+            changeSetRequest.setType(ChangeSetType.GROUP_ROLE);
+            changeSetRequest.setActionType(groupRoleEntity.getAction());
+        } else if (entity instanceof TideGroupDraftEntity groupEntity) {
+            changeSetRequest.setChangeSetId(groupEntity.getChangeRequestId());
+            changeSetRequest.setType(ChangeSetType.GROUP);
+            changeSetRequest.setActionType(groupEntity.getAction());
+        } else if (entity instanceof TideUserGroupMembershipEntity membershipEntity) {
+            changeSetRequest.setChangeSetId(membershipEntity.getChangeRequestId());
+            changeSetRequest.setType(ChangeSetType.USER_GROUP_MEMBERSHIP);
+            changeSetRequest.setActionType(membershipEntity.getAction());
         }
         else {
             throw new IllegalArgumentException("Unsupported entity type: " + entity.getClass().getSimpleName());
@@ -127,6 +142,18 @@ public class ChangeRequestUtils {
             changeSetRequest.setChangeSetId(draftEntity.getChangeRequestId());
             changeSetRequest.setType(ChangeSetType.CLIENT_FULLSCOPE);
             changeSetRequest.setActionType(actionType);
+        } else if (entity instanceof TideGroupRoleMappingEntity groupRoleEntity) {
+            changeSetRequest.setChangeSetId(groupRoleEntity.getChangeRequestId());
+            changeSetRequest.setType(ChangeSetType.GROUP_ROLE);
+            changeSetRequest.setActionType(groupRoleEntity.getAction());
+        } else if (entity instanceof TideGroupDraftEntity groupEntity) {
+            changeSetRequest.setChangeSetId(groupEntity.getChangeRequestId());
+            changeSetRequest.setType(ChangeSetType.GROUP);
+            changeSetRequest.setActionType(groupEntity.getAction());
+        } else if (entity instanceof TideUserGroupMembershipEntity membershipEntity) {
+            changeSetRequest.setChangeSetId(membershipEntity.getChangeRequestId());
+            changeSetRequest.setType(ChangeSetType.USER_GROUP_MEMBERSHIP);
+            changeSetRequest.setActionType(membershipEntity.getAction());
         }
         else {
             throw new IllegalArgumentException("Unsupported entity type: " + entity.getClass().getSimpleName());

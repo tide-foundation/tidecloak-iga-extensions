@@ -23,10 +23,12 @@ import org.keycloak.representations.idm.RolesRepresentation;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitter;
 import org.tidecloak.base.iga.ChangeSetCommitter.ChangeSetCommitterFactory;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequestList;
+import org.tidecloak.base.iga.ChangeSetProcessors.models.WhatIfRequest;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.base.iga.ChangeSetSigner.ChangeSetSigner;
 import org.tidecloak.base.iga.ChangeSetSigner.ChangeSetSignerFactory;
@@ -495,6 +497,21 @@ public class IGARealmResource {
         return Response.ok(changes).build();
     }
 
+    @GET
+    @Path("change-set/groups/requests")
+    public Response getRequestedChangesForGroups() {
+        auth.users().requireManage();
+
+        if (!BasicIGAUtils.isIGAEnabled(realm)) {
+            return Response.ok().entity(new ArrayList<>()).build();
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<RequestedChanges> changes = new ArrayList<>();
+        changes.addAll(processGroupRoleMappings(em, realm));
+        changes.addAll(processGroupMemberships(em, realm));
+        return Response.ok(changes).build();
+    }
+
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/commit")
@@ -803,10 +820,90 @@ public class IGARealmResource {
         return changes;
     }
 
+    public static List<RequestedChanges> processGroupRoleMappings(EntityManager em, RealmModel realm) {
+        List<TideGroupRoleMappingEntity> mappings = em.createNamedQuery("getAllPendingGroupRoleMappingsByRealm", TideGroupRoleMappingEntity.class)
+                .setParameter("draftStatus", DraftStatus.ACTIVE)
+                .setParameter("realm", realm.getId())
+                .getResultList();
+
+        List<RequestedChanges> changes = new ArrayList<>();
+        for (TideGroupRoleMappingEntity m : mappings) {
+            if (m.getGroup() == null) continue;
+
+            GroupModel group = realm.getGroupById(m.getGroup().getId());
+            RoleModel role = realm.getRoleById(m.getRoleId());
+            if (group == null || role == null) continue;
+
+            List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", m.getChangeRequestId())
+                    .getResultList();
+            if (proofs.isEmpty()) continue;
+
+            String actionDescription = m.getAction() == ActionType.DELETE ? "Removing Role from Group" : "Granting Role to Group";
+            String clientId = role.isClientRole() ? realm.getClientById(role.getContainerId()).getClientId() : null;
+
+            GroupChangeRequest requestChange = new GroupChangeRequest(
+                    group.getName(), role.getName(), null, actionDescription,
+                    ChangeSetType.GROUP_ROLE, RequestType.GROUP, clientId, realm.getName(),
+                    m.getAction(), m.getChangeRequestId(), new ArrayList<>(), m.getDraftStatus()
+            );
+
+            proofs.forEach(p -> {
+                em.lock(p, LockModeType.PESSIMISTIC_WRITE);
+                requestChange.getUserRecord().add(new RequestChangesUserRecord(
+                        p.getUser().getUsername(), p.getId(),
+                        realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()
+                ));
+            });
+            changes.add(requestChange);
+        }
+        return changes;
+    }
+
+    public static List<RequestedChanges> processGroupMemberships(EntityManager em, RealmModel realm) {
+        List<TideUserGroupMembershipEntity> mappings = em.createNamedQuery("getAllPendingUserGroupMembershipDraftsByRealm", TideUserGroupMembershipEntity.class)
+                .setParameter("draftStatus", DraftStatus.ACTIVE)
+                .setParameter("realmId", realm.getId())
+                .getResultList();
+
+        List<RequestedChanges> changes = new ArrayList<>();
+        for (TideUserGroupMembershipEntity m : mappings) {
+            GroupModel group = realm.getGroupById(m.getGroupId());
+            if (group == null) continue;
+
+            String userName = m.getUser() != null ? m.getUser().getUsername() : "Unknown";
+
+            List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", m.getChangeRequestId())
+                    .getResultList();
+            if (proofs.isEmpty()) continue;
+
+            String actionDescription = m.getAction() == ActionType.DELETE ? "Removing User from Group" : "Adding User to Group";
+
+            GroupChangeRequest requestChange = new GroupChangeRequest(
+                    group.getName(), null, userName, actionDescription,
+                    ChangeSetType.USER_GROUP_MEMBERSHIP, RequestType.GROUP, null, realm.getName(),
+                    m.getAction(), m.getChangeRequestId(), new ArrayList<>(), m.getDraftStatus()
+            );
+
+            proofs.forEach(p -> {
+                em.lock(p, LockModeType.PESSIMISTIC_WRITE);
+                requestChange.getUserRecord().add(new RequestChangesUserRecord(
+                        p.getUser().getUsername(), p.getId(),
+                        realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()
+                ));
+            });
+            changes.add(requestChange);
+        }
+        return changes;
+    }
+
     private List<?> getRoleFromMapping(EntityManager em, ChangeSetRequest change, ChangeSetType type, ActionType action, RealmModel realm) {
         return switch (type) {
             case USER_ROLE -> getUserRoleMappings(em, change, action, realm);
-            case GROUP, USER_GROUP_MEMBERSHIP, GROUP_ROLE -> null;
+            case GROUP_ROLE -> getGroupRoleMappings(em, change);
+            case GROUP -> getGroupDraftMappings(em, change);
+            case USER_GROUP_MEMBERSHIP -> getGroupMembershipMappings(em, change);
             case COMPOSITE_ROLE, DEFAULT_ROLES -> getCompositeRoleMappings(em, change, action, realm);
             case ROLE -> getRoleMappings(em, change, action);
             case USER -> getUserMappings(em, change, action);
@@ -860,6 +957,24 @@ public class IGARealmResource {
     public static List<?> getClientEntity(EntityManager em, ChangeSetRequest change) {
         return em.createNamedQuery("getClientDraftById", TideClientDraftEntity.class)
                 .setParameter("changesetId", change.getChangeSetId())
+                .getResultList();
+    }
+
+    public static List<?> getGroupRoleMappings(EntityManager em, ChangeSetRequest change) {
+        return em.createNamedQuery("GetGroupRoleDraftEntityByRequestId", TideGroupRoleMappingEntity.class)
+                .setParameter("requestId", change.getChangeSetId())
+                .getResultList();
+    }
+
+    public static List<?> getGroupDraftMappings(EntityManager em, ChangeSetRequest change) {
+        return em.createNamedQuery("GetGroupDraftEntityByRequestId", TideGroupDraftEntity.class)
+                .setParameter("requestId", change.getChangeSetId())
+                .getResultList();
+    }
+
+    public static List<?> getGroupMembershipMappings(EntityManager em, ChangeSetRequest change) {
+        return em.createNamedQuery("GetUserGroupMembershipDraftEntityByRequestId", TideUserGroupMembershipEntity.class)
+                .setParameter("requestId", change.getChangeSetId())
                 .getResultList();
     }
 
@@ -1897,6 +2012,31 @@ public class IGARealmResource {
         settings.Threshold_N = max;
 
         return settings;
+    }
+
+    @POST
+    @Path("what-if-token")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response whatIfToken(WhatIfRequest request) {
+        auth.realm().requireManageRealm();
+        try {
+            if (request.getChangeSetType() == null || request.getActionType() == null
+                    || request.getUserId() == null || request.getClientId() == null) {
+                return buildResponse(400, "changeSetType, actionType, userId, and clientId are required.");
+            }
+
+            ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();
+            ChangeSetProcessor<?> processor = processorFactory.getProcessor(request.getChangeSetType());
+            String whatIfToken = processor.generateWhatIfToken(session, realm, request);
+
+            return Response.ok(whatIfToken, MediaType.APPLICATION_JSON).build();
+        } catch (IllegalArgumentException e) {
+            return buildResponse(400, e.getMessage());
+        } catch (Exception e) {
+            logger.error("Error generating what-if token", e);
+            return buildResponse(500, "Error generating what-if token: " + e.getMessage());
+        }
     }
 
     private Response buildResponse(int status, String message) {
