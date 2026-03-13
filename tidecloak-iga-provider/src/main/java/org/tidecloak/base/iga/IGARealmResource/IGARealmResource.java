@@ -509,6 +509,7 @@ public class IGARealmResource {
         List<RequestedChanges> changes = new ArrayList<>();
         changes.addAll(processGroupRoleMappings(em, realm));
         changes.addAll(processGroupMemberships(em, realm));
+        changes.addAll(processGroupMoves(em, realm));
         return Response.ok(changes).build();
     }
 
@@ -904,6 +905,7 @@ public class IGARealmResource {
             case GROUP_ROLE -> getGroupRoleMappings(em, change);
             case GROUP -> getGroupDraftMappings(em, change);
             case USER_GROUP_MEMBERSHIP -> getGroupMembershipMappings(em, change);
+            case GROUP_MOVE -> getGroupMoveMappings(em, change);
             case COMPOSITE_ROLE, DEFAULT_ROLES -> getCompositeRoleMappings(em, change, action, realm);
             case ROLE -> getRoleMappings(em, change, action);
             case USER -> getUserMappings(em, change, action);
@@ -976,6 +978,51 @@ public class IGARealmResource {
         return em.createNamedQuery("GetUserGroupMembershipDraftEntityByRequestId", TideUserGroupMembershipEntity.class)
                 .setParameter("requestId", change.getChangeSetId())
                 .getResultList();
+    }
+
+    public static List<?> getGroupMoveMappings(EntityManager em, ChangeSetRequest change) {
+        return em.createNamedQuery("GetGroupMoveDraftEntityByRequestId", TideGroupMoveDraftEntity.class)
+                .setParameter("requestId", change.getChangeSetId())
+                .getResultList();
+    }
+
+    public static List<RequestedChanges> processGroupMoves(EntityManager em, RealmModel realm) {
+        List<TideGroupMoveDraftEntity> mappings = em.createNamedQuery("getAllPendingGroupMoveDraftsByRealm", TideGroupMoveDraftEntity.class)
+                .setParameter("draftStatus", DraftStatus.ACTIVE)
+                .setParameter("realmId", realm.getId())
+                .getResultList();
+
+        List<RequestedChanges> changes = new ArrayList<>();
+        for (TideGroupMoveDraftEntity m : mappings) {
+            GroupModel group = realm.getGroupById(m.getGroupId());
+            if (group == null) continue;
+
+            List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                    .setParameter("recordId", m.getChangeRequestId())
+                    .getResultList();
+            if (proofs.isEmpty()) continue;
+
+            String newParentName = m.getNewParentId() != null ?
+                    realm.getGroupById(m.getNewParentId()) != null ? realm.getGroupById(m.getNewParentId()).getName() : "Unknown" :
+                    "Top Level";
+            String actionDescription = "Moving Group to " + newParentName;
+
+            GroupChangeRequest requestChange = new GroupChangeRequest(
+                    group.getName(), null, null, actionDescription,
+                    ChangeSetType.GROUP_MOVE, RequestType.GROUP, null, realm.getName(),
+                    m.getAction(), m.getChangeRequestId(), new ArrayList<>(), m.getDraftStatus()
+            );
+
+            proofs.forEach(p -> {
+                em.lock(p, LockModeType.PESSIMISTIC_WRITE);
+                requestChange.getUserRecord().add(new RequestChangesUserRecord(
+                        p.getUser().getUsername(), p.getId(),
+                        realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()
+                ));
+            });
+            changes.add(requestChange);
+        }
+        return changes;
     }
 
     // ── Policy Template endpoints ───────────────────────────────────

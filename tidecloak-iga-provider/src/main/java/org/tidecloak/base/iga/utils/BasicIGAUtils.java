@@ -177,6 +177,8 @@ public class BasicIGAUtils {
             return ((TideGroupDraftEntity) entity).getId();
         } else if (entity instanceof TideUserGroupMembershipEntity) {
             return ((TideUserGroupMembershipEntity) entity).getId();
+        } else if (entity instanceof TideGroupMoveDraftEntity) {
+            return ((TideGroupMoveDraftEntity) entity).getId();
         }
         return null;
     }
@@ -198,6 +200,8 @@ public class BasicIGAUtils {
             return ((TideGroupDraftEntity) entity).getChangeRequestId();
         } else if (entity instanceof TideUserGroupMembershipEntity) {
             return ((TideUserGroupMembershipEntity) entity).getChangeRequestId();
+        } else if (entity instanceof TideGroupMoveDraftEntity) {
+            return ((TideGroupMoveDraftEntity) entity).getChangeRequestId();
         }
         return null;
     }
@@ -230,6 +234,8 @@ public class BasicIGAUtils {
             return getAccessProofs(em, tideGroupDraftEntity.getChangeRequestId(), ChangeSetType.GROUP);
         } else if (entity instanceof TideUserGroupMembershipEntity tideUserGroupMembershipEntity) {
             return getAccessProofs(em, tideUserGroupMembershipEntity.getChangeRequestId(), ChangeSetType.USER_GROUP_MEMBERSHIP);
+        } else if (entity instanceof TideGroupMoveDraftEntity tideGroupMoveDraftEntity) {
+            return getAccessProofs(em, tideGroupMoveDraftEntity.getChangeRequestId(), ChangeSetType.GROUP_MOVE);
         }
         return null;
     }
@@ -245,6 +251,7 @@ public class BasicIGAUtils {
             case GROUP_ROLE -> em.find(TideGroupRoleMappingEntity.class, entityId);
             case GROUP -> em.find(TideGroupDraftEntity.class, entityId);
             case USER_GROUP_MEMBERSHIP -> em.find(TideUserGroupMembershipEntity.class, entityId);
+            case GROUP_MOVE -> em.find(TideGroupMoveDraftEntity.class, entityId);
             default -> null;
         };
     }
@@ -288,6 +295,10 @@ public class BasicIGAUtils {
             return ChangeSetType.USER_GROUP_MEMBERSHIP;
         }
 
+        if (entity instanceof TideGroupMoveDraftEntity) {
+            return ChangeSetType.GROUP_MOVE;
+        }
+
         return null;
     }
 
@@ -324,6 +335,10 @@ public class BasicIGAUtils {
 
         if (entity instanceof TideUserGroupMembershipEntity) {
             return ((TideUserGroupMembershipEntity) entity).getAction();
+        }
+
+        if (entity instanceof TideGroupMoveDraftEntity) {
+            return ((TideGroupMoveDraftEntity) entity).getAction();
         }
 
         return ActionType.NONE;
@@ -440,6 +455,14 @@ public class BasicIGAUtils {
                                 .setParameter("requestId", changeSetId)
                                 .getResultList();
 
+                case GROUP_MOVE ->
+                        em.createNamedQuery(
+                                        "GetGroupMoveDraftEntityByRequestId",
+                                        TideGroupMoveDraftEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
+
                 default -> null;
             };
         } catch (NoResultException e) {
@@ -515,6 +538,10 @@ public class BasicIGAUtils {
 
             case USER_GROUP_MEMBERSHIP:
                 ((TideUserGroupMembershipEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                break;
+
+            case GROUP_MOVE:
+                ((TideGroupMoveDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
                 break;
 
             case POLICY:
@@ -641,6 +668,10 @@ public class BasicIGAUtils {
 
             case USER_GROUP_MEMBERSHIP:
                 ((TideUserGroupMembershipEntity) draftRecordEntity).setDraftStatus(draftStatus);
+                break;
+
+            case GROUP_MOVE:
+                ((TideGroupMoveDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
                 break;
 
             case POLICY:

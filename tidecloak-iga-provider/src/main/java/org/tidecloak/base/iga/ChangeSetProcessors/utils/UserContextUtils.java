@@ -442,7 +442,7 @@ public class UserContextUtils extends UserContextUtilBase {
     private Object getMappings(EntityManager em, String recordId, ChangeSetType type) {
         return switch (type) {
             case USER_ROLE -> em.find(TideUserRoleMappingDraftEntity.class, recordId);
-            case GROUP, USER_GROUP_MEMBERSHIP, GROUP_ROLE -> null;
+            case GROUP, USER_GROUP_MEMBERSHIP, GROUP_ROLE, GROUP_MOVE -> null;
             case COMPOSITE_ROLE, DEFAULT_ROLES -> em.find(TideCompositeRoleMappingDraftEntity.class, recordId);
             case ROLE -> em.find(TideRoleDraftEntity.class, recordId);
             case USER -> em.find(TideUserDraftEntity.class, recordId);
