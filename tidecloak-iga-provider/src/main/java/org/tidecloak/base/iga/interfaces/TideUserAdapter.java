@@ -51,24 +51,30 @@ public class TideUserAdapter extends UserAdapter {
 
     @Override
     public void joinGroup(GroupModel group) {
-        super.joinGroup(group);
+        try {
+            // Don't draft for master realm — apply directly
+            RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+            if (realm.equals(masterRealm)) {
+                super.joinGroup(group);
+                return;
+            }
 
-        // Dont draft for master realm
-        RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
-        if(realm.equals(masterRealm)){
-            return;
+            TideUserGroupMembershipEntity entity = new TideUserGroupMembershipEntity();
+            entity.setId(KeycloakModelUtils.generateId());
+            entity.setUser(getEntity());
+            entity.setGroupId(group.getId());
+            entity.setDraftStatus(DraftStatus.DRAFT);
+            entity.setAction(ActionType.CREATE);
+            em.persist(entity);
+            em.flush();
+
+            ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
+            ChangeSetProcessor<TideUserGroupMembershipEntity> membershipProcessor = changeSetProcessorFactory.getProcessor(ChangeSetType.USER_GROUP_MEMBERSHIP);
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.USER_GROUP_MEMBERSHIP);
+            membershipProcessor.executeWorkflow(session, entity, em, WorkflowType.REQUEST, params, null);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
-        TideUserGroupMembershipEntity entity = new TideUserGroupMembershipEntity();
-
-        //TODO: !!!! CHECK IF THIS EXISTS BEFORE ADDING
-        entity.setId(KeycloakModelUtils.generateId());
-        entity.setUser(getEntity());
-        entity.setGroupId(group.getId());
-        entity.setDraftStatus(DraftStatus.DRAFT);
-        entity.setAction(ActionType.CREATE);
-        em.persist(entity);
-        em.flush();
-        em.detach(entity);
     }
 
     @Override
@@ -83,11 +89,30 @@ public class TideUserAdapter extends UserAdapter {
 
     @Override
     public void leaveGroup(GroupModel group) {
-        super.leaveGroup(group);
-//        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-//        List<ClientRole> effectiveGroupClientRoles = proofGeneration.getEffectiveGroupClientRoles(group);
-//        UserModel user = session.users().getUserById(realm, getEntity().getId());
-//        proofGeneration.regenerateProofsForMembers(effectiveGroupClientRoles, List.of(user));
+        try {
+            // Don't draft for master realm — apply directly
+            RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+            if (realm.equals(masterRealm)) {
+                super.leaveGroup(group);
+                return;
+            }
+
+            TideUserGroupMembershipEntity entity = new TideUserGroupMembershipEntity();
+            entity.setId(KeycloakModelUtils.generateId());
+            entity.setUser(getEntity());
+            entity.setGroupId(group.getId());
+            entity.setDraftStatus(DraftStatus.DRAFT);
+            entity.setAction(ActionType.DELETE);
+            em.persist(entity);
+            em.flush();
+
+            ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
+            ChangeSetProcessor<TideUserGroupMembershipEntity> membershipProcessor = changeSetProcessorFactory.getProcessor(ChangeSetType.USER_GROUP_MEMBERSHIP);
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.USER_GROUP_MEMBERSHIP);
+            membershipProcessor.executeWorkflow(session, entity, em, WorkflowType.REQUEST, params, null);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Override
@@ -367,6 +392,22 @@ public class TideUserAdapter extends UserAdapter {
 //        }
 //    }
 
+
+    /**
+     * Applies the group join directly to the base Keycloak table.
+     * Called during the COMMIT phase after a draft has been approved.
+     */
+    public void applyJoinGroup(GroupModel group) {
+        super.joinGroup(group);
+    }
+
+    /**
+     * Applies the group leave directly from the base Keycloak table.
+     * Called during the COMMIT phase after a deletion draft has been approved.
+     */
+    public void applyLeaveGroup(GroupModel group) {
+        super.leaveGroup(group);
+    }
 
     @Override
     public Stream<RoleModel> getRoleMappingsStream() {

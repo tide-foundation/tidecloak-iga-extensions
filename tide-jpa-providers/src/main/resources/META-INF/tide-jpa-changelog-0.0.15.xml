@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.2.xsd">
+
+    <changeSet id="20260313-create-group-move-draft" author="tidecloak">
+        <preConditions onFail="MARK_RAN">
+            <not><tableExists tableName="GROUP_MOVE_DRAFT"/></not>
+        </preConditions>
+        <createTable tableName="GROUP_MOVE_DRAFT">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="GROUP_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="OLD_PARENT_ID" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="NEW_PARENT_ID" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="DRAFT_STATUS" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ACTION_TYPE" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CREATED_TIMESTAMP" type="BIGINT"/>
+        </createTable>
+        <addPrimaryKey columnNames="ID" constraintName="PK_GROUP_MOVE_DRAFT" tableName="GROUP_MOVE_DRAFT"/>
+        <addForeignKeyConstraint baseColumnNames="GROUP_ID" baseTableName="GROUP_MOVE_DRAFT"
+                                 constraintName="FK_GROUP_MOVE_GROUP" referencedColumnNames="ID"
+                                 referencedTableName="KEYCLOAK_GROUP"/>
+    </changeSet>
+
+</databaseChangeLog>

@@ -21,6 +21,7 @@ public class TideEntityProvider implements JpaEntityProvider {
                 TideGroupDraftEntity.class,
                 TideUserGroupMembershipEntity.class,
                 TideGroupRoleMappingEntity.class,
+                TideGroupMoveDraftEntity.class,
                 TideClientDraftEntity.class,
                 TideCompositeRoleDraftEntity.class,
                 AccessProofDetailDependencyEntity.class,

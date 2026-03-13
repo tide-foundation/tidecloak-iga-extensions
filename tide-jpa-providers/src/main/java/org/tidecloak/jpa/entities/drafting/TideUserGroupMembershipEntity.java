@@ -7,6 +7,13 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.DraftStatus;
 
+@NamedQueries({
+        @NamedQuery(name="GetUserGroupMembershipDraftEntityByRequestId", query="SELECT m FROM TideUserGroupMembershipEntity m where m.changeRequestId = :requestId"),
+        @NamedQuery(name="getAllPendingUserGroupMembershipDraftsByRealm", query="select m from TideUserGroupMembershipEntity m where m.draftStatus <> :draftStatus and m.user IN (select u from UserEntity u where u.realmId=:realmId)"),
+        @NamedQuery(name="deleteTideUserGroupMembershipDraftsByUser", query="delete from TideUserGroupMembershipEntity m where m.user = :user"),
+        @NamedQuery(name="deleteTideUserGroupMembershipDraftByRealm", query="delete from TideUserGroupMembershipEntity m where m.user IN (select u from UserEntity u where u.realmId=:realmId)")
+})
+
 @Table(name="USER_GROUP_MEMBERSHIP_DRAFT")
 @Entity
 public class TideUserGroupMembershipEntity {
