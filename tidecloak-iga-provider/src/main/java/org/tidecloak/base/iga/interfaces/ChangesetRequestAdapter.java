@@ -109,7 +109,12 @@ public class ChangesetRequestAdapter {
                     .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
             threshold = parseThreshold(tideAdmin);
             numberOfAdmins = getNumberOfActiveAdmins(session, realm, tideAdmin, em);
-
+            // Cap threshold at numberOfAdmins: a stale tideThreshold (e.g. from a previous
+            // failed bulk attempt) should never exceed the current admin count, otherwise
+            // approvals become impossible to satisfy.
+            if (threshold > numberOfAdmins && numberOfAdmins > 0) {
+                threshold = Math.max(1, (int) (0.7 * numberOfAdmins));
+            }
         }
 
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSetId, changeSetType));

@@ -238,11 +238,14 @@ public class TideAdminRealmResource {
             auth.users().requireManage();
 
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-            var test = changeSetId.contains("policy") ? changeSetId.split("policy")[0] : changeSetId;
             var type = changeSetId.contains("policy") ? ChangeSetType.POLICY : ChangeSetType.valueOf(changeSetType);
-
+            System.out.println("[add-review] changeSetId=" + changeSetId + " type=" + type + " requestCount=" + (requests != null ? requests.size() : 0));
 
             ChangesetRequestEntity changesetRequestEntity = ChangesetRequestAdapter.getChangesetRequestEntity(session, changeSetId, type);
+
+            if (changesetRequestEntity == null) {
+                return buildResponse(400, "No changeset request entity found for id=" + changeSetId + " type=" + type);
+            }
 
             // Optional: sanity check
             if (requests == null || requests.isEmpty()) {
@@ -253,9 +256,6 @@ public class TideAdminRealmResource {
                 requests.forEach(req -> {
                     changesetRequestEntity.setRequestModel(req);
                     em.flush();
-                    System.out.println("ADD TO THIS CHANGE REQUEST ENTITY " + changeSetId + " " + type);
-                    ModelRequest testing = ModelRequest.FromBytes(Base64.getDecoder().decode(req));
-                    System.out.println(testing.ToString());
                     try {
                         ChangesetRequestAdapter.saveAdminAuthorizaton(session, String.valueOf(type), changeSetId, actionType,
                                 auth.adminAuth().getUser());

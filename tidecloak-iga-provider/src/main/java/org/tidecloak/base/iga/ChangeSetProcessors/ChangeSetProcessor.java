@@ -169,11 +169,19 @@ public interface ChangeSetProcessor<T> {
         List<ClientModel> affectedClients = getAffectedClients(session, realm, entity, em);
         ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();// Initialize the processor factory
 
-        for (ClientModel client : affectedClients) {
+        // Exclude all batch-mate change sets from regeneration — their models already have
+        // dokens from the enclave signing phase. Regenerating would destroy the doken.
+        @SuppressWarnings("unchecked")
+        List<String> batchIds = (List<String>) session.getAttribute("batchAuthorityIds");
+        Set<String> skipIds = new HashSet<>();
+        if (batchIds != null) skipIds.addAll(batchIds);
+        skipIds.add(change.getChangeSetId());
 
+        for (ClientModel client : affectedClients) {
+            Set<String> finalSkipIds = skipIds;
             List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, client)
                     .stream()
-                    .filter(proof -> !Objects.equals(proof.getChangeRequestKey().getChangeRequestId(), change.getChangeSetId()))
+                    .filter(proof -> !finalSkipIds.contains(proof.getChangeRequestKey().getChangeRequestId()))
                     .toList();
 
             for(AccessProofDetailEntity userContextDraft : userContextDrafts) {
@@ -256,11 +264,17 @@ public interface ChangeSetProcessor<T> {
      * Updates other authority requests for the same role when the current entity is an authority request.
      * This recalculates the policy threshold for pending authority requests since the number of active admins has changed.
      */
+    @SuppressWarnings("unchecked")
     default void updateOtherAuthorityRequests(KeycloakSession session, RealmModel realm, ChangeSetRequest change, TideUserRoleMappingDraftEntity currentEntity, EntityManager em) throws Exception {
         String roleId = currentEntity.getRoleId();
         String currentUserId = currentEntity.getUser().getId();
 
-        // Find all pending authority requests for the same role (excluding the current one)
+        // During bulk commit, skip batch-mate changesets — their POLICY models already
+        // have dokens from the enclave signing phase. Recreating would destroy those dokens.
+        List<String> batchIds = (List<String>) session.getAttribute("batchAuthorityIds");
+        Set<String> batchIdSet = batchIds != null ? new HashSet<>(batchIds) : Collections.emptySet();
+
+        // Find all pending authority requests for the same role (excluding the current one and batch-mates)
         List<TideUserRoleMappingDraftEntity> pendingAuthorityRequests = em.createNamedQuery("getUserRoleMappingDraftsByRoleAndStatusNotEqualTo", TideUserRoleMappingDraftEntity.class)
                 .setParameter("roleId", roleId)
                 .setParameter("draftStatus", DraftStatus.ACTIVE)
@@ -268,6 +282,7 @@ public interface ChangeSetProcessor<T> {
                 .stream()
                 .filter(draft -> !Objects.equals(draft.getUser().getId(), currentUserId)) // Exclude current user
                 .filter(draft -> !Objects.equals(draft.getChangeRequestId(), change.getChangeSetId())) // Exclude current change request
+                .filter(draft -> !batchIdSet.contains(draft.getChangeRequestId())) // Exclude batch-mates
                 .toList();
 
         RoleModel role = realm.getRoleById(roleId);

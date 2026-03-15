@@ -126,6 +126,9 @@ public class IGARealmResource {
                     currentWebOrigins.add(session.getContext().getAuthServerUrl().toString());
                     secAdminConsole.setWebOrigins(currentWebOrigins);
 
+                    // Re-sign IDP settings so the new web origin is included
+                    signIdpSettings(tideIdp, componentModel);
+
                     // Find the "roles" client scope
                     ClientScopeModel rolesScope =
                             session.clientScopes()
@@ -2061,6 +2064,125 @@ public class IGARealmResource {
         return settings;
     }
 
+    /**
+     * Signs IDP settings including all client web origins.
+     * Duplicated from VendorResource.SignIdpSettings in tidecloak-idp-extensions.
+     */
+    private void signIdpSettings(IdentityProviderModel idp, ComponentModel componentModel) {
+        try {
+            MultivaluedHashMap<String, String> config = componentModel.getConfig();
+            ObjectMapper objectMapper = new ObjectMapper();
+            String currentSecretKeys = config.getFirst("clientSecret");
+            SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
+
+            if (secretKeys.activeVrk == null || secretKeys.activeVrk.trim().isEmpty()) {
+                logger.warn("Unable to sign settings, no active license for realm " + realm.getName());
+                return;
+            }
+
+            SignRequestSettingsMidgard settings = constructRealmPolicySignSettings(config, secretKeys.activeVrk);
+
+            boolean isBackupOn = idp.getConfig().getOrDefault("backupOn", "false").equalsIgnoreCase("true");
+            VendorSettings vendorSettings = new VendorSettings(realm.isRegistrationAllowed(), isBackupOn, idp.getConfig().get("ImageURL"), idp.getConfig().get("LogoURL"));
+            String vendorSettingsString = objectMapper.writeValueAsString(vendorSettings);
+
+            String encodedRealmName = java.net.URLEncoder.encode(realm.getName(), StandardCharsets.UTF_8);
+            String authServerUrl = session.getContext().getAuthServerUrl().toString();
+            authServerUrl = authServerUrl.endsWith("/") ? authServerUrl : authServerUrl + "/";
+
+            String loginEndpoint = authServerUrl + "realms/" + encodedRealmName + "/broker/tide/endpoint";
+            String linkTideAccEndpoint = authServerUrl + "realms/" + encodedRealmName + "/login-actions/required-action";
+            String changeSetEndpoint = idp.getConfig().get("changeSetEndpoint");
+            String customAdminUIDomain = idp.getConfig().get("CustomAdminUIDomain");
+
+            List<String> urls = new ArrayList<>();
+            urls.add(loginEndpoint);
+            urls.add(linkTideAccEndpoint);
+            urls.add(changeSetEndpoint);
+            if (customAdminUIDomain != null) {
+                urls.add(customAdminUIDomain);
+            }
+
+            // Collect all client web origins
+            record ClientOrigins(String clientId, List<String> origins) {}
+            List<ClientOrigins> clientorigins;
+            try (java.util.stream.Stream<ClientModel> s = realm.getClientsStream()) {
+                clientorigins = s
+                        .map(c -> new ClientOrigins(c.getClientId(), getAllWebOriginsForClient(c)))
+                        .collect(Collectors.toList());
+            }
+
+            List<String> clientOriginsToSend = new ArrayList<>();
+            for (ClientOrigins co : clientorigins) {
+                clientOriginsToSend.addAll(co.origins());
+            }
+
+            String clientJsonUrls = objectMapper.writeValueAsString(clientOriginsToSend);
+            String jsonUrls = objectMapper.writeValueAsString(urls);
+            String draft = jsonUrls + "|" + clientJsonUrls + "|" + vendorSettingsString;
+
+            ModelRequest req = ModelRequest.New("TidecloakUpdateSettings", "1", "VRK:1", draft.getBytes(StandardCharsets.UTF_8));
+            req.SetAuthorization(Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
+            req.SetAuthorizer(jakarta.xml.bind.DatatypeConverter.parseHexBinary(config.getFirst("gVRK")));
+            req.SetAuthorizerCertificate(Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
+            SignatureResponse response = Midgard.SignModel(settings, req);
+
+            idp.getConfig().put("loginURLSig", response.Signatures[0]);
+            idp.getConfig().put("linkTideURLSig", response.Signatures[1]);
+            idp.getConfig().put("changeSetURLSig", response.Signatures[2]);
+            if (customAdminUIDomain != null) {
+                idp.getConfig().put("customAdminUIDomainSig", response.Signatures[3]);
+            }
+
+            int urlIndex = 0;
+            for (ClientOrigins co : clientorigins) {
+                String clientId = co.clientId();
+                for (String origin : co.origins()) {
+                    idp.getConfig().put("clientAuth:" + clientId + origin, response.Signatures[urlIndex + urls.size()]);
+                    urlIndex++;
+                }
+            }
+
+            idp.getConfig().put("settingsSig", response.Signatures[response.Signatures.length - 1]);
+            session.identityProviders().update(idp);
+
+        } catch (Exception e) {
+            throw new RuntimeException("Unable to sign Identity provider settings: " + e.getMessage(), e);
+        }
+    }
+
+    private static List<String> getAllWebOriginsForClient(ClientModel client) {
+        Set<String> origins = new LinkedHashSet<>();
+        for (String raw : client.getWebOrigins()) {
+            String o = extractOrigin(raw);
+            if (o != null) origins.add(o);
+        }
+        if (client.getRootUrl() != null) { String o = extractOrigin(client.getRootUrl()); if (o != null) origins.add(o); }
+        if (client.getBaseUrl() != null) { String o = extractOrigin(client.getBaseUrl()); if (o != null) origins.add(o); }
+        if (client.getManagementUrl() != null) { String o = extractOrigin(client.getManagementUrl()); if (o != null) origins.add(o); }
+        for (String redirect : client.getRedirectUris()) {
+            String o = extractOrigin(redirect);
+            if (o != null) origins.add(o);
+        }
+        return new ArrayList<>(origins);
+    }
+
+    private static String extractOrigin(String uriStr) {
+        if (uriStr == null) return null;
+        uriStr = uriStr.trim();
+        if (uriStr.equals("+")) return null;
+        try {
+            java.net.URI u = new java.net.URI(uriStr);
+            String scheme = u.getScheme();
+            String host = u.getHost();
+            int port = u.getPort();
+            if (scheme == null || host == null) return null;
+            return (port == -1) ? scheme + "://" + host : scheme + "://" + host + ":" + port;
+        } catch (java.net.URISyntaxException e) {
+            return null;
+        }
+    }
+
     @POST
     @Path("what-if-token")
     @Consumes(MediaType.APPLICATION_JSON)
@@ -2113,6 +2235,36 @@ public class IGARealmResource {
             }
         }
 
+        // When firstAdmin authorizer, only allow signing one tide-realm-admin at a time
+        ComponentModel tideComponent = realm.getComponentsStream()
+                .filter(x -> x.getProviderId().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_VENDOR_KEY))
+                .findFirst()
+                .orElse(null);
+        if (tideComponent != null && changeSets.size() > 1) {
+            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)
+                    .setParameter("ID", tideComponent.getId())
+                    .setParameter("types", List.of("firstAdmin", "multiAdmin"))
+                    .getResultList();
+            if (!realmAuthorizers.isEmpty() && "firstAdmin".equals(realmAuthorizers.get(0).getType())) {
+                RoleModel tideRealmAdminRole = realm.getClientByClientId(org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
+                        .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+                if (tideRealmAdminRole != null) {
+                    long authorityCount = changeSets.stream()
+                            .filter(cs -> cs.getType() == ChangeSetType.USER_ROLE)
+                            .filter(cs -> {
+                                List<?> drafts = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, cs.getType(), cs.getChangeSetId());
+                                return drafts.stream().anyMatch(d ->
+                                        d instanceof TideUserRoleMappingDraftEntity urm
+                                                && urm.getRoleId().equals(tideRealmAdminRole.getId()));
+                            })
+                            .count();
+                    if (authorityCount > 1) {
+                        throw new BadRequestException("As firstAdmin, you can only sign one tide-realm-admin assignment at a time");
+                    }
+                }
+            }
+        }
+
         List<Map<String, Object>> signedList = new ArrayList<>();
         ObjectMapper objectMapper = new ObjectMapper();
 
@@ -2160,12 +2312,24 @@ public class IGARealmResource {
 
                 ActionType actionType = allDelete ? ActionType.DELETE : ActionType.CREATE;
 
+                ChangeSetRequest bulkReq = new ChangeSetRequest(
+                        changeSet.getChangesetRequestId(),
+                        changeSet.getChangesetType(),
+                        actionType
+                );
+                // Carry over policyRoleId and dynamicData from the original request
+                // so MultiAdmin.signWithAuthorizer() can resolve and set the signed policy
+                String policyRoleId = changeSets.get(0).getPolicyRoleId();
+                if (policyRoleId != null) {
+                    bulkReq.setPolicyRoleId(policyRoleId);
+                }
+                List<String> dynamicData = changeSets.get(0).getDynamicData();
+                if (dynamicData != null && !dynamicData.isEmpty()) {
+                    bulkReq.setDynamicData(dynamicData);
+                }
+
                 Response singleResp = signer.sign(
-                        new ChangeSetRequest(
-                                changeSet.getChangesetRequestId(),
-                                changeSet.getChangesetType(),
-                                actionType
-                        ),
+                        bulkReq,
                         em,
                         session,
                         realm,
@@ -2255,6 +2419,12 @@ public class IGARealmResource {
                 ))
                 .values());
 
+        // Store batch changeSetIds so post-commit recalculation can skip batch-mates
+        List<String> batchIds = filtered.stream()
+                .map(ChangeSetRequest::getChangeSetId)
+                .collect(Collectors.toList());
+        session.setAttribute("batchAuthorityIds", batchIds);
+
         for (ChangeSetRequest changeSet: filtered){
             List<?> draftRecordEntities= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
             if (draftRecordEntities ==  null || draftRecordEntities.isEmpty()) {
@@ -2268,6 +2438,18 @@ public class IGARealmResource {
             }
 
         }
+
+        // Commit deferred policy changes AFTER all UserContext models have been signed.
+        // This prevents the ORK threshold from changing mid-batch.
+        @SuppressWarnings("unchecked")
+        List<Object[]> deferredPolicyCommits = (List<Object[]>) session.getAttribute("deferredPolicyCommits", List.class);
+        if (deferredPolicyCommits != null) {
+            for (Object[] entry : deferredPolicyCommits) {
+                org.tidecloak.base.iga.TideRequests.TideRoleRequests.commitRolePolicy(
+                        session, (String) entry[0], entry[1], (String) entry[2]);
+            }
+        }
+
         return Response.ok("Change sets approved and committed").build();
     }
 

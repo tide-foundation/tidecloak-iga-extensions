@@ -305,8 +305,12 @@ public class BasicIGAUtils {
     public static ActionType getActionTypeFromEntity(Object entity) {
         if (entity == null) return ActionType.NONE;
 
-        if (entity instanceof TideUserRoleMappingDraftEntity) {
-            return ((TideUserRoleMappingDraftEntity) entity).getAction();
+        if (entity instanceof TideUserRoleMappingDraftEntity urm) {
+            // handleDeleteRequest doesn't set action to DELETE, so check deleteStatus
+            if (urm.getDeleteStatus() != null) {
+                return ActionType.DELETE;
+            }
+            return urm.getAction();
         }
 
         if (entity instanceof TideCompositeRoleMappingDraftEntity) {
@@ -693,7 +697,12 @@ public class BasicIGAUtils {
         int numberOfRejections = changesetRequest.getAdminAuthorizations().stream().filter(a -> !a.getIsApproval()).collect(Collectors.toSet()).size();
 
         // Check the count of the remaining admins left to approve. If less than the threshold then just cancel change request
-        if((numberOfAdmins - numberOfRejections) < Integer.parseInt(tideRealmAdmin.getFirstAttribute("tideThreshold"))) {
+        int threshold = Integer.parseInt(tideRealmAdmin.getFirstAttribute("tideThreshold"));
+        // Cap threshold at numberOfAdmins to prevent stale tideThreshold from making approvals impossible
+        if (threshold > numberOfAdmins && numberOfAdmins > 0) {
+            threshold = Math.max(1, (int) (0.7 * numberOfAdmins));
+        }
+        if((numberOfAdmins - numberOfRejections) < threshold) {
             return DraftStatus.DENIED;
         }
         return DraftStatus.PENDING;

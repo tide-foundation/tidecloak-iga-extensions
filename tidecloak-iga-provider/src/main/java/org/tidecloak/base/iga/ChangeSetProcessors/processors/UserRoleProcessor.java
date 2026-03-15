@@ -39,6 +39,7 @@ import static org.tidecloak.base.iga.ChangeSetProcessors.utils.ChangeRequestUtil
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.addRoleToAccessToken;
 import static org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils.removeRoleFromAccessToken;
 import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.createRolePolicyDraft;
+import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRolePolicy;
 
 public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMappingDraftEntity> {
 
@@ -110,40 +111,56 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                 throw new Exception("Authorizer not found for this realm.");
             }
 
-            List<TideUserRoleMappingDraftEntity> tideAdminRealmRoleRequests = em.createNamedQuery("getUserRoleMappingDraftsByRoleAndStatusNotEqualTo", TideUserRoleMappingDraftEntity.class)
-                    .setParameter("roleId", role.getId())
-                    .setParameter("draftStatus", DraftStatus.ACTIVE)
-                    .getResultList();
+            // During bulk authority commits, commitWithAuthorizer already called
+            // InitializeTideRequestWithVrk("Policy:1"). The recreation loop below also calls
+            // createRolePolicyDraft which uses InitializeTideRequestWithVrk("Policy:1"),
+            // causing "already instantiated". Skip recreation during bulk — pending requests
+            // keep their existing state and will be recreated at next sign.
+            Boolean skipRecreation = session.getAttribute("skipPolicyDraftRecreation", Boolean.class);
+            if (skipRecreation == null || !skipRecreation) {
+                List<TideUserRoleMappingDraftEntity> tideAdminRealmRoleRequests = em.createNamedQuery("getUserRoleMappingDraftsByRoleAndStatusNotEqualTo", TideUserRoleMappingDraftEntity.class)
+                        .setParameter("roleId", role.getId())
+                        .setParameter("draftStatus", DraftStatus.ACTIVE)
+                        .getResultList();
 
-            List<ClientModel> clientList = ClientUtils.getUniqueClientList(session, realm, role, em);
+                // Skip batch-mates: if multiple tide-realm-admin assignments are being committed
+                // together, their shared policy already has the correct threshold — don't nuke them.
+                @SuppressWarnings("unchecked")
+                List<String> batchIds = session.getAttribute("batchAuthorityIds", List.class);
+                Set<String> batchIdSet = batchIds != null ? new HashSet<>(batchIds) : Collections.emptySet();
 
-            tideAdminRealmRoleRequests.forEach(request -> {
-                try {
-                    UserModel u = session.users().getUserById(realm, request.getUser().getId());
-                    List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", request.getChangeRequestId()).getResultList();
-                    if(!changesetRequestEntity.isEmpty()) {
-                        changesetRequestEntity.forEach(em::remove);
-                    }
-                    em.flush();
-                    List<AccessProofDetailEntity> accessProofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
-                            .setParameter("recordId", request.getId()).getResultList();
-                    accessProofs.forEach(p -> {
-                        em.remove(p);
+                List<ClientModel> clientList = ClientUtils.getUniqueClientList(session, realm, role, em);
+
+                tideAdminRealmRoleRequests.stream()
+                        .filter(request -> !batchIdSet.contains(request.getChangeRequestId()))
+                        .forEach(request -> {
+                    try {
+                        UserModel u = session.users().getUserById(realm, request.getUser().getId());
+                        List<ChangesetRequestEntity> changesetRequestEntity = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class).setParameter("changesetRequestId", request.getChangeRequestId()).getResultList();
+                        if(!changesetRequestEntity.isEmpty()) {
+                            changesetRequestEntity.forEach(em::remove);
+                        }
                         em.flush();
-                    });
-                    List<PolicyDraftEntity> policyDraftEntities = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", request.getChangeRequestId()).getResultList();
-                    if(!policyDraftEntities.isEmpty()){
-                        em.remove(policyDraftEntities.get(0));
-                        em.flush();
+                        List<AccessProofDetailEntity> accessProofs = em.createNamedQuery("getProofDetailsForDraft", AccessProofDetailEntity.class)
+                                .setParameter("recordId", request.getId()).getResultList();
+                        accessProofs.forEach(p -> {
+                            em.remove(p);
+                            em.flush();
+                        });
+                        List<PolicyDraftEntity> policyDraftEntities = em.createNamedQuery("getPolicyByChangeSetId", PolicyDraftEntity.class).setParameter("changesetId", request.getChangeRequestId()).getResultList();
+                        if(!policyDraftEntities.isEmpty()){
+                            em.remove(policyDraftEntities.get(0));
+                            em.flush();
+                        }
+                        createRolePolicyDraft(session, request.getId(), 0.7, 1, role);
+                        processRealmManagementRoleAssignment(session, em, realm, clientList, request, u);
+
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
                     }
-                    createRolePolicyDraft(session, request.getId(), 0.7, 1, role);
-                    processRealmManagementRoleAssignment(session, em, realm, clientList, request, u);
 
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-
-            });
+                });
+            }
         }
 
         // Log successful completion
@@ -414,6 +431,24 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
             UserEntity ue = userById.get(userId);
             UserModel um = session.users().getUserById(realm, userId);
 
+            // Short-circuit: if this user has only 1 proof total, no combining needed
+            long totalProofs = userEntry.getValue().values().stream()
+                    .mapToLong(List::size)
+                    .sum();
+            if (totalProofs <= 1) {
+                userEntry.getValue().values().stream()
+                        .flatMap(List::stream)
+                        .findFirst()
+                        .ifPresent(proof -> {
+                            List<ChangesetRequestEntity> existing = em.createNamedQuery(
+                                            "getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                                    .setParameter("changesetRequestId", proof.getChangeRequestKey().getChangeRequestId())
+                                    .getResultList();
+                            results.addAll(existing);
+                        });
+                continue;
+            }
+
             String combinedRequestId = KeycloakModelUtils.generateId();
 
             List<AccessProofDetailEntity> toRemoveProofs = new ArrayList<>();
@@ -466,6 +501,41 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
 
             }
 
+            // Fix authority assignment policy linkage after combining:
+            // PolicyDraftEntity.changesetRequestId still uses the old changeRequestId + "policy".
+            // Update it (and the POLICY ChangesetRequestEntity) to use the new combinedRequestId.
+            Set<String> processedOldPolicyIds = new HashSet<>();
+            for (var clientPolicyEntry : userEntry.getValue().entrySet()) {
+                for (var proof : clientPolicyEntry.getValue()) {
+                    String oldId = proof.getChangeRequestKey().getChangeRequestId();
+                    if (!oldId.equals(combinedRequestId) && processedOldPolicyIds.add(oldId)) {
+                        PolicyDraftEntity policyDraft = getDraftRolePolicy(session, oldId);
+                        if (policyDraft != null) {
+                            policyDraft.setChangesetRequestId(combinedRequestId + "policy");
+
+                            // POLICY ChangesetRequestEntity has composite PK — must delete and recreate
+                            ChangesetRequestEntity oldPolicyReq = em.find(ChangesetRequestEntity.class,
+                                    new ChangesetRequestEntity.Key(oldId + "policy", ChangeSetType.POLICY));
+                            if (oldPolicyReq != null) {
+                                String draftReq = oldPolicyReq.getDraftRequest();
+                                String reqModel = oldPolicyReq.getRequestModel();
+                                Long ts = oldPolicyReq.getTimestamp();
+                                em.remove(oldPolicyReq);
+                                em.flush();
+
+                                ChangesetRequestEntity newPolicyReq = new ChangesetRequestEntity();
+                                newPolicyReq.setChangesetRequestId(combinedRequestId + "policy");
+                                newPolicyReq.setChangesetType(ChangeSetType.POLICY);
+                                newPolicyReq.setDraftRequest(draftReq);
+                                newPolicyReq.setRequestModel(reqModel);
+                                newPolicyReq.setTimestamp(ts);
+                                em.persist(newPolicyReq);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Remove outdated proofs and their change-request entities
             toRemoveProofs.forEach(em::remove);
             toRemoveRequests.forEach(em::remove);
@@ -477,6 +547,85 @@ public class UserRoleProcessor implements ChangeSetProcessor<TideUserRoleMapping
                     .setParameter("changesetRequestId", combinedRequestId)
                     .getResultList();
             results.addAll(created);
+        }
+
+        // Merge authority assignment policies if multiple users are getting an authority role.
+        // Instead of N individual policies (each with numberOfAdditionalAdmins=+/-1),
+        // create 1 shared policy with the net admin change and correct threshold.
+        //
+        // Detect authority assignments by checking if the role has a TideRoleDraftEntity with
+        // an initCert (i.e., it's a policy-governed authority role), not by PolicyDraftEntity
+        // existence which may be missing due to IsEqualTo early return in createRolePolicyDraft.
+        System.out.println("[combineChangeRequests] results.size()=" + results.size());
+        for (ChangesetRequestEntity r : results) {
+            System.out.println("[combineChangeRequests]   result: id=" + r.getChangesetRequestId() + " type=" + r.getChangesetType());
+        }
+        Map<String, List<String>> authorityByRole = new LinkedHashMap<>(); // roleId -> list of changeSetIds
+        Map<String, Integer> authorityNetChange = new LinkedHashMap<>(); // roleId -> net admin change (+creates, -deletes)
+        Map<String, PolicyDraftEntity> existingPolicies = new LinkedHashMap<>();
+        for (ChangesetRequestEntity result : results) {
+            List<TideUserRoleMappingDraftEntity> drafts = em.createNamedQuery(
+                            "GetUserRoleMappingDraftEntityByRequestId", TideUserRoleMappingDraftEntity.class)
+                    .setParameter("requestId", result.getChangesetRequestId())
+                    .getResultList();
+
+            for (TideUserRoleMappingDraftEntity draft : drafts) {
+                List<TideRoleDraftEntity> roleDrafts = em.createNamedQuery("getRoleDraftByRoleId", TideRoleDraftEntity.class)
+                        .setParameter("roleId", draft.getRoleId())
+                        .getResultList();
+                boolean isAuthority = !roleDrafts.isEmpty() && roleDrafts.get(0).getInitCert() != null;
+                System.out.println("[combineChangeRequests]   draft roleId=" + draft.getRoleId() + " isAuthority=" + isAuthority + " roleDrafts.size()=" + roleDrafts.size());
+                if (isAuthority) {
+                    authorityByRole.computeIfAbsent(draft.getRoleId(), k -> new ArrayList<>())
+                            .add(result.getChangesetRequestId());
+                    // Track net change: +1 for CREATE, -1 for DELETE
+                    // Use deleteStatus to detect removals (handleDeleteRequest doesn't set actionType)
+                    int delta = (draft.getDeleteStatus() == DraftStatus.DRAFT) ? -1 : 1;
+                    authorityNetChange.merge(draft.getRoleId(), delta, Integer::sum);
+                    PolicyDraftEntity pd = getDraftRolePolicy(session, draft.getChangeRequestId());
+                    if (pd != null) {
+                        existingPolicies.put(result.getChangesetRequestId(), pd);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // For each authority role with multiple assignments, create a shared policy
+        System.out.println("[combineChangeRequests] authorityByRole=" + authorityByRole);
+        for (var authorityEntry : authorityByRole.entrySet()) {
+            List<String> authorityChangeSetIds = authorityEntry.getValue();
+            System.out.println("[combineChangeRequests] roleId=" + authorityEntry.getKey() + " authorityChangeSetIds.size()=" + authorityChangeSetIds.size());
+            if (authorityChangeSetIds.size() > 1) {
+                String firstAuthorityId = authorityChangeSetIds.get(0);
+
+                // Delete any existing individual PolicyDraftEntities and POLICY ChangesetRequestEntities
+                for (String csId : authorityChangeSetIds) {
+                    PolicyDraftEntity pd = existingPolicies.get(csId);
+                    if (pd != null) {
+                        em.remove(pd);
+                    }
+                    ChangesetRequestEntity policyReq = em.find(ChangesetRequestEntity.class,
+                            new ChangesetRequestEntity.Key(csId + "policy", ChangeSetType.POLICY));
+                    if (policyReq != null) {
+                        em.remove(policyReq);
+                    }
+                }
+                em.flush();
+
+                // Create 1 shared policy with net admin change (positive for adds, negative for removals)
+                RoleModel authorityRole = realm.getRoleById(authorityEntry.getKey());
+                int netChange = authorityNetChange.getOrDefault(authorityEntry.getKey(), authorityChangeSetIds.size());
+                System.out.println("[combineChangeRequests] Creating shared policy: firstAuthorityId=" + firstAuthorityId + " netChange=" + netChange + " role=" + authorityRole.getName());
+                // forceCreate=true: individual policies were already deleted above, so we must
+                // create the shared policy even if the threshold matches the current committed one
+                // (e.g. from a previous failed bulk attempt that updated the policy but not the roles).
+                createRolePolicyDraft(session, firstAuthorityId, 0.7, netChange, authorityRole, true);
+                System.out.println("[combineChangeRequests] Shared policy created successfully");
+
+                // Store batch IDs so commit-side can skip post-commit recalculation for batch-mates
+                session.setAttribute("batchAuthorityIds", new ArrayList<>(authorityChangeSetIds));
+            }
         }
 
         // Flush all pending changes once at the end

@@ -238,6 +238,24 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
             UserEntity ue = userById.get(userId);
             UserModel um = session.users().getUserById(realm, userId);
 
+            // Short-circuit: if this user has only 1 proof total, no combining needed
+            long totalProofs = userEntry.getValue().values().stream()
+                    .mapToLong(List::size)
+                    .sum();
+            if (totalProofs <= 1) {
+                userEntry.getValue().values().stream()
+                        .flatMap(List::stream)
+                        .findFirst()
+                        .ifPresent(proof -> {
+                            List<ChangesetRequestEntity> existing = em.createNamedQuery(
+                                            "getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                                    .setParameter("changesetRequestId", proof.getChangeRequestKey().getChangeRequestId())
+                                    .getResultList();
+                            results.addAll(existing);
+                        });
+                continue;
+            }
+
             String combinedRequestId = KeycloakModelUtils.generateId();
 
             List<AccessProofDetailEntity> toRemoveProofs = new ArrayList<>();

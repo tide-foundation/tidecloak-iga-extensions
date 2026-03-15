@@ -65,10 +65,16 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
      * @throws Exception If an error occurs during the update process.
      */
     @Override
+    @SuppressWarnings("unchecked")
     public void updateAffectedUserContexts(KeycloakSession session, RealmModel realm, ChangeSetRequest change, T entity, EntityManager em) throws Exception {
+        // Exclude all batch-mate change sets — their models already have dokens
+        List<String> batchIds = (List<String>) session.getAttribute("batchAuthorityIds");
+        Set<String> skipIds = batchIds != null ? new HashSet<>(batchIds) : new HashSet<>();
+        skipIds.add(change.getChangeSetId());
+
         // Group proofDetails by changeRequestId
         Map<ChangeRequestKey, List<AccessProofDetailEntity>> groupedProofDetails = getUserContextDraftsForRealm(em, realm.getId()).stream()
-                .filter(proof -> !Objects.equals(proof.getChangeRequestKey().getChangeRequestId(), change.getChangeSetId()))
+                .filter(proof -> !skipIds.contains(proof.getChangeRequestKey().getChangeRequestId()))
                 .sorted(Comparator.comparingLong(AccessProofDetailEntity::getCreatedTimestamp).reversed())
                 .collect(Collectors.groupingBy(AccessProofDetailEntity::getChangeRequestKey));
 
