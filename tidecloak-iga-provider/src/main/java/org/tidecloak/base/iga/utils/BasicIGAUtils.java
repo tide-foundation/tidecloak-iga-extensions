@@ -46,7 +46,43 @@ import java.util.stream.StreamSupport;
 import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRolePolicy;
 import static org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter.getChangeSetStatus;
 
+import org.jboss.logging.Logger;
+
 public class BasicIGAUtils {
+
+    private static final Logger logger = Logger.getLogger(BasicIGAUtils.class);
+
+    /**
+     * Extracts the requesting admin's identity from the Bearer token and stores it
+     * in session attributes so that ChangeSetProcessor can stamp it on ChangesetRequestEntity.
+     * Safe to call multiple times per session — only runs once.
+     */
+    public static void stampRequestingAdmin(KeycloakSession session) {
+        if (session.getAttribute("requestedByUserId", String.class) != null) return;
+        try {
+            jakarta.ws.rs.core.HttpHeaders headers = session.getContext().getRequestHeaders();
+            String authHeader = headers != null ? headers.getHeaderString("Authorization") : null;
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) return;
+
+            String tokenString = authHeader.substring(7);
+            RealmModel currentRealm = session.getContext().getRealm();
+            org.keycloak.services.managers.AuthenticationManager.AuthResult authResult =
+                    new org.keycloak.services.managers.AppAuthManager.BearerTokenAuthenticator(session)
+                            .setRealm(currentRealm)
+                            .setTokenString(tokenString)
+                            .setConnection(session.getContext().getConnection())
+                            .setHeaders(headers)
+                            .authenticate();
+
+            if (authResult != null && authResult.getUser() != null) {
+                UserModel adminUser = authResult.getUser();
+                session.setAttribute("requestedByUserId", adminUser.getId());
+                session.setAttribute("requestedByUsername", adminUser.getUsername());
+            }
+        } catch (Exception e) {
+            logger.warnf("stampRequestingAdmin failed: %s", e.getMessage());
+        }
+    }
 
     /**
      * Resolves the TideRoleDraftEntity for a given policyRoleId.

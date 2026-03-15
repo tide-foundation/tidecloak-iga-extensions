@@ -16,6 +16,7 @@ import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.ClientUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
+import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.WorkflowType;
@@ -46,11 +47,15 @@ public class TideUserAdapter extends UserAdapter {
 
         ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
         this.processor = changeSetProcessorFactory.getProcessor(ChangeSetType.USER_ROLE);
+    }
 
+    private void stampRequestingAdmin() {
+        BasicIGAUtils.stampRequestingAdmin(session);
     }
 
     @Override
     public void joinGroup(GroupModel group) {
+        stampRequestingAdmin();
         try {
             // Don't draft for master realm — apply directly
             RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
@@ -89,6 +94,7 @@ public class TideUserAdapter extends UserAdapter {
 
     @Override
     public void leaveGroup(GroupModel group) {
+        stampRequestingAdmin();
         try {
             // Don't draft for master realm — apply directly
             RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
@@ -117,6 +123,7 @@ public class TideUserAdapter extends UserAdapter {
 
     @Override
     public void grantRole(RoleModel roleModel) {
+        stampRequestingAdmin();
         try {
             if(hasDirectRole(roleModel)) return;
 
@@ -207,6 +214,7 @@ public class TideUserAdapter extends UserAdapter {
 
     @Override
     public void deleteRoleMapping(RoleModel roleModel) {
+        stampRequestingAdmin();
         try {
             // If we are removing a direct role but this user has an indirect role assignment, we remove the direct role without drafting. No change to the user context
             boolean hasIndirectRole = getRoleMappingsStream().anyMatch(role -> !role.getId().equalsIgnoreCase(roleModel.getId()) && role.hasRole(roleModel));

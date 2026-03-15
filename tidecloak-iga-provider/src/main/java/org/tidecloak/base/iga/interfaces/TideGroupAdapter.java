@@ -11,6 +11,7 @@ import org.keycloak.models.utils.RoleUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
+import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.jpa.entities.drafting.TideGroupRoleMappingEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -41,6 +42,7 @@ public class TideGroupAdapter extends GroupAdapter {
 
     @Override
     public void grantRole(RoleModel role) {
+        BasicIGAUtils.stampRequestingAdmin(session);
         try {
             // Don't draft for master realm — apply directly
             RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
@@ -79,6 +81,7 @@ public class TideGroupAdapter extends GroupAdapter {
 
     @Override
     public void deleteRoleMapping(RoleModel role) {
+        BasicIGAUtils.stampRequestingAdmin(session);
         try {
             // Don't draft for master realm
             RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());

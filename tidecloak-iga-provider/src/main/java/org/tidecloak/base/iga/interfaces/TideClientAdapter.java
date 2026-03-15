@@ -9,6 +9,7 @@ import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
+import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -41,6 +42,7 @@ public class TideClientAdapter extends ClientAdapter {
 
     @Override
     public void setFullScopeAllowed(boolean value) {
+        BasicIGAUtils.stampRequestingAdmin(session);
         try {
             // Dont draft for master realm
             RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());

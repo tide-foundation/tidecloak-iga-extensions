@@ -340,6 +340,16 @@ public class TideChangeSetProcessor<T> implements ChangeSetProcessor<T> {
             entity.setChangesetType(type);
             em.persist(entity);
         }
+        // Stamp requestedBy from session attributes (set by stampRequestingAdmin in the adapter)
+        if (entity.getRequestedBy() == null) {
+            String userId = session.getAttribute("requestedByUserId", String.class);
+            String username = session.getAttribute("requestedByUsername", String.class);
+            if (userId != null) {
+                entity.setRequestedBy(userId);
+                entity.setRequestedByUsername(username);
+                org.jboss.logging.Logger.getLogger("TideChangeSetProcessor").infof("saveUserContextDraft: stamped requestedBy=%s (%s)", userId, username);
+            }
+        }
 
         entity.setDraftRequest(draft);
 

@@ -73,6 +73,17 @@ public class IGARealmResource {
         this.session = session;
         this.realm = realm;
         this.auth = auth;
+
+        // Store the admin user info in the session so processors can stamp it on ChangesetRequestEntity
+        try {
+            UserModel adminUser = auth.adminAuth().getUser();
+            if (adminUser != null) {
+                session.setAttribute("requestedByUserId", adminUser.getId());
+                session.setAttribute("requestedByUsername", adminUser.getUsername());
+            }
+        } catch (Exception e) {
+            // best effort
+        }
     }
 
     @POST
@@ -2929,7 +2940,7 @@ public class IGARealmResource {
     /**
      * Enriches RequestedChanges with requestedBy info from the ChangesetRequestEntity.
      */
-    private static void enrichWithRequestedBy(EntityManager em, List<? extends RequestedChanges> changes) {
+    private void enrichWithRequestedBy(EntityManager em, List<? extends RequestedChanges> changes) {
         for (RequestedChanges change : changes) {
             if (change.getDraftRecordId() != null) {
                 try {
@@ -2970,6 +2981,8 @@ public class IGARealmResource {
                         } catch (Exception ignored2) {
                             // Best effort
                         }
+                    } else {
+                        logger.warnf("enrichWithRequestedBy: No ChangesetRequestEntity found for draftId=%s", change.getDraftRecordId());
                     }
                 } catch (Exception ignored) {
                     // Best effort

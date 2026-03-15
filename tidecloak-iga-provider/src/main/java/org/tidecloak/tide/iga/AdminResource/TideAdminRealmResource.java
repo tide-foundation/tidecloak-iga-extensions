@@ -68,6 +68,16 @@ public class TideAdminRealmResource {
         this.auth = auth;
         ChangeSetProcessorFactory factory = ChangeSetProcessorFactoryProvider.getFactory();
         this.processor = factory.getProcessor(ChangeSetType.REALM_LICENSING);
+
+        // Store the admin user info in the session so processors can stamp it on ChangesetRequestEntity
+        try {
+            UserModel adminUser = auth.adminAuth().getUser();
+            if (adminUser != null) {
+                session.setAttribute("requestedByUserId", adminUser.getId());
+                session.setAttribute("requestedByUsername", adminUser.getUsername());
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     @GET
