@@ -113,11 +113,11 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
                 case CREATE:
                     logger.debug(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", entity.getId(), entity.getChangeRequestId()));
                     handleCreateRequest(session, entity, em, callback);
-                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
+                    ChangeSetProcessor.super.createChangeRequestEntity(session, em, entity.getChangeRequestId(), changeSetType);
                     break;
                 case DELETE:
                     logger.debug("Client Processor has no implementation for DELETE.");
-                    //ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
+                    //ChangeSetProcessor.super.createChangeRequestEntity(session, em, entity.getChangeRequestId(), changeSetType);
                     break;
                 default:
                     logger.warn(String.format("Unsupported action type: %s for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", action, entity.getId(), entity.getChangeRequestId()));

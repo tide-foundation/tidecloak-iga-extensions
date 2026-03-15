@@ -177,7 +177,7 @@ public class UserGroupMembershipProcessor implements ChangeSetProcessor<TideUser
                 default:
                     throw new IllegalArgumentException("Unsupported action: " + action);
             }
-            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
+            ChangeSetProcessor.super.createChangeRequestEntity(session, em, entity.getChangeRequestId(), changeSetType);
         } catch (Exception e) {
             throw new RuntimeException("Failed to process USER_GROUP_MEMBERSHIP request", e);
         }

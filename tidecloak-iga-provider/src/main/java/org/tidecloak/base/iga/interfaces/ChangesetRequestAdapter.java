@@ -36,7 +36,7 @@ public class ChangesetRequestAdapter {
                 .orElse(null);
 
         String json = "{\"id\":\"" + adminUser.getId() + "\"}";
-        AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), json, adminUser.getId(), em);
+        AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), json, adminUser.getId(), adminUser.getUsername(), em);
         changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
         var id = changeSetRequestID.contains("policy") ? changeSetRequestID.split("policy")[0] : changeSetRequestID;
         var type =  changeSetRequestID.contains("policy") ? "USER_ROLE" : changeSetType;
@@ -68,8 +68,7 @@ public class ChangesetRequestAdapter {
                 .findFirst()
                 .orElse(null);
 
-        String json = "{\"id\":\"" + adminUser.getId() + "\"}";
-        AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), null, adminUser.getId(), em);
+        AdminAuthorizationEntity adminAuthorizationEntity = createAdminAuthorizationEntity(changeSetRequestID, ChangeSetType.valueOf(changeSetType), null, adminUser.getId(), adminUser.getUsername(), em);
         changesetRequestEntity.addAdminAuthorization(adminAuthorizationEntity);
         List<?> draftRecordEntity= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, ChangeSetType.valueOf(changeSetType), changeSetRequestID);
         draftRecordEntity.forEach(d -> {
@@ -155,8 +154,12 @@ public class ChangesetRequestAdapter {
     }
 
     public static AdminAuthorizationEntity createAdminAuthorizationEntity(String changeSetRequestId, ChangeSetType changeSetType, String adminAuthorization, String userId, EntityManager em) throws Exception {
+        return createAdminAuthorizationEntity(changeSetRequestId, changeSetType, adminAuthorization, userId, null, em);
+    }
 
-        ChangesetRequestEntity changesetRequestEntity = em. find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSetRequestId, changeSetType));
+    public static AdminAuthorizationEntity createAdminAuthorizationEntity(String changeSetRequestId, ChangeSetType changeSetType, String adminAuthorization, String userId, String username, EntityManager em) throws Exception {
+
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeSetRequestId, changeSetType));
         if(changesetRequestEntity == null){
             throw new Exception("No changeset request found with this id, " + changeSetRequestId);
         }
@@ -168,6 +171,7 @@ public class ChangesetRequestAdapter {
         adminAuthorizationEntity.setId(KeycloakModelUtils.generateId());
         adminAuthorizationEntity.setChangesetRequest(changesetRequestEntity);
         adminAuthorizationEntity.setUserId(userId);
+        adminAuthorizationEntity.setUsername(username);
         adminAuthorizationEntity.setAdminAuthorization(adminAuth);
         adminAuthorizationEntity.setIsApproval(isApproval);
         em.persist(adminAuthorizationEntity);

@@ -29,6 +29,11 @@ public class AdminAuthorizationEntity {
     @Column(name="IS_APPROVAL")
     private  boolean isApproval;
 
+    @Column(name="USERNAME")
+    private String username;
+
+    @Column(name="ACTION_TIMESTAMP")
+    private Long actionTimestamp = System.currentTimeMillis() / 1000;
 
     public void setId(String id){this.id = id; }
     public  String getId() { return this.id; }
@@ -38,6 +43,10 @@ public class AdminAuthorizationEntity {
     public String getAdminAuthorization() { return this.adminAuthorization; }
     public void setIsApproval(boolean isApproval) { this.isApproval = isApproval;}
     public boolean getIsApproval() { return this.isApproval;}
+    public String getUsername() { return this.username; }
+    public void setUsername(String username) { this.username = username; }
+    public Long getActionTimestamp() { return this.actionTimestamp; }
+    public void setActionTimestamp(Long actionTimestamp) { this.actionTimestamp = actionTimestamp; }
     public ChangesetRequestEntity getChangesetRequest() {
         return changesetRequest;
     }

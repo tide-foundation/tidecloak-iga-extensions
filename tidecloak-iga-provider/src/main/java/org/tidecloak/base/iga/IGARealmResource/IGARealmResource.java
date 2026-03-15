@@ -18,6 +18,7 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.cache.UserCache;
 import org.keycloak.models.jpa.entities.ClientEntity;
+import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.representations.idm.RolesRepresentation;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
@@ -470,6 +471,7 @@ public class IGARealmResource {
         }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> changes = new ArrayList<>(processUserRoleMappings(em, realm));
+        enrichWithRequestedBy(em, changes);
         return Response.ok(changes).build();
     }
 
@@ -484,6 +486,7 @@ public class IGARealmResource {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> requestedChangesList = new ArrayList<>(processRoleMappings(em, realm));
         requestedChangesList.addAll(processCompositeRoleMappings(em, realm));
+        enrichWithRequestedBy(em, requestedChangesList);
         return Response.ok(requestedChangesList).build();
     }
 
@@ -497,6 +500,7 @@ public class IGARealmResource {
         }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> changes = new ArrayList<>(processClientDraftRecords(em, realm));
+        enrichWithRequestedBy(em, changes);
         return Response.ok(changes).build();
     }
 
@@ -513,7 +517,175 @@ public class IGARealmResource {
         changes.addAll(processGroupRoleMappings(em, realm));
         changes.addAll(processGroupMemberships(em, realm));
         changes.addAll(processGroupMoves(em, realm));
+        enrichWithRequestedBy(em, changes);
         return Response.ok(changes).build();
+    }
+
+    @GET
+    @Path("change-set/counts")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getChangeSetCounts() {
+        auth.users().requireManage();
+        if (!BasicIGAUtils.isIGAEnabled(realm)) {
+            Map<String, Integer> empty = new LinkedHashMap<>();
+            empty.put("users", 0);
+            empty.put("roles", 0);
+            empty.put("clients", 0);
+            empty.put("groups", 0);
+            empty.put("total", 0);
+            return Response.ok(empty).build();
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        int users = processUserRoleMappings(em, realm).size();
+        int roles = processRoleMappings(em, realm).size() + processCompositeRoleMappings(em, realm).size();
+        int clients = processClientDraftRecords(em, realm).size();
+        int groups = processGroupRoleMappings(em, realm).size()
+                + processGroupMemberships(em, realm).size()
+                + processGroupMoves(em, realm).size();
+
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        counts.put("users", users);
+        counts.put("roles", roles);
+        counts.put("clients", clients);
+        counts.put("groups", groups);
+        counts.put("total", users + roles + clients + groups);
+        return Response.ok(counts).build();
+    }
+
+    @GET
+    @Path("change-set/all/requests")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getAllChangeSetRequests() {
+        auth.users().requireManage();
+        if (!BasicIGAUtils.isIGAEnabled(realm)) {
+            Map<String, List<?>> empty = new LinkedHashMap<>();
+            empty.put("users", new ArrayList<>());
+            empty.put("roles", new ArrayList<>());
+            empty.put("clients", new ArrayList<>());
+            empty.put("groups", new ArrayList<>());
+            return Response.ok(empty).build();
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        List<RequestedChanges> users = new ArrayList<>(processUserRoleMappings(em, realm));
+        enrichWithRequestedBy(em, users);
+
+        List<RequestedChanges> roles = new ArrayList<>(processRoleMappings(em, realm));
+        roles.addAll(processCompositeRoleMappings(em, realm));
+        enrichWithRequestedBy(em, roles);
+
+        List<RequestedChanges> clients = new ArrayList<>(processClientDraftRecords(em, realm));
+        enrichWithRequestedBy(em, clients);
+
+        List<RequestedChanges> groups = new ArrayList<>();
+        groups.addAll(processGroupRoleMappings(em, realm));
+        groups.addAll(processGroupMemberships(em, realm));
+        groups.addAll(processGroupMoves(em, realm));
+        enrichWithRequestedBy(em, groups);
+
+        Map<String, List<RequestedChanges>> result = new LinkedHashMap<>();
+        result.put("users", users);
+        result.put("roles", roles);
+        result.put("clients", clients);
+        result.put("groups", groups);
+        return Response.ok(result).build();
+    }
+
+    @GET
+    @Path("change-set/{id}/activity")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getChangeSetActivity(@PathParam("id") String changesetRequestId) {
+        auth.users().requireManage();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        try {
+            // Find all changeset request entities with this ID (across types)
+            List<ChangesetRequestEntity> entities = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                    .setParameter("changesetRequestId", changesetRequestId)
+                    .getResultList();
+
+            if (entities.isEmpty()) {
+                return Response.ok(Map.of("approvals", List.of(), "comments", List.of(), "requestedBy", "", "requestedByUsername", "")).build();
+            }
+
+            ChangesetRequestEntity cre = entities.get(0);
+
+            // Build approval/rejection list
+            List<Map<String, Object>> approvals = new ArrayList<>();
+            for (AdminAuthorizationEntity auth : cre.getAdminAuthorizations()) {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("userId", auth.getUserId());
+                entry.put("username", auth.getUsername() != null ? auth.getUsername() : "");
+                entry.put("isApproval", auth.getIsApproval());
+                entry.put("timestamp", auth.getActionTimestamp());
+                approvals.add(entry);
+            }
+
+            // Get comments
+            List<ChangesetCommentEntity> commentEntities = em.createNamedQuery("getCommentsByChangesetRequestId", ChangesetCommentEntity.class)
+                    .setParameter("changesetRequestId", changesetRequestId)
+                    .getResultList();
+
+            List<Map<String, Object>> comments = new ArrayList<>();
+            for (ChangesetCommentEntity c : commentEntities) {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("id", c.getId());
+                entry.put("userId", c.getUserId());
+                entry.put("username", c.getUsername());
+                entry.put("comment", c.getComment());
+                entry.put("timestamp", c.getTimestamp());
+                comments.add(entry);
+            }
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("requestedBy", cre.getRequestedBy() != null ? cre.getRequestedBy() : "");
+            result.put("requestedByUsername", cre.getRequestedByUsername() != null ? cre.getRequestedByUsername() : "");
+            result.put("timestamp", cre.getTimestamp());
+            result.put("approvals", approvals);
+            result.put("comments", comments);
+
+            return Response.ok(result).build();
+        } catch (Exception e) {
+            return Response.serverError().entity("Error fetching activity: " + e.getMessage()).build();
+        }
+    }
+
+    @POST
+    @Path("change-set/{id}/comments")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response addChangeSetComment(@PathParam("id") String changesetRequestId, Map<String, String> body) {
+        auth.users().requireManage();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        try {
+            String commentText = body.get("comment");
+            if (commentText == null || commentText.isBlank()) {
+                return Response.status(Response.Status.BAD_REQUEST).entity("Comment text is required").build();
+            }
+
+            UserModel adminUser = auth.adminAuth().getUser();
+
+            ChangesetCommentEntity comment = new ChangesetCommentEntity();
+            comment.setId(KeycloakModelUtils.generateId());
+            comment.setChangesetRequestId(changesetRequestId);
+            comment.setUserId(adminUser.getId());
+            comment.setUsername(adminUser.getUsername());
+            comment.setComment(commentText);
+            em.persist(comment);
+            em.flush();
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("id", comment.getId());
+            result.put("userId", comment.getUserId());
+            result.put("username", comment.getUsername());
+            result.put("comment", comment.getComment());
+            result.put("timestamp", comment.getTimestamp());
+
+            return Response.ok(result).build();
+        } catch (Exception e) {
+            return Response.serverError().entity("Error adding comment: " + e.getMessage()).build();
+        }
     }
 
     @POST
@@ -2047,6 +2219,73 @@ public class IGARealmResource {
         }
     }
 
+    @GET
+    @Path("role-policies")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response listRolePolicies() {
+        auth.realm().requireManageRealm();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        try {
+            // Get all TideRoleDraftEntities in this realm that have an initCert
+            List<TideRoleDraftEntity> roleDrafts = em.createQuery(
+                    "SELECT r FROM TideRoleDraftEntity r WHERE r.initCert IS NOT NULL " +
+                    "AND r.role IN (SELECT u FROM RoleEntity u WHERE u.realmId = :realmId)",
+                    TideRoleDraftEntity.class)
+                    .setParameter("realmId", realm.getId())
+                    .getResultList();
+
+            // Resolve role name for tide-realm-admin to exclude it
+            String tideRealmAdminRoleId = null;
+            ClientModel realmMgmt = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
+            if (realmMgmt != null) {
+                RoleModel tideAdminRole = realmMgmt.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+                if (tideAdminRole != null) {
+                    tideRealmAdminRoleId = tideAdminRole.getId();
+                }
+            }
+
+            List<Map<String, Object>> result = new ArrayList<>();
+            for (TideRoleDraftEntity draft : roleDrafts) {
+                RoleEntity roleEntity = draft.getRole();
+                if (roleEntity == null) continue;
+
+                // Skip tide-realm-admin — it's shown separately as admin policy
+                if (roleEntity.getId().equals(tideRealmAdminRoleId)) continue;
+
+                // Parse the policy from initCert
+                Map<String, Object> entry = new HashMap<>();
+                entry.put("id", draft.getId());
+                entry.put("roleId", roleEntity.getId());
+                entry.put("roleName", roleEntity.getName());
+                entry.put("clientRole", roleEntity.isClientRole());
+                if (roleEntity.isClientRole()) {
+                    ClientModel client = realm.getClientById(roleEntity.getClientId());
+                    if (client != null) {
+                        entry.put("clientId", client.getClientId());
+                    }
+                }
+                entry.put("timestamp", draft.getTimestamp());
+                entry.put("hasSig", draft.getInitCertSig() != null && !draft.getInitCertSig().isEmpty());
+
+                try {
+                    Policy policy = Policy.From(Base64.getDecoder().decode(draft.getInitCert()));
+                    entry.put("policyDisplay", policy.toString());
+                } catch (Exception e) {
+                    entry.put("policyDisplay", null);
+                }
+
+                result.add(entry);
+            }
+
+            return Response.ok(result, MediaType.APPLICATION_JSON).build();
+        } catch (Exception e) {
+            logger.error("[RolePolicies] Error listing role policies", e);
+            return Response.serverError()
+                    .entity("Failed to list role policies: " + e.getMessage()).build();
+        }
+    }
+
     // Helper: build sign settings for realm policy (same as ConstructSignSettings in TideAdminRealmResource)
     private SignRequestSettingsMidgard constructRealmPolicySignSettings(MultivaluedHashMap<String, String> config, String vrk) {
         int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
@@ -2616,6 +2855,58 @@ public class IGARealmResource {
                 "accessProof", committed.getAccessProof() != null ? committed.getAccessProof() : "",
                 "accessProofSig", committed.getAccessProofSig() != null ? committed.getAccessProofSig() : ""
         )).build();
+    }
+
+    /**
+     * Enriches RequestedChanges with requestedBy info from the ChangesetRequestEntity.
+     */
+    private static void enrichWithRequestedBy(EntityManager em, List<? extends RequestedChanges> changes) {
+        for (RequestedChanges change : changes) {
+            if (change.getDraftRecordId() != null) {
+                try {
+                    List<ChangesetRequestEntity> entities = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                            .setParameter("changesetRequestId", change.getDraftRecordId())
+                            .getResultList();
+                    if (!entities.isEmpty()) {
+                        ChangesetRequestEntity cre = entities.get(0);
+                        change.setRequestedBy(cre.getRequestedBy());
+                        change.setRequestedByUsername(cre.getRequestedByUsername());
+
+                        // Approval / rejection summary
+                        List<AdminAuthorizationEntity> auths = cre.getAdminAuthorizations();
+                        if (auths != null) {
+                            List<String> approvers = new ArrayList<>();
+                            List<String> deniers = new ArrayList<>();
+                            for (AdminAuthorizationEntity auth : auths) {
+                                String name = auth.getUsername() != null ? auth.getUsername() : auth.getUserId();
+                                if (auth.getIsApproval()) {
+                                    approvers.add(name);
+                                } else {
+                                    deniers.add(name);
+                                }
+                            }
+                            change.setApprovalCount(approvers.size());
+                            change.setRejectionCount(deniers.size());
+                            change.setApprovedBy(approvers);
+                            change.setDeniedBy(deniers);
+                        }
+
+                        // Comment count
+                        try {
+                            Long commentCount = em.createQuery(
+                                    "SELECT COUNT(c) FROM ChangesetCommentEntity c WHERE c.changesetRequestId = :id", Long.class)
+                                    .setParameter("id", change.getDraftRecordId())
+                                    .getSingleResult();
+                            change.setCommentCount(commentCount != null ? commentCount.intValue() : 0);
+                        } catch (Exception ignored2) {
+                            // Best effort
+                        }
+                    }
+                } catch (Exception ignored) {
+                    // Best effort
+                }
+            }
+        }
     }
 
     /**

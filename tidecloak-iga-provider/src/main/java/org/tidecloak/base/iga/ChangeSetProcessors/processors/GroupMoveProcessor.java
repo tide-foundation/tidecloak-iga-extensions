@@ -169,7 +169,7 @@ public class GroupMoveProcessor implements ChangeSetProcessor<TideGroupMoveDraft
         try {
             handleCreateRequest(session, entity, em, callback);
             if (!DraftStatus.ACTIVE.equals(entity.getDraftStatus())) {
-                ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
+                ChangeSetProcessor.super.createChangeRequestEntity(session, em, entity.getChangeRequestId(), changeSetType);
             }
         } catch (Exception e) {
             throw new RuntimeException("Failed to process GROUP_MOVE request", e);

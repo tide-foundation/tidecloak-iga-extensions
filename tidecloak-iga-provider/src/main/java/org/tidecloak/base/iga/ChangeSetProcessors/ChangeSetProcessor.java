@@ -704,11 +704,31 @@ public interface ChangeSetProcessor<T> {
     }
 
     default void createChangeRequestEntity(EntityManager em, String recordId, ChangeSetType changeSetType) {
+        createChangeRequestEntity(null, em, recordId, changeSetType);
+    }
+
+    default void createChangeRequestEntity(KeycloakSession session, EntityManager em, String recordId, ChangeSetType changeSetType) {
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(recordId, changeSetType));
         if (changesetRequestEntity == null) {
             ChangesetRequestEntity entity = new ChangesetRequestEntity();
             entity.setChangesetRequestId(recordId);
             entity.setChangesetType(changeSetType);
+            if (session != null) {
+                try {
+                    jakarta.ws.rs.core.HttpHeaders headers = session.getContext().getRequestHeaders();
+                    String authHeader = headers != null ? headers.getHeaderString("Authorization") : null;
+                    if (authHeader != null && authHeader.startsWith("Bearer ")) {
+                        String tokenString = authHeader.substring(7);
+                        org.keycloak.representations.AccessToken token =
+                                new org.keycloak.jose.jws.JWSInput(tokenString)
+                                        .readJsonContent(org.keycloak.representations.AccessToken.class);
+                        entity.setRequestedBy(token.getSubject());
+                        entity.setRequestedByUsername(token.getPreferredUsername());
+                    }
+                } catch (Exception ignored) {
+                    // Best effort
+                }
+            }
             em.persist(entity);
             em.flush();
         }

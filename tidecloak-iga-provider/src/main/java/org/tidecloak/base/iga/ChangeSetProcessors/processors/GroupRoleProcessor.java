@@ -181,7 +181,7 @@ public class GroupRoleProcessor implements ChangeSetProcessor<TideGroupRoleMappi
             }
             // Skip creating changeset request entity if already immediately committed (no affected users)
             if (!DraftStatus.ACTIVE.equals(entity.getDraftStatus())) {
-                ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
+                ChangeSetProcessor.super.createChangeRequestEntity(session, em, entity.getChangeRequestId(), changeSetType);
             }
         } catch (Exception e) {
             throw new RuntimeException("Failed to process GROUP_ROLE request", e);

@@ -91,7 +91,7 @@ public class GroupProcessor implements ChangeSetProcessor<TideGroupDraftEntity> 
                 default:
                     throw new IllegalArgumentException("Unsupported action: " + action);
             }
-            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
+            ChangeSetProcessor.super.createChangeRequestEntity(session, em, entity.getChangeRequestId(), changeSetType);
         } catch (Exception e) {
             throw new RuntimeException("Failed to process GROUP request", e);
         }
