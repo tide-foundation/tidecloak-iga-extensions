@@ -5,6 +5,7 @@ import org.tidecloak.jpa.entities.AccessProofDetailDependencyEntity;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.ForsetiContractEntity;
 import org.tidecloak.jpa.entities.PolicyTemplateEntity;
+import org.tidecloak.jpa.entities.ChangesetCommentEntity;
 import org.tidecloak.jpa.entities.SshPolicyEntity;
 import org.tidecloak.jpa.entities.UserClientAccessProofEntity;
 import org.tidecloak.jpa.entities.drafting.*;
@@ -29,7 +30,8 @@ public class TideEntityProvider implements JpaEntityProvider {
                 UserClientAccessProofEntity.class,
                 PolicyTemplateEntity.class,
                 ForsetiContractEntity.class,
-                SshPolicyEntity.class
+                SshPolicyEntity.class,
+                ChangesetCommentEntity.class
                 );
     }
 

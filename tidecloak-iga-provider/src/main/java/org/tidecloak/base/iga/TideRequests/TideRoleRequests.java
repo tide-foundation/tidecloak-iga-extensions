@@ -100,7 +100,11 @@ public class TideRoleRequests {
         em.flush();
     }
 
-    public static void createRolePolicyDraft(KeycloakSession session,  String recordId, double thresholdPercentage, int numberOfAdditionalAdmins, RoleModel role) throws Exception {
+    public static void createRolePolicyDraft(KeycloakSession session, String recordId, double thresholdPercentage, int numberOfAdditionalAdmins, RoleModel role) throws Exception {
+        createRolePolicyDraft(session, recordId, thresholdPercentage, numberOfAdditionalAdmins, role, false);
+    }
+
+    public static void createRolePolicyDraft(KeycloakSession session, String recordId, double thresholdPercentage, int numberOfAdditionalAdmins, RoleModel role, boolean forceCreate) throws Exception {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         RoleModel tideRole = session.clients().getClientByClientId(session.getContext().getRealm(), Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(tideRealmAdminRole);
         String algorithm = "EdDSA";
@@ -119,7 +123,8 @@ public class TideRoleRequests {
 
         int numberOfActiveAdmins = users.size();
 
-        // TODO: update to be able to change additional admin value when we can approve multiple admins at a time. ATM its one at a time.
+        // numberOfAdditionalAdmins supports bulk approval: when N users are approved together,
+        // combineChangeRequests() calls this with numberOfAdditionalAdmins = N.
         int threshold = Math.max(1, (int) (thresholdPercentage * (numberOfActiveAdmins + numberOfAdditionalAdmins)));
 
         // Grab from tide key provider
@@ -156,9 +161,12 @@ public class TideRoleRequests {
 
 
         Policy currentPolicy = Policy.From(Base64.getDecoder().decode(tideAdmin.getInitCert()));
-        if(currentPolicy.IsEqualTo(policy.ToBytes())){
+        System.out.println("[createRolePolicyDraft] recordId=" + recordId + " activeAdmins=" + numberOfActiveAdmins + " additionalAdmins=" + numberOfAdditionalAdmins + " threshold=" + threshold + " forceCreate=" + forceCreate);
+        if(!forceCreate && currentPolicy.IsEqualTo(policy.ToBytes())){
+            System.out.println("[createRolePolicyDraft] IsEqualTo=true, skipping policy creation (threshold unchanged)");
             return; // hash is the same, dont need to recreate
         }
+        System.out.println("[createRolePolicyDraft] IsEqualTo=false or forceCreate=true, creating new policy draft");
 
         PolicyDraftEntity policyDraftEntity = new PolicyDraftEntity();
         String id = KeycloakModelUtils.generateId();
@@ -175,7 +183,7 @@ public class TideRoleRequests {
         ModelRequest modelReq = ModelRequest.New("Policy", "1", "Policy:1", pSignReq.GetDraft(), policy.ToBytes());
         var expireAtTime = (System.currentTimeMillis() / 1000) + 2628000; // 1 month from now
         modelReq.SetCustomExpiry(expireAtTime);
-        modelReq = modelReq.InitializeTideRequestWithVrk(modelReq, signedSettings, "Policy:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
+        modelReq = ModelRequest.InitializeTideRequestWithVrk(modelReq, signedSettings, "Policy:1", DatatypeConverter.parseHexBinary(config.getFirst("gVRK")), Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
 
         // create change request entity here too
         ChangesetRequestEntity changesetRequestEntity = new ChangesetRequestEntity();

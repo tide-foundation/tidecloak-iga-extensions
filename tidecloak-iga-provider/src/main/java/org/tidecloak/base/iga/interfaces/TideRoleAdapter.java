@@ -11,6 +11,7 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
+import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.shared.Constants;
@@ -41,6 +42,7 @@ public class TideRoleAdapter extends RoleAdapter {
 
     @Override
     public void removeCompositeRole(RoleModel roleModel) {
+        BasicIGAUtils.stampRequestingAdmin(session);
         // Dont draft for master realm
         RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
         if(realm.equals(masterRealm)){
@@ -109,6 +111,7 @@ public class TideRoleAdapter extends RoleAdapter {
 
     @Override
     public void addCompositeRole(RoleModel roleModel) {
+        BasicIGAUtils.stampRequestingAdmin(session);
         try {
             RoleEntity entity = toRoleEntity(roleModel);
             for (RoleEntity composite : getEntity().getCompositeRoles()) {

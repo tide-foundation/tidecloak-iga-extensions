@@ -1,19 +1,23 @@
 package org.tidecloak.base.iga.ChangeSetProcessors.processors;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import org.jboss.logging.Logger;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
+import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.RoleUtils;
 import org.keycloak.representations.AccessToken;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.base.iga.ChangeSetProcessors.keys.UserClientKey;
 import org.tidecloak.jpa.entities.ChangeRequestKey;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils;
 import org.tidecloak.base.iga.interfaces.TideClientAdapter;
 import org.tidecloak.base.iga.interfaces.TideUserAdapter;
+import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserGroupMembershipEntity;
@@ -22,6 +26,8 @@ import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import org.keycloak.models.cache.CacheRealmProvider;
@@ -171,10 +177,120 @@ public class UserGroupMembershipProcessor implements ChangeSetProcessor<TideUser
                 default:
                     throw new IllegalArgumentException("Unsupported action: " + action);
             }
-            ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
+            ChangeSetProcessor.super.createChangeRequestEntity(session, em, entity.getChangeRequestId(), changeSetType);
         } catch (Exception e) {
             throw new RuntimeException("Failed to process USER_GROUP_MEMBERSHIP request", e);
         }
+    }
+
+    @Override
+    public List<ChangesetRequestEntity> combineChangeRequests(
+            KeycloakSession session,
+            List<TideUserGroupMembershipEntity> entities,
+            EntityManager em) throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+        RealmModel realm = session.getContext().getRealm();
+
+        Map<UserClientKey, List<AccessProofDetailEntity>> rawMap =
+                ChangeSetProcessor.super.groupChangeRequests(entities, em);
+
+        Map<String, Map<String, List<AccessProofDetailEntity>>> byUserClient =
+                rawMap.entrySet().stream()
+                        .flatMap(e -> e.getValue().stream()
+                                .map(proof -> Map.entry(e.getKey(), proof)))
+                        .collect(Collectors.groupingBy(
+                                e -> e.getKey().getUserId(),
+                                Collectors.groupingBy(
+                                        e -> e.getKey().getClientId(),
+                                        Collectors.mapping(Map.Entry::getValue, Collectors.toList())
+                                )));
+
+        List<String> userIds = new ArrayList<>(byUserClient.keySet());
+        Map<String, UserEntity> userById = em.createQuery(
+                        "SELECT u FROM UserEntity u WHERE u.id IN :ids", UserEntity.class)
+                .setParameter("ids", userIds)
+                .getResultList().stream()
+                .collect(Collectors.toMap(UserEntity::getId, Function.identity()));
+
+        Set<String> clientIds = byUserClient.values().stream()
+                .flatMap(m -> m.keySet().stream())
+                .collect(Collectors.toSet());
+        Map<String, ClientModel> clientById = clientIds.stream()
+                .map(cid -> Map.entry(cid, realm.getClientById(cid)))
+                .filter(e -> e.getValue() != null)
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+        List<ChangesetRequestEntity> results = new ArrayList<>();
+
+        for (var userEntry : byUserClient.entrySet()) {
+            String userId = userEntry.getKey();
+            UserEntity ue = userById.get(userId);
+            UserModel um = session.users().getUserById(realm, userId);
+
+            // Short-circuit: if this user has only 1 proof total, no combining needed
+            long totalProofs = userEntry.getValue().values().stream()
+                    .mapToLong(List::size)
+                    .sum();
+            if (totalProofs <= 1) {
+                userEntry.getValue().values().stream()
+                        .flatMap(List::stream)
+                        .findFirst()
+                        .ifPresent(proof -> {
+                            List<ChangesetRequestEntity> existing = em.createNamedQuery(
+                                            "getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                                    .setParameter("changesetRequestId", proof.getChangeRequestKey().getChangeRequestId())
+                                    .getResultList();
+                            results.addAll(existing);
+                        });
+                continue;
+            }
+
+            String combinedRequestId = KeycloakModelUtils.generateId();
+
+            List<AccessProofDetailEntity> toRemoveProofs = new ArrayList<>();
+            List<ChangesetRequestEntity> toRemoveRequests = new ArrayList<>();
+
+            for (var clientEntry : userEntry.getValue().entrySet()) {
+                ClientModel cm = clientById.get(clientEntry.getKey());
+                AtomicReference<String> mappingId = new AtomicReference<>();
+                if (cm == null) continue;
+                String combinedProofDraft = null;
+
+                for (var proof : clientEntry.getValue()) {
+                    mappingId.set(proof.getChangeRequestKey().getMappingId());
+                    TideUserGroupMembershipEntity draft = (TideUserGroupMembershipEntity) BasicIGAUtils.fetchDraftRecordEntity(em, ChangeSetType.USER_GROUP_MEMBERSHIP, proof.getChangeRequestKey().getMappingId());
+                    if (draft == null) {
+                        throw new IllegalStateException("Missing draft for request " + proof.getChangeRequestKey().getMappingId());
+                    }
+                    draft.setChangeRequestId(combinedRequestId);
+                    em.persist(draft);
+
+                    if (combinedProofDraft == null) {
+                        combinedProofDraft = proof.getProofDraft();
+                    }
+                    AccessToken token = objectMapper.readValue(combinedProofDraft, AccessToken.class);
+                    combinedProofDraft = combinedTransformedUserContext(session, realm, cm, um, "openId", draft, token);
+
+                    toRemoveProofs.add(proof);
+                    toRemoveRequests.addAll(em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                            .setParameter("changesetRequestId", proof.getChangeRequestKey().getChangeRequestId())
+                            .getResultList());
+                }
+
+                ChangeSetProcessor.super.saveUserContextDraft(session, em, realm, cm, ue, new ChangeRequestKey(mappingId.get(), combinedRequestId), ChangeSetType.USER_GROUP_MEMBERSHIP, combinedProofDraft);
+            }
+
+            toRemoveProofs.forEach(em::remove);
+            toRemoveRequests.forEach(em::remove);
+
+            List<ChangesetRequestEntity> created = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                    .setParameter("changesetRequestId", combinedRequestId)
+                    .getResultList();
+            results.addAll(created);
+        }
+
+        em.flush();
+        return results;
     }
 
     @Override

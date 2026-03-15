@@ -18,6 +18,7 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.*;
 import org.keycloak.models.cache.UserCache;
 import org.keycloak.models.jpa.entities.ClientEntity;
+import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.representations.idm.RolesRepresentation;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
@@ -72,220 +73,181 @@ public class IGARealmResource {
         this.session = session;
         this.realm = realm;
         this.auth = auth;
+
+        // Store the admin user info in the session so processors can stamp it on ChangesetRequestEntity
+        try {
+            UserModel adminUser = auth.adminAuth().getUser();
+            if (adminUser != null) {
+                session.setAttribute("requestedByUserId", adminUser.getId());
+                session.setAttribute("requestedByUsername", adminUser.getUsername());
+            }
+        } catch (Exception e) {
+            // best effort
+        }
     }
 
     @POST
     @Path("toggle-iga")
     @Produces(MediaType.TEXT_PLAIN)
-    public Response toggleIGA(@FormParam("isIGAEnabled") boolean isEnabled) throws Exception {
-        try {
-            auth.realm().requireManageRealm();
 
+    public Response toggleIGA(@FormParam("isIGAEnabled") boolean isEnabled) throws Exception {
+        try{
             RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
-            if (realm.equals(masterRealm)) {
+            if(realm.equals(masterRealm)){
                 return buildResponse(400, "Master realm does not support IGA.");
             }
 
-            RealmModel currentRealm = session.getContext().getRealm();
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-
-            currentRealm.setAttribute("isIGAEnabled", isEnabled);
-            logger.infof("IGA has been toggled to: %s", isEnabled);
+            auth.realm().requireManageRealm();
+            session.getContext().getRealm().setAttribute("isIGAEnabled", isEnabled);
+            logger.info("IGA has been toggled to : " + isEnabled);
 
             IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
-            boolean hasTideVendorKey = realm.getComponentsStream()
-                    .anyMatch(c -> "tide-vendor-key".equals(c.getProviderId()));
+            ComponentModel componentModel = realm.getComponentsStream()
+                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))  // Use .equals for string comparison
+                    .findFirst()
+                    .orElse(null);
 
-            boolean hasTideSupport = tideIdp != null && hasTideVendorKey;
+            // if IGA is on and tideIdp exists, we need to enable EDDSA as default sig
+            if (tideIdp != null && componentModel != null) {
+                String currentAlgorithm = session.getContext().getRealm().getDefaultSignatureAlgorithm();
 
-            if (isEnabled) {
-                enableIga(currentRealm, em, hasTideSupport);
+                if (isEnabled) {
+                    if (!"EdDSA".equalsIgnoreCase(currentAlgorithm)) {
+                        session.getContext().getRealm().setDefaultSignatureAlgorithm("EdDSA");
+                        logger.info("IGA has been enabled, default signature algorithm updated to EdDSA");
+                    }
+                    // Check the TideClientDraft Table and generate and AccessProofDetails that dont exist.
+                    List<TideClientDraftEntity> entities = findDraftsNotInAccessProof(em, realm);
+                    entities.forEach(c -> {
+                        try {
+                            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.CLIENT);
+                            ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
+                            changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT).executeWorkflow(session, c, em, WorkflowType.REQUEST, params, null);
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
+
+                    // Get the admin console client
+                    ClientModel secAdminConsole =
+                            session.clients().getClientByClientId(realm, Constants.ADMIN_CONSOLE_CLIENT_ID);
+
+                    // Ensure current auth server URL is in web origins
+                    Set<String> currentWebOrigins = new HashSet<>(secAdminConsole.getWebOrigins());
+                    currentWebOrigins.add(session.getContext().getAuthServerUrl().toString());
+                    secAdminConsole.setWebOrigins(currentWebOrigins);
+
+                    // Re-sign IDP settings so the new web origin is included
+                    signIdpSettings(tideIdp, componentModel);
+
+                    // Find the "roles" client scope
+                    ClientScopeModel rolesScope =
+                            session.clientScopes()
+                                    .getClientScopesStream(realm)
+                                    .filter(cs -> "roles".equalsIgnoreCase(cs.getName()))
+                                    .findFirst()
+                                    .orElse(null);
+
+                    if (rolesScope == null) {
+                        throw new IllegalStateException("roles client scope not found");
+                    }
+
+                    // Get predefined mappers from the roles scope
+                    ProtocolMapperModel scopeClientRole =
+                            rolesScope.getProtocolMapperByName("openid-connect", "client roles");
+                    ProtocolMapperModel scopeRealmRole =
+                            rolesScope.getProtocolMapperByName("openid-connect", "realm roles");
+
+                    if (scopeClientRole == null || scopeRealmRole == null) {
+                        throw new IllegalStateException("Expected predefined mappers 'client roles' / 'realm roles' not found on roles scope");
+                    }
+
+                    // Clone mappers like the Admin Console would when "Add predefined mapper" is used
+                    ProtocolMapperModel clientRoleMapper = cloneMapper(scopeClientRole);
+                    ProtocolMapperModel realmRoleMapper  = cloneMapper(scopeRealmRole);
+
+                    // Apply your config changes on the clones
+                    Map<String, String> clientRoleConfig = new HashMap<>(clientRoleMapper.getConfig());
+                    clientRoleConfig.put("lightweight.claim", "true");
+                    clientRoleMapper.setConfig(clientRoleConfig);
+
+                    Map<String, String> realmRoleConfig = new HashMap<>(realmRoleMapper.getConfig());
+                    realmRoleConfig.put("lightweight.claim", "true");
+                    realmRoleMapper.setConfig(realmRoleConfig);
+
+                    // Check if the client already has mappers with these names
+                    ProtocolMapperModel existingClientRole =
+                            secAdminConsole.getProtocolMapperByName("openid-connect", clientRoleMapper.getName());
+                    ProtocolMapperModel existingRealmRole =
+                            secAdminConsole.getProtocolMapperByName("openid-connect", realmRoleMapper.getName());
+
+                    // If mapper exists, just update its config; if not, add the cloned mapper
+                    if (existingClientRole == null) {
+                        secAdminConsole.addProtocolMapper(clientRoleMapper);
+                    } else {
+                        Map<String, String> cfg = new HashMap<>(existingClientRole.getConfig());
+                        cfg.put("lightweight.claim", "true");
+                        existingClientRole.setConfig(cfg);
+                    }
+
+                    if (existingRealmRole == null) {
+                        secAdminConsole.addProtocolMapper(realmRoleMapper);
+                    } else {
+                        Map<String, String> cfg = new HashMap<>(existingRealmRole.getConfig());
+                        cfg.put("lightweight.claim", "true");
+                        existingRealmRole.setConfig(cfg);
+                    }
+
+                } else {
+                    // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA
+                    // TODO: Fix error: Uncaught server error: java.lang.RuntimeException: org.keycloak.crypto.SignatureException:
+                    // Signing failed. java.security.InvalidKeyException: Unsupported key type (tide eddsa key)
+                    if (currentAlgorithm.equalsIgnoreCase("EdDSA")) {
+                        session.getContext().getRealm().setDefaultSignatureAlgorithm("RS256");
+                        logger.info("IGA has been disabled, default signature algorithm updated to RS256");
+                    }
+                }
             } else {
-                disableIga(currentRealm, hasTideSupport);
+                if (isEnabled){
+                    // Get a list of users
+                    ClientModel realmManagement = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
+                    RoleModel realmAdmin = session.roles().getClientRole(realmManagement, "realm-admin");
+                    List<UserModel> users = session.users().searchForUserStream(realm, new HashMap<>()).toList();
+                    // sign realm-admin roles
+                    users.forEach(u -> {
+                        UserEntity ue = em.find(UserEntity.class, u.getId());
+                        TideUserRoleMappingDraftEntity userRoleMappingDraft = em.createNamedQuery("getUserRoleAssignmentDraftEntity", TideUserRoleMappingDraftEntity.class)
+                                .setParameter("user", ue)
+                                .setParameter("roleId", realmAdmin.getId())
+                                .getSingleResult();
+
+                        if (userRoleMappingDraft.getDraftStatus().equals(DraftStatus.DRAFT)) {
+                            ChangeSetRequest cr = new ChangeSetRequest();
+                            cr.setChangeSetId(userRoleMappingDraft.getChangeRequestId());
+                            cr.setActionType(userRoleMappingDraft.getAction());
+                            cr.setType(ChangeSetType.USER_ROLE);
+                            try {
+                                signChangeSets(Collections.singletonList(cr));
+                                commitChangeSets(Collections.singletonList(cr));
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            }
+                        }
+                    });
+                }
             }
 
-            enableRealmEvents(realm);
+            // enable events by default
+            realm.setEventsEnabled(true);
+            realm.setAdminEventsEnabled(true);
+            realm.setAdminEventsDetailsEnabled(true);
 
-            return buildResponse(200, "IGA has been toggled to: " + isEnabled);
-        } catch (Exception e) {
-            logger.errorf(e, "Error toggling IGA on realm %s", realm != null ? realm.getName() : "unknown");
+            return buildResponse(200, "IGA has been toggled to : " + isEnabled);
+        }catch(Exception e) {
+            logger.error("Error toggling IGA on realm: ", e);
             throw e;
         }
-    }
-
-    private void enableIga(RealmModel currentRealm, EntityManager em, boolean hasTideSupport) throws Exception {
-        // Always ensure admin console is configured when enabling IGA
-        configureAdminConsoleForIga();
-
-        if (hasTideSupport) {
-            ensureDefaultSignatureAlgorithm(
-                    currentRealm,
-                    "EdDSA",
-                    "IGA has been enabled, default signature algorithm updated to EdDSA"
-            );
-
-            generateMissingAccessProofs(em);
-        } else {
-            // No tide setup, perform initial realm-admin role signing flow
-            signDraftRealmAdminRoleAssignments(em);
-        }
-    }
-
-    private void disableIga(RealmModel currentRealm, boolean hasTideSupport) {
-        if (!hasTideSupport) {
-            return;
-        }
-
-        String currentAlgorithm = currentRealm.getDefaultSignatureAlgorithm();
-
-        // If tide IDP exists but IGA is disabled, default signature cannot be EdDSA
-        // TODO: Fix error: Uncaught server error: java.lang.RuntimeException:
-        // org.keycloak.crypto.SignatureException: Signing failed.
-        // java.security.InvalidKeyException: Unsupported key type (tide eddsa key)
-        if ("EdDSA".equalsIgnoreCase(currentAlgorithm)) {
-            currentRealm.setDefaultSignatureAlgorithm("RS256");
-            logger.info("IGA has been disabled, default signature algorithm updated to RS256");
-        }
-    }
-
-    private void configureAdminConsoleForIga() {
-        ClientModel adminConsole = session.clients().getClientByClientId(realm, Constants.ADMIN_CONSOLE_CLIENT_ID);
-        if (adminConsole == null) {
-            throw new IllegalStateException("Admin console client not found");
-        }
-
-        // Ensure current auth server URL is in web origins
-        Set<String> webOrigins = new HashSet<>(adminConsole.getWebOrigins());
-        webOrigins.add(session.getContext().getAuthServerUrl().toString());
-        adminConsole.setWebOrigins(webOrigins);
-
-        // Find the "roles" client scope
-        ClientScopeModel rolesScope = session.clientScopes()
-                .getClientScopesStream(realm)
-                .filter(cs -> "roles".equalsIgnoreCase(cs.getName()))
-                .findFirst()
-                .orElseThrow(() -> new IllegalStateException("roles client scope not found"));
-
-        // Get predefined mappers from the roles scope
-        ProtocolMapperModel scopeClientRole =
-                rolesScope.getProtocolMapperByName("openid-connect", "client roles");
-        ProtocolMapperModel scopeRealmRole =
-                rolesScope.getProtocolMapperByName("openid-connect", "realm roles");
-
-        if (scopeClientRole == null || scopeRealmRole == null) {
-            throw new IllegalStateException(
-                    "Expected predefined mappers 'client roles' / 'realm roles' not found on roles scope"
-            );
-        }
-
-        upsertLightweightMapper(adminConsole, scopeClientRole);
-        upsertLightweightMapper(adminConsole, scopeRealmRole);
-    }
-
-    private void upsertLightweightMapper(ClientModel client, ProtocolMapperModel predefinedMapper) {
-        ProtocolMapperModel existing =
-                client.getProtocolMapperByName("openid-connect", predefinedMapper.getName());
-
-        if (existing == null) {
-            ProtocolMapperModel cloned = cloneMapper(predefinedMapper);
-            Map<String, String> cfg = new HashMap<>(cloned.getConfig());
-            cfg.put("lightweight.claim", "true");
-            cloned.setConfig(cfg);
-            client.addProtocolMapper(cloned);
-            return;
-        }
-
-        Map<String, String> cfg = new HashMap<>(existing.getConfig());
-        if (!"true".equals(cfg.get("lightweight.claim"))) {
-            cfg.put("lightweight.claim", "true");
-            existing.setConfig(cfg);
-        }
-    }
-
-    private void generateMissingAccessProofs(EntityManager em) throws Exception {
-        List<TideClientDraftEntity> entities = findDraftsNotInAccessProof(em, realm);
-        if (entities == null || entities.isEmpty()) {
-            return;
-        }
-
-        ChangeSetProcessorFactory factory = ChangeSetProcessorFactoryProvider.getFactory();
-        ChangeSetProcessor<Object> processor = factory.getProcessor(ChangeSetType.CLIENT);
-
-        for (TideClientDraftEntity entity : entities) {
-            WorkflowParams params = new WorkflowParams(
-                    DraftStatus.DRAFT,
-                    false,
-                    ActionType.CREATE,
-                    ChangeSetType.CLIENT
-            );
-            processor.executeWorkflow(session, entity, em, WorkflowType.REQUEST, params, null);
-        }
-    }
-
-    private void signDraftRealmAdminRoleAssignments(EntityManager em) throws Exception {
-        ClientModel realmManagement =
-                session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
-        if (realmManagement == null) {
-            throw new IllegalStateException("realm-management client not found");
-        }
-
-        RoleModel realmAdmin = session.roles().getClientRole(realmManagement, "realm-admin");
-        if (realmAdmin == null) {
-            throw new IllegalStateException("realm-admin role not found");
-        }
-
-        List<UserModel> users = session.users().searchForUserStream(realm, Collections.emptyMap()).toList();
-        if (users.isEmpty()) {
-            return;
-        }
-
-        for (UserModel user : users) {
-            UserEntity userEntity = em.find(UserEntity.class, user.getId());
-            if (userEntity == null) {
-                continue;
-            }
-
-            TideUserRoleMappingDraftEntity draft;
-            try {
-                draft = em.createNamedQuery(
-                                "getUserRoleAssignmentDraftEntity",
-                                TideUserRoleMappingDraftEntity.class
-                        )
-                        .setParameter("user", userEntity)
-                        .setParameter("roleId", realmAdmin.getId())
-                        .getSingleResult();
-            } catch (jakarta.persistence.NoResultException ex) {
-                logger.debugf(
-                        "No realm-admin draft role assignment found for user %s",
-                        user.getUsername()
-                );
-                continue;
-            }
-
-            if (DraftStatus.DRAFT.equals(draft.getDraftStatus())) {
-                ChangeSetRequest req = new ChangeSetRequest();
-                req.setChangeSetId(draft.getChangeRequestId());
-                req.setActionType(draft.getAction());
-                req.setType(ChangeSetType.USER_ROLE);
-
-                signChangeSets(Collections.singletonList(req));
-                commitChangeSets(Collections.singletonList(req));
-            }
-        }
-    }
-
-    private void ensureDefaultSignatureAlgorithm(RealmModel realmModel, String algorithm, String logMessage) {
-        String current = realmModel.getDefaultSignatureAlgorithm();
-        if (!algorithm.equalsIgnoreCase(current)) {
-            realmModel.setDefaultSignatureAlgorithm(algorithm);
-            logger.info(logMessage);
-        }
-    }
-
-    private void enableRealmEvents(RealmModel realmModel) {
-        realmModel.setEventsEnabled(true);
-        realmModel.setAdminEventsEnabled(true);
-        realmModel.setAdminEventsDetailsEnabled(true);
     }
 
     // --- Helper: clone a mapper from the scope to use on the client ---
@@ -520,6 +482,7 @@ public class IGARealmResource {
         }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> changes = new ArrayList<>(processUserRoleMappings(em, realm));
+        enrichWithRequestedBy(em, changes);
         return Response.ok(changes).build();
     }
 
@@ -534,6 +497,7 @@ public class IGARealmResource {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> requestedChangesList = new ArrayList<>(processRoleMappings(em, realm));
         requestedChangesList.addAll(processCompositeRoleMappings(em, realm));
+        enrichWithRequestedBy(em, requestedChangesList);
         return Response.ok(requestedChangesList).build();
     }
 
@@ -547,6 +511,7 @@ public class IGARealmResource {
         }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> changes = new ArrayList<>(processClientDraftRecords(em, realm));
+        enrichWithRequestedBy(em, changes);
         return Response.ok(changes).build();
     }
 
@@ -563,7 +528,244 @@ public class IGARealmResource {
         changes.addAll(processGroupRoleMappings(em, realm));
         changes.addAll(processGroupMemberships(em, realm));
         changes.addAll(processGroupMoves(em, realm));
+        enrichWithRequestedBy(em, changes);
         return Response.ok(changes).build();
+    }
+
+    @GET
+    @Path("change-set/counts")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getChangeSetCounts() {
+        auth.users().requireManage();
+        if (!BasicIGAUtils.isIGAEnabled(realm)) {
+            Map<String, Integer> empty = new LinkedHashMap<>();
+            empty.put("users", 0);
+            empty.put("roles", 0);
+            empty.put("clients", 0);
+            empty.put("groups", 0);
+            empty.put("total", 0);
+            return Response.ok(empty).build();
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        int users = processUserRoleMappings(em, realm).size();
+        int roles = processRoleMappings(em, realm).size() + processCompositeRoleMappings(em, realm).size();
+        int clients = processClientDraftRecords(em, realm).size();
+        int groups = processGroupRoleMappings(em, realm).size()
+                + processGroupMemberships(em, realm).size()
+                + processGroupMoves(em, realm).size();
+
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        counts.put("users", users);
+        counts.put("roles", roles);
+        counts.put("clients", clients);
+        counts.put("groups", groups);
+        counts.put("total", users + roles + clients + groups);
+        return Response.ok(counts).build();
+    }
+
+    @GET
+    @Path("change-set/all/requests")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getAllChangeSetRequests() {
+        auth.users().requireManage();
+        if (!BasicIGAUtils.isIGAEnabled(realm)) {
+            Map<String, List<?>> empty = new LinkedHashMap<>();
+            empty.put("users", new ArrayList<>());
+            empty.put("roles", new ArrayList<>());
+            empty.put("clients", new ArrayList<>());
+            empty.put("groups", new ArrayList<>());
+            return Response.ok(empty).build();
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        List<RequestedChanges> users = new ArrayList<>(processUserRoleMappings(em, realm));
+        enrichWithRequestedBy(em, users);
+
+        List<RequestedChanges> roles = new ArrayList<>(processRoleMappings(em, realm));
+        roles.addAll(processCompositeRoleMappings(em, realm));
+        enrichWithRequestedBy(em, roles);
+
+        List<RequestedChanges> clients = new ArrayList<>(processClientDraftRecords(em, realm));
+        enrichWithRequestedBy(em, clients);
+
+        List<RequestedChanges> groups = new ArrayList<>();
+        groups.addAll(processGroupRoleMappings(em, realm));
+        groups.addAll(processGroupMemberships(em, realm));
+        groups.addAll(processGroupMoves(em, realm));
+        enrichWithRequestedBy(em, groups);
+
+        Map<String, List<RequestedChanges>> result = new LinkedHashMap<>();
+        result.put("users", users);
+        result.put("roles", roles);
+        result.put("clients", clients);
+        result.put("groups", groups);
+        return Response.ok(result).build();
+    }
+
+    @GET
+    @Path("change-set/{id}/activity")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getChangeSetActivity(@PathParam("id") String changesetRequestId) {
+        auth.users().requireManage();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        try {
+            // Find all changeset request entities with this ID (across types)
+            List<ChangesetRequestEntity> entities = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                    .setParameter("changesetRequestId", changesetRequestId)
+                    .getResultList();
+
+            if (entities.isEmpty()) {
+                return Response.ok(Map.of("approvals", List.of(), "comments", List.of(), "requestedBy", "", "requestedByUsername", "")).build();
+            }
+
+            ChangesetRequestEntity cre = entities.get(0);
+
+            // Build approval/rejection list
+            List<Map<String, Object>> approvals = new ArrayList<>();
+            for (AdminAuthorizationEntity auth : cre.getAdminAuthorizations()) {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("userId", auth.getUserId());
+                entry.put("username", auth.getUsername() != null ? auth.getUsername() : "");
+                entry.put("isApproval", auth.getIsApproval());
+                entry.put("timestamp", auth.getActionTimestamp());
+                approvals.add(entry);
+            }
+
+            // Get comments
+            List<ChangesetCommentEntity> commentEntities = em.createNamedQuery("getCommentsByChangesetRequestId", ChangesetCommentEntity.class)
+                    .setParameter("changesetRequestId", changesetRequestId)
+                    .getResultList();
+
+            List<Map<String, Object>> comments = new ArrayList<>();
+            for (ChangesetCommentEntity c : commentEntities) {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("id", c.getId());
+                entry.put("userId", c.getUserId());
+                entry.put("username", c.getUsername());
+                entry.put("comment", c.getComment());
+                entry.put("timestamp", c.getTimestamp());
+                comments.add(entry);
+            }
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("requestedBy", cre.getRequestedBy() != null ? cre.getRequestedBy() : "");
+            result.put("requestedByUsername", cre.getRequestedByUsername() != null ? cre.getRequestedByUsername() : "");
+            result.put("timestamp", cre.getTimestamp());
+            result.put("approvals", approvals);
+            result.put("comments", comments);
+
+            return Response.ok(result).build();
+        } catch (Exception e) {
+            return Response.serverError().entity("Error fetching activity: " + e.getMessage()).build();
+        }
+    }
+
+    @POST
+    @Path("change-set/{id}/comments")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response addChangeSetComment(@PathParam("id") String changesetRequestId, Map<String, String> body) {
+        auth.users().requireManage();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        try {
+            String commentText = body.get("comment");
+            if (commentText == null || commentText.isBlank()) {
+                return Response.status(Response.Status.BAD_REQUEST).entity("Comment text is required").build();
+            }
+
+            UserModel adminUser = auth.adminAuth().getUser();
+
+            ChangesetCommentEntity comment = new ChangesetCommentEntity();
+            comment.setId(KeycloakModelUtils.generateId());
+            comment.setChangesetRequestId(changesetRequestId);
+            comment.setUserId(adminUser.getId());
+            comment.setUsername(adminUser.getUsername());
+            comment.setComment(commentText);
+            em.persist(comment);
+            em.flush();
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("id", comment.getId());
+            result.put("userId", comment.getUserId());
+            result.put("username", comment.getUsername());
+            result.put("comment", comment.getComment());
+            result.put("timestamp", comment.getTimestamp());
+
+            return Response.ok(result).build();
+        } catch (Exception e) {
+            return Response.serverError().entity("Error adding comment: " + e.getMessage()).build();
+        }
+    }
+
+    @PUT
+    @Path("change-set/{id}/comments/{commentId}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response updateChangeSetComment(@PathParam("id") String changesetRequestId, @PathParam("commentId") String commentId, Map<String, String> body) {
+        auth.users().requireManage();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        try {
+            String commentText = body.get("comment");
+            if (commentText == null || commentText.isBlank()) {
+                return Response.status(Response.Status.BAD_REQUEST).entity("Comment text is required").build();
+            }
+
+            ChangesetCommentEntity comment = em.find(ChangesetCommentEntity.class, commentId);
+            if (comment == null) {
+                return Response.status(Response.Status.NOT_FOUND).entity("Comment not found").build();
+            }
+
+            UserModel adminUser = auth.adminAuth().getUser();
+            if (!comment.getUserId().equals(adminUser.getId())) {
+                return Response.status(Response.Status.FORBIDDEN).entity("You can only edit your own comments").build();
+            }
+
+            comment.setComment(commentText);
+            comment.setTimestamp(System.currentTimeMillis() / 1000);
+            em.merge(comment);
+            em.flush();
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("id", comment.getId());
+            result.put("userId", comment.getUserId());
+            result.put("username", comment.getUsername());
+            result.put("comment", comment.getComment());
+            result.put("timestamp", comment.getTimestamp());
+
+            return Response.ok(result).build();
+        } catch (Exception e) {
+            return Response.serverError().entity("Error updating comment: " + e.getMessage()).build();
+        }
+    }
+
+    @DELETE
+    @Path("change-set/{id}/comments/{commentId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response deleteChangeSetComment(@PathParam("id") String changesetRequestId, @PathParam("commentId") String commentId) {
+        auth.users().requireManage();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        try {
+            ChangesetCommentEntity comment = em.find(ChangesetCommentEntity.class, commentId);
+            if (comment == null) {
+                return Response.status(Response.Status.NOT_FOUND).entity("Comment not found").build();
+            }
+
+            UserModel adminUser = auth.adminAuth().getUser();
+            if (!comment.getUserId().equals(adminUser.getId())) {
+                return Response.status(Response.Status.FORBIDDEN).entity("You can only delete your own comments").build();
+            }
+
+            em.remove(comment);
+            em.flush();
+
+            return Response.ok(Map.of("deleted", true)).build();
+        } catch (Exception e) {
+            return Response.serverError().entity("Error deleting comment: " + e.getMessage()).build();
+        }
     }
 
     @POST
@@ -2097,6 +2299,73 @@ public class IGARealmResource {
         }
     }
 
+    @GET
+    @Path("role-policies")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response listRolePolicies() {
+        auth.realm().requireManageRealm();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        try {
+            // Get all TideRoleDraftEntities in this realm that have an initCert
+            List<TideRoleDraftEntity> roleDrafts = em.createQuery(
+                    "SELECT r FROM TideRoleDraftEntity r WHERE r.initCert IS NOT NULL " +
+                    "AND r.role IN (SELECT u FROM RoleEntity u WHERE u.realmId = :realmId)",
+                    TideRoleDraftEntity.class)
+                    .setParameter("realmId", realm.getId())
+                    .getResultList();
+
+            // Resolve role name for tide-realm-admin to exclude it
+            String tideRealmAdminRoleId = null;
+            ClientModel realmMgmt = session.clients().getClientByClientId(realm, Constants.REALM_MANAGEMENT_CLIENT_ID);
+            if (realmMgmt != null) {
+                RoleModel tideAdminRole = realmMgmt.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+                if (tideAdminRole != null) {
+                    tideRealmAdminRoleId = tideAdminRole.getId();
+                }
+            }
+
+            List<Map<String, Object>> result = new ArrayList<>();
+            for (TideRoleDraftEntity draft : roleDrafts) {
+                RoleEntity roleEntity = draft.getRole();
+                if (roleEntity == null) continue;
+
+                // Skip tide-realm-admin — it's shown separately as admin policy
+                if (roleEntity.getId().equals(tideRealmAdminRoleId)) continue;
+
+                // Parse the policy from initCert
+                Map<String, Object> entry = new HashMap<>();
+                entry.put("id", draft.getId());
+                entry.put("roleId", roleEntity.getId());
+                entry.put("roleName", roleEntity.getName());
+                entry.put("clientRole", roleEntity.isClientRole());
+                if (roleEntity.isClientRole()) {
+                    ClientModel client = realm.getClientById(roleEntity.getClientId());
+                    if (client != null) {
+                        entry.put("clientId", client.getClientId());
+                    }
+                }
+                entry.put("timestamp", draft.getTimestamp());
+                entry.put("hasSig", draft.getInitCertSig() != null && !draft.getInitCertSig().isEmpty());
+
+                try {
+                    Policy policy = Policy.From(Base64.getDecoder().decode(draft.getInitCert()));
+                    entry.put("policyDisplay", policy.toString());
+                } catch (Exception e) {
+                    entry.put("policyDisplay", null);
+                }
+
+                result.add(entry);
+            }
+
+            return Response.ok(result, MediaType.APPLICATION_JSON).build();
+        } catch (Exception e) {
+            logger.error("[RolePolicies] Error listing role policies", e);
+            return Response.serverError()
+                    .entity("Failed to list role policies: " + e.getMessage()).build();
+        }
+    }
+
     // Helper: build sign settings for realm policy (same as ConstructSignSettings in TideAdminRealmResource)
     private SignRequestSettingsMidgard constructRealmPolicySignSettings(MultivaluedHashMap<String, String> config, String vrk) {
         int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
@@ -2112,6 +2381,125 @@ public class IGARealmResource {
         settings.Threshold_N = max;
 
         return settings;
+    }
+
+    /**
+     * Signs IDP settings including all client web origins.
+     * Duplicated from VendorResource.SignIdpSettings in tidecloak-idp-extensions.
+     */
+    private void signIdpSettings(IdentityProviderModel idp, ComponentModel componentModel) {
+        try {
+            MultivaluedHashMap<String, String> config = componentModel.getConfig();
+            ObjectMapper objectMapper = new ObjectMapper();
+            String currentSecretKeys = config.getFirst("clientSecret");
+            SecretKeys secretKeys = objectMapper.readValue(currentSecretKeys, SecretKeys.class);
+
+            if (secretKeys.activeVrk == null || secretKeys.activeVrk.trim().isEmpty()) {
+                logger.warn("Unable to sign settings, no active license for realm " + realm.getName());
+                return;
+            }
+
+            SignRequestSettingsMidgard settings = constructRealmPolicySignSettings(config, secretKeys.activeVrk);
+
+            boolean isBackupOn = idp.getConfig().getOrDefault("backupOn", "false").equalsIgnoreCase("true");
+            VendorSettings vendorSettings = new VendorSettings(realm.isRegistrationAllowed(), isBackupOn, idp.getConfig().get("ImageURL"), idp.getConfig().get("LogoURL"));
+            String vendorSettingsString = objectMapper.writeValueAsString(vendorSettings);
+
+            String encodedRealmName = java.net.URLEncoder.encode(realm.getName(), StandardCharsets.UTF_8);
+            String authServerUrl = session.getContext().getAuthServerUrl().toString();
+            authServerUrl = authServerUrl.endsWith("/") ? authServerUrl : authServerUrl + "/";
+
+            String loginEndpoint = authServerUrl + "realms/" + encodedRealmName + "/broker/tide/endpoint";
+            String linkTideAccEndpoint = authServerUrl + "realms/" + encodedRealmName + "/login-actions/required-action";
+            String changeSetEndpoint = idp.getConfig().get("changeSetEndpoint");
+            String customAdminUIDomain = idp.getConfig().get("CustomAdminUIDomain");
+
+            List<String> urls = new ArrayList<>();
+            urls.add(loginEndpoint);
+            urls.add(linkTideAccEndpoint);
+            urls.add(changeSetEndpoint);
+            if (customAdminUIDomain != null) {
+                urls.add(customAdminUIDomain);
+            }
+
+            // Collect all client web origins
+            record ClientOrigins(String clientId, List<String> origins) {}
+            List<ClientOrigins> clientorigins;
+            try (java.util.stream.Stream<ClientModel> s = realm.getClientsStream()) {
+                clientorigins = s
+                        .map(c -> new ClientOrigins(c.getClientId(), getAllWebOriginsForClient(c)))
+                        .collect(Collectors.toList());
+            }
+
+            List<String> clientOriginsToSend = new ArrayList<>();
+            for (ClientOrigins co : clientorigins) {
+                clientOriginsToSend.addAll(co.origins());
+            }
+
+            String clientJsonUrls = objectMapper.writeValueAsString(clientOriginsToSend);
+            String jsonUrls = objectMapper.writeValueAsString(urls);
+            String draft = jsonUrls + "|" + clientJsonUrls + "|" + vendorSettingsString;
+
+            ModelRequest req = ModelRequest.New("TidecloakUpdateSettings", "1", "VRK:1", draft.getBytes(StandardCharsets.UTF_8));
+            req.SetAuthorization(Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
+            req.SetAuthorizer(jakarta.xml.bind.DatatypeConverter.parseHexBinary(config.getFirst("gVRK")));
+            req.SetAuthorizerCertificate(Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
+            SignatureResponse response = Midgard.SignModel(settings, req);
+
+            idp.getConfig().put("loginURLSig", response.Signatures[0]);
+            idp.getConfig().put("linkTideURLSig", response.Signatures[1]);
+            idp.getConfig().put("changeSetURLSig", response.Signatures[2]);
+            if (customAdminUIDomain != null) {
+                idp.getConfig().put("customAdminUIDomainSig", response.Signatures[3]);
+            }
+
+            int urlIndex = 0;
+            for (ClientOrigins co : clientorigins) {
+                String clientId = co.clientId();
+                for (String origin : co.origins()) {
+                    idp.getConfig().put("clientAuth:" + clientId + origin, response.Signatures[urlIndex + urls.size()]);
+                    urlIndex++;
+                }
+            }
+
+            idp.getConfig().put("settingsSig", response.Signatures[response.Signatures.length - 1]);
+            session.identityProviders().update(idp);
+
+        } catch (Exception e) {
+            throw new RuntimeException("Unable to sign Identity provider settings: " + e.getMessage(), e);
+        }
+    }
+
+    private static List<String> getAllWebOriginsForClient(ClientModel client) {
+        Set<String> origins = new LinkedHashSet<>();
+        for (String raw : client.getWebOrigins()) {
+            String o = extractOrigin(raw);
+            if (o != null) origins.add(o);
+        }
+        if (client.getRootUrl() != null) { String o = extractOrigin(client.getRootUrl()); if (o != null) origins.add(o); }
+        if (client.getBaseUrl() != null) { String o = extractOrigin(client.getBaseUrl()); if (o != null) origins.add(o); }
+        if (client.getManagementUrl() != null) { String o = extractOrigin(client.getManagementUrl()); if (o != null) origins.add(o); }
+        for (String redirect : client.getRedirectUris()) {
+            String o = extractOrigin(redirect);
+            if (o != null) origins.add(o);
+        }
+        return new ArrayList<>(origins);
+    }
+
+    private static String extractOrigin(String uriStr) {
+        if (uriStr == null) return null;
+        uriStr = uriStr.trim();
+        if (uriStr.equals("+")) return null;
+        try {
+            java.net.URI u = new java.net.URI(uriStr);
+            String scheme = u.getScheme();
+            String host = u.getHost();
+            int port = u.getPort();
+            if (scheme == null || host == null) return null;
+            return (port == -1) ? scheme + "://" + host : scheme + "://" + host + ":" + port;
+        } catch (java.net.URISyntaxException e) {
+            return null;
+        }
     }
 
     @POST
@@ -2166,6 +2554,36 @@ public class IGARealmResource {
             }
         }
 
+        // When firstAdmin authorizer, only allow signing one tide-realm-admin at a time
+        ComponentModel tideComponent = realm.getComponentsStream()
+                .filter(x -> x.getProviderId().equalsIgnoreCase(org.tidecloak.shared.Constants.TIDE_VENDOR_KEY))
+                .findFirst()
+                .orElse(null);
+        if (tideComponent != null && changeSets.size() > 1) {
+            List<AuthorizerEntity> realmAuthorizers = em.createNamedQuery("getAuthorizerByProviderIdAndTypes", AuthorizerEntity.class)
+                    .setParameter("ID", tideComponent.getId())
+                    .setParameter("types", List.of("firstAdmin", "multiAdmin"))
+                    .getResultList();
+            if (!realmAuthorizers.isEmpty() && "firstAdmin".equals(realmAuthorizers.get(0).getType())) {
+                RoleModel tideRealmAdminRole = realm.getClientByClientId(org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
+                        .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+                if (tideRealmAdminRole != null) {
+                    long authorityCount = changeSets.stream()
+                            .filter(cs -> cs.getType() == ChangeSetType.USER_ROLE)
+                            .filter(cs -> {
+                                List<?> drafts = BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, cs.getType(), cs.getChangeSetId());
+                                return drafts.stream().anyMatch(d ->
+                                        d instanceof TideUserRoleMappingDraftEntity urm
+                                                && urm.getRoleId().equals(tideRealmAdminRole.getId()));
+                            })
+                            .count();
+                    if (authorityCount > 1) {
+                        throw new BadRequestException("As firstAdmin, you can only sign one tide-realm-admin assignment at a time");
+                    }
+                }
+            }
+        }
+
         List<Map<String, Object>> signedList = new ArrayList<>();
         ObjectMapper objectMapper = new ObjectMapper();
 
@@ -2213,12 +2631,24 @@ public class IGARealmResource {
 
                 ActionType actionType = allDelete ? ActionType.DELETE : ActionType.CREATE;
 
+                ChangeSetRequest bulkReq = new ChangeSetRequest(
+                        changeSet.getChangesetRequestId(),
+                        changeSet.getChangesetType(),
+                        actionType
+                );
+                // Carry over policyRoleId and dynamicData from the original request
+                // so MultiAdmin.signWithAuthorizer() can resolve and set the signed policy
+                String policyRoleId = changeSets.get(0).getPolicyRoleId();
+                if (policyRoleId != null) {
+                    bulkReq.setPolicyRoleId(policyRoleId);
+                }
+                List<String> dynamicData = changeSets.get(0).getDynamicData();
+                if (dynamicData != null && !dynamicData.isEmpty()) {
+                    bulkReq.setDynamicData(dynamicData);
+                }
+
                 Response singleResp = signer.sign(
-                        new ChangeSetRequest(
-                                changeSet.getChangesetRequestId(),
-                                changeSet.getChangesetType(),
-                                actionType
-                        ),
+                        bulkReq,
                         em,
                         session,
                         realm,
@@ -2308,6 +2738,12 @@ public class IGARealmResource {
                 ))
                 .values());
 
+        // Store batch changeSetIds so post-commit recalculation can skip batch-mates
+        List<String> batchIds = filtered.stream()
+                .map(ChangeSetRequest::getChangeSetId)
+                .collect(Collectors.toList());
+        session.setAttribute("batchAuthorityIds", batchIds);
+
         for (ChangeSetRequest changeSet: filtered){
             List<?> draftRecordEntities= BasicIGAUtils.fetchDraftRecordEntityByRequestId(em, changeSet.getType(), changeSet.getChangeSetId());
             if (draftRecordEntities ==  null || draftRecordEntities.isEmpty()) {
@@ -2321,6 +2757,18 @@ public class IGARealmResource {
             }
 
         }
+
+        // Commit deferred policy changes AFTER all UserContext models have been signed.
+        // This prevents the ORK threshold from changing mid-batch.
+        @SuppressWarnings("unchecked")
+        List<Object[]> deferredPolicyCommits = (List<Object[]>) session.getAttribute("deferredPolicyCommits", List.class);
+        if (deferredPolicyCommits != null) {
+            for (Object[] entry : deferredPolicyCommits) {
+                org.tidecloak.base.iga.TideRequests.TideRoleRequests.commitRolePolicy(
+                        session, (String) entry[0], entry[1], (String) entry[2]);
+            }
+        }
+
         return Response.ok("Change sets approved and committed").build();
     }
 
@@ -2487,6 +2935,60 @@ public class IGARealmResource {
                 "accessProof", committed.getAccessProof() != null ? committed.getAccessProof() : "",
                 "accessProofSig", committed.getAccessProofSig() != null ? committed.getAccessProofSig() : ""
         )).build();
+    }
+
+    /**
+     * Enriches RequestedChanges with requestedBy info from the ChangesetRequestEntity.
+     */
+    private void enrichWithRequestedBy(EntityManager em, List<? extends RequestedChanges> changes) {
+        for (RequestedChanges change : changes) {
+            if (change.getDraftRecordId() != null) {
+                try {
+                    List<ChangesetRequestEntity> entities = em.createNamedQuery("getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                            .setParameter("changesetRequestId", change.getDraftRecordId())
+                            .getResultList();
+                    if (!entities.isEmpty()) {
+                        ChangesetRequestEntity cre = entities.get(0);
+                        change.setRequestedBy(cre.getRequestedBy());
+                        change.setRequestedByUsername(cre.getRequestedByUsername());
+
+                        // Approval / rejection summary
+                        List<AdminAuthorizationEntity> auths = cre.getAdminAuthorizations();
+                        if (auths != null) {
+                            List<String> approvers = new ArrayList<>();
+                            List<String> deniers = new ArrayList<>();
+                            for (AdminAuthorizationEntity auth : auths) {
+                                String name = auth.getUsername() != null ? auth.getUsername() : auth.getUserId();
+                                if (auth.getIsApproval()) {
+                                    approvers.add(name);
+                                } else {
+                                    deniers.add(name);
+                                }
+                            }
+                            change.setApprovalCount(approvers.size());
+                            change.setRejectionCount(deniers.size());
+                            change.setApprovedBy(approvers);
+                            change.setDeniedBy(deniers);
+                        }
+
+                        // Comment count
+                        try {
+                            Long commentCount = em.createQuery(
+                                    "SELECT COUNT(c) FROM ChangesetCommentEntity c WHERE c.changesetRequestId = :id", Long.class)
+                                    .setParameter("id", change.getDraftRecordId())
+                                    .getSingleResult();
+                            change.setCommentCount(commentCount != null ? commentCount.intValue() : 0);
+                        } catch (Exception ignored2) {
+                            // Best effort
+                        }
+                    } else {
+                        logger.warnf("enrichWithRequestedBy: No ChangesetRequestEntity found for draftId=%s", change.getDraftRecordId());
+                    }
+                } catch (Exception ignored) {
+                    // Best effort
+                }
+            }
+        }
     }
 
     /**

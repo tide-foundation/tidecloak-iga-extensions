@@ -38,6 +38,27 @@ public class RequestedChanges {
     @JsonProperty("deleteStatus")
     protected DraftStatus deleteStatus;
 
+    @JsonProperty("requestedBy")
+    protected String requestedBy;
+
+    @JsonProperty("requestedByUsername")
+    protected String requestedByUsername;
+
+    @JsonProperty("approvalCount")
+    protected int approvalCount;
+
+    @JsonProperty("rejectionCount")
+    protected int rejectionCount;
+
+    @JsonProperty("approvedBy")
+    protected List<String> approvedBy;
+
+    @JsonProperty("deniedBy")
+    protected List<String> deniedBy;
+
+    @JsonProperty("commentCount")
+    protected int commentCount;
+
     public RequestedChanges(String action, ChangeSetType changeSetType, RequestType requestType, String clientId, String realmId, ActionType actionType, String draftRecordId, List<RequestChangesUserRecord> userRecord, DraftStatus status, DraftStatus deleteStatus) {
         this.action = action;
         this.requestType = requestType;
@@ -93,5 +114,20 @@ public class RequestedChanges {
         this.deleteStatus = draftStatus;
     }
 
+    public String getRequestedBy() { return requestedBy; }
+    public void setRequestedBy(String requestedBy) { this.requestedBy = requestedBy; }
+    public String getRequestedByUsername() { return requestedByUsername; }
+    public void setRequestedByUsername(String requestedByUsername) { this.requestedByUsername = requestedByUsername; }
+
+    public int getApprovalCount() { return approvalCount; }
+    public void setApprovalCount(int approvalCount) { this.approvalCount = approvalCount; }
+    public int getRejectionCount() { return rejectionCount; }
+    public void setRejectionCount(int rejectionCount) { this.rejectionCount = rejectionCount; }
+    public List<String> getApprovedBy() { return approvedBy; }
+    public void setApprovedBy(List<String> approvedBy) { this.approvedBy = approvedBy; }
+    public List<String> getDeniedBy() { return deniedBy; }
+    public void setDeniedBy(List<String> deniedBy) { this.deniedBy = deniedBy; }
+    public int getCommentCount() { return commentCount; }
+    public void setCommentCount(int commentCount) { this.commentCount = commentCount; }
 
 }

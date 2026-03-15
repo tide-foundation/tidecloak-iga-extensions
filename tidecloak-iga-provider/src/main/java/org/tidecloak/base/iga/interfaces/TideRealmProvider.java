@@ -14,6 +14,7 @@ import org.keycloak.models.utils.RepresentationToModel;
 import org.keycloak.representations.idm.ProtocolMapperRepresentation;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
+import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
@@ -56,6 +57,7 @@ public class TideRealmProvider extends JpaRealmProvider {
 
     @Override
     public ClientModel addClient(RealmModel realm, String clientId) {
+        BasicIGAUtils.stampRequestingAdmin(session);
         try {
             String igaAttribute = realm.getAttribute("isIGAEnabled");
             boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
@@ -108,6 +110,7 @@ public class TideRealmProvider extends JpaRealmProvider {
 
     @Override
     public boolean removeRole(RoleModel role) {
+        BasicIGAUtils.stampRequestingAdmin(session);
         try {
             List<UserModel> users = session.users().searchForUserStream(session.getContext().getRealm(), new HashMap<>()).filter(u -> u.hasRole(role)).toList();
             if(users.isEmpty()){
@@ -181,6 +184,7 @@ public class TideRealmProvider extends JpaRealmProvider {
 
     @Override
     public void moveGroup(RealmModel realm, GroupModel group, GroupModel toParent) {
+        BasicIGAUtils.stampRequestingAdmin(session);
         // Don't draft for master realm or IGA-disabled realms
         String igaAttribute = realm.getAttribute("isIGAEnabled");
         boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
