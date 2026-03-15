@@ -688,6 +688,75 @@ public class IGARealmResource {
         }
     }
 
+    @PUT
+    @Path("change-set/{id}/comments/{commentId}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response updateChangeSetComment(@PathParam("id") String changesetRequestId, @PathParam("commentId") String commentId, Map<String, String> body) {
+        auth.users().requireManage();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        try {
+            String commentText = body.get("comment");
+            if (commentText == null || commentText.isBlank()) {
+                return Response.status(Response.Status.BAD_REQUEST).entity("Comment text is required").build();
+            }
+
+            ChangesetCommentEntity comment = em.find(ChangesetCommentEntity.class, commentId);
+            if (comment == null) {
+                return Response.status(Response.Status.NOT_FOUND).entity("Comment not found").build();
+            }
+
+            UserModel adminUser = auth.adminAuth().getUser();
+            if (!comment.getUserId().equals(adminUser.getId())) {
+                return Response.status(Response.Status.FORBIDDEN).entity("You can only edit your own comments").build();
+            }
+
+            comment.setComment(commentText);
+            comment.setTimestamp(System.currentTimeMillis() / 1000);
+            em.merge(comment);
+            em.flush();
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("id", comment.getId());
+            result.put("userId", comment.getUserId());
+            result.put("username", comment.getUsername());
+            result.put("comment", comment.getComment());
+            result.put("timestamp", comment.getTimestamp());
+
+            return Response.ok(result).build();
+        } catch (Exception e) {
+            return Response.serverError().entity("Error updating comment: " + e.getMessage()).build();
+        }
+    }
+
+    @DELETE
+    @Path("change-set/{id}/comments/{commentId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response deleteChangeSetComment(@PathParam("id") String changesetRequestId, @PathParam("commentId") String commentId) {
+        auth.users().requireManage();
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        try {
+            ChangesetCommentEntity comment = em.find(ChangesetCommentEntity.class, commentId);
+            if (comment == null) {
+                return Response.status(Response.Status.NOT_FOUND).entity("Comment not found").build();
+            }
+
+            UserModel adminUser = auth.adminAuth().getUser();
+            if (!comment.getUserId().equals(adminUser.getId())) {
+                return Response.status(Response.Status.FORBIDDEN).entity("You can only delete your own comments").build();
+            }
+
+            em.remove(comment);
+            em.flush();
+
+            return Response.ok(Map.of("deleted", true)).build();
+        } catch (Exception e) {
+            return Response.serverError().entity("Error deleting comment: " + e.getMessage()).build();
+        }
+    }
+
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Path("change-set/commit")
