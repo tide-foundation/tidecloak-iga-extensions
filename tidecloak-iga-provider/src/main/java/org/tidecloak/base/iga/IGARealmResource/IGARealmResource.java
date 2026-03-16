@@ -99,6 +99,12 @@ public class IGARealmResource {
 
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
             auth.realm().requireManageRealm();
+
+            // Block disabling IGA directly — must go through the offboarding approval workflow
+            if (!isEnabled && BasicIGAUtils.isIGAEnabled(realm)) {
+                return buildResponse(400, "IGA cannot be disabled directly. Please use the offboarding workflow to disable IGA through the approval process.");
+            }
+
             session.getContext().getRealm().setAttribute("isIGAEnabled", isEnabled);
             logger.info("IGA has been toggled to : " + isEnabled);
 
@@ -482,6 +488,7 @@ public class IGARealmResource {
         }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> changes = new ArrayList<>(processUserRoleMappings(em, realm));
+        changes.addAll(processUserDeletionDrafts(em, realm));
         enrichWithRequestedBy(em, changes);
         return Response.ok(changes).build();
     }
@@ -511,6 +518,7 @@ public class IGARealmResource {
         }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<RequestedChanges> changes = new ArrayList<>(processClientDraftRecords(em, realm));
+        changes.addAll(processClientDeletionDrafts(em, realm));
         enrichWithRequestedBy(em, changes);
         return Response.ok(changes).build();
     }
@@ -528,6 +536,7 @@ public class IGARealmResource {
         changes.addAll(processGroupRoleMappings(em, realm));
         changes.addAll(processGroupMemberships(em, realm));
         changes.addAll(processGroupMoves(em, realm));
+        changes.addAll(processGroupDeletionDrafts(em, realm));
         enrichWithRequestedBy(em, changes);
         return Response.ok(changes).build();
     }
@@ -547,12 +556,15 @@ public class IGARealmResource {
             return Response.ok(empty).build();
         }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        int users = processUserRoleMappings(em, realm).size();
+        int users = processUserRoleMappings(em, realm).size()
+                + processUserDeletionDrafts(em, realm).size();
         int roles = processRoleMappings(em, realm).size() + processCompositeRoleMappings(em, realm).size();
-        int clients = processClientDraftRecords(em, realm).size();
+        int clients = processClientDraftRecords(em, realm).size()
+                + processClientDeletionDrafts(em, realm).size();
         int groups = processGroupRoleMappings(em, realm).size()
                 + processGroupMemberships(em, realm).size()
-                + processGroupMoves(em, realm).size();
+                + processGroupMoves(em, realm).size()
+                + processGroupDeletionDrafts(em, realm).size();
 
         Map<String, Integer> counts = new LinkedHashMap<>();
         counts.put("users", users);
@@ -579,6 +591,7 @@ public class IGARealmResource {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
         List<RequestedChanges> users = new ArrayList<>(processUserRoleMappings(em, realm));
+        users.addAll(processUserDeletionDrafts(em, realm));
         enrichWithRequestedBy(em, users);
 
         List<RequestedChanges> roles = new ArrayList<>(processRoleMappings(em, realm));
@@ -586,12 +599,14 @@ public class IGARealmResource {
         enrichWithRequestedBy(em, roles);
 
         List<RequestedChanges> clients = new ArrayList<>(processClientDraftRecords(em, realm));
+        clients.addAll(processClientDeletionDrafts(em, realm));
         enrichWithRequestedBy(em, clients);
 
         List<RequestedChanges> groups = new ArrayList<>();
         groups.addAll(processGroupRoleMappings(em, realm));
         groups.addAll(processGroupMemberships(em, realm));
         groups.addAll(processGroupMoves(em, realm));
+        groups.addAll(processGroupDeletionDrafts(em, realm));
         enrichWithRequestedBy(em, groups);
 
         Map<String, List<RequestedChanges>> result = new LinkedHashMap<>();
@@ -917,7 +932,11 @@ public class IGARealmResource {
         if (!proofs.isEmpty()) {
             proofs.forEach(p -> {
                 TideClientDraftEntity tideClientDraftEntity = (TideClientDraftEntity) BasicIGAUtils.fetchDraftRecordEntity(em, p.getChangesetType(), p.getChangeRequestKey().getMappingId());
+                if (tideClientDraftEntity == null) return;
+                // Skip delete drafts — they are handled by processClientDeletionDrafts
+                if (tideClientDraftEntity.getDeleteStatus() != null && tideClientDraftEntity.getDeleteStatus() != DraftStatus.NULL && tideClientDraftEntity.getDeleteStatus() != DraftStatus.ACTIVE) return;
                 ClientModel client = realm.getClientById(p.getClientId());
+                if (client == null) return;
                 RequestedChanges requestChange = new RequestedChanges("New Client Created",ChangeSetType.CLIENT, RequestType.CLIENT, client.getClientId(), realm.getName(), ActionType.CREATE, p.getChangeRequestKey().getChangeRequestId(), new ArrayList<>(), tideClientDraftEntity.getDraftStatus(), DraftStatus.NULL);
                 requestChange.getUserRecord().add(new RequestChangesUserRecord("Default User Context for all USERS", p.getId(), client.getClientId(), p.getProofDraft()));
                 changes.add(requestChange);
@@ -925,6 +944,173 @@ public class IGARealmResource {
         }
         return changes;
     }
+
+    public static List<RequestedChanges> processClientDeletionDrafts(EntityManager em, RealmModel realm) {
+        List<TideClientDraftEntity> mappings = em.createNamedQuery("getClientDeletionDraftsByRealm", TideClientDraftEntity.class)
+                .setParameter("activeStatus", DraftStatus.ACTIVE)
+                .setParameter("nullStatus", DraftStatus.NULL)
+                .setParameter("realmId", realm.getId())
+                .getResultList();
+
+        List<RequestedChanges> changes = new ArrayList<>();
+        for (TideClientDraftEntity c : mappings) {
+            ClientModel client = realm.getClientById(c.getClient().getId());
+            if (client == null) continue;
+
+            List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsByMappingIdAndType", AccessProofDetailEntity.class)
+                    .setParameter("mappingId", c.getId())
+                    .setParameter("changesetType", ChangeSetType.CLIENT)
+                    .getResultList();
+
+            // Use the proof's changeRequestId if available (entity's may be stale after combineChangeRequests)
+            String changeRequestId = c.getChangeRequestId();
+            if (!proofs.isEmpty()) {
+                String proofRequestId = proofs.get(0).getChangeRequestKey().getChangeRequestId();
+                if (!proofRequestId.equals(changeRequestId)) {
+                    // Sync the entity's changeRequestId to match the proofs so approval flow can find it
+                    c.setChangeRequestId(proofRequestId);
+                    changeRequestId = proofRequestId;
+                    em.flush();
+                }
+            }
+
+            // Ensure a ChangesetRequestEntity exists for the deletion workflow
+            ChangesetRequestEntity cre = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeRequestId, ChangeSetType.CLIENT));
+            if (cre == null) {
+                cre = new ChangesetRequestEntity();
+                cre.setChangesetRequestId(changeRequestId);
+                cre.setChangesetType(ChangeSetType.CLIENT);
+                em.persist(cre);
+                em.flush();
+            }
+
+            // Pass ACTIVE as the status so the UI uses deleteStatus for display
+            RequestedChanges requestChange = new RequestedChanges(
+                    "Deleting Client", ChangeSetType.CLIENT, RequestType.CLIENT,
+                    client.getClientId(), realm.getName(), ActionType.DELETE,
+                    changeRequestId, new ArrayList<>(),
+                    DraftStatus.ACTIVE, c.getDeleteStatus());
+
+            proofs.forEach(p -> {
+                em.lock(p, LockModeType.PESSIMISTIC_WRITE);
+                String username = p.getUser() != null ? p.getUser().getUsername() : "All Users";
+                requestChange.getUserRecord().add(new RequestChangesUserRecord(
+                        username, p.getId(), client.getClientId(), p.getProofDraft()));
+            });
+            changes.add(requestChange);
+        }
+        return changes;
+    }
+
+    public static List<RequestedChanges> processUserDeletionDrafts(EntityManager em, RealmModel realm) {
+        List<TideUserDraftEntity> mappings = em.createNamedQuery("getUserDeletionDraftsByRealm", TideUserDraftEntity.class)
+                .setParameter("activeStatus", DraftStatus.ACTIVE)
+                .setParameter("nullStatus", DraftStatus.NULL)
+                .setParameter("realmId", realm.getId())
+                .getResultList();
+
+        List<RequestedChanges> changes = new ArrayList<>();
+        for (TideUserDraftEntity u : mappings) {
+            UserEntity userEntity = u.getUser();
+            if (userEntity == null) continue;
+            String username = userEntity.getUsername();
+
+            List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsByMappingIdAndType", AccessProofDetailEntity.class)
+                    .setParameter("mappingId", u.getId())
+                    .setParameter("changesetType", ChangeSetType.USER)
+                    .getResultList();
+
+            String changeRequestId = u.getChangeRequestId();
+            if (!proofs.isEmpty()) {
+                String proofRequestId = proofs.get(0).getChangeRequestKey().getChangeRequestId();
+                if (!proofRequestId.equals(changeRequestId)) {
+                    u.setChangeRequestId(proofRequestId);
+                    changeRequestId = proofRequestId;
+                    em.flush();
+                }
+            }
+
+            ChangesetRequestEntity cre = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeRequestId, ChangeSetType.USER));
+            if (cre == null) {
+                cre = new ChangesetRequestEntity();
+                cre.setChangesetRequestId(changeRequestId);
+                cre.setChangesetType(ChangeSetType.USER);
+                em.persist(cre);
+                em.flush();
+            }
+
+            // Pass ACTIVE as the status so the UI uses deleteStatus for display
+            RequestedChanges requestChange = new RequestedChanges(
+                    "Deleting User: " + username, ChangeSetType.USER, RequestType.USER,
+                    null, realm.getName(), ActionType.DELETE,
+                    changeRequestId, new ArrayList<>(),
+                    DraftStatus.ACTIVE, u.getDeleteStatus());
+
+            proofs.forEach(p -> {
+                em.lock(p, LockModeType.PESSIMISTIC_WRITE);
+                requestChange.getUserRecord().add(new RequestChangesUserRecord(
+                        username, p.getId(),
+                        realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
+            });
+            changes.add(requestChange);
+        }
+        return changes;
+    }
+
+    public static List<RequestedChanges> processGroupDeletionDrafts(EntityManager em, RealmModel realm) {
+        List<TideGroupDraftEntity> mappings = em.createNamedQuery("getGroupDeletionDraftsByRealm", TideGroupDraftEntity.class)
+                .setParameter("actionType", ActionType.DELETE)
+                .setParameter("activeStatus", DraftStatus.ACTIVE)
+                .setParameter("realmId", realm.getId())
+                .getResultList();
+
+        List<RequestedChanges> changes = new ArrayList<>();
+        for (TideGroupDraftEntity g : mappings) {
+            GroupModel group = realm.getGroupById(g.getId());
+            String groupName = group != null ? group.getName() : g.getName();
+
+            List<AccessProofDetailEntity> proofs = em.createNamedQuery("getProofDetailsByMappingIdAndType", AccessProofDetailEntity.class)
+                    .setParameter("mappingId", g.getId())
+                    .setParameter("changesetType", ChangeSetType.GROUP)
+                    .getResultList();
+
+            String changeRequestId = g.getChangeRequestId();
+            if (!proofs.isEmpty()) {
+                String proofRequestId = proofs.get(0).getChangeRequestKey().getChangeRequestId();
+                if (!proofRequestId.equals(changeRequestId)) {
+                    g.setChangeRequestId(proofRequestId);
+                    changeRequestId = proofRequestId;
+                    em.flush();
+                }
+            }
+
+            ChangesetRequestEntity cre = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(changeRequestId, ChangeSetType.GROUP));
+            if (cre == null) {
+                cre = new ChangesetRequestEntity();
+                cre.setChangesetRequestId(changeRequestId);
+                cre.setChangesetType(ChangeSetType.GROUP);
+                em.persist(cre);
+                em.flush();
+            }
+
+            GroupChangeRequest requestChange = new GroupChangeRequest(
+                    groupName, null, null, "Deleting Group",
+                    ChangeSetType.GROUP, RequestType.GROUP, null, realm.getName(),
+                    ActionType.DELETE, changeRequestId, new ArrayList<>(),
+                    g.getDraftStatus());
+
+            proofs.forEach(p -> {
+                em.lock(p, LockModeType.PESSIMISTIC_WRITE);
+                String username = p.getUser() != null ? p.getUser().getUsername() : "All Users";
+                requestChange.getUserRecord().add(new RequestChangesUserRecord(
+                        username, p.getId(),
+                        realm.getClientById(p.getClientId()).getClientId(), p.getProofDraft()));
+            });
+            changes.add(requestChange);
+        }
+        return changes;
+    }
+
     public static List<RequestedChanges> processUserRoleMappings(EntityManager em, RealmModel realm) {
         // Get all pending changes, records that do not have an active delete status or active draft status
         List<TideUserRoleMappingDraftEntity> mappings = em.createNamedQuery("getAllPendingUserRoleMappingsByRealm", TideUserRoleMappingDraftEntity.class)

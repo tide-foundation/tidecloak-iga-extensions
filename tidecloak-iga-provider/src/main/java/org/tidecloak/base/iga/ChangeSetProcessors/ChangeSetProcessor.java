@@ -352,7 +352,14 @@ public interface ChangeSetProcessor<T> {
         List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, change.getChangeSetId(), change.getType());
 
         if (userContextDrafts.isEmpty()) {
-            throw new Exception("No user context drafts found for this change set id, " + change.getChangeSetId());
+            // No affected users — run the callback directly (e.g. deleting a role with no users)
+            commitCallback.run();
+            ChangesetRequestEntity cre = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(change.getChangeSetId(), change.getType()));
+            if (cre != null) {
+                cre.getAdminAuthorizations().clear();
+                em.flush();
+            }
+            return;
         }
 
         if(BasicIGAUtils.isIGAEnabled(session.getContext().getRealm()) && componentModel == null){

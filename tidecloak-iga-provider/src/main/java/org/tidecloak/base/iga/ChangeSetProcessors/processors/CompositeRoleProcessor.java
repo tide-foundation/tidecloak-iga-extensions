@@ -500,6 +500,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
     private String generateRealmDefaultUserContext(KeycloakSession session, RealmModel realm, ClientModel client, RoleModel childRole, EntityManager em, Boolean isDelete) throws Exception {
         List<String> clients = List.of(Constants.ADMIN_CLI_CLIENT_ID, Constants.ADMIN_CONSOLE_CLIENT_ID);
         String id = KeycloakModelUtils.generateId();
+        session.setAttribute("skipIGADraftingForRemove", Boolean.TRUE);
         UserModel dummyUser = session.users().addUser(realm, id, id, true, false);
 
         AccessToken accessToken = ChangeSetProcessor.super.generateAccessToken(session, realm, client, dummyUser);
@@ -516,6 +517,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
         if(clients.contains(client.getClientId())){
             accessToken.subject(null);
             session.users().removeUser(realm, dummyUser);
+            session.removeAttribute("skipIGADraftingForRemove");
             return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username"), client.isFullScopeAllowed());
         } else {
             if(isDelete){
@@ -532,6 +534,7 @@ public class CompositeRoleProcessor implements ChangeSetProcessor<TideCompositeR
             }
             accessToken.subject(null);
             session.users().removeUser(realm, dummyUser);
+            session.removeAttribute("skipIGADraftingForRemove");
             return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username"), client.isFullScopeAllowed());
         }
     }

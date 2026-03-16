@@ -79,4 +79,19 @@ public class ClientUtils {
 
         return clientList.stream().distinct().collect(Collectors.toList());
     }
+
+    /**
+     * Returns all full-scope clients in the realm (excluding broker service client).
+     * Used for operations like user deletion that affect all clients.
+     */
+    public static List<ClientModel> getFullScopeClients(KeycloakSession session, RealmModel realm, EntityManager em) {
+        List<ClientModel> clientList = session.clients().getClientsStream(realm)
+                .map(client -> new TideClientAdapter(realm, em, session, em.find(ClientEntity.class, client.getId())))
+                .filter(TideClientAdapter::isFullScopeAllowed)
+                .collect(Collectors.toList());
+
+        clientList.removeIf(r -> r.getClientId().equalsIgnoreCase(org.keycloak.models.Constants.BROKER_SERVICE_CLIENT_ID));
+
+        return clientList.stream().distinct().collect(Collectors.toList());
+    }
 }

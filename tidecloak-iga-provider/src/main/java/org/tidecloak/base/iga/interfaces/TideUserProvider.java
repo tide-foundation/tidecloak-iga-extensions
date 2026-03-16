@@ -8,9 +8,15 @@ import org.keycloak.models.jpa.JpaUserProvider;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.shared.enums.ActionType;
+import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
+import org.tidecloak.shared.enums.WorkflowType;
+import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.jpa.entities.drafting.TideUserDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 
@@ -19,6 +25,7 @@ import java.util.stream.Stream;
 
 public class TideUserProvider extends JpaUserProvider {
     private final KeycloakSession session;
+    private final ChangeSetProcessorFactory changeSetProcessorFactory = ChangeSetProcessorFactoryProvider.getFactory();
 
     public TideUserProvider(KeycloakSession session, EntityManager em) {
         super(session, em);
@@ -64,17 +71,83 @@ public class TideUserProvider extends JpaUserProvider {
 
     @Override
     public boolean removeUser(RealmModel realm, UserModel user) {
+        System.out.println("[TideUserProvider.removeUser] CALLED for user=" + user.getUsername() + " realm=" + realm.getName());
+        BasicIGAUtils.stampRequestingAdmin(session);
         UserEntity userEntity = em.find(UserEntity.class, user.getId(), LockModeType.PESSIMISTIC_WRITE);
         if (userEntity == null) return false;
-        removeUser(userEntity);
-        return true;
+
+        String igaAttribute = realm.getAttribute("isIGAEnabled");
+        boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
+        RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+
+        // Skip IGA drafting for internal/dummy user removals (e.g. default user context generation)
+        Boolean skipIGA = session.getAttribute("skipIGADraftingForRemove", Boolean.class);
+        if (!isIGAEnabled || realm.equals(masterRealm) || Boolean.TRUE.equals(skipIGA)) {
+            directRemoveUser(userEntity);
+            return true;
+        }
+
+        try {
+            List<TideUserDraftEntity> userDrafts = em.createNamedQuery("getTideUserDraftEntity", TideUserDraftEntity.class)
+                    .setParameter("user", userEntity)
+                    .getResultList();
+
+            if (userDrafts.isEmpty()) {
+                // Create a draft entity for pre-existing users so deletion goes through IGA
+                TideUserDraftEntity newDraft = new TideUserDraftEntity();
+                newDraft.setId(KeycloakModelUtils.generateId());
+                newDraft.setChangeRequestId(KeycloakModelUtils.generateId());
+                newDraft.setUser(userEntity);
+                newDraft.setDraftStatus(DraftStatus.ACTIVE);
+                newDraft.setAction(ActionType.CREATE);
+                newDraft.setDeleteStatus(DraftStatus.DRAFT);
+                newDraft.setTimestamp(System.currentTimeMillis());
+                em.persist(newDraft);
+                em.flush();
+
+                WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.USER);
+                changeSetProcessorFactory.getProcessor(ChangeSetType.USER).executeWorkflow(session, newDraft, em, WorkflowType.REQUEST, params, null);
+                return true;
+            }
+
+            TideUserDraftEntity draft = userDrafts.get(0);
+
+            // Check if this is an approved deletion being committed
+            if (draft.getDeleteStatus() == DraftStatus.ACTIVE) {
+                em.remove(draft);
+                em.flush();
+                directRemoveUser(userEntity);
+                return true;
+            }
+
+            // Already has a pending delete draft
+            if (draft.getDeleteStatus() == DraftStatus.DRAFT || draft.getDeleteStatus() == DraftStatus.PENDING) {
+                return true;
+            }
+
+            // Create delete request
+            draft.setDeleteStatus(DraftStatus.DRAFT);
+            draft.setTimestamp(System.currentTimeMillis());
+            em.flush();
+
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.USER);
+            changeSetProcessorFactory.getProcessor(ChangeSetType.USER).executeWorkflow(session, draft, em, WorkflowType.REQUEST, params, null);
+            return true;
+        } catch (Exception e) {
+            System.err.println("[TideUserProvider.removeUser] ERROR during delete draft workflow: " + e.getMessage());
+            e.printStackTrace();
+            throw new RuntimeException(e);
+        }
     }
 
-    private void removeUser(UserEntity user) {
-        em.createNamedQuery("deleteProofByUser").setParameter("user", user).executeUpdate(); // Deletes final proof from UserClientAccessProofEntity
-        em.createNamedQuery("deleteAllDraftProofRecordsForUser").setParameter("user", user).executeUpdate(); // Deletes draft proof from AccessProofDetailEntity
-        em.createNamedQuery("deleteUserDrafts").setParameter("user", user).executeUpdate(); // Not implemented yet, user can be deleted. tideuserprovider
-        em.createNamedQuery("deleteUserRoleMappingDraftsByUser").setParameter("user", user).executeUpdate(); // Delete user role mapping draft records from TideUserRoleMappingDraftEntity
+    /**
+     * Directly removes a user and all associated records. Called after approval or when IGA is disabled.
+     */
+    public void directRemoveUser(UserEntity user) {
+        em.createNamedQuery("deleteProofByUser").setParameter("user", user).executeUpdate();
+        em.createNamedQuery("deleteAllDraftProofRecordsForUser").setParameter("user", user).executeUpdate();
+        em.createNamedQuery("deleteUserDrafts").setParameter("user", user).executeUpdate();
+        em.createNamedQuery("deleteUserRoleMappingDraftsByUser").setParameter("user", user).executeUpdate();
         em.createNamedQuery("deleteUserRoleMappingsByUser").setParameter("user", user).executeUpdate();
         em.createNamedQuery("deleteUserGroupMembershipsByUser").setParameter("user", user).executeUpdate();
         em.createNamedQuery("deleteUserConsentClientScopesByUser").setParameter("user", user).executeUpdate();

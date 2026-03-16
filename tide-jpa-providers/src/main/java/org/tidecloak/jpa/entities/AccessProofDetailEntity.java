@@ -85,6 +85,10 @@ import org.tidecloak.shared.enums.ChangeSetType;
         @NamedQuery(
                 name  = "DeleteAllAccessProofsByClient",
                 query = "DELETE FROM AccessProofDetailEntity r WHERE r.clientId = :clientId"
+        ),
+        @NamedQuery(
+                name  = "getProofDetailsByMappingIdAndType",
+                query = "SELECT a FROM AccessProofDetailEntity a WHERE a.changeRequestKey.mappingId = :mappingId AND a.changesetType = :changesetType ORDER BY a.createdTimestamp DESC"
         )
 })
 

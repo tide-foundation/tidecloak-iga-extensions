@@ -20,6 +20,7 @@ import org.tidecloak.jpa.entities.ChangesetRequestEntity;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.GroupUtils;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideGroupDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideGroupMoveDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
@@ -112,16 +113,6 @@ public class TideRealmProvider extends JpaRealmProvider {
     public boolean removeRole(RoleModel role) {
         BasicIGAUtils.stampRequestingAdmin(session);
         try {
-            List<UserModel> users = session.users().searchForUserStream(session.getContext().getRealm(), new HashMap<>()).filter(u -> u.hasRole(role)).toList();
-            if(users.isEmpty()){
-                em.createNamedQuery("DeleteAllCompositeRoleMappingsByRoleId")
-                        .setParameter("roleId", role.getId())
-                        .executeUpdate();
-                return super.removeRole(role);
-            }
-
-            // Deletion of roles need to be first approved
-            // Check if draft record already exists
             RoleEntity roleEntity = TideEntityUtils.toRoleEntity(role, em);
 
             String igaAttribute = session.getContext().getRealm().getAttribute("isIGAEnabled");
@@ -143,6 +134,7 @@ public class TideRealmProvider extends JpaRealmProvider {
                 return super.removeRole(role);
             }
 
+            // IGA is enabled — check if this is an approved deletion being committed
             List<TideRoleDraftEntity> draftsToBeRemoved = em.createNamedQuery("getRoleDraftByRoleEntityAndDeleteStatus", TideRoleDraftEntity.class)
                     .setParameter("role", roleEntity)
                     .setParameter("deleteStatus", DraftStatus.ACTIVE)
@@ -158,6 +150,7 @@ public class TideRealmProvider extends JpaRealmProvider {
                 return super.removeRole(role);
             }
 
+            // Create a draft change request for the deletion
             List<TideRoleDraftEntity> drafts = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                     .setParameter("role", roleEntity)
                     .getResultList();
@@ -178,8 +171,6 @@ public class TideRealmProvider extends JpaRealmProvider {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
-
-
     }
 
     @Override
@@ -218,6 +209,59 @@ public class TideRealmProvider extends JpaRealmProvider {
      */
     public void applyMoveGroup(RealmModel realm, GroupModel group, GroupModel toParent) {
         super.moveGroup(realm, group, toParent);
+    }
+
+    @Override
+    public boolean removeGroup(RealmModel realm, GroupModel group) {
+        BasicIGAUtils.stampRequestingAdmin(session);
+        if (group == null) return false;
+
+        String igaAttribute = realm.getAttribute("isIGAEnabled");
+        boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
+        RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+        if (!isIGAEnabled || realm.equals(masterRealm)) {
+            return super.removeGroup(realm, group);
+        }
+
+        try {
+            // Check if this is a committed deletion (approved draft with ACTIVE status)
+            TideGroupDraftEntity existingDraft = em.find(TideGroupDraftEntity.class, group.getId());
+            if (existingDraft != null && existingDraft.getAction() == ActionType.DELETE
+                    && existingDraft.getDraftStatus() == DraftStatus.ACTIVE) {
+                em.remove(existingDraft);
+                em.flush();
+                return super.removeGroup(realm, group);
+            }
+
+            // Create or update draft for deletion
+            TideGroupDraftEntity draftEntity;
+            if (existingDraft != null) {
+                draftEntity = existingDraft;
+            } else {
+                draftEntity = new TideGroupDraftEntity();
+                draftEntity.setId(group.getId());
+                draftEntity.setName(group.getName());
+                draftEntity.setParentId(group.getParentId());
+                draftEntity.setRealm(realm.getId());
+            }
+            draftEntity.setAction(ActionType.DELETE);
+            draftEntity.setDraftStatus(DraftStatus.DRAFT);
+            em.persist(draftEntity);
+            em.flush();
+
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.DELETE, ChangeSetType.GROUP);
+            changeSetProcessorFactory.getProcessor(ChangeSetType.GROUP).executeWorkflow(session, draftEntity, em, WorkflowType.REQUEST, params, null);
+            return true;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Applies the group removal directly. Called during COMMIT phase after approval.
+     */
+    public boolean applyRemoveGroup(RealmModel realm, GroupModel group) {
+        return super.removeGroup(realm, group);
     }
     @Override
     public RoleModel addClientRole(ClientModel client, String name) {
@@ -288,7 +332,8 @@ public class TideRealmProvider extends JpaRealmProvider {
 
     /**
      *
-     * Same as super class, instead we explicity use the remove roles else it'll use the tide drafting delete
+     * Same as super class, instead we explicitly use the remove roles else it'll use the tide drafting delete.
+     * When IGA is enabled, realm deletion is blocked — all resources must be individually deleted through the draft workflow.
      *
      **/
     @Override
@@ -296,34 +341,43 @@ public class TideRealmProvider extends JpaRealmProvider {
         RealmEntity realm = (RealmEntity)this.em.find(RealmEntity.class, id, LockModeType.PESSIMISTIC_WRITE);
         if (realm == null) {
             return false;
-        } else {
-            final RealmAdapter adapter = new RealmAdapter(this.session, this.em, realm);
-            this.session.users().preRemove(adapter);
-            realm.getDefaultGroupIds().clear();
-            this.em.flush();
-            this.em.createNamedQuery("deleteGroupRoleMappingsByRealm").setParameter("realm", realm.getId()).executeUpdate();
-            session.clients().removeClients(adapter);
-            this.em.createNamedQuery("deleteDefaultClientScopeRealmMappingByRealm").setParameter("realm", realm).executeUpdate();
-            this.session.clientScopes().removeClientScopes(adapter);
-            adapter.getRolesStream().forEach(this::removeRoleOnRealmDelete);
-            Stream<GroupModel> var10000 = this.session.groups().getTopLevelGroupsStream(adapter);
-            Objects.requireNonNull(adapter);
-            var10000.forEach(adapter::removeGroup);
-            this.em.createNamedQuery("removeClientInitialAccessByRealm").setParameter("realm", realm).executeUpdate();
-            this.em.remove(realm);
-            this.em.flush();
-            this.em.clear();
-            this.session.getKeycloakSessionFactory().publish(new RealmModel.RealmRemovedEvent() {
-                public RealmModel getRealm() {
-                    return adapter;
-                }
-
-                public KeycloakSession getKeycloakSession() {
-                    return TideRealmProvider.this.session;
-                }
-            });
-            return true;
         }
+
+        final RealmAdapter adapter = new RealmAdapter(this.session, this.em, realm);
+
+        // Block realm deletion when IGA is enabled
+        String igaAttribute = adapter.getAttribute("isIGAEnabled");
+        boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
+        RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+        if (isIGAEnabled && !adapter.equals(masterRealm)) {
+            throw new RuntimeException("Cannot delete realm with IGA enabled. Disable IGA first or delete all resources individually through the approval workflow.");
+        }
+
+        this.session.users().preRemove(adapter);
+        realm.getDefaultGroupIds().clear();
+        this.em.flush();
+        this.em.createNamedQuery("deleteGroupRoleMappingsByRealm").setParameter("realm", realm.getId()).executeUpdate();
+        session.clients().removeClients(adapter);
+        this.em.createNamedQuery("deleteDefaultClientScopeRealmMappingByRealm").setParameter("realm", realm).executeUpdate();
+        this.session.clientScopes().removeClientScopes(adapter);
+        adapter.getRolesStream().forEach(this::removeRoleOnRealmDelete);
+        Stream<GroupModel> var10000 = this.session.groups().getTopLevelGroupsStream(adapter);
+        Objects.requireNonNull(adapter);
+        var10000.forEach(adapter::removeGroup);
+        this.em.createNamedQuery("removeClientInitialAccessByRealm").setParameter("realm", realm).executeUpdate();
+        this.em.remove(realm);
+        this.em.flush();
+        this.em.clear();
+        this.session.getKeycloakSessionFactory().publish(new RealmModel.RealmRemovedEvent() {
+            public RealmModel getRealm() {
+                return adapter;
+            }
+
+            public KeycloakSession getKeycloakSession() {
+                return TideRealmProvider.this.session;
+            }
+        });
+        return true;
     }
 
     public void removeRoleOnRealmDelete(RoleModel role) {
@@ -354,11 +408,75 @@ public class TideRealmProvider extends JpaRealmProvider {
 
     @Override
     public boolean removeClient(RealmModel realm, String id) {
+        BasicIGAUtils.stampRequestingAdmin(session);
         logger.tracef("removeClient(%s, %s)%s", realm, id, getShortStackTrace());
 
         final ClientModel client = getClientById(realm, id);
         if (client == null) return false;
 
+        String igaAttribute = realm.getAttribute("isIGAEnabled");
+        boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
+        RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+
+        if (!isIGAEnabled || realm.equals(masterRealm)) {
+            return directRemoveClient(realm, client, id);
+        }
+
+        try {
+            ClientEntity clientEntity = em.find(ClientEntity.class, id);
+            if (clientEntity == null) return false;
+
+            List<TideClientDraftEntity> clientDrafts = em.createNamedQuery("getClientDraftDetails", TideClientDraftEntity.class)
+                    .setParameter("client", clientEntity)
+                    .getResultList();
+
+            if (!clientDrafts.isEmpty()) {
+                TideClientDraftEntity draft = clientDrafts.get(0);
+
+                // Check if this is an approved deletion being committed
+                if (draft.getDeleteStatus() == DraftStatus.ACTIVE) {
+                    return directRemoveClient(realm, client, id);
+                }
+
+                // Already has a pending delete
+                if (draft.getDeleteStatus() == DraftStatus.DRAFT || draft.getDeleteStatus() == DraftStatus.PENDING) {
+                    return true;
+                }
+
+                // Create delete request
+                draft.setDeleteStatus(DraftStatus.DRAFT);
+                draft.setTimestamp(System.currentTimeMillis());
+                em.flush();
+
+                WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.CLIENT);
+                changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT).executeWorkflow(session, draft, em, WorkflowType.REQUEST, params, null);
+                return true;
+            }
+
+            // No draft exists — create one for the deletion so it goes through IGA
+            TideClientDraftEntity newDraft = new TideClientDraftEntity();
+            newDraft.setId(KeycloakModelUtils.generateId());
+            newDraft.setChangeRequestId(KeycloakModelUtils.generateId());
+            newDraft.setClient(clientEntity);
+            newDraft.setDraftStatus(DraftStatus.ACTIVE);
+            newDraft.setAction(ActionType.CREATE);
+            newDraft.setDeleteStatus(DraftStatus.DRAFT);
+            newDraft.setTimestamp(System.currentTimeMillis());
+            em.persist(newDraft);
+            em.flush();
+
+            WorkflowParams deleteParams = new WorkflowParams(DraftStatus.DRAFT, true, ActionType.DELETE, ChangeSetType.CLIENT);
+            changeSetProcessorFactory.getProcessor(ChangeSetType.CLIENT).executeWorkflow(session, newDraft, em, WorkflowType.REQUEST, deleteParams, null);
+            return true;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Directly removes a client and all associated records. Called after approval or when IGA is disabled.
+     */
+    public boolean directRemoveClient(RealmModel realm, ClientModel client, String id) {
         session.users().preRemove(realm, client);
         client.getRolesStream().forEach(this::removeRoleOnRealmDelete);
         ClientEntity clientEntity = em.find(ClientEntity.class, id, LockModeType.PESSIMISTIC_WRITE);
@@ -378,7 +496,7 @@ public class TideRealmProvider extends JpaRealmProvider {
         int countRemoved = em.createNamedQuery("deleteClientScopeClientMappingByClient")
                 .setParameter("clientId", clientEntity.getId())
                 .executeUpdate();
-        em.remove(clientEntity);  // i have no idea why, but this needs to come before deleteScopeMapping
+        em.remove(clientEntity);
 
         try {
             em.flush();
@@ -388,14 +506,11 @@ public class TideRealmProvider extends JpaRealmProvider {
                 if(!changeRequestEntity.isEmpty()){
                     changeRequestEntity.forEach(c -> em.remove(c));
                 }
-
             });
             em.createNamedQuery("deleteClient").setParameter("client", clientEntity).executeUpdate();
             em.createNamedQuery("DeleteAllAccessProofsByClient").setParameter("clientId", clientEntity.getId()).executeUpdate();
             em.createNamedQuery("DeleteAllUserProofsByClient").setParameter("clientId", clientEntity.getId()).executeUpdate();
             em.flush();
-
-
         } catch (RuntimeException e) {
             logger.errorv("Unable to delete client entity: {0} from realm {1}", client.getClientId(), realm.getName());
             throw e;

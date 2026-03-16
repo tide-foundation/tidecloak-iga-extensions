@@ -25,6 +25,8 @@ import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 
+import org.tidecloak.base.iga.interfaces.TideRealmProvider;
+
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -75,6 +77,67 @@ public class GroupProcessor implements ChangeSetProcessor<TideGroupDraftEntity> 
         u.normalizeAccessToken(token, client.isFullScopeAllowed());
 
         return token;
+    }
+
+    @Override
+    public void cancel(KeycloakSession session, TideGroupDraftEntity entity, EntityManager em, ActionType actionType) {
+        List<AccessProofDetailEntity> pendingChanges = em.createNamedQuery("getProofDetailsForDraftByChangeSetTypeAndId", AccessProofDetailEntity.class)
+                .setParameter("recordId", entity.getChangeRequestId())
+                .setParameter("changesetType", ChangeSetType.GROUP)
+                .getResultList();
+        pendingChanges.forEach(em::remove);
+
+        if (actionType == ActionType.DELETE) {
+            entity.setAction(ActionType.CREATE);
+            entity.setDraftStatus(DraftStatus.ACTIVE);
+        }
+        em.flush();
+
+        ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(entity.getChangeRequestId(), ChangeSetType.GROUP));
+        if (changesetRequestEntity != null) {
+            em.remove(changesetRequestEntity);
+            em.flush();
+        }
+    }
+
+    @Override
+    public void commit(KeycloakSession session, ChangeSetRequest change, TideGroupDraftEntity entity, EntityManager em, Runnable commitCallback) throws Exception {
+        RealmModel realm = session.getContext().getRealm();
+
+        Runnable callback = () -> {
+            try {
+                List<TideGroupDraftEntity> entities = em.createNamedQuery("GetGroupDraftEntityByRequestId", TideGroupDraftEntity.class)
+                        .setParameter("requestId", change.getChangeSetId()).getResultList();
+                commitGroupChangeRequest(session, realm, entities, change, em);
+            } catch (Exception e) {
+                throw new RuntimeException("Error during commit callback", e);
+            }
+        };
+
+        ChangeSetProcessor.super.commit(session, change, entity, em, callback);
+    }
+
+    private void commitGroupChangeRequest(KeycloakSession session, RealmModel realm, List<TideGroupDraftEntity> entities, ChangeSetRequest change, EntityManager em) {
+        entities.forEach(entity -> {
+            if (change.getActionType() == ActionType.CREATE) {
+                if (entity.getDraftStatus() == DraftStatus.ACTIVE) return;
+                if (entity.getDraftStatus() != DraftStatus.APPROVED) {
+                    throw new RuntimeException("Draft record has not been approved by all admins.");
+                }
+                entity.setDraftStatus(DraftStatus.ACTIVE);
+            } else if (change.getActionType() == ActionType.DELETE) {
+                if (entity.getDraftStatus() != DraftStatus.APPROVED) {
+                    throw new RuntimeException("Deletion has not been approved by all admins.");
+                }
+                entity.setDraftStatus(DraftStatus.ACTIVE);
+                GroupModel group = realm.getGroupById(entity.getId());
+                if (group != null) {
+                    TideRealmProvider realmProvider = (TideRealmProvider) session.getProvider(RealmProvider.class);
+                    realmProvider.applyRemoveGroup(realm, group);
+                }
+                em.remove(entity);
+            }
+        });
     }
 
     @Override

@@ -14,6 +14,7 @@ import org.tidecloak.jpa.entities.drafting.TideGroupDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideGroupMoveDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideGroupRoleMappingEntity;
 import org.tidecloak.jpa.entities.drafting.TideRoleDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideUserDraftEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserGroupMembershipEntity;
 import org.tidecloak.jpa.entities.drafting.TideUserRoleMappingDraftEntity;
 
@@ -40,6 +41,14 @@ public class ChangeRequestUtils {
             changeSetRequest.setType(ChangeSetType.ROLE);
             changeSetRequest.setActionType(actionType);
         } else if (entity instanceof TideClientDraftEntity draftEntity) {
+            // Check for client deletion first
+            if (draftEntity.getDeleteStatus() != null && !draftEntity.getDeleteStatus().equals(DraftStatus.NULL)) {
+                changeSetRequest.setChangeSetId(draftEntity.getChangeRequestId());
+                changeSetRequest.setType(ChangeSetType.CLIENT);
+                changeSetRequest.setActionType(ActionType.DELETE);
+                return changeSetRequest;
+            }
+
             boolean isFullScopeEnabledActive = draftEntity.getFullScopeEnabled() != null
                     && draftEntity.getFullScopeEnabled().equals(DraftStatus.ACTIVE);
             boolean isFullScopeDisabledActive = draftEntity.getFullScopeDisabled() != null
@@ -87,6 +96,12 @@ public class ChangeRequestUtils {
             changeSetRequest.setChangeSetId(groupMoveEntity.getChangeRequestId());
             changeSetRequest.setType(ChangeSetType.GROUP_MOVE);
             changeSetRequest.setActionType(groupMoveEntity.getAction());
+        } else if (entity instanceof TideUserDraftEntity userDraftEntity) {
+            ActionType actionType = userDraftEntity.getDeleteStatus() != null
+                    && !userDraftEntity.getDeleteStatus().equals(DraftStatus.NULL) ? ActionType.DELETE : ActionType.CREATE;
+            changeSetRequest.setChangeSetId(userDraftEntity.getChangeRequestId());
+            changeSetRequest.setType(ChangeSetType.USER);
+            changeSetRequest.setActionType(actionType);
         }
         else {
             throw new IllegalArgumentException("Unsupported entity type: " + entity.getClass().getSimpleName());
@@ -116,6 +131,14 @@ public class ChangeRequestUtils {
             changeSetRequest.setType(ChangeSetType.ROLE);
             changeSetRequest.setActionType(actionType);
         } else if (entity instanceof TideClientDraftEntity draftEntity) {
+            // Check for client deletion first
+            if (draftEntity.getDeleteStatus() != null && !draftEntity.getDeleteStatus().equals(DraftStatus.NULL)) {
+                changeSetRequest.setChangeSetId(draftEntity.getChangeRequestId());
+                changeSetRequest.setType(ChangeSetType.CLIENT);
+                changeSetRequest.setActionType(ActionType.DELETE);
+                return changeSetRequest;
+            }
+
             if(type.equals(ChangeSetType.CLIENT)){
                 changeSetRequest.setChangeSetId(draftEntity.getChangeRequestId());
                 changeSetRequest.setType(ChangeSetType.CLIENT);
@@ -163,6 +186,12 @@ public class ChangeRequestUtils {
             changeSetRequest.setChangeSetId(groupMoveEntity.getChangeRequestId());
             changeSetRequest.setType(ChangeSetType.GROUP_MOVE);
             changeSetRequest.setActionType(groupMoveEntity.getAction());
+        } else if (entity instanceof TideUserDraftEntity userDraftEntity) {
+            ActionType actionType = userDraftEntity.getDeleteStatus() != null
+                    && !userDraftEntity.getDeleteStatus().equals(DraftStatus.NULL) ? ActionType.DELETE : ActionType.CREATE;
+            changeSetRequest.setChangeSetId(userDraftEntity.getChangeRequestId());
+            changeSetRequest.setType(ChangeSetType.USER);
+            changeSetRequest.setActionType(actionType);
         }
         else {
             throw new IllegalArgumentException("Unsupported entity type: " + entity.getClass().getSimpleName());

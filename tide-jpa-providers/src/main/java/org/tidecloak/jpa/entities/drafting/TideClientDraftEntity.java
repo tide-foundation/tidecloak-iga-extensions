@@ -53,7 +53,12 @@ import org.tidecloak.shared.enums.ActionType;
                 name = "getClientDraftsWithNullScopes",
                 query = "SELECT t FROM TideClientDraftEntity t WHERE t.fullScopeEnabled IS NULL OR t.fullScopeDisabled IS NULL"
         ),
-        @NamedQuery(name="GetClientDraftEntityByRequestId", query="SELECT m FROM TideClientDraftEntity m where m.changeRequestId = :requestId")
+        @NamedQuery(name="GetClientDraftEntityByRequestId", query="SELECT m FROM TideClientDraftEntity m where m.changeRequestId = :requestId"),
+        @NamedQuery(name="getClientDeletionDraftsByRealm",
+                query = "SELECT t FROM TideClientDraftEntity t " +
+                        "WHERE t.deleteStatus IS NOT NULL AND t.deleteStatus != :activeStatus " +
+                        "AND t.deleteStatus != :nullStatus " +
+                        "AND t.client.id IN (SELECT c.id FROM ClientEntity c WHERE c.realmId = :realmId)")
 })
 
 
@@ -94,6 +99,10 @@ public class TideClientDraftEntity {
     @Enumerated(EnumType.STRING)
     @Column(name = "DRAFT_STATUS")
     private DraftStatus draftStatus = DraftStatus.DRAFT; // Default to DRAFT
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "DELETE_STATUS")
+    private DraftStatus deleteStatus;
 
     @Column(name = "TIMESTAMP")
     protected Long timestamp = System.currentTimeMillis();
@@ -178,6 +187,14 @@ public class TideClientDraftEntity {
 
     public void setDraftStatus(DraftStatus draftStatus) {
         this.draftStatus = draftStatus;
+    }
+
+    public DraftStatus getDeleteStatus() {
+        return deleteStatus;
+    }
+
+    public void setDeleteStatus(DraftStatus deleteStatus) {
+        this.deleteStatus = deleteStatus;
     }
 
 }

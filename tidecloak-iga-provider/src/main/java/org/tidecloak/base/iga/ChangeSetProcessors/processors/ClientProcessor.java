@@ -23,6 +23,7 @@ import org.tidecloak.shared.enums.DraftStatus;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -40,10 +41,14 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
 
     @Override
     public void cancel(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, ActionType actionType) {
-        if(!entity.getFullScopeDisabled().equals(DraftStatus.ACTIVE)){
-            entity.setFullScopeDisabled(DraftStatus.NULL);
-        }else if (!entity.getFullScopeEnabled().equals(DraftStatus.ACTIVE)){
-            entity.setFullScopeEnabled(DraftStatus.NULL);
+        if (actionType == ActionType.DELETE) {
+            entity.setDeleteStatus(DraftStatus.NULL);
+        } else {
+            if(!entity.getFullScopeDisabled().equals(DraftStatus.ACTIVE)){
+                entity.setFullScopeDisabled(DraftStatus.NULL);
+            }else if (!entity.getFullScopeEnabled().equals(DraftStatus.ACTIVE)){
+                entity.setFullScopeEnabled(DraftStatus.NULL);
+            }
         }
 
         // Find any pending changes
@@ -80,7 +85,7 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
                 List<TideClientDraftEntity> entities = em.createNamedQuery("GetClientDraftEntityByRequestId", TideClientDraftEntity.class)
                         .setParameter("requestId", change.getChangeSetId()).getResultList();
 
-                commitDefaultUserContext(realm, entities, change);
+                commitDefaultUserContext(realm, session, entities, change);
             } catch (Exception e) {
                 throw new RuntimeException("Error during commit callback", e);
             }
@@ -116,8 +121,9 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
                     ChangeSetProcessor.super.createChangeRequestEntity(session, em, entity.getChangeRequestId(), changeSetType);
                     break;
                 case DELETE:
-                    logger.debug("Client Processor has no implementation for DELETE.");
-                    //ChangeSetProcessor.super.createChangeRequestEntity(session, em, entity.getChangeRequestId(), changeSetType);
+                    logger.debug(String.format("Initiating DELETE action for Entity ID: %s in workflow: REQUEST. Change Request ID: %s", entity.getId(), entity.getChangeRequestId()));
+                    handleDeleteRequest(session, entity, em, callback);
+                    ChangeSetProcessor.super.createChangeRequestEntity(session, em, entity.getChangeRequestId(), changeSetType);
                     break;
                 default:
                     logger.warn(String.format("Unsupported action type: %s for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", action, entity.getId(), entity.getChangeRequestId()));
@@ -156,6 +162,29 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
 
     @Override
     public void handleDeleteRequest(KeycloakSession session, TideClientDraftEntity entity, EntityManager em, Runnable callback) throws Exception {
+        entity.setChangeRequestId(KeycloakModelUtils.generateId());
+        RealmModel realm = session.realms().getRealm(entity.getClient().getRealmId());
+        ClientModel client = realm.getClientById(entity.getClient().getId());
+        if (client == null) {
+            em.flush();
+            return;
+        }
+
+        // All users in the realm are affected by client deletion
+        List<UserModel> users = session.users().searchForUserStream(realm, new HashMap<>()).toList();
+        if (users.isEmpty()) {
+            em.flush();
+            return;
+        }
+
+        for (UserModel user : users) {
+            ChangeSetProcessor.super.generateAndSaveTransformedUserContextDraft(
+                    session, em, realm, client, user,
+                    new ChangeRequestKey(entity.getId(), entity.getChangeRequestId()),
+                    ChangeSetType.CLIENT, entity);
+        }
+
+        em.flush();
     }
 
     @Override
@@ -171,7 +200,7 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
         return null;
     }
 
-    private void commitDefaultUserContext(RealmModel realm, List<TideClientDraftEntity> entities, ChangeSetRequest change) {
+    private void commitDefaultUserContext(RealmModel realm, KeycloakSession session, List<TideClientDraftEntity> entities, ChangeSetRequest change) {
         entities.forEach(entity -> {
             ClientModel clientModel = realm.getClientByClientId(entity.getClient().getClientId());
             if (clientModel == null) return;
@@ -183,8 +212,13 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
                 entity.setDraftStatus(DraftStatus.ACTIVE);
 
             } else if (change.getActionType() == ActionType.DELETE) {
-                throw new RuntimeException("CLIENT has no implementation for DELETE");
-
+                if (entity.getDeleteStatus() != DraftStatus.APPROVED) {
+                    throw new RuntimeException("Deletion has not been approved by all admins.");
+                }
+                entity.setDeleteStatus(DraftStatus.ACTIVE);
+                // Calling removeClient will hit TideRealmProvider.removeClient,
+                // which detects deleteStatus=ACTIVE and does the actual direct delete
+                realm.removeClient(clientModel.getId());
             }
         });
     }
@@ -332,11 +366,13 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
     private String generateRealmDefaultUserContext(KeycloakSession session, RealmModel realm, ClientModel client, EntityManager em) throws Exception {
         List<String> clients = List.of(Constants.ADMIN_CLI_CLIENT_ID, Constants.ADMIN_CONSOLE_CLIENT_ID);
         String id = KeycloakModelUtils.generateId();
+        session.setAttribute("skipIGADraftingForRemove", Boolean.TRUE);
         UserModel dummyUser = session.users().addUser(realm, id, id, true, false);
         AccessToken accessToken = ChangeSetProcessor.super.generateAccessToken(session, realm, client, dummyUser);
         if(clients.contains(client.getClientId())){
             accessToken.subject(null);
             session.users().removeUser(realm, dummyUser);
+            session.removeAttribute("skipIGADraftingForRemove");
             return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username", "scope"), client.isFullScopeAllowed());
         } else {
             Set<RoleModel> rolesToAdd = getAllAccess(session, Set.of(realm.getDefaultRole()), client, client.getClientScopes(true).values().stream(), client.isFullScopeAllowed(), null);
@@ -351,6 +387,7 @@ public class ClientProcessor implements ChangeSetProcessor<TideClientDraftEntity
         }
             accessToken.subject(null);
             session.users().removeUser(realm, dummyUser);
+            session.removeAttribute("skipIGADraftingForRemove");
             return ChangeSetProcessor.super.cleanAccessToken(accessToken, List.of("preferred_username", "scope"), client.isFullScopeAllowed());
     }
 }

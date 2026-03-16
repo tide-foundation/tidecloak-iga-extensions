@@ -18,7 +18,8 @@ public enum ChangeSetTypeEntity {
     GROUP_ROLE(ChangeSetType.GROUP_ROLE, "GROUP_ROLE_MAPPING_DRAFT", TideGroupRoleMappingEntity.class, GroupRoleProcessor::new),
     GROUP(ChangeSetType.GROUP, "KEYCLOAK_GROUP_DRAFT", TideGroupDraftEntity.class, GroupProcessor::new),
     USER_GROUP_MEMBERSHIP(ChangeSetType.USER_GROUP_MEMBERSHIP, "USER_GROUP_MEMBERSHIP_DRAFT", TideUserGroupMembershipEntity.class, UserGroupMembershipProcessor::new),
-    GROUP_MOVE(ChangeSetType.GROUP_MOVE, "GROUP_MOVE_DRAFT", TideGroupMoveDraftEntity.class, GroupMoveProcessor::new);
+    GROUP_MOVE(ChangeSetType.GROUP_MOVE, "GROUP_MOVE_DRAFT", TideGroupMoveDraftEntity.class, GroupMoveProcessor::new),
+    USER(ChangeSetType.USER, "USER_ENTITY_DRAFT", TideUserDraftEntity.class, UserProcessor::new);
 
     private final ChangeSetType baseType;
     private final String tableName;

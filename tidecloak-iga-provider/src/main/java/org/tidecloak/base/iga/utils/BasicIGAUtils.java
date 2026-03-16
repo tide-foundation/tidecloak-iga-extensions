@@ -698,8 +698,24 @@ public class BasicIGAUtils {
                 }
                 break;
 
+            case USER:
+                if (changeSetAction == ActionType.CREATE) {
+                    ((TideUserDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
+                } else if (changeSetAction == ActionType.DELETE) {
+                    ((TideUserDraftEntity) draftRecordEntity).setDeleteStatus(draftStatus);
+                }
+                break;
+
             case CLIENT:
-                ((TideClientDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
+                if (changeSetAction == ActionType.CREATE) {
+                    ((TideClientDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
+                } else if (changeSetAction == ActionType.DELETE) {
+                    ((TideClientDraftEntity) draftRecordEntity).setDeleteStatus(draftStatus);
+                }
+                break;
+
+            case GROUP:
+                ((TideGroupDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
                 break;
 
             case GROUP_ROLE:
