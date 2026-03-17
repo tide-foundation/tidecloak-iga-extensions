@@ -8,6 +8,7 @@ import org.keycloak.models.*;
 import org.keycloak.models.jpa.UserAdapter;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.jpa.entities.UserGroupMembershipEntity;
+import org.keycloak.representations.idm.MembershipType;
 
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
@@ -87,6 +88,7 @@ public class TideUserAdapter extends UserAdapter {
         UserGroupMembershipEntity entity = new UserGroupMembershipEntity();
         entity.setUser(getEntity());
         entity.setGroupId(group.getId());
+        entity.setMembershipType(MembershipType.UNMANAGED);
         em.persist(entity);
         em.flush();
         em.detach(entity);
@@ -404,17 +406,33 @@ public class TideUserAdapter extends UserAdapter {
     /**
      * Applies the group join directly to the base Keycloak table.
      * Called during the COMMIT phase after a draft has been approved.
+     * Directly inserts into USER_GROUP_MEMBERSHIP to bypass the parent's
+     * joinGroup chain (isDirectMember check, event firing, batch mode).
      */
     public void applyJoinGroup(GroupModel group) {
-        super.joinGroup(group);
+        UserGroupMembershipEntity entity = new UserGroupMembershipEntity();
+        entity.setUser(getEntity());
+        entity.setGroupId(group.getId());
+        entity.setMembershipType(MembershipType.UNMANAGED);
+        em.persist(entity);
+        em.flush();
     }
 
     /**
      * Applies the group leave directly from the base Keycloak table.
      * Called during the COMMIT phase after a deletion draft has been approved.
+     * Directly removes from USER_GROUP_MEMBERSHIP to bypass the parent's
+     * leaveGroup chain.
      */
     public void applyLeaveGroup(GroupModel group) {
-        super.leaveGroup(group);
+        List<UserGroupMembershipEntity> results = em.createNamedQuery("userMemberOf", UserGroupMembershipEntity.class)
+                .setParameter("user", getEntity())
+                .setParameter("groupId", group.getId())
+                .getResultList();
+        for (UserGroupMembershipEntity entity : results) {
+            em.remove(entity);
+        }
+        em.flush();
     }
 
     @Override

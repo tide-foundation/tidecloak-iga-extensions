@@ -80,7 +80,14 @@ public class PolicyResourceProvider implements RealmResourceProvider {
     @Produces(MediaType.APPLICATION_OCTET_STREAM)
     public Response getAdminPolicyBytes() {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        RoleModel role = session.clients().getClientByClientId(session.getContext().getRealm(), Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        ClientModel client = session.clients().getClientByClientId(session.getContext().getRealm(), Constants.REALM_MANAGEMENT_CLIENT_ID);
+        if (client == null) {
+            return Response.status(Response.Status.NOT_FOUND).entity("Realm management client not found").build();
+        }
+        RoleModel role = client.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        if (role == null) {
+            return Response.status(Response.Status.NOT_FOUND).entity("Tide realm admin role not found").build();
+        }
         RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", roleEntity).getSingleResult();
@@ -92,7 +99,14 @@ public class PolicyResourceProvider implements RealmResourceProvider {
     @Produces(MediaType.TEXT_PLAIN)
     public Response getAdminPolicyDisplay() {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        RoleModel role = session.clients().getClientByClientId(session.getContext().getRealm(), Constants.REALM_MANAGEMENT_CLIENT_ID).getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        ClientModel client = session.clients().getClientByClientId(session.getContext().getRealm(), Constants.REALM_MANAGEMENT_CLIENT_ID);
+        if (client == null) {
+            return Response.status(Response.Status.NOT_FOUND).entity("Realm management client not found").build();
+        }
+        RoleModel role = client.getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        if (role == null) {
+            return Response.status(Response.Status.NOT_FOUND).entity("Tide realm admin role not found").build();
+        }
         RoleEntity roleEntity = em.getReference(RoleEntity.class, role.getId());
         TideRoleDraftEntity tideRoleEntity = em.createNamedQuery("getRoleDraftByRole", TideRoleDraftEntity.class)
                 .setParameter("role", roleEntity).getSingleResult();
