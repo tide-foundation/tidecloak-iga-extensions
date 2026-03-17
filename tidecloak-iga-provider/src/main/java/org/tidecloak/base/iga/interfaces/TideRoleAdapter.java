@@ -114,7 +114,10 @@ public class TideRoleAdapter extends RoleAdapter {
         BasicIGAUtils.stampRequestingAdmin(session);
         try {
             RoleEntity entity = toRoleEntity(roleModel);
-            for (RoleEntity composite : getEntity().getCompositeRoles()) {
+            List<RoleEntity> childRoles = em.createNamedQuery("getChildRoles", RoleEntity.class)
+                    .setParameter("parentRoleId", getEntity().getId())
+                    .getResultList();
+            for (RoleEntity composite : childRoles) {
                 if (composite.equals(entity)) return;
             }
             super.addCompositeRole(roleModel);
