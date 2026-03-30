@@ -30,6 +30,7 @@ import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvi
 
 import javax.xml.bind.DatatypeConverter;
 import java.util.*;
+import java.util.HexFormat;
 
 import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.commitRolePolicy;
 import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRolePolicy;
@@ -76,6 +77,7 @@ public class MultiAdmin implements Authorizer{
 
         Object draftEntity = draftEntities.get(0);
         var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
+        System.out.println("[MultiAdmin.sign] changeSetId=" + changeSet.getChangeSetId() + " authorityAssignment=" + (authorityAssignment != null ? authorityAssignment.getChangesetRequestId() : "null"));
 
         // Set the VVK-signed custom policy on the stored requestModel
         // The policy in initCert should already be VVK-signed (done by frontend during policy commit, keylessh pattern)
@@ -83,7 +85,6 @@ public class MultiAdmin implements Authorizer{
         TideRoleDraftEntity tideAdmin = BasicIGAUtils.resolvePolicyRole(em, session, policyRoleId);
         if (tideAdmin != null && tideAdmin.getInitCert() != null && changesetRequestEntity.getRequestModel() != null) {
             Policy policy = Policy.From(Base64.getDecoder().decode(tideAdmin.getInitCert()));
-            System.out.println("[MultiAdmin.sign] Policy loaded from initCert, bytes: " + tideAdmin.getInitCert().length());
 
             // Set the signed policy on the model request
             ModelRequest req = ModelRequest.FromBytes(Base64.getDecoder().decode(changesetRequestEntity.getRequestModel()));
@@ -114,7 +115,6 @@ public class MultiAdmin implements Authorizer{
                     offset += part.length;
                 }
                 req.SetDynamicData(raw);
-                System.out.println("[MultiAdmin.sign] Injected dynamicData with " + dynamicData.size() + " elements, " + totalSize + " bytes");
             }
 
             changesetRequestEntity.setRequestModel(Base64.getEncoder().encodeToString(req.Encode()));
@@ -128,21 +128,33 @@ public class MultiAdmin implements Authorizer{
         firstResponse.put("changesetId", changesetRequestEntity.getChangesetRequestId());
         firstResponse.put("requiresApprovalPopup", true);
         firstResponse.put("changeSetDraftRequests", changesetRequestEntity.getRequestModel());
+        firstResponse.put("actionType", changeSet.getActionType() != null ? changeSet.getActionType().name() : null);
+        firstResponse.put("changeSetType", changeSet.getType() != null ? changeSet.getType().name() : null);
         responses.add(firstResponse);
 
-        // --- Second ---
+        // --- Second (POLICY, only for authority assignments) ---
         if (authorityAssignment != null) {
+            System.out.println("[MultiAdmin.sign] Looking for POLICY entity with key=" + authorityAssignment.getChangesetRequestId());
             ChangesetRequestEntity policyReqEntity = em.find(
                     ChangesetRequestEntity.class,
                     new ChangesetRequestEntity.Key(authorityAssignment.getChangesetRequestId(), ChangeSetType.POLICY)
             );
+            System.out.println("[MultiAdmin.sign] policyReqEntity found=" + (policyReqEntity != null));
 
-            Map<String, Object> secondResponse = new HashMap<>();
-            secondResponse.put("message", "Opening Enclave to request approval.");
-            secondResponse.put("changesetId", authorityAssignment.getChangesetRequestId());
-            secondResponse.put("requiresApprovalPopup", true);
-            secondResponse.put("changeSetDraftRequests", policyReqEntity.getRequestModel());
-            responses.add(secondResponse);
+            if (policyReqEntity != null) {
+                // Do NOT call SetPolicy on the POLICY model here — send it as-is from
+                // createRolePolicyDraft so the enclave can add dokens without corruption.
+                // SetPolicy is called later at commit time (matching working individual flow).
+
+                Map<String, Object> secondResponse = new HashMap<>();
+                secondResponse.put("message", "Opening Enclave to request approval.");
+                secondResponse.put("changesetId", authorityAssignment.getChangesetRequestId());
+                secondResponse.put("requiresApprovalPopup", true);
+                secondResponse.put("changeSetDraftRequests", policyReqEntity.getRequestModel());
+                secondResponse.put("actionType", "NONE");
+                secondResponse.put("changeSetType", ChangeSetType.POLICY.name());
+                responses.add(secondResponse);
+            }
         }
 
         // Serialize to JSON string
@@ -154,8 +166,6 @@ public class MultiAdmin implements Authorizer{
     public Response commitWithAuthorizer(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, Object draftEntity, AdminAuth auth, AuthorizerEntity authorizer, ComponentModel componentModel) throws Exception {
         IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
 
-        TideRoleDraftEntity tideAdmin = BasicIGAUtils.resolvePolicyRole(em, session, changeSet.getPolicyRoleId());
-        var policyString = tideAdmin.getInitCert();
         boolean isAuthorityAssignment = isAuthorityAssignment(session, draftEntity, em);
 
         ObjectMapper objectMapper = new ObjectMapper();
@@ -208,25 +218,54 @@ public class MultiAdmin implements Authorizer{
             if(roleInitCert == null) {
                 throw new BadRequestException("Role Init Cert draft not found for changeSet, " + changeSet.getChangeSetId());
             }
+
+            // Sign the UserContext first
             SignatureResponse response = Midgard.SignModel(settings, req);
 
             for ( int i = 0; i < orderedProofDetails.size() ; i++){
                     orderedProofDetails.get(i).setSignature(response.Signatures[i]);
             }
 
-            // sign policy now
-            ChangesetRequestEntity changesetRequest = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(authorityAssignment.getChangesetRequestId(), ChangeSetType.POLICY));
-            ModelRequest pReq = ModelRequest.FromBytes(Base64.getDecoder().decode(changesetRequest.getRequestModel()));
-            Policy policy = Policy.From(Base64.getDecoder().decode(policyString));
+            // Skip the COMMIT workflow's pending-request recreation to prevent
+            // a conflicting InitializeTideRequestWithVrk call for "Policy:1".
+            session.setAttribute("skipPolicyDraftRecreation", Boolean.TRUE);
 
-            pReq.SetPolicy(policy.ToBytes());
+            // Sign POLICY model: load from DB (has dokens from enclave approval),
+            // set the existing signed policy, and sign — matching the working individual flow.
+            // signWithAuthorizer did NOT SetPolicy on the POLICY model, so the enclave
+            // received the clean model from createRolePolicyDraft and added dokens.
+            String policyKey = authorityAssignment.getChangesetRequestId();
+            System.out.println("[MultiAdmin.commit] Looking for POLICY entity with key=" + policyKey);
+            ChangesetRequestEntity policyChangesetReq = em.find(ChangesetRequestEntity.class,
+                    new ChangesetRequestEntity.Key(policyKey, ChangeSetType.POLICY));
+            if (policyChangesetReq == null) {
+                throw new BadRequestException("POLICY ChangesetRequestEntity not found for key=" + policyKey);
+            }
+            String policyModelB64 = policyChangesetReq.getRequestModel();
+            System.out.println("[MultiAdmin.commit] POLICY model length=" + (policyModelB64 != null ? policyModelB64.length() : "null")
+                    + " adminAuths=" + policyChangesetReq.getAdminAuthorizations().size());
+            ModelRequest pReq = ModelRequest.FromBytes(Base64.getDecoder().decode(policyModelB64));
+
+            String policyRoleId = changeSet.getPolicyRoleId();
+            TideRoleDraftEntity tideAdmin = BasicIGAUtils.resolvePolicyRole(em, session, policyRoleId);
+            Policy existingPolicy = Policy.From(Base64.getDecoder().decode(tideAdmin.getInitCert()));
+            pReq.SetPolicy(existingPolicy.ToBytes());
+
             SignatureResponse pResp = Midgard.SignModel(settings, pReq);
-            commitRolePolicy(session, changeSet.getChangeSetId(), draftEntity, pResp.Signatures[0]); // get the last one
-        } else {
-            // Set the custom policy on the request so the ORK uses our contract, not the default
-            Policy policy = Policy.From(Base64.getDecoder().decode(policyString));
-            req.SetPolicy(policy.ToBytes());
 
+            // Defer the policy commit until after all UserContext models are signed.
+            // Committing the policy now would update the ORK threshold mid-batch,
+            // causing subsequent UC signs to fail with "not enough approvals".
+            @SuppressWarnings("unchecked")
+            List<Object[]> deferred = (List<Object[]>) session.getAttribute("deferredPolicyCommits", List.class);
+            if (deferred == null) {
+                deferred = new ArrayList<>();
+                session.setAttribute("deferredPolicyCommits", deferred);
+            }
+            deferred.add(new Object[]{changeSet.getChangeSetId(), draftEntity, pResp.Signatures[0]});
+        } else {
+            // Policy was already set during signWithAuthorizer() and stored with the doken via addReview.
+            // Do NOT call SetPolicy here — it would invalidate the doken embedded in the ModelRequest.
             SignatureResponse response = Midgard.SignModel(settings, req);
 
             for ( int i = 0; i < orderedProofDetails.size(); i++){

@@ -14,9 +14,13 @@ import org.keycloak.models.utils.RepresentationToModel;
 import org.keycloak.representations.idm.ProtocolMapperRepresentation;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
+import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
+import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessor;
+import org.tidecloak.base.iga.ChangeSetProcessors.utils.GroupUtils;
 import org.tidecloak.jpa.entities.drafting.TideClientDraftEntity;
+import org.tidecloak.jpa.entities.drafting.TideGroupMoveDraftEntity;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
@@ -42,7 +46,18 @@ public class TideRealmProvider extends JpaRealmProvider {
     }
 
     @Override
+    public GroupModel getGroupById(RealmModel realm, String id) {
+        GroupModel group = super.getGroupById(realm, id);
+        if (group == null) return null;
+        if (group instanceof TideGroupAdapter) return group;
+        GroupEntity groupEntity = em.find(GroupEntity.class, id);
+        if (groupEntity == null) return null;
+        return new TideGroupAdapter(realm, em, groupEntity, session);
+    }
+
+    @Override
     public ClientModel addClient(RealmModel realm, String clientId) {
+        BasicIGAUtils.stampRequestingAdmin(session);
         try {
             String igaAttribute = realm.getAttribute("isIGAEnabled");
             boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
@@ -95,6 +110,7 @@ public class TideRealmProvider extends JpaRealmProvider {
 
     @Override
     public boolean removeRole(RoleModel role) {
+        BasicIGAUtils.stampRequestingAdmin(session);
         try {
             List<UserModel> users = session.users().searchForUserStream(session.getContext().getRealm(), new HashMap<>()).filter(u -> u.hasRole(role)).toList();
             if(users.isEmpty()){
@@ -167,21 +183,41 @@ public class TideRealmProvider extends JpaRealmProvider {
     }
 
     @Override
-    public void moveGroup(RealmModel realm, GroupModel group, GroupModel toParent){
+    public void moveGroup(RealmModel realm, GroupModel group, GroupModel toParent) {
+        BasicIGAUtils.stampRequestingAdmin(session);
+        // Don't draft for master realm or IGA-disabled realms
+        String igaAttribute = realm.getAttribute("isIGAEnabled");
+        boolean isIGAEnabled = igaAttribute != null && igaAttribute.equalsIgnoreCase("true");
+        RealmModel masterRealm = session.realms().getRealmByName(Config.getAdminRealm());
+        if (!isIGAEnabled || realm.equals(masterRealm)) {
+            super.moveGroup(realm, group, toParent);
+            return;
+        }
+
+        try {
+            TideGroupMoveDraftEntity entity = new TideGroupMoveDraftEntity();
+            entity.setId(KeycloakModelUtils.generateId());
+            entity.setGroupId(group.getId());
+            entity.setOldParentId(group.getParentId());
+            entity.setNewParentId(toParent != null ? toParent.getId() : null);
+            entity.setDraftStatus(DraftStatus.DRAFT);
+            entity.setAction(ActionType.CREATE);
+            em.persist(entity);
+            em.flush();
+
+            ChangeSetProcessor<TideGroupMoveDraftEntity> processor = changeSetProcessorFactory.getProcessor(ChangeSetType.GROUP_MOVE);
+            WorkflowParams params = new WorkflowParams(DraftStatus.DRAFT, false, ActionType.CREATE, ChangeSetType.GROUP_MOVE);
+            processor.executeWorkflow(session, entity, em, WorkflowType.REQUEST, params, null);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Applies the group move directly. Called during COMMIT phase after approval.
+     */
+    public void applyMoveGroup(RealmModel realm, GroupModel group, GroupModel toParent) {
         super.moveGroup(realm, group, toParent);
-
-//        // get group inherited roles, we just need the client to regen
-//        GroupModel movedGroup = session.groups().getGroupById(realm, group.getId());
-//
-//        ProofGeneration proofGeneration = new ProofGeneration(session, realm, em);
-//        // get effective roles
-//        List<ClientRole> effectiveGroupClientRoles = proofGeneration.getEffectiveGroupClientRoles(movedGroup);
-//        // Initialize proof generation
-//
-//        // Recursively handle proof regeneration for all members in the hierarchy of the group
-//        List<UserModel> members = proofGeneration.getAllGroupMembersIncludingSubgroups(realm, movedGroup);
-//        proofGeneration.regenerateProofsForMembers(effectiveGroupClientRoles, members);
-
     }
     @Override
     public RoleModel addClientRole(ClientModel client, String name) {

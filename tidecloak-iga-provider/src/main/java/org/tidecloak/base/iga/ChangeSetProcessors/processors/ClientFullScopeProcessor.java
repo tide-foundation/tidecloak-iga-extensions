@@ -114,7 +114,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
                 case CREATE:
                     logger.debug(String.format("Initiating CREATE (enable) action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleCreateRequest(session, entity, em, callback);
-                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
+                    ChangeSetProcessor.super.createChangeRequestEntity(session, em, entity.getChangeRequestId(), changeSetType);
                     if (!isIGAEnabled){
                         if (entity.getFullScopeEnabled().equals(DraftStatus.ACTIVE)){
                             entity.setFullScopeDisabled(DraftStatus.NULL);
@@ -125,7 +125,7 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
                 case DELETE:
                     logger.debug(String.format("Initiating DELETE (disable) action for Mapping ID: %s in workflow: REQUEST", entity.getId()));
                     handleDeleteRequest(session, entity, em, callback);
-                    ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
+                    ChangeSetProcessor.super.createChangeRequestEntity(session, em, entity.getChangeRequestId(), changeSetType);
                     if (!isIGAEnabled){
                         if (entity.getFullScopeDisabled().equals(DraftStatus.ACTIVE)){
                             entity.setFullScopeEnabled(DraftStatus.NULL);
@@ -363,6 +363,24 @@ public class ClientFullScopeProcessor implements ChangeSetProcessor<TideClientDr
             String userId = userEntry.getKey();
             UserEntity ue = userById.get(userId);
             UserModel um = session.users().getUserById(realm, userId);
+
+            // Short-circuit: if this user has only 1 proof total, no combining needed
+            long totalProofs = userEntry.getValue().values().stream()
+                    .mapToLong(List::size)
+                    .sum();
+            if (totalProofs <= 1) {
+                userEntry.getValue().values().stream()
+                        .flatMap(List::stream)
+                        .findFirst()
+                        .ifPresent(proof -> {
+                            List<ChangesetRequestEntity> existing = em.createNamedQuery(
+                                            "getAllChangeRequestsByRecordId", ChangesetRequestEntity.class)
+                                    .setParameter("changesetRequestId", proof.getChangeRequestKey().getChangeRequestId())
+                                    .getResultList();
+                            results.addAll(existing);
+                        });
+                continue;
+            }
 
             String combinedRequestId = KeycloakModelUtils.generateId();
 

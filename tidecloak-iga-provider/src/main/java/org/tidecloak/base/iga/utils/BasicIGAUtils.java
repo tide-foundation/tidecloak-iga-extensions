@@ -46,7 +46,43 @@ import java.util.stream.StreamSupport;
 import static org.tidecloak.base.iga.TideRequests.TideRoleRequests.getDraftRolePolicy;
 import static org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter.getChangeSetStatus;
 
+import org.jboss.logging.Logger;
+
 public class BasicIGAUtils {
+
+    private static final Logger logger = Logger.getLogger(BasicIGAUtils.class);
+
+    /**
+     * Extracts the requesting admin's identity from the Bearer token and stores it
+     * in session attributes so that ChangeSetProcessor can stamp it on ChangesetRequestEntity.
+     * Safe to call multiple times per session — only runs once.
+     */
+    public static void stampRequestingAdmin(KeycloakSession session) {
+        if (session.getAttribute("requestedByUserId", String.class) != null) return;
+        try {
+            jakarta.ws.rs.core.HttpHeaders headers = session.getContext().getRequestHeaders();
+            String authHeader = headers != null ? headers.getHeaderString("Authorization") : null;
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) return;
+
+            String tokenString = authHeader.substring(7);
+            RealmModel currentRealm = session.getContext().getRealm();
+            org.keycloak.services.managers.AuthenticationManager.AuthResult authResult =
+                    new org.keycloak.services.managers.AppAuthManager.BearerTokenAuthenticator(session)
+                            .setRealm(currentRealm)
+                            .setTokenString(tokenString)
+                            .setConnection(session.getContext().getConnection())
+                            .setHeaders(headers)
+                            .authenticate();
+
+            if (authResult != null && authResult.getUser() != null) {
+                UserModel adminUser = authResult.getUser();
+                session.setAttribute("requestedByUserId", adminUser.getId());
+                session.setAttribute("requestedByUsername", adminUser.getUsername());
+            }
+        } catch (Exception e) {
+            logger.warnf("stampRequestingAdmin failed: %s", e.getMessage());
+        }
+    }
 
     /**
      * Resolves the TideRoleDraftEntity for a given policyRoleId.
@@ -171,6 +207,14 @@ public class BasicIGAUtils {
             return ((TideClientDraftEntity) entity).getId();
         } else if (entity instanceof PolicyDraftEntity) {
             return ((PolicyDraftEntity) entity).getId();
+        } else if (entity instanceof TideGroupRoleMappingEntity) {
+            return ((TideGroupRoleMappingEntity) entity).getId();
+        } else if (entity instanceof TideGroupDraftEntity) {
+            return ((TideGroupDraftEntity) entity).getId();
+        } else if (entity instanceof TideUserGroupMembershipEntity) {
+            return ((TideUserGroupMembershipEntity) entity).getId();
+        } else if (entity instanceof TideGroupMoveDraftEntity) {
+            return ((TideGroupMoveDraftEntity) entity).getId();
         }
         return null;
     }
@@ -186,6 +230,14 @@ public class BasicIGAUtils {
             return ((TideClientDraftEntity) entity).getChangeRequestId();
         } else if (entity instanceof PolicyDraftEntity) {
             return ((PolicyDraftEntity) entity).getChangesetRequestId();
+        } else if (entity instanceof TideGroupRoleMappingEntity) {
+            return ((TideGroupRoleMappingEntity) entity).getChangeRequestId();
+        } else if (entity instanceof TideGroupDraftEntity) {
+            return ((TideGroupDraftEntity) entity).getChangeRequestId();
+        } else if (entity instanceof TideUserGroupMembershipEntity) {
+            return ((TideUserGroupMembershipEntity) entity).getChangeRequestId();
+        } else if (entity instanceof TideGroupMoveDraftEntity) {
+            return ((TideGroupMoveDraftEntity) entity).getChangeRequestId();
         }
         return null;
     }
@@ -212,6 +264,14 @@ public class BasicIGAUtils {
             return getAccessProofs(em, tideCompositeRoleMappingDraftEntity.getChangeRequestId(), ChangeSetType.COMPOSITE_ROLE);
         } else if (entity instanceof TideClientDraftEntity tideClientDraftEntity) {
             return getAccessProofs(em, tideClientDraftEntity.getChangeRequestId(), ChangeSetType.CLIENT_FULLSCOPE);
+        } else if (entity instanceof TideGroupRoleMappingEntity tideGroupRoleMappingEntity) {
+            return getAccessProofs(em, tideGroupRoleMappingEntity.getChangeRequestId(), ChangeSetType.GROUP_ROLE);
+        } else if (entity instanceof TideGroupDraftEntity tideGroupDraftEntity) {
+            return getAccessProofs(em, tideGroupDraftEntity.getChangeRequestId(), ChangeSetType.GROUP);
+        } else if (entity instanceof TideUserGroupMembershipEntity tideUserGroupMembershipEntity) {
+            return getAccessProofs(em, tideUserGroupMembershipEntity.getChangeRequestId(), ChangeSetType.USER_GROUP_MEMBERSHIP);
+        } else if (entity instanceof TideGroupMoveDraftEntity tideGroupMoveDraftEntity) {
+            return getAccessProofs(em, tideGroupMoveDraftEntity.getChangeRequestId(), ChangeSetType.GROUP_MOVE);
         }
         return null;
     }
@@ -224,6 +284,10 @@ public class BasicIGAUtils {
             case USER -> em.find(TideUserDraftEntity.class, entityId);
             case CLIENT_FULLSCOPE, CLIENT -> em.find(TideClientDraftEntity.class, entityId);
             case POLICY -> em.find(PolicyDraftEntity.class, entityId);
+            case GROUP_ROLE -> em.find(TideGroupRoleMappingEntity.class, entityId);
+            case GROUP -> em.find(TideGroupDraftEntity.class, entityId);
+            case USER_GROUP_MEMBERSHIP -> em.find(TideUserGroupMembershipEntity.class, entityId);
+            case GROUP_MOVE -> em.find(TideGroupMoveDraftEntity.class, entityId);
             default -> null;
         };
     }
@@ -255,14 +319,34 @@ public class BasicIGAUtils {
             return ChangeSetType.POLICY;
         }
 
+        if (entity instanceof TideGroupRoleMappingEntity) {
+            return ChangeSetType.GROUP_ROLE;
+        }
+
+        if (entity instanceof TideGroupDraftEntity) {
+            return ChangeSetType.GROUP;
+        }
+
+        if (entity instanceof TideUserGroupMembershipEntity) {
+            return ChangeSetType.USER_GROUP_MEMBERSHIP;
+        }
+
+        if (entity instanceof TideGroupMoveDraftEntity) {
+            return ChangeSetType.GROUP_MOVE;
+        }
+
         return null;
     }
 
     public static ActionType getActionTypeFromEntity(Object entity) {
         if (entity == null) return ActionType.NONE;
 
-        if (entity instanceof TideUserRoleMappingDraftEntity) {
-            return ((TideUserRoleMappingDraftEntity) entity).getAction();
+        if (entity instanceof TideUserRoleMappingDraftEntity urm) {
+            // handleDeleteRequest doesn't set action to DELETE, so check deleteStatus
+            if (urm.getDeleteStatus() != null) {
+                return ActionType.DELETE;
+            }
+            return urm.getAction();
         }
 
         if (entity instanceof TideCompositeRoleMappingDraftEntity) {
@@ -279,6 +363,22 @@ public class BasicIGAUtils {
 
         if (entity instanceof TideClientDraftEntity) {
             return ((TideClientDraftEntity) entity).getAction();
+        }
+
+        if (entity instanceof TideGroupRoleMappingEntity) {
+            return ((TideGroupRoleMappingEntity) entity).getAction();
+        }
+
+        if (entity instanceof TideGroupDraftEntity) {
+            return ((TideGroupDraftEntity) entity).getAction();
+        }
+
+        if (entity instanceof TideUserGroupMembershipEntity) {
+            return ((TideUserGroupMembershipEntity) entity).getAction();
+        }
+
+        if (entity instanceof TideGroupMoveDraftEntity) {
+            return ((TideGroupMoveDraftEntity) entity).getAction();
         }
 
         return ActionType.NONE;
@@ -371,6 +471,38 @@ public class BasicIGAUtils {
                                 .setParameter("changesetId", changeSetId)
                                 .getResultList();
 
+                case GROUP_ROLE ->
+                        em.createNamedQuery(
+                                        "GetGroupRoleDraftEntityByRequestId",
+                                        TideGroupRoleMappingEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
+
+                case GROUP ->
+                        em.createNamedQuery(
+                                        "GetGroupDraftEntityByRequestId",
+                                        TideGroupDraftEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
+
+                case USER_GROUP_MEMBERSHIP ->
+                        em.createNamedQuery(
+                                        "GetUserGroupMembershipDraftEntityByRequestId",
+                                        TideUserGroupMembershipEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
+
+                case GROUP_MOVE ->
+                        em.createNamedQuery(
+                                        "GetGroupMoveDraftEntityByRequestId",
+                                        TideGroupMoveDraftEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
+
                 default -> null;
             };
         } catch (NoResultException e) {
@@ -440,6 +572,18 @@ public class BasicIGAUtils {
             case CLIENT:
                 ((TideClientDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
                 break;
+            case GROUP_ROLE:
+                ((TideGroupRoleMappingEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                break;
+
+            case USER_GROUP_MEMBERSHIP:
+                ((TideUserGroupMembershipEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                break;
+
+            case GROUP_MOVE:
+                ((TideGroupMoveDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                break;
+
             case POLICY:
                 // PolicyDraftEntity status is driven by scope (REALM_PENDING → REALM), not draftStatus
                 break;
@@ -558,6 +702,18 @@ public class BasicIGAUtils {
                 ((TideClientDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
                 break;
 
+            case GROUP_ROLE:
+                ((TideGroupRoleMappingEntity) draftRecordEntity).setDraftStatus(draftStatus);
+                break;
+
+            case USER_GROUP_MEMBERSHIP:
+                ((TideUserGroupMembershipEntity) draftRecordEntity).setDraftStatus(draftStatus);
+                break;
+
+            case GROUP_MOVE:
+                ((TideGroupMoveDraftEntity) draftRecordEntity).setDraftStatus(draftStatus);
+                break;
+
             case POLICY:
                 // PolicyDraftEntity status is driven by scope (REALM_PENDING → REALM), not draftStatus
                 break;
@@ -577,7 +733,12 @@ public class BasicIGAUtils {
         int numberOfRejections = changesetRequest.getAdminAuthorizations().stream().filter(a -> !a.getIsApproval()).collect(Collectors.toSet()).size();
 
         // Check the count of the remaining admins left to approve. If less than the threshold then just cancel change request
-        if((numberOfAdmins - numberOfRejections) < Integer.parseInt(tideRealmAdmin.getFirstAttribute("tideThreshold"))) {
+        int threshold = Integer.parseInt(tideRealmAdmin.getFirstAttribute("tideThreshold"));
+        // Cap threshold at numberOfAdmins to prevent stale tideThreshold from making approvals impossible
+        if (threshold > numberOfAdmins && numberOfAdmins > 0) {
+            threshold = Math.max(1, (int) (0.7 * numberOfAdmins));
+        }
+        if((numberOfAdmins - numberOfRejections) < threshold) {
             return DraftStatus.DENIED;
         }
         return DraftStatus.PENDING;

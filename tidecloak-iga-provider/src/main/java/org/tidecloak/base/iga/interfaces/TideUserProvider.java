@@ -8,6 +8,7 @@ import org.keycloak.models.jpa.JpaUserProvider;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 
+import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.jpa.entities.drafting.TideUserDraftEntity;
@@ -26,6 +27,7 @@ public class TideUserProvider extends JpaUserProvider {
 
     @Override
     public UserModel addUser(RealmModel realm, String username) {
+        BasicIGAUtils.stampRequestingAdmin(session);
         // Call the existing functionality from the superclass
         UserModel user = super.addUser(realm, username);
 

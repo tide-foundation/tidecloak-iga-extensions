@@ -15,6 +15,7 @@ import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.jpa.entities.ClientEntity;
+import org.keycloak.models.jpa.entities.GroupEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
@@ -29,7 +30,9 @@ import org.midgard.models.Policy.Policy;
 import org.midgard.models.RequestExtensions.UserContextSignRequest;
 import org.midgard.models.UserContext.UserContext;
 import org.tidecloak.base.iga.ChangeSetProcessors.keys.UserClientKey;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
+import org.tidecloak.base.iga.ChangeSetProcessors.models.WhatIfRequest;
 import org.keycloak.representations.AccessToken;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.TideEntityUtils;
 import org.tidecloak.base.iga.ChangeSetProcessors.utils.UserContextUtils;
@@ -166,11 +169,19 @@ public interface ChangeSetProcessor<T> {
         List<ClientModel> affectedClients = getAffectedClients(session, realm, entity, em);
         ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();// Initialize the processor factory
 
-        for (ClientModel client : affectedClients) {
+        // Exclude all batch-mate change sets from regeneration — their models already have
+        // dokens from the enclave signing phase. Regenerating would destroy the doken.
+        @SuppressWarnings("unchecked")
+        List<String> batchIds = (List<String>) session.getAttribute("batchAuthorityIds");
+        Set<String> skipIds = new HashSet<>();
+        if (batchIds != null) skipIds.addAll(batchIds);
+        skipIds.add(change.getChangeSetId());
 
+        for (ClientModel client : affectedClients) {
+            Set<String> finalSkipIds = skipIds;
             List<AccessProofDetailEntity> userContextDrafts = getUserContextDrafts(em, client)
                     .stream()
-                    .filter(proof -> !Objects.equals(proof.getChangeRequestKey().getChangeRequestId(), change.getChangeSetId()))
+                    .filter(proof -> !finalSkipIds.contains(proof.getChangeRequestKey().getChangeRequestId()))
                     .toList();
 
             for(AccessProofDetailEntity userContextDraft : userContextDrafts) {
@@ -253,11 +264,17 @@ public interface ChangeSetProcessor<T> {
      * Updates other authority requests for the same role when the current entity is an authority request.
      * This recalculates the policy threshold for pending authority requests since the number of active admins has changed.
      */
+    @SuppressWarnings("unchecked")
     default void updateOtherAuthorityRequests(KeycloakSession session, RealmModel realm, ChangeSetRequest change, TideUserRoleMappingDraftEntity currentEntity, EntityManager em) throws Exception {
         String roleId = currentEntity.getRoleId();
         String currentUserId = currentEntity.getUser().getId();
 
-        // Find all pending authority requests for the same role (excluding the current one)
+        // During bulk commit, skip batch-mate changesets — their POLICY models already
+        // have dokens from the enclave signing phase. Recreating would destroy those dokens.
+        List<String> batchIds = (List<String>) session.getAttribute("batchAuthorityIds");
+        Set<String> batchIdSet = batchIds != null ? new HashSet<>(batchIds) : Collections.emptySet();
+
+        // Find all pending authority requests for the same role (excluding the current one and batch-mates)
         List<TideUserRoleMappingDraftEntity> pendingAuthorityRequests = em.createNamedQuery("getUserRoleMappingDraftsByRoleAndStatusNotEqualTo", TideUserRoleMappingDraftEntity.class)
                 .setParameter("roleId", roleId)
                 .setParameter("draftStatus", DraftStatus.ACTIVE)
@@ -265,6 +282,7 @@ public interface ChangeSetProcessor<T> {
                 .stream()
                 .filter(draft -> !Objects.equals(draft.getUser().getId(), currentUserId)) // Exclude current user
                 .filter(draft -> !Objects.equals(draft.getChangeRequestId(), change.getChangeSetId())) // Exclude current change request
+                .filter(draft -> !batchIdSet.contains(draft.getChangeRequestId())) // Exclude batch-mates
                 .toList();
 
         RoleModel role = realm.getRoleById(roleId);
@@ -351,7 +369,13 @@ public interface ChangeSetProcessor<T> {
         if (processor != null) {
             processor.commit(session, change, entity, em, commitCallback);
         }
-        updateAffectedUserContexts(session, session.getContext().getRealm(), change, entity, em);
+        try {
+            updateAffectedUserContexts(session, session.getContext().getRealm(), change, entity, em);
+        } catch (Exception e) {
+            org.jboss.logging.Logger.getLogger(ChangeSetProcessor.class)
+                    .errorf(e, "updateAffectedUserContexts failed for changeSetId=%s, type=%s. Main commit should still succeed.",
+                            change.getChangeSetId(), change.getType());
+        }
     }
 
     /**
@@ -680,13 +704,28 @@ public interface ChangeSetProcessor<T> {
     }
 
     default void createChangeRequestEntity(EntityManager em, String recordId, ChangeSetType changeSetType) {
+        createChangeRequestEntity(null, em, recordId, changeSetType);
+    }
+
+    default void createChangeRequestEntity(KeycloakSession session, EntityManager em, String recordId, ChangeSetType changeSetType) {
         ChangesetRequestEntity changesetRequestEntity = em.find(ChangesetRequestEntity.class, new ChangesetRequestEntity.Key(recordId, changeSetType));
         if (changesetRequestEntity == null) {
-            ChangesetRequestEntity entity = new ChangesetRequestEntity();
-            entity.setChangesetRequestId(recordId);
-            entity.setChangesetType(changeSetType);
-            em.persist(entity);
+            changesetRequestEntity = new ChangesetRequestEntity();
+            changesetRequestEntity.setChangesetRequestId(recordId);
+            changesetRequestEntity.setChangesetType(changeSetType);
+            em.persist(changesetRequestEntity);
             em.flush();
+        }
+        // Stamp requestedBy from session attributes (set by stampRequestingAdmin in the adapter)
+        if (changesetRequestEntity.getRequestedBy() == null && session != null) {
+            String userId = session.getAttribute("requestedByUserId", String.class);
+            String username = session.getAttribute("requestedByUsername", String.class);
+            if (userId != null) {
+                changesetRequestEntity.setRequestedBy(userId);
+                changesetRequestEntity.setRequestedByUsername(username);
+                em.flush();
+                org.jboss.logging.Logger.getLogger("ChangeSetProcessor").infof("createChangeRequestEntity: stamped requestedBy=%s (%s)", userId, username);
+            }
         }
     }
 
@@ -725,6 +764,126 @@ public interface ChangeSetProcessor<T> {
                 authSessionManager.removeAuthenticationSession(realm, authSession, false);
             }
         }
+    }
+
+    /**
+     * Generates a "what-if" token preview showing what a user's access token would look like
+     * if a proposed change were applied, without persisting anything.
+     *
+     * @param session The Keycloak session.
+     * @param realm   The realm.
+     * @param request The what-if request parameters.
+     * @return A cleaned JSON string of the hypothetical access token.
+     */
+    default String generateWhatIfToken(KeycloakSession session, RealmModel realm, WhatIfRequest request) throws Exception {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        ChangeSetProcessorFactory processorFactory = ChangeSetProcessorFactoryProvider.getFactory();
+
+        UserModel user = session.users().getUserById(realm, request.getUserId());
+        if (user == null) {
+            throw new IllegalArgumentException("User not found: " + request.getUserId());
+        }
+
+        ClientModel client = realm.getClientById(request.getClientId());
+        if (client == null) {
+            throw new IllegalArgumentException("Client not found: " + request.getClientId());
+        }
+
+        // Generate base access token for user + client
+        AccessToken token = this.generateAccessToken(session, realm, client, user);
+        token = this.transformedToken(token, user);
+
+        ChangeSetType type = request.getChangeSetType();
+        ActionType action = request.getActionType();
+        boolean isFullScopeAllowed = client.isFullScopeAllowed();
+
+        // Build a temporary in-memory entity based on changeSetType and transform the token
+        switch (type) {
+            case USER_ROLE: {
+                TideUserRoleMappingDraftEntity entity = new TideUserRoleMappingDraftEntity();
+                entity.setId(KeycloakModelUtils.generateId());
+                entity.setChangeRequestId(KeycloakModelUtils.generateId());
+                entity.setRoleId(request.getRoleId());
+                entity.setUser(em.getReference(UserEntity.class, request.getUserId()));
+                if (action == ActionType.DELETE) {
+                    entity.setDeleteStatus(DraftStatus.DRAFT);
+                }
+                ChangeSetProcessor processor = processorFactory.getProcessor(type);
+                token = processor.transformUserContext(token, session, entity, user, client);
+                break;
+            }
+            case COMPOSITE_ROLE: {
+                TideCompositeRoleMappingDraftEntity entity = new TideCompositeRoleMappingDraftEntity();
+                entity.setId(KeycloakModelUtils.generateId());
+                entity.setChangeRequestId(KeycloakModelUtils.generateId());
+                entity.setComposite(em.getReference(RoleEntity.class, request.getCompositeRoleId()));
+                entity.setChildRole(em.getReference(RoleEntity.class, request.getChildRoleId()));
+                if (action == ActionType.DELETE) {
+                    entity.setDeleteStatus(DraftStatus.DRAFT);
+                }
+                ChangeSetProcessor processor = processorFactory.getProcessor(type);
+                token = processor.transformUserContext(token, session, entity, user, client);
+                break;
+            }
+            case CLIENT_FULLSCOPE: {
+                TideClientDraftEntity entity = new TideClientDraftEntity();
+                entity.setId(KeycloakModelUtils.generateId());
+                entity.setChangeRequestId(KeycloakModelUtils.generateId());
+                entity.setClient(em.getReference(ClientEntity.class, request.getClientId()));
+                if (action == ActionType.CREATE) {
+                    // Enabling full scope: fullScopeDisabled is ACTIVE, fullScopeEnabled is being requested
+                    entity.setFullScopeDisabled(DraftStatus.ACTIVE);
+                    entity.setFullScopeEnabled(DraftStatus.DRAFT);
+                } else {
+                    // Disabling full scope: fullScopeEnabled is ACTIVE, fullScopeDisabled is being requested
+                    entity.setFullScopeEnabled(DraftStatus.ACTIVE);
+                    entity.setFullScopeDisabled(DraftStatus.DRAFT);
+                }
+                ChangeSetProcessor processor = processorFactory.getProcessor(type);
+                token = processor.transformUserContext(token, session, entity, user, client);
+                isFullScopeAllowed = action == ActionType.CREATE;
+                break;
+            }
+            case CLIENT: {
+                // Default user context for a client — no transformation, just generate the base token
+                return this.cleanAccessToken(token, null, isFullScopeAllowed);
+            }
+            case GROUP_ROLE: {
+                TideGroupRoleMappingEntity entity = new TideGroupRoleMappingEntity();
+                entity.setId(KeycloakModelUtils.generateId());
+                entity.setChangeRequestId(KeycloakModelUtils.generateId());
+                entity.setGroup(em.getReference(GroupEntity.class, request.getGroupId()));
+                entity.setRoleId(request.getRoleId());
+                entity.setAction(action);
+                ChangeSetProcessor processor = processorFactory.getProcessor(type);
+                token = processor.transformUserContext(token, session, entity, user, client);
+                break;
+            }
+            case GROUP: {
+                TideGroupDraftEntity entity = new TideGroupDraftEntity();
+                entity.setId(request.getGroupId());
+                entity.setChangeRequestId(KeycloakModelUtils.generateId());
+                entity.setAction(action);
+                ChangeSetProcessor processor = processorFactory.getProcessor(type);
+                token = processor.transformUserContext(token, session, entity, user, client);
+                break;
+            }
+            case USER_GROUP_MEMBERSHIP: {
+                TideUserGroupMembershipEntity entity = new TideUserGroupMembershipEntity();
+                entity.setId(KeycloakModelUtils.generateId());
+                entity.setChangeRequestId(KeycloakModelUtils.generateId());
+                entity.setUser(em.getReference(UserEntity.class, request.getUserId()));
+                entity.setGroupId(request.getGroupId());
+                entity.setAction(action);
+                ChangeSetProcessor processor = processorFactory.getProcessor(type);
+                token = processor.transformUserContext(token, session, entity, user, client);
+                break;
+            }
+            default:
+                throw new IllegalArgumentException("Unsupported changeSetType for what-if: " + type);
+        }
+
+        return this.cleanAccessToken(token, null, isFullScopeAllowed);
     }
 
     private JsonNode cleanProofDraft (JsonNode token, List<String> keysToRemove) throws JsonProcessingException {

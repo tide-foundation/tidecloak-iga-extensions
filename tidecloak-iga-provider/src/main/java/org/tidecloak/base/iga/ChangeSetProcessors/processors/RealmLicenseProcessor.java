@@ -73,7 +73,7 @@ public class RealmLicenseProcessor implements org.tidecloak.base.iga.ChangeSetPr
             if (Objects.requireNonNull(action) == ActionType.CREATE) {
                 logger.debug(String.format("Initiating CREATE action for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", entity.getId(), entity.getChangeRequestId()));
                 handleCreateRequest(session, entity, em, callback);
-                ChangeSetProcessor.super.createChangeRequestEntity(em, entity.getChangeRequestId(), changeSetType);
+                ChangeSetProcessor.super.createChangeRequestEntity(session, em, entity.getChangeRequestId(), changeSetType);
                 callback.run();
             } else {
                 logger.warn(String.format("Unsupported action type: %s for Mapping ID: %s in workflow: REQUEST. Change Request ID: %s", action, entity.getId(), entity.getChangeRequestId()));

@@ -43,6 +43,12 @@ public class ChangesetRequestEntity {
     @Column(name = "REQUEST_MODEL")
     protected String requestModel;
 
+    @Column(name = "REQUESTED_BY")
+    protected String requestedBy;
+
+    @Column(name = "REQUESTED_BY_USERNAME")
+    protected String requestedByUsername;
+
     public ChangeSetType getChangesetType() {
         return changesetType;
     }
@@ -93,6 +99,22 @@ public class ChangesetRequestEntity {
 
     public void setTimestamp(Long timestamp) {
         this.timestamp = timestamp;
+    }
+
+    public String getRequestedBy() {
+        return requestedBy;
+    }
+
+    public void setRequestedBy(String requestedBy) {
+        this.requestedBy = requestedBy;
+    }
+
+    public String getRequestedByUsername() {
+        return requestedByUsername;
+    }
+
+    public void setRequestedByUsername(String requestedByUsername) {
+        this.requestedByUsername = requestedByUsername;
     }
 
     public static class Key implements Serializable {
