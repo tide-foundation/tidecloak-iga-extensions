@@ -26,6 +26,7 @@ public final class LicenseHistory {
             String customerId,
             String vendorId,
             String payerPub,
+            String walletId,
             long expiry,
             KeycloakSession session
     ) {
@@ -46,6 +47,7 @@ public final class LicenseHistory {
             String customerId,
             String vendorId,
             String payerPub,
+            String walletId,
             long expiry,
             KeycloakSession session
     ) {
@@ -84,6 +86,7 @@ public final class LicenseHistory {
         e.setCustomerId(customerId);
         e.setVendorId(vendorId);
         e.setPayerPub(payerPub);
+        e.setWalletId(walletId);
         e.setExpiry(expiry);
 
         try {
