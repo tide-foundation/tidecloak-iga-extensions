@@ -131,11 +131,57 @@ public class ServerIdentityResourceProvider implements RealmResourceProvider {
 
             em.persist(draft);
 
+            // Build a ModelRequest for enclave approval signing
+            // The draft is the cert request metadata, the model is ServerCert:1
+            String requestModelB64 = null;
+            try {
+                org.keycloak.component.ComponentModel componentModel = realm.getComponentsStream()
+                        .filter(x -> "tide-vendor-key".equals(x.getProviderId()))
+                        .findFirst()
+                        .orElse(null);
+
+                if (componentModel != null) {
+                    org.keycloak.common.util.MultivaluedHashMap<String, String> config = componentModel.getConfig();
+                    String currentSecretKeys = config.getFirst("clientSecret");
+                    org.tidecloak.shared.models.SecretKeys secretKeys = objectMapper.readValue(
+                            currentSecretKeys, org.tidecloak.shared.models.SecretKeys.class);
+
+                    // Build TBS cert as draft
+                    String issuerCn = "tide.realm." + realm.getName();
+                    byte[] tbsCert = ServerCertBuilder.buildTbs(
+                            publicKey, clientId, realm.getName(), issuerCn, spiffeId, requestedLifetime);
+
+                    ObjectNode metadata = objectMapper.createObjectNode();
+                    metadata.put("realm", realm.getName());
+                    metadata.put("clientId", clientId);
+                    metadata.put("instanceId", instanceId);
+                    metadata.put("spiffeId", spiffeId);
+                    metadata.put("requestedLifetime", requestedLifetime);
+
+                    org.midgard.models.ModelRequest modelReq = org.midgard.models.ModelRequest.New(
+                            "ServerCert", "1", "VRK:1", tbsCert);
+                    modelReq.SetDynamicData(objectMapper.writeValueAsBytes(metadata));
+
+                    String gVRK = config.getFirst("gVRK");
+                    String gVRKCertificate = config.getFirst("gVRKCertificate");
+
+                    modelReq.SetAuthorization(org.midgard.Midgard.SignWithVrk(
+                            modelReq.GetDataToAuthorize(), secretKeys.activeVrk));
+                    modelReq.SetAuthorizer(java.util.HexFormat.of().parseHex(gVRK));
+                    modelReq.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(gVRKCertificate));
+
+                    requestModelB64 = java.util.Base64.getEncoder().encodeToString(modelReq.Encode());
+                }
+            } catch (Exception e) {
+                logger.warn("Could not build model request for SERVER_CERT enclave approval", e);
+            }
+
             // Create changeset request entity (links to IGA approval flow)
             ChangesetRequestEntity changeRequest = new ChangesetRequestEntity();
             changeRequest.setChangesetRequestId(changeRequestId);
             changeRequest.setChangesetType(ChangeSetType.SERVER_CERT);
             changeRequest.setDraftRequest(objectMapper.writeValueAsString(request));
+            changeRequest.setRequestModel(requestModelB64);
             changeRequest.setTimestamp(System.currentTimeMillis());
             changeRequest.setRequestedBy("server:" + instanceId);
             changeRequest.setRequestedByUsername(clientId + "/" + instanceId);
