@@ -159,7 +159,7 @@ public class ServerIdentityResourceProvider implements RealmResourceProvider {
                     metadata.put("requestedLifetime", requestedLifetime);
 
                     org.midgard.models.ModelRequest modelReq = org.midgard.models.ModelRequest.New(
-                            "ServerCert", "1", "VRK:1", tbsCert);
+                            "sCert", "1", "VRK:1", tbsCert);
                     modelReq.SetDynamicData(objectMapper.writeValueAsBytes(metadata));
 
                     String gVRK = config.getFirst("gVRK");
@@ -383,7 +383,7 @@ public class ServerIdentityResourceProvider implements RealmResourceProvider {
             metadata.put("spiffeId", existing.getSpiffeId());
             metadata.put("requestedLifetime", requestedLifetime);
 
-            org.midgard.models.ModelRequest req = org.midgard.models.ModelRequest.New("ServerCert", "1", "VRK:1", tbsCert);
+            org.midgard.models.ModelRequest req = org.midgard.models.ModelRequest.New("sCert", "1", "VRK:1", tbsCert);
             req.SetDynamicData(mapper.writeValueAsBytes(metadata));
             req.SetAuthorization(org.midgard.Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
             req.SetAuthorizer(java.util.HexFormat.of().parseHex(gVRK));
@@ -399,7 +399,7 @@ public class ServerIdentityResourceProvider implements RealmResourceProvider {
             // Build trust bundle (self-signed VVK CA cert)
             byte[] vvkPubBytes = java.util.HexFormat.of().parseHex(gVRK);
             byte[] caTbs = ServerCertBuilder.buildVvkCaTbs(vvkPubBytes, realm.getName());
-            org.midgard.models.ModelRequest caReq = org.midgard.models.ModelRequest.New("ServerCert", "1", "VRK:1", caTbs);
+            org.midgard.models.ModelRequest caReq = org.midgard.models.ModelRequest.New("sCert", "1", "VRK:1", caTbs);
             com.fasterxml.jackson.databind.node.ObjectNode caMeta = mapper.createObjectNode();
             caMeta.put("realm", realm.getName());
             caMeta.put("clientId", "VVK-CA");

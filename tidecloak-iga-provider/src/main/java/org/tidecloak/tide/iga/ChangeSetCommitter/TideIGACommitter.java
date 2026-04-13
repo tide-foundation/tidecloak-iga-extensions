@@ -123,7 +123,7 @@ public class TideIGACommitter implements ChangeSetCommitter {
         byte[] dynamicData = objectMapper.writeValueAsBytes(metadata);
 
         // Create and sign the model request
-        ModelRequest req = ModelRequest.New("ServerCert", "1", "VRK:1", tbsCert);
+        ModelRequest req = ModelRequest.New("sCert", "1", "VRK:1", tbsCert);
         req.SetDynamicData(dynamicData);
         req.SetAuthorization(Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
         req.SetAuthorizer(HexFormat.of().parseHex(gVRK));
@@ -145,7 +145,7 @@ public class TideIGACommitter implements ChangeSetCommitter {
         byte[] vvkPubBytes = HexFormat.of().parseHex(gVRK);
         byte[] caTbs = ServerCertBuilder.buildVvkCaTbs(vvkPubBytes, realm.getName());
 
-        ModelRequest caReq = ModelRequest.New("ServerCert", "1", "VRK:1", caTbs);
+        ModelRequest caReq = ModelRequest.New("sCert", "1", "VRK:1", caTbs);
         ObjectNode caMeta = objectMapper.createObjectNode();
         caMeta.put("realm", realm.getName());
         caMeta.put("clientId", "VVK-CA");
