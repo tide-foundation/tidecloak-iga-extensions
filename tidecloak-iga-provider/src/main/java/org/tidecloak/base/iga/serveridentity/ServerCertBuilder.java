@@ -103,6 +103,109 @@ public class ServerCertBuilder {
         return pem.toString();
     }
 
+    /**
+     * Build a self-signed VVK CA certificate for the trust bundle.
+     * This is a minimal X.509 v3 cert with CA:TRUE, signed by the VVK itself.
+     * Used as the trust anchor for verifying server SVIDs.
+     *
+     * @param vvkPublicKeyHex VVK public key as hex string (gVRK)
+     * @param realmName Realm name for the issuer CN
+     * @param vvkSignature Pre-computed VVK signature of the TBS bytes
+     * @return PEM-encoded CA certificate
+     */
+    public static String buildVvkCaCert(byte[] vvkPublicKeyBytes, String realmName, byte[] vvkSignature) {
+        String issuerCn = "tide.realm." + realmName;
+        Instant now = Instant.now();
+        Date notBefore = Date.from(now);
+        // CA cert valid for 10 years
+        Date notAfter = Date.from(now.plusSeconds(10L * 365 * 24 * 3600));
+
+        byte[] version = derExplicit(0, derInteger(BigInteger.valueOf(2)));
+        byte[] serialNumber = derInteger(BigInteger.ONE);
+        byte[] signatureAlgorithm = ed25519AlgorithmIdentifier();
+        byte[] issuer = derSequence(derSet(derSequence(
+                derOid(new int[]{2, 5, 4, 3}),
+                derUtf8String(issuerCn)
+        )));
+        byte[] validity = derSequence(derUtcTime(notBefore), derUtcTime(notAfter));
+        byte[] subject = derSequence(derSet(derSequence(
+                derOid(new int[]{2, 5, 4, 3}),
+                derUtf8String(issuerCn)
+        )));
+        byte[] subjectPublicKeyInfo = derSequence(
+                ed25519AlgorithmIdentifier(),
+                derBitString(vvkPublicKeyBytes)
+        );
+
+        // CA:TRUE extension
+        byte[] basicConstraints = derSequence(
+                derOid(new int[]{2, 5, 29, 19}),
+                new byte[]{0x01, 0x01, (byte) 0xFF}, // critical: true
+                derOctetString(derSequence(new byte[]{0x01, 0x01, (byte) 0xFF})) // CA:TRUE
+        );
+
+        // Key Usage: keyCertSign + cRLSign
+        byte[] keyUsage = derSequence(
+                derOid(new int[]{2, 5, 29, 15}),
+                new byte[]{0x01, 0x01, (byte) 0xFF}, // critical: true
+                derOctetString(new byte[]{0x03, 0x02, 0x01, 0x06}) // bits 5,6 set (keyCertSign, cRLSign)
+        );
+
+        byte[] extensions = derExplicit(3, derSequence(basicConstraints, keyUsage));
+
+        byte[] tbsCert = derSequence(
+                version, serialNumber, signatureAlgorithm, issuer, validity,
+                subject, subjectPublicKeyInfo, extensions
+        );
+
+        byte[] fullCert = assembleCertificate(tbsCert, vvkSignature);
+        return toPem(fullCert);
+    }
+
+    /**
+     * Build the TBS bytes for a VVK CA certificate (for signing by the VVK).
+     */
+    public static byte[] buildVvkCaTbs(byte[] vvkPublicKeyBytes, String realmName) {
+        String issuerCn = "tide.realm." + realmName;
+        Instant now = Instant.now();
+        Date notBefore = Date.from(now);
+        Date notAfter = Date.from(now.plusSeconds(10L * 365 * 24 * 3600));
+
+        byte[] version = derExplicit(0, derInteger(BigInteger.valueOf(2)));
+        byte[] serialNumber = derInteger(BigInteger.ONE);
+        byte[] signatureAlgorithm = ed25519AlgorithmIdentifier();
+        byte[] issuer = derSequence(derSet(derSequence(
+                derOid(new int[]{2, 5, 4, 3}),
+                derUtf8String(issuerCn)
+        )));
+        byte[] validity = derSequence(derUtcTime(notBefore), derUtcTime(notAfter));
+        byte[] subject = derSequence(derSet(derSequence(
+                derOid(new int[]{2, 5, 4, 3}),
+                derUtf8String(issuerCn)
+        )));
+        byte[] subjectPublicKeyInfo = derSequence(
+                ed25519AlgorithmIdentifier(),
+                derBitString(vvkPublicKeyBytes)
+        );
+
+        byte[] basicConstraints = derSequence(
+                derOid(new int[]{2, 5, 29, 19}),
+                new byte[]{0x01, 0x01, (byte) 0xFF},
+                derOctetString(derSequence(new byte[]{0x01, 0x01, (byte) 0xFF}))
+        );
+        byte[] keyUsage = derSequence(
+                derOid(new int[]{2, 5, 29, 15}),
+                new byte[]{0x01, 0x01, (byte) 0xFF},
+                derOctetString(new byte[]{0x03, 0x02, 0x01, 0x06})
+        );
+        byte[] extensions = derExplicit(3, derSequence(basicConstraints, keyUsage));
+
+        return derSequence(
+                version, serialNumber, signatureAlgorithm, issuer, validity,
+                subject, subjectPublicKeyInfo, extensions
+        );
+    }
+
     // --- ASN.1 DER Encoding Helpers ---
 
     private static byte[] ed25519AlgorithmIdentifier() {

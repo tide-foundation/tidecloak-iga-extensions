@@ -140,10 +140,27 @@ public class TideIGACommitter implements ChangeSetCommitter {
         byte[] fullCert = ServerCertBuilder.assembleCertificate(tbsCert, signatureBytes);
         String certPem = ServerCertBuilder.toPem(fullCert);
 
-        // Build trust bundle (VVK public key as self-signed CA cert)
-        // For now, use the gVRK (VVK public point) as a reference
-        // Full self-signed CA cert building is deferred
-        String trustBundle = "VVK:" + gVRK;
+        // Build trust bundle: self-signed VVK CA certificate
+        // The CA cert TBS is signed by VVK via ORK network
+        byte[] vvkPubBytes = HexFormat.of().parseHex(gVRK);
+        byte[] caTbs = ServerCertBuilder.buildVvkCaTbs(vvkPubBytes, realm.getName());
+
+        ModelRequest caReq = ModelRequest.New("ServerCert", "1", "VRK:1", caTbs);
+        ObjectNode caMeta = objectMapper.createObjectNode();
+        caMeta.put("realm", realm.getName());
+        caMeta.put("clientId", "VVK-CA");
+        caMeta.put("instanceId", "trust-bundle");
+        caMeta.put("spiffeId", "spiffe://tide.realm." + realm.getName());
+        caMeta.put("requestedLifetime", 315360000L); // 10 years
+        caReq.SetDynamicData(objectMapper.writeValueAsBytes(caMeta));
+        caReq.SetAuthorization(Midgard.SignWithVrk(caReq.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
+        caReq.SetAuthorizer(HexFormat.of().parseHex(gVRK));
+        caReq.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(gVRKCertificate));
+
+        SignatureResponse caSignResponse = Midgard.SignModel(settings, caReq);
+        byte[] caSignatureBytes = java.util.Base64.getDecoder().decode(
+                caSignResponse.Signatures[0].replace('-', '+').replace('_', '/'));
+        String trustBundle = ServerCertBuilder.buildVvkCaCert(vvkPubBytes, realm.getName(), caSignatureBytes);
 
         // Store the signed certificate
         draft.setCertificate(certPem);

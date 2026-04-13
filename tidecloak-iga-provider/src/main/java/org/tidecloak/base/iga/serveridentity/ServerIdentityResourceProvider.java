@@ -350,15 +350,34 @@ public class ServerIdentityResourceProvider implements RealmResourceProvider {
             byte[] fullCert = ServerCertBuilder.assembleCertificate(tbsCert, signatureBytes);
             String certPem = ServerCertBuilder.toPem(fullCert);
 
+            // Build trust bundle (self-signed VVK CA cert)
+            byte[] vvkPubBytes = java.util.HexFormat.of().parseHex(gVRK);
+            byte[] caTbs = ServerCertBuilder.buildVvkCaTbs(vvkPubBytes, realm.getName());
+            org.midgard.models.ModelRequest caReq = org.midgard.models.ModelRequest.New("ServerCert", "1", "VRK:1", caTbs);
+            com.fasterxml.jackson.databind.node.ObjectNode caMeta = mapper.createObjectNode();
+            caMeta.put("realm", realm.getName());
+            caMeta.put("clientId", "VVK-CA");
+            caMeta.put("instanceId", "trust-bundle");
+            caMeta.put("spiffeId", "spiffe://tide.realm." + realm.getName());
+            caMeta.put("requestedLifetime", 315360000L);
+            caReq.SetDynamicData(mapper.writeValueAsBytes(caMeta));
+            caReq.SetAuthorization(org.midgard.Midgard.SignWithVrk(caReq.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
+            caReq.SetAuthorizer(java.util.HexFormat.of().parseHex(gVRK));
+            caReq.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(gVRKCertificate));
+            org.midgard.models.SignatureResponse caSignResp = org.midgard.Midgard.SignModel(settings, caReq);
+            byte[] caSignBytes = java.util.Base64.getDecoder().decode(
+                    caSignResp.Signatures[0].replace('-', '+').replace('_', '/'));
+            String trustBundle = ServerCertBuilder.buildVvkCaCert(vvkPubBytes, realm.getName(), caSignBytes);
+
             existing.setCertificate(certPem);
-            existing.setTrustBundle("VVK:" + gVRK);
+            existing.setTrustBundle(trustBundle);
             em.merge(existing);
             em.flush();
 
             ObjectNode response = objectMapper.createObjectNode();
             response.put("status", "RENEWED");
             response.put("certificate", certPem);
-            response.put("trustBundle", "VVK:" + gVRK);
+            response.put("trustBundle", trustBundle);
             response.put("spiffeId", existing.getSpiffeId());
 
             return Response.ok(objectMapper.writeValueAsString(response))
