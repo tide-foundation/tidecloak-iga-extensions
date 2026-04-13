@@ -15,6 +15,7 @@ public enum ChangeSetType {
     CLIENT_FULLSCOPE,
     RAGNAROK,
     REALM_LICENSING,
-    POLICY
+    POLICY,
+    SERVER_CERT
     ;
 }
