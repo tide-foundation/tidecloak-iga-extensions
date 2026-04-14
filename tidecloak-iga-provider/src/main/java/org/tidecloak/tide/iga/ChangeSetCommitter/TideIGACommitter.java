@@ -128,79 +128,61 @@ public class TideIGACommitter implements ChangeSetCommitter {
                 ChangesetRequestEntity.class,
                 new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), ChangeSetType.SERVER_CERT)
         );
-        // --- Step 1: Resolve ServerCert:1 policy (reuse signed or sign fresh) ---
-        logger.info("[SERVER_CERT] Resolving ServerCert:1 policy...");
+        // --- Step 1: Sign ServerCert:1 policy fresh via ORK network ---
+        // Always create a fresh policy on each approval — if the policy gets revoked on the ORKs,
+        // a new one must be generated.
+        logger.info("[SERVER_CERT] Building fresh ServerCert:1 policy...");
 
-        // Check if a VVK-signed ServerCert:1 policy was persisted from a prior commit.
-        // If so, skip the entire policy signing step and reuse the existing signed policy.
-        String existingSignedPolicyB64 = config.getFirst("serverCertSignedPolicy");
-        Policy sCertPolicy;
+        String sCertPolicyKey = changeSet.getChangeSetId() + "-scpo";
+        ChangesetRequestEntity sCertPolicyEntity = em.find(
+                ChangesetRequestEntity.class,
+                new ChangesetRequestEntity.Key(sCertPolicyKey, ChangeSetType.POLICY)
+        );
 
-        if (existingSignedPolicyB64 != null && !existingSignedPolicyB64.isEmpty()) {
-            // Reuse the previously VVK-signed policy — no enclave or ORK interaction needed
-            sCertPolicy = Policy.From(Base64.getDecoder().decode(existingSignedPolicyB64));
-            logger.info("[SERVER_CERT] ServerCert:1 policy reused from prior commit (stored in component config)");
+        // Build the ServerCert:1 policy object
+        PolicyParameters sCertPolicyParams = new PolicyParameters();
+        sCertPolicyParams.put("realm", realm.getName());
+        // Calculate threshold from active tide-realm-admin count
+        RoleModel tideAdminRole = session.clients()
+                .getClientByClientId(realm, org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
+                .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        int adminCount = ChangesetRequestAdapter.getNumberOfActiveAdmins(session, realm, tideAdminRole, em);
+        int approvalThreshold = Math.max(1, (int) (0.7 * Math.max(1, adminCount)));
+        sCertPolicyParams.put("threshold", approvalThreshold);
+        sCertPolicyParams.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        sCertPolicyParams.put("resource", "realm-management");
+        Policy sCertPolicy = new Policy("ServerCert:1", new String[]{"ServerCert:1"}, settings.VVKId,
+                ApprovalType.EXPLICIT, ExecutionType.PUBLIC, sCertPolicyParams);
+
+        if (sCertPolicyEntity != null && sCertPolicyEntity.getRequestModel() != null) {
+            // Reuse model from sign time (has admin dokens from enclave)
+            ModelRequest sCertPolicyModelReq = ModelRequest.FromBytes(Base64.getDecoder().decode(sCertPolicyEntity.getRequestModel()));
+            SignatureResponse sCertPolicySignResp = Midgard.SignModel(settings, sCertPolicyModelReq);
+            sCertPolicy.AddSignature(java.util.Base64.getDecoder().decode(sCertPolicySignResp.Signatures[0]));
+            logger.info("[SERVER_CERT] ServerCert:1 policy signed (from sign-time enclave model)");
         } else {
-            // First-time flow: need to sign the policy via ORK network
-            String sCertPolicyKey = changeSet.getChangeSetId() + "-scpo";
-            ChangesetRequestEntity sCertPolicyEntity = em.find(
-                    ChangesetRequestEntity.class,
-                    new ChangesetRequestEntity.Key(sCertPolicyKey, ChangeSetType.POLICY)
-            );
+            // Build fresh (single-admin / firstAdmin flow) — use VRK:1 auth
+            byte[] authorizerBytes = HexFormat.of().parseHex(gVRK);
+            byte[] certBytes = java.util.Base64.getDecoder().decode(gVRKCertificate);
 
-            // Build the ServerCert:1 policy object
-            PolicyParameters sCertPolicyParams = new PolicyParameters();
-            sCertPolicyParams.put("realm", realm.getName());
-            // Calculate threshold from active tide-realm-admin count
-            RoleModel tideAdminRole = session.clients()
-                    .getClientByClientId(realm, org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
-                    .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-            int adminCount = ChangesetRequestAdapter.getNumberOfActiveAdmins(session, realm, tideAdminRole, em);
-            int approvalThreshold = Math.max(1, (int) (0.7 * Math.max(1, adminCount)));
-            sCertPolicyParams.put("threshold", approvalThreshold);
-            sCertPolicyParams.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-            sCertPolicyParams.put("resource", "realm-management");
-            sCertPolicy = new Policy("ServerCert:1", new String[]{"ServerCert:1"}, settings.VVKId,
-                    ApprovalType.EXPLICIT, ExecutionType.PUBLIC, sCertPolicyParams);
+            PolicySignRequest sCertPolicySignReq = new PolicySignRequest(sCertPolicy.ToBytes(), "VRK:1");
+            ModelRequest sCertPolicyModelReq = ModelRequest.New("Policy", "1", "VRK:1",
+                    sCertPolicySignReq.GetDraft(), sCertPolicy.ToBytes());
+            sCertPolicyModelReq.SetAuthorizer(authorizerBytes);
+            sCertPolicyModelReq.SetAuthorizerCertificate(certBytes);
+            sCertPolicyModelReq.SetAuthorization(
+                    Midgard.SignWithVrk(sCertPolicyModelReq.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
+            SignatureResponse sCertPolicySignResp = Midgard.SignModel(settings, sCertPolicyModelReq);
+            sCertPolicy.AddSignature(java.util.Base64.getDecoder().decode(sCertPolicySignResp.Signatures[0]));
+            logger.info("[SERVER_CERT] ServerCert:1 policy signed (fresh build)");
+        }
 
-            if (sCertPolicyEntity != null && sCertPolicyEntity.getRequestModel() != null) {
-                // Reuse model from sign time (has admin dokens from enclave)
-                ModelRequest sCertPolicyModelReq = ModelRequest.FromBytes(Base64.getDecoder().decode(sCertPolicyEntity.getRequestModel()));
-                SignatureResponse sCertPolicySignResp = Midgard.SignModel(settings, sCertPolicyModelReq);
-                sCertPolicy.AddSignature(java.util.Base64.getDecoder().decode(sCertPolicySignResp.Signatures[0]));
-                logger.info("[SERVER_CERT] ServerCert:1 policy signed (from sign-time enclave model)");
-            } else {
-                // Build fresh (single-admin / firstAdmin flow) — use VRK:1 auth
-                byte[] authorizerBytes = HexFormat.of().parseHex(gVRK);
-                byte[] certBytes = java.util.Base64.getDecoder().decode(gVRKCertificate);
-
-                PolicySignRequest sCertPolicySignReq = new PolicySignRequest(sCertPolicy.ToBytes(), "VRK:1");
-                ModelRequest sCertPolicyModelReq = ModelRequest.New("Policy", "1", "VRK:1",
-                        sCertPolicySignReq.GetDraft(), sCertPolicy.ToBytes());
-                sCertPolicyModelReq.SetAuthorizer(authorizerBytes);
-                sCertPolicyModelReq.SetAuthorizerCertificate(certBytes);
-                sCertPolicyModelReq.SetAuthorization(
-                        Midgard.SignWithVrk(sCertPolicyModelReq.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
-                SignatureResponse sCertPolicySignResp = Midgard.SignModel(settings, sCertPolicyModelReq);
-                sCertPolicy.AddSignature(java.util.Base64.getDecoder().decode(sCertPolicySignResp.Signatures[0]));
-                logger.info("[SERVER_CERT] ServerCert:1 policy signed (fresh build)");
+        // Clean up the policy entity (no longer needed after signing)
+        if (sCertPolicyEntity != null) {
+            if (sCertPolicyEntity.getAdminAuthorizations() != null) {
+                sCertPolicyEntity.getAdminAuthorizations().clear();
             }
-
-            // Clean up the policy entity (no longer needed after signing)
-            if (sCertPolicyEntity != null) {
-                if (sCertPolicyEntity.getAdminAuthorizations() != null) {
-                    sCertPolicyEntity.getAdminAuthorizations().clear();
-                }
-                em.remove(sCertPolicyEntity);
-            }
-
-            // Persist the VVK-signed policy in the component config for future reuse.
-            // Subsequent SERVER_CERT approvals will skip the policy signing step entirely.
-            config.putSingle("serverCertSignedPolicy",
-                    Base64.getEncoder().encodeToString(sCertPolicy.ToBytes()));
-            componentModel.setConfig(config);
-            realm.updateComponent(componentModel);
-            logger.info("[SERVER_CERT] ServerCert:1 signed policy persisted to component config for future reuse");
+            em.remove(sCertPolicyEntity);
         }
 
         // --- Step 2: Build sCert:1 model with signed policy attached ---

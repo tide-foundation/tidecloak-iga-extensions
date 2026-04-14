@@ -96,11 +96,6 @@ public class MultiAdmin implements Authorizer{
             String gVRK = config.getFirst("gVRK");
             String gVRKCertificate = config.getFirst("gVRKCertificate");
 
-            // Check if a VVK-signed ServerCert:1 policy already exists from a prior approval.
-            // If so, we can skip creating the policy enclave item and only send 3 items.
-            String existingSignedPolicyB64 = config.getFirst("serverCertSignedPolicy");
-            boolean hasExistingPolicy = (existingSignedPolicyB64 != null && !existingSignedPolicyB64.isEmpty());
-
             // Build X.509 TBS certificate (same as commitServerCert)
             String issuerCn = "tide.realm." + realm.getName();
             byte[] tbsCert = ServerCertBuilder.buildTbs(
@@ -156,8 +151,8 @@ public class MultiAdmin implements Authorizer{
                 adminPolicyBytes = adminPolicy.ToBytes();
             }
 
-            if (!hasExistingPolicy) {
-                // --- First-time flow: build ServerCert:1 policy ModelRequest for enclave approval ---
+            {
+                // --- Build ServerCert:1 policy ModelRequest for enclave approval ---
                 String vvkIdForPolicy = config.getFirst("vvkId");
 
                 PolicyParameters sCertPolicyParams = new PolicyParameters();
@@ -203,12 +198,7 @@ public class MultiAdmin implements Authorizer{
                 sCertPolicyEntity.setTimestamp(System.currentTimeMillis());
                 em.persist(sCertPolicyEntity);
 
-                System.out.println("[MultiAdmin.sign] First-time flow: built ServerCert:1 policy for enclave approval");
-            } else {
-                // --- Reuse flow: signed policy already exists, attach to cert/CA/pubkey models ---
-                // The existing signed policy will be used at commit time via SetPolicy().
-                // No policy enclave item needed — only 3 items sent to enclave.
-                System.out.println("[MultiAdmin.sign] Reuse flow: existing ServerCert:1 signed policy found, skipping policy enclave item");
+                System.out.println("[MultiAdmin.sign] Built ServerCert:1 policy for enclave approval");
             }
 
             // Don't attach policy to sCert yet — policies get signed at commit time
@@ -265,7 +255,7 @@ public class MultiAdmin implements Authorizer{
 
             em.flush();
 
-            System.out.println("[MultiAdmin.sign] Built ServerCert:1 models for enclave approval (policy " + (hasExistingPolicy ? "reused" : "new") + ")");
+            System.out.println("[MultiAdmin.sign] Built ServerCert:1 models for enclave approval (all 4 items)");
         }
 
         var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
