@@ -13,8 +13,7 @@ import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.services.resources.admin.AdminAuth;
 import org.midgard.Midgard;
 import org.midgard.models.*;
-import org.midgard.models.Policy.*;
-import org.midgard.models.RequestExtensions.*;
+import org.midgard.models.Policy.Policy;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
 import org.tidecloak.base.iga.serveridentity.ServerCertBuilder;
@@ -29,7 +28,7 @@ import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
-import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
+
 
 import javax.xml.bind.DatatypeConverter;
 import java.util.*;
@@ -116,9 +115,9 @@ public class MultiAdmin implements Authorizer{
             metadata.put("spiffeId", draft.getSpiffeId());
             byte[] dynamicData = mapper.writeValueAsBytes(metadata);
 
-            // Create ServerCert:1 ModelRequest with Policy:1 auth flow
+            // Create ServerCert:1 ModelRequest with AuthorizerPack auth flow
             // Use longer expiry (24h) since this needs admin approval
-            ModelRequest sCertReq = ModelRequest.New("ServerCert", "1", "Policy:1", tbsCert);
+            ModelRequest sCertReq = ModelRequest.New("ServerCert", "1", "AuthorizerPack:1", tbsCert);
             sCertReq.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
             sCertReq.SetDynamicData(dynamicData);
 
@@ -142,67 +141,6 @@ public class MultiAdmin implements Authorizer{
             // and sets the creation authorization signature on the model
             ModelRequest.InitializeTideRequestWithVrk(sCertReq, settings, "ServerCert:1", authorizerBytes, certBytes);
 
-            // --- Resolve admin policy to attach to policy model requests ---
-            String policyRoleIdForCert = changeSet.getPolicyRoleId();
-            TideRoleDraftEntity tideAdminForCert = BasicIGAUtils.resolvePolicyRole(em, session, policyRoleIdForCert);
-            byte[] adminPolicyBytes = null;
-            if (tideAdminForCert != null && tideAdminForCert.getInitCert() != null) {
-                Policy adminPolicy = Policy.From(Base64.getDecoder().decode(tideAdminForCert.getInitCert()));
-                adminPolicyBytes = adminPolicy.ToBytes();
-            }
-
-            {
-                // --- Build ServerCert:1 policy ModelRequest for enclave approval ---
-                String vvkIdForPolicy = config.getFirst("vvkId");
-
-                PolicyParameters sCertPolicyParams = new PolicyParameters();
-                sCertPolicyParams.put("realm", realm.getName());
-                // Calculate threshold from active tide-realm-admin count
-                RoleModel tideAdminRole = session.clients()
-                        .getClientByClientId(realm, org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
-                        .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-                int adminCount = ChangesetRequestAdapter.getNumberOfActiveAdmins(session, realm, tideAdminRole, em);
-                int approvalThreshold = Math.max(1, (int) (0.7 * Math.max(1, adminCount)));
-                sCertPolicyParams.put("threshold", approvalThreshold);
-                sCertPolicyParams.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-                sCertPolicyParams.put("resource", "realm-management");
-
-                Policy sCertPolicy = new Policy(
-                        "ServerCert:1",
-                        new String[]{"ServerCert:1"},
-                        vvkIdForPolicy,
-                        ApprovalType.EXPLICIT,
-                        ExecutionType.PUBLIC,
-                        sCertPolicyParams
-                );
-
-                // Use Policy:1 auth (NOT VRK:1) to avoid VRK revocation
-                PolicySignRequest sCertPolicySignReq = new PolicySignRequest(sCertPolicy.ToBytes(), "Policy:1");
-                ModelRequest sCertPolicyModelReq = ModelRequest.New(
-                        "Policy", "1", "Policy:1",
-                        sCertPolicySignReq.GetDraft(),
-                        sCertPolicy.ToBytes()
-                );
-                sCertPolicyModelReq.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
-                // Initialize via VRK (sets creation auth) — this does NOT revoke the VRK
-                ModelRequest.InitializeTideRequestWithVrk(sCertPolicyModelReq, settings, "Policy:1", authorizerBytes, certBytes);
-                // Attach admin policy so the ORK can authorize this Policy:1 request
-                if (adminPolicyBytes != null) sCertPolicyModelReq.SetPolicy(adminPolicyBytes);
-
-                // Store as separate entity for enclave approval
-                String sCertPolicyKey = changeSet.getChangeSetId() + "-scpo";
-                ChangesetRequestEntity sCertPolicyEntity = new ChangesetRequestEntity();
-                sCertPolicyEntity.setChangesetRequestId(sCertPolicyKey);
-                sCertPolicyEntity.setChangesetType(ChangeSetType.POLICY);
-                sCertPolicyEntity.setRequestModel(Base64.getEncoder().encodeToString(sCertPolicyModelReq.Encode()));
-                sCertPolicyEntity.setTimestamp(System.currentTimeMillis());
-                em.persist(sCertPolicyEntity);
-
-                System.out.println("[MultiAdmin.sign] Built ServerCert:1 policy for enclave approval");
-            }
-
-            // Don't attach policy to sCert yet — policies get signed at commit time
-            // Store sCert model without policy (policy attached after policies are VVK-signed)
             String encodedModel = Base64.getEncoder().encodeToString(sCertReq.Encode());
             changesetRequestEntity.setRequestModel(encodedModel);
 
@@ -212,11 +150,9 @@ public class MultiAdmin implements Authorizer{
             byte[] vvkPubBytesForCa = HexFormat.of().parseHex(gVVKForCa);
             byte[] caTbs = ServerCertBuilder.buildVvkCaTbs(vvkPubBytesForCa, realm.getName());
 
-            ModelRequest caReq = ModelRequest.New("ServerCert", "1", "Policy:1", caTbs);
+            ModelRequest caReq = ModelRequest.New("ServerCert", "1", "AuthorizerPack:1", caTbs);
             caReq.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
             ModelRequest.InitializeTideRequestWithVrk(caReq, settings, "ServerCert:1", authorizerBytes, certBytes);
-            // Attach admin policy for Policy:1 auth
-            if (adminPolicyBytes != null) caReq.SetPolicy(adminPolicyBytes);
             // Set DynamicData for contract validation
             ObjectNode caMetadata = mapper.createObjectNode();
             caMetadata.put("type", "ca-cert");
@@ -234,10 +170,9 @@ public class MultiAdmin implements Authorizer{
 
             // --- Build public key signing request (VVK signs the raw public key) ---
             byte[] pubKeyBytes = Base64.getUrlDecoder().decode(draft.getPublicKey());
-            ModelRequest pkReq = ModelRequest.New("ServerCert", "1", "Policy:1", pubKeyBytes);
+            ModelRequest pkReq = ModelRequest.New("ServerCert", "1", "AuthorizerPack:1", pubKeyBytes);
             pkReq.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
             ModelRequest.InitializeTideRequestWithVrk(pkReq, settings, "ServerCert:1", authorizerBytes, certBytes);
-            if (adminPolicyBytes != null) pkReq.SetPolicy(adminPolicyBytes);
             ObjectNode pkMetadata = mapper.createObjectNode();
             pkMetadata.put("type", "public-key");
             pkMetadata.put("realm", realm.getName());
@@ -255,7 +190,7 @@ public class MultiAdmin implements Authorizer{
 
             em.flush();
 
-            System.out.println("[MultiAdmin.sign] Built ServerCert:1 models for enclave approval (all 4 items)");
+            System.out.println("[MultiAdmin.sign] Built ServerCert:1 models for enclave approval (all 3 items)");
         }
 
         var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
@@ -315,24 +250,8 @@ public class MultiAdmin implements Authorizer{
         firstResponse.put("changeSetType", changeSet.getType() != null ? changeSet.getType().name() : null);
         responses.add(firstResponse);
 
-        // --- SERVER_CERT policies: send to enclave for admin doken approval ---
+        // --- SERVER_CERT: send enclave items for admin doken approval ---
         if (changeSet.getType() == ChangeSetType.SERVER_CERT) {
-            // ServerCert:1 policy
-            String sCertPolicyKey = changeSet.getChangeSetId() + "-scpo";
-            ChangesetRequestEntity sCertPolicyReqEntity = em.find(
-                    ChangesetRequestEntity.class,
-                    new ChangesetRequestEntity.Key(sCertPolicyKey, ChangeSetType.POLICY)
-            );
-            if (sCertPolicyReqEntity != null) {
-                Map<String, Object> sCertPolicyResponse = new HashMap<>();
-                sCertPolicyResponse.put("message", "Opening Enclave to request approval.");
-                sCertPolicyResponse.put("changesetId", sCertPolicyKey);
-                sCertPolicyResponse.put("requiresApprovalPopup", true);
-                sCertPolicyResponse.put("changeSetDraftRequests", sCertPolicyReqEntity.getRequestModel());
-                sCertPolicyResponse.put("actionType", "NONE");
-                sCertPolicyResponse.put("changeSetType", ChangeSetType.POLICY.name());
-                responses.add(sCertPolicyResponse);
-            }
             // VVK CA cert
             String caKey = changeSet.getChangeSetId() + "-ca";
             ChangesetRequestEntity caReqEntity = em.find(

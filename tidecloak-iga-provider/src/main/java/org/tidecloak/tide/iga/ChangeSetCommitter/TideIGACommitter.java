@@ -19,20 +19,12 @@ import org.tidecloak.shared.Constants;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.shared.models.SecretKeys;
-import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
-import org.keycloak.models.RoleModel;
-
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.midgard.Midgard;
 import org.midgard.models.ModelRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
-import org.midgard.models.Policy.Policy;
-import org.midgard.models.Policy.PolicyParameters;
-import org.midgard.models.Policy.ApprovalType;
-import org.midgard.models.Policy.ExecutionType;
-import org.midgard.models.RequestExtensions.PolicySignRequest;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -128,64 +120,8 @@ public class TideIGACommitter implements ChangeSetCommitter {
                 ChangesetRequestEntity.class,
                 new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), ChangeSetType.SERVER_CERT)
         );
-        // --- Step 1: Sign ServerCert:1 policy fresh via ORK network ---
-        // Always create a fresh policy on each approval — if the policy gets revoked on the ORKs,
-        // a new one must be generated.
-        logger.info("[SERVER_CERT] Building fresh ServerCert:1 policy...");
 
-        String sCertPolicyKey = changeSet.getChangeSetId() + "-scpo";
-        ChangesetRequestEntity sCertPolicyEntity = em.find(
-                ChangesetRequestEntity.class,
-                new ChangesetRequestEntity.Key(sCertPolicyKey, ChangeSetType.POLICY)
-        );
-
-        // Build the ServerCert:1 policy object
-        PolicyParameters sCertPolicyParams = new PolicyParameters();
-        sCertPolicyParams.put("realm", realm.getName());
-        // Calculate threshold from active tide-realm-admin count
-        RoleModel tideAdminRole = session.clients()
-                .getClientByClientId(realm, org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
-                .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-        int adminCount = ChangesetRequestAdapter.getNumberOfActiveAdmins(session, realm, tideAdminRole, em);
-        int approvalThreshold = Math.max(1, (int) (0.7 * Math.max(1, adminCount)));
-        sCertPolicyParams.put("threshold", approvalThreshold);
-        sCertPolicyParams.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-        sCertPolicyParams.put("resource", "realm-management");
-        Policy sCertPolicy = new Policy("ServerCert:1", new String[]{"ServerCert:1"}, settings.VVKId,
-                ApprovalType.EXPLICIT, ExecutionType.PUBLIC, sCertPolicyParams);
-
-        if (sCertPolicyEntity != null && sCertPolicyEntity.getRequestModel() != null) {
-            // Reuse model from sign time (has admin dokens from enclave)
-            ModelRequest sCertPolicyModelReq = ModelRequest.FromBytes(Base64.getDecoder().decode(sCertPolicyEntity.getRequestModel()));
-            SignatureResponse sCertPolicySignResp = Midgard.SignModel(settings, sCertPolicyModelReq);
-            sCertPolicy.AddSignature(java.util.Base64.getDecoder().decode(sCertPolicySignResp.Signatures[0]));
-            logger.info("[SERVER_CERT] ServerCert:1 policy signed (from sign-time enclave model)");
-        } else {
-            // Build fresh (single-admin / firstAdmin flow) — use VRK:1 auth
-            byte[] authorizerBytes = HexFormat.of().parseHex(gVRK);
-            byte[] certBytes = java.util.Base64.getDecoder().decode(gVRKCertificate);
-
-            PolicySignRequest sCertPolicySignReq = new PolicySignRequest(sCertPolicy.ToBytes(), "VRK:1");
-            ModelRequest sCertPolicyModelReq = ModelRequest.New("Policy", "1", "VRK:1",
-                    sCertPolicySignReq.GetDraft(), sCertPolicy.ToBytes());
-            sCertPolicyModelReq.SetAuthorizer(authorizerBytes);
-            sCertPolicyModelReq.SetAuthorizerCertificate(certBytes);
-            sCertPolicyModelReq.SetAuthorization(
-                    Midgard.SignWithVrk(sCertPolicyModelReq.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
-            SignatureResponse sCertPolicySignResp = Midgard.SignModel(settings, sCertPolicyModelReq);
-            sCertPolicy.AddSignature(java.util.Base64.getDecoder().decode(sCertPolicySignResp.Signatures[0]));
-            logger.info("[SERVER_CERT] ServerCert:1 policy signed (fresh build)");
-        }
-
-        // Clean up the policy entity (no longer needed after signing)
-        if (sCertPolicyEntity != null) {
-            if (sCertPolicyEntity.getAdminAuthorizations() != null) {
-                sCertPolicyEntity.getAdminAuthorizations().clear();
-            }
-            em.remove(sCertPolicyEntity);
-        }
-
-        // --- Step 2: Build sCert:1 model with signed policy attached ---
+        // --- Build sCert:1 model (uses AuthorizerPack auth, no policy needed) ---
         ModelRequest req;
         if (existingChangesetReq != null && existingChangesetReq.getRequestModel() != null) {
             req = ModelRequest.FromBytes(Base64.getDecoder().decode(existingChangesetReq.getRequestModel()));
@@ -198,7 +134,7 @@ public class TideIGACommitter implements ChangeSetCommitter {
             metadata.put("spiffeId", draft.getSpiffeId());
             byte[] dynamicData = objectMapper.writeValueAsBytes(metadata);
 
-            req = ModelRequest.New("ServerCert", "1", "Policy:1", tbsCert);
+            req = ModelRequest.New("ServerCert", "1", "AuthorizerPack:1", tbsCert);
             req.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
             req.SetDynamicData(dynamicData);
 
@@ -206,10 +142,8 @@ public class TideIGACommitter implements ChangeSetCommitter {
             byte[] certBytes = java.util.Base64.getDecoder().decode(gVRKCertificate);
             ModelRequest.InitializeTideRequestWithVrk(req, settings, "ServerCert:1", authorizerBytes, certBytes);
         }
-        // Attach the VVK-signed ServerCert:1 policy
-        req.SetPolicy(sCertPolicy.ToBytes());
 
-        // --- Step 3: Sign sCert:1 ---
+        // --- Sign sCert:1 ---
         SignatureResponse signatureResponse = Midgard.SignModel(settings, req);
 
         // Decode the VVK signature
@@ -241,7 +175,6 @@ public class TideIGACommitter implements ChangeSetCommitter {
             ModelRequest caReq = ModelRequest.FromBytes(Base64.getDecoder().decode(caEntity.getRequestModel()));
             // Use the SAME TBS that was signed (draft from sign time), not the rebuilt one
             caTbsForAssembly = caReq.GetDraft();
-            caReq.SetPolicy(sCertPolicy.ToBytes());
             SignatureResponse caSignResponse = Midgard.SignModel(settings, caReq);
             caSignatureBytes = java.util.Base64.getDecoder().decode(
                     caSignResponse.Signatures[0].replace('-', '+').replace('_', '/'));
@@ -266,7 +199,6 @@ public class TideIGACommitter implements ChangeSetCommitter {
         if (pkEntity != null && pkEntity.getRequestModel() != null) {
             ModelRequest pkReq = ModelRequest.FromBytes(Base64.getDecoder().decode(pkEntity.getRequestModel()));
             byte[] signedPubKeyDraft = pkReq.GetDraft();
-            pkReq.SetPolicy(sCertPolicy.ToBytes());
             SignatureResponse pkSignResponse = Midgard.SignModel(settings, pkReq);
             byte[] pkSignatureBytes = java.util.Base64.getDecoder().decode(
                     pkSignResponse.Signatures[0].replace('-', '+').replace('_', '/'));
