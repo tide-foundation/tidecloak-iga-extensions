@@ -116,9 +116,9 @@ public class MultiAdmin implements Authorizer{
             metadata.put("requestedLifetime", draft.getRequestedLifetime());
             byte[] dynamicData = mapper.writeValueAsBytes(metadata);
 
-            // Create sCert:1 ModelRequest with Policy:1 auth flow
+            // Create ServerCert:1 ModelRequest with Policy:1 auth flow
             // Use longer expiry (24h) since this needs admin approval
-            ModelRequest sCertReq = ModelRequest.New("sCert", "1", "Policy:1", tbsCert);
+            ModelRequest sCertReq = ModelRequest.New("ServerCert", "1", "Policy:1", tbsCert);
             sCertReq.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
             sCertReq.SetDynamicData(dynamicData);
 
@@ -138,9 +138,9 @@ public class MultiAdmin implements Authorizer{
             byte[] authorizerBytes = HexFormat.of().parseHex(gVRK);
             byte[] certBytes = java.util.Base64.getDecoder().decode(gVRKCertificate);
 
-            // Initialize the request via VRK: creates tideReqInit:1, signs it,
+            // Initialize the request via VRK: creates TideRequestInitialization:1, signs it,
             // and sets the creation authorization signature on the model
-            ModelRequest.InitializeTideRequestWithVrk(sCertReq, settings, "sCert:1", authorizerBytes, certBytes);
+            ModelRequest.InitializeTideRequestWithVrk(sCertReq, settings, "ServerCert:1", authorizerBytes, certBytes);
 
             // --- Resolve admin policy to attach to policy model requests ---
             String policyRoleIdForCert = changeSet.getPolicyRoleId();
@@ -168,7 +168,7 @@ public class MultiAdmin implements Authorizer{
 
             Policy sCertPolicy = new Policy(
                     "ServerCert:1",
-                    new String[]{"sCert:1"},
+                    new String[]{"ServerCert:1"},
                     vvkIdForPolicy,
                     ApprovalType.EXPLICIT,
                     ExecutionType.PUBLIC,
@@ -204,7 +204,7 @@ public class MultiAdmin implements Authorizer{
 
             em.flush();
 
-            System.out.println("[MultiAdmin.sign] Built sCert:1 + ServerCert:1 policy for enclave approval");
+            System.out.println("[MultiAdmin.sign] Built ServerCert:1 + ServerCert:1 policy for enclave approval");
         }
 
         var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);

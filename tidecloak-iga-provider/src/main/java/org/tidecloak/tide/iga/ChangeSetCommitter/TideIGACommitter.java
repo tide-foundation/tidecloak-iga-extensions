@@ -148,7 +148,7 @@ public class TideIGACommitter implements ChangeSetCommitter {
         sCertPolicyParams.put("threshold", approvalThreshold);
         sCertPolicyParams.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
         sCertPolicyParams.put("resource", "realm-management");
-        Policy sCertPolicy = new Policy("ServerCert:1", new String[]{"sCert:1"}, settings.VVKId,
+        Policy sCertPolicy = new Policy("ServerCert:1", new String[]{"ServerCert:1"}, settings.VVKId,
                 ApprovalType.EXPLICIT, ExecutionType.PUBLIC, sCertPolicyParams);
 
         if (sCertPolicyEntity != null && sCertPolicyEntity.getRequestModel() != null) {
@@ -187,13 +187,13 @@ public class TideIGACommitter implements ChangeSetCommitter {
             metadata.put("requestedLifetime", draft.getRequestedLifetime());
             byte[] dynamicData = objectMapper.writeValueAsBytes(metadata);
 
-            req = ModelRequest.New("sCert", "1", "Policy:1", tbsCert);
+            req = ModelRequest.New("ServerCert", "1", "Policy:1", tbsCert);
             req.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
             req.SetDynamicData(dynamicData);
 
             byte[] authorizerBytes = HexFormat.of().parseHex(gVRK);
             byte[] certBytes = java.util.Base64.getDecoder().decode(gVRKCertificate);
-            ModelRequest.InitializeTideRequestWithVrk(req, settings, "sCert:1", authorizerBytes, certBytes);
+            ModelRequest.InitializeTideRequestWithVrk(req, settings, "ServerCert:1", authorizerBytes, certBytes);
         }
         // Attach the VVK-signed ServerCert:1 policy
         req.SetPolicy(sCertPolicy.ToBytes());

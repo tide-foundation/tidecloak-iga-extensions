@@ -2516,7 +2516,7 @@ public class IGARealmResource {
             String jsonUrls = objectMapper.writeValueAsString(urls);
             String draft = jsonUrls + "|" + clientJsonUrls + "|" + vendorSettingsString;
 
-            ModelRequest req = ModelRequest.New("tcUpdateSettings", "1", "VRK:1", draft.getBytes(StandardCharsets.UTF_8));
+            ModelRequest req = ModelRequest.New("TidecloakUpdateSettings", "1", "VRK:1", draft.getBytes(StandardCharsets.UTF_8));
             req.SetAuthorization(Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
             req.SetAuthorizer(jakarta.xml.bind.DatatypeConverter.parseHexBinary(config.getFirst("gVRK")));
             req.SetAuthorizerCertificate(Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));
