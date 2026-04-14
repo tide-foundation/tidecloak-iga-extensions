@@ -206,17 +206,43 @@ public class TideIGACommitter implements ChangeSetCommitter {
                 signatureResponse.Signatures[0].replace('-', '+').replace('_', '/')
         );
 
-        // Assemble complete X.509 certificate
-        byte[] fullCert = ServerCertBuilder.assembleCertificate(tbsCert, signatureBytes);
+        // Assemble using the TBS that was actually signed (from the model's draft, not rebuilt)
+        byte[] signedTbs = req.GetDraft();
+        byte[] fullCert = ServerCertBuilder.assembleCertificate(signedTbs, signatureBytes);
         String certPem = ServerCertBuilder.toPem(fullCert);
 
-        // Build trust bundle: self-signed VVK CA certificate
-        // Use the actual VVK public key (gVVK), NOT the AuthorizerPack (gVRK)
+        // Build trust bundle: VVK CA certificate (VVK-signed via ORK network)
         String gVVK = config.getFirst("clientId"); // "clientId" config stores the gVVK public key
         byte[] vvkPubBytes = HexFormat.of().parseHex(gVVK);
         byte[] caTbs = ServerCertBuilder.buildVvkCaTbs(vvkPubBytes, realm.getName());
-        byte[] caSignatureBytes = Midgard.Sign(settings.VendorRotatingPrivateKey, caTbs);
-        String trustBundle = ServerCertBuilder.buildVvkCaCert(vvkPubBytes, realm.getName(), caSignatureBytes);
+
+        // Check if the CA cert model was built at sign time (multi-admin flow with enclave approval)
+        String caKey = changeSet.getChangeSetId() + "-ca";
+        ChangesetRequestEntity caEntity = em.find(
+                ChangesetRequestEntity.class,
+                new ChangesetRequestEntity.Key(caKey, ChangeSetType.SERVER_CERT)
+        );
+
+        byte[] caSignatureBytes;
+        byte[] caTbsForAssembly = caTbs; // default: use freshly built TBS
+        if (caEntity != null && caEntity.getRequestModel() != null) {
+            // Reuse from sign time (has admin dokens from enclave)
+            ModelRequest caReq = ModelRequest.FromBytes(Base64.getDecoder().decode(caEntity.getRequestModel()));
+            // Use the SAME TBS that was signed (draft from sign time), not the rebuilt one
+            caTbsForAssembly = caReq.GetDraft();
+            caReq.SetPolicy(sCertPolicy.ToBytes());
+            SignatureResponse caSignResponse = Midgard.SignModel(settings, caReq);
+            caSignatureBytes = java.util.Base64.getDecoder().decode(
+                    caSignResponse.Signatures[0].replace('-', '+').replace('_', '/'));
+            logger.info("[SERVER_CERT] VVK CA cert signed via ORK network (reused from sign time)");
+        } else {
+            // Fallback: sign with VRK locally (single-admin / firstAdmin flow)
+            caSignatureBytes = Midgard.Sign(settings.VendorRotatingPrivateKey, caTbs);
+            logger.info("[SERVER_CERT] VVK CA cert signed with VRK (fallback)");
+        }
+        // Assemble with the TBS that was actually signed (timestamps match)
+        byte[] fullCaCert = ServerCertBuilder.assembleCertificate(caTbsForAssembly, caSignatureBytes);
+        String trustBundle = ServerCertBuilder.toPem(fullCaCert);
 
         // Store the signed certificate
         draft.setCertificate(certPem);
@@ -232,6 +258,14 @@ public class TideIGACommitter implements ChangeSetCommitter {
         if (changesetReq != null) {
             changesetReq.getAdminAuthorizations().clear();
             em.remove(changesetReq);
+        }
+
+        // Clean up the CA cert entity
+        if (caEntity != null) {
+            if (caEntity.getAdminAuthorizations() != null) {
+                caEntity.getAdminAuthorizations().clear();
+            }
+            em.remove(caEntity);
         }
 
         em.flush();

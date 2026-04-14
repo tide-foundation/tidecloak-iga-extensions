@@ -202,9 +202,36 @@ public class MultiAdmin implements Authorizer{
             String encodedModel = Base64.getEncoder().encodeToString(sCertReq.Encode());
             changesetRequestEntity.setRequestModel(encodedModel);
 
+            // --- Build VVK CA cert ModelRequest (for enclave approval) ---
+            // The CA cert needs VVK signing (self-signed) so standard TLS verification works
+            String gVVKForCa = config.getFirst("clientId");
+            byte[] vvkPubBytesForCa = HexFormat.of().parseHex(gVVKForCa);
+            byte[] caTbs = ServerCertBuilder.buildVvkCaTbs(vvkPubBytesForCa, realm.getName());
+
+            ModelRequest caReq = ModelRequest.New("ServerCert", "1", "Policy:1", caTbs);
+            caReq.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
+            ModelRequest.InitializeTideRequestWithVrk(caReq, settings, "ServerCert:1", authorizerBytes, certBytes);
+            // Attach admin policy for Policy:1 auth
+            if (adminPolicyBytes != null) caReq.SetPolicy(adminPolicyBytes);
+            // Set DynamicData for contract validation
+            ObjectNode caMetadata = mapper.createObjectNode();
+            caMetadata.put("realm", realm.getName());
+            caMetadata.put("clientId", "VVK-CA");
+            caMetadata.put("instanceId", "ca");
+            caMetadata.put("spiffeId", "spiffe://tide.realm." + realm.getName() + "/client/VVK-CA/instance/ca");
+            caReq.SetDynamicData(mapper.writeValueAsBytes(caMetadata));
+
+            String caKey = changeSet.getChangeSetId() + "-ca";
+            ChangesetRequestEntity caEntity = new ChangesetRequestEntity();
+            caEntity.setChangesetRequestId(caKey);
+            caEntity.setChangesetType(ChangeSetType.SERVER_CERT);
+            caEntity.setRequestModel(Base64.getEncoder().encodeToString(caReq.Encode()));
+            caEntity.setTimestamp(System.currentTimeMillis());
+            em.persist(caEntity);
+
             em.flush();
 
-            System.out.println("[MultiAdmin.sign] Built ServerCert:1 + ServerCert:1 policy for enclave approval");
+            System.out.println("[MultiAdmin.sign] Built ServerCert:1 + ServerCert:1 policy + VVK CA cert for enclave approval");
         }
 
         var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
@@ -281,6 +308,22 @@ public class MultiAdmin implements Authorizer{
                 sCertPolicyResponse.put("actionType", "NONE");
                 sCertPolicyResponse.put("changeSetType", ChangeSetType.POLICY.name());
                 responses.add(sCertPolicyResponse);
+            }
+            // VVK CA cert
+            String caKey = changeSet.getChangeSetId() + "-ca";
+            ChangesetRequestEntity caReqEntity = em.find(
+                    ChangesetRequestEntity.class,
+                    new ChangesetRequestEntity.Key(caKey, ChangeSetType.SERVER_CERT)
+            );
+            if (caReqEntity != null) {
+                Map<String, Object> caResponse = new HashMap<>();
+                caResponse.put("message", "Opening Enclave to request approval.");
+                caResponse.put("changesetId", caKey);
+                caResponse.put("requiresApprovalPopup", true);
+                caResponse.put("changeSetDraftRequests", caReqEntity.getRequestModel());
+                caResponse.put("actionType", "NONE");
+                caResponse.put("changeSetType", ChangeSetType.SERVER_CERT.name());
+                responses.add(caResponse);
             }
         }
 
