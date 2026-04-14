@@ -211,8 +211,9 @@ public class TideIGACommitter implements ChangeSetCommitter {
         String certPem = ServerCertBuilder.toPem(fullCert);
 
         // Build trust bundle: self-signed VVK CA certificate
-        // The CA cert is signed directly with VRK (not via sCert:1 model, since it's not a server cert)
-        byte[] vvkPubBytes = HexFormat.of().parseHex(gVRK);
+        // Use the actual VVK public key (gVVK), NOT the AuthorizerPack (gVRK)
+        String gVVK = config.getFirst("clientId"); // "clientId" config stores the gVVK public key
+        byte[] vvkPubBytes = HexFormat.of().parseHex(gVVK);
         byte[] caTbs = ServerCertBuilder.buildVvkCaTbs(vvkPubBytes, realm.getName());
         byte[] caSignatureBytes = Midgard.Sign(settings.VendorRotatingPrivateKey, caTbs);
         String trustBundle = ServerCertBuilder.buildVvkCaCert(vvkPubBytes, realm.getName(), caSignatureBytes);
