@@ -96,6 +96,11 @@ public class MultiAdmin implements Authorizer{
             String gVRK = config.getFirst("gVRK");
             String gVRKCertificate = config.getFirst("gVRKCertificate");
 
+            // Check if a VVK-signed ServerCert:1 policy already exists from a prior approval.
+            // If so, we can skip creating the policy enclave item and only send 3 items.
+            String existingSignedPolicyB64 = config.getFirst("serverCertSignedPolicy");
+            boolean hasExistingPolicy = (existingSignedPolicyB64 != null && !existingSignedPolicyB64.isEmpty());
+
             // Build X.509 TBS certificate (same as commitServerCert)
             String issuerCn = "tide.realm." + realm.getName();
             byte[] tbsCert = ServerCertBuilder.buildTbs(
@@ -151,51 +156,60 @@ public class MultiAdmin implements Authorizer{
                 adminPolicyBytes = adminPolicy.ToBytes();
             }
 
-            // --- Build ServerCert:1 policy ModelRequest (Policy:1 auth, for enclave approval) ---
-            String vvkIdForPolicy = config.getFirst("vvkId");
+            if (!hasExistingPolicy) {
+                // --- First-time flow: build ServerCert:1 policy ModelRequest for enclave approval ---
+                String vvkIdForPolicy = config.getFirst("vvkId");
 
-            PolicyParameters sCertPolicyParams = new PolicyParameters();
-            sCertPolicyParams.put("realm", realm.getName());
-            // Calculate threshold from active tide-realm-admin count
-            RoleModel tideAdminRole = session.clients()
-                    .getClientByClientId(realm, org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
-                    .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-            int adminCount = ChangesetRequestAdapter.getNumberOfActiveAdmins(session, realm, tideAdminRole, em);
-            int approvalThreshold = Math.max(1, (int) (0.7 * Math.max(1, adminCount)));
-            sCertPolicyParams.put("threshold", approvalThreshold);
-            sCertPolicyParams.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
-            sCertPolicyParams.put("resource", "realm-management");
+                PolicyParameters sCertPolicyParams = new PolicyParameters();
+                sCertPolicyParams.put("realm", realm.getName());
+                // Calculate threshold from active tide-realm-admin count
+                RoleModel tideAdminRole = session.clients()
+                        .getClientByClientId(realm, org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
+                        .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+                int adminCount = ChangesetRequestAdapter.getNumberOfActiveAdmins(session, realm, tideAdminRole, em);
+                int approvalThreshold = Math.max(1, (int) (0.7 * Math.max(1, adminCount)));
+                sCertPolicyParams.put("threshold", approvalThreshold);
+                sCertPolicyParams.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+                sCertPolicyParams.put("resource", "realm-management");
 
-            Policy sCertPolicy = new Policy(
-                    "ServerCert:1",
-                    new String[]{"ServerCert:1"},
-                    vvkIdForPolicy,
-                    ApprovalType.EXPLICIT,
-                    ExecutionType.PUBLIC,
-                    sCertPolicyParams
-            );
+                Policy sCertPolicy = new Policy(
+                        "ServerCert:1",
+                        new String[]{"ServerCert:1"},
+                        vvkIdForPolicy,
+                        ApprovalType.EXPLICIT,
+                        ExecutionType.PUBLIC,
+                        sCertPolicyParams
+                );
 
-            // Use Policy:1 auth (NOT VRK:1) to avoid VRK revocation
-            PolicySignRequest sCertPolicySignReq = new PolicySignRequest(sCertPolicy.ToBytes(), "Policy:1");
-            ModelRequest sCertPolicyModelReq = ModelRequest.New(
-                    "Policy", "1", "Policy:1",
-                    sCertPolicySignReq.GetDraft(),
-                    sCertPolicy.ToBytes()
-            );
-            sCertPolicyModelReq.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
-            // Initialize via VRK (sets creation auth) — this does NOT revoke the VRK
-            ModelRequest.InitializeTideRequestWithVrk(sCertPolicyModelReq, settings, "Policy:1", authorizerBytes, certBytes);
-            // Attach admin policy so the ORK can authorize this Policy:1 request
-            if (adminPolicyBytes != null) sCertPolicyModelReq.SetPolicy(adminPolicyBytes);
+                // Use Policy:1 auth (NOT VRK:1) to avoid VRK revocation
+                PolicySignRequest sCertPolicySignReq = new PolicySignRequest(sCertPolicy.ToBytes(), "Policy:1");
+                ModelRequest sCertPolicyModelReq = ModelRequest.New(
+                        "Policy", "1", "Policy:1",
+                        sCertPolicySignReq.GetDraft(),
+                        sCertPolicy.ToBytes()
+                );
+                sCertPolicyModelReq.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
+                // Initialize via VRK (sets creation auth) — this does NOT revoke the VRK
+                ModelRequest.InitializeTideRequestWithVrk(sCertPolicyModelReq, settings, "Policy:1", authorizerBytes, certBytes);
+                // Attach admin policy so the ORK can authorize this Policy:1 request
+                if (adminPolicyBytes != null) sCertPolicyModelReq.SetPolicy(adminPolicyBytes);
 
-            // Store as separate entity for enclave approval
-            String sCertPolicyKey = changeSet.getChangeSetId() + "-scpo";
-            ChangesetRequestEntity sCertPolicyEntity = new ChangesetRequestEntity();
-            sCertPolicyEntity.setChangesetRequestId(sCertPolicyKey);
-            sCertPolicyEntity.setChangesetType(ChangeSetType.POLICY);
-            sCertPolicyEntity.setRequestModel(Base64.getEncoder().encodeToString(sCertPolicyModelReq.Encode()));
-            sCertPolicyEntity.setTimestamp(System.currentTimeMillis());
-            em.persist(sCertPolicyEntity);
+                // Store as separate entity for enclave approval
+                String sCertPolicyKey = changeSet.getChangeSetId() + "-scpo";
+                ChangesetRequestEntity sCertPolicyEntity = new ChangesetRequestEntity();
+                sCertPolicyEntity.setChangesetRequestId(sCertPolicyKey);
+                sCertPolicyEntity.setChangesetType(ChangeSetType.POLICY);
+                sCertPolicyEntity.setRequestModel(Base64.getEncoder().encodeToString(sCertPolicyModelReq.Encode()));
+                sCertPolicyEntity.setTimestamp(System.currentTimeMillis());
+                em.persist(sCertPolicyEntity);
+
+                System.out.println("[MultiAdmin.sign] First-time flow: built ServerCert:1 policy for enclave approval");
+            } else {
+                // --- Reuse flow: signed policy already exists, attach to cert/CA/pubkey models ---
+                // The existing signed policy will be used at commit time via SetPolicy().
+                // No policy enclave item needed — only 3 items sent to enclave.
+                System.out.println("[MultiAdmin.sign] Reuse flow: existing ServerCert:1 signed policy found, skipping policy enclave item");
+            }
 
             // Don't attach policy to sCert yet — policies get signed at commit time
             // Store sCert model without policy (policy attached after policies are VVK-signed)
@@ -251,7 +265,7 @@ public class MultiAdmin implements Authorizer{
 
             em.flush();
 
-            System.out.println("[MultiAdmin.sign] Built ServerCert:1 + policy + VVK CA cert + public key sig for enclave approval");
+            System.out.println("[MultiAdmin.sign] Built ServerCert:1 models for enclave approval (policy " + (hasExistingPolicy ? "reused" : "new") + ")");
         }
 
         var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
