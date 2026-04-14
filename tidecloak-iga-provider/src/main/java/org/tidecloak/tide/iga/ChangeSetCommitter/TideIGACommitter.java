@@ -19,6 +19,8 @@ import org.tidecloak.shared.Constants;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
 import org.tidecloak.shared.models.SecretKeys;
+import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
+import org.keycloak.models.RoleModel;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -26,13 +28,20 @@ import org.midgard.Midgard;
 import org.midgard.models.ModelRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
+import org.midgard.models.Policy.Policy;
+import org.midgard.models.Policy.PolicyParameters;
+import org.midgard.models.Policy.ApprovalType;
+import org.midgard.models.Policy.ExecutionType;
+import org.midgard.models.RequestExtensions.PolicySignRequest;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.logging.Logger;
 
 public class TideIGACommitter implements ChangeSetCommitter {
+    private static final Logger logger = Logger.getLogger(TideIGACommitter.class.getName());
     @Override
     public Response commit(ChangeSetRequest changeSet, EntityManager em, KeycloakSession session, RealmModel realm, Object draftEntity, AdminAuth auth) throws Exception {
         // Check for key provider
@@ -102,7 +111,7 @@ public class TideIGACommitter implements ChangeSetCommitter {
         String gVRK = config.getFirst("gVRK");
         String gVRKCertificate = config.getFirst("gVRKCertificate");
 
-        // Build X.509 TBS certificate
+        // Build X.509 TBS certificate (always needed for final certificate assembly)
         String issuerCn = "tide.realm." + realm.getName();
         byte[] tbsCert = ServerCertBuilder.buildTbs(
                 draft.getPublicKey(),
@@ -113,22 +122,83 @@ public class TideIGACommitter implements ChangeSetCommitter {
                 draft.getRequestedLifetime()
         );
 
-        // Build DynamicData
-        ObjectNode metadata = objectMapper.createObjectNode();
-        metadata.put("realm", realm.getName());
-        metadata.put("clientId", draft.getClientId());
-        metadata.put("instanceId", draft.getInstanceId());
-        metadata.put("spiffeId", draft.getSpiffeId());
-        metadata.put("requestedLifetime", draft.getRequestedLifetime());
-        byte[] dynamicData = objectMapper.writeValueAsBytes(metadata);
+        // Check if the requestModel was already built during sign time (multi-admin flow).
+        // If so, reuse it to avoid rebuilding and to keep consistency with the enclave-approved model.
+        ChangesetRequestEntity existingChangesetReq = em.find(
+                ChangesetRequestEntity.class,
+                new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), ChangeSetType.SERVER_CERT)
+        );
+        // --- Step 1: Sign ServerCert:1 policy ---
+        logger.info("[SERVER_CERT] Signing ServerCert:1 policy...");
+        String sCertPolicyKey = changeSet.getChangeSetId() + "-scpo";
+        ChangesetRequestEntity sCertPolicyEntity = em.find(
+                ChangesetRequestEntity.class,
+                new ChangesetRequestEntity.Key(sCertPolicyKey, ChangeSetType.POLICY)
+        );
 
-        // Create and sign the model request
-        ModelRequest req = ModelRequest.New("sCert", "1", "VRK:1", tbsCert);
-        req.SetDynamicData(dynamicData);
-        req.SetAuthorization(Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
-        req.SetAuthorizer(HexFormat.of().parseHex(gVRK));
-        req.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(gVRKCertificate));
+        // Build the ServerCert:1 policy object (same params regardless of reuse or fresh)
+        PolicyParameters sCertPolicyParams = new PolicyParameters();
+        sCertPolicyParams.put("realm", realm.getName());
+        // Calculate threshold from active tide-realm-admin count
+        RoleModel tideAdminRole = session.clients()
+                .getClientByClientId(realm, org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
+                .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        int adminCount = ChangesetRequestAdapter.getNumberOfActiveAdmins(session, realm, tideAdminRole, em);
+        int approvalThreshold = Math.max(1, (int) (0.7 * Math.max(1, adminCount)));
+        sCertPolicyParams.put("threshold", approvalThreshold);
+        sCertPolicyParams.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+        sCertPolicyParams.put("resource", "realm-management");
+        Policy sCertPolicy = new Policy("ServerCert:1", new String[]{"sCert:1"}, settings.VVKId,
+                ApprovalType.EXPLICIT, ExecutionType.PUBLIC, sCertPolicyParams);
 
+        if (sCertPolicyEntity != null && sCertPolicyEntity.getRequestModel() != null) {
+            // Reuse model from sign time (has admin dokens from enclave)
+            ModelRequest sCertPolicyModelReq = ModelRequest.FromBytes(Base64.getDecoder().decode(sCertPolicyEntity.getRequestModel()));
+            SignatureResponse sCertPolicySignResp = Midgard.SignModel(settings, sCertPolicyModelReq);
+            sCertPolicy.AddSignature(java.util.Base64.getDecoder().decode(sCertPolicySignResp.Signatures[0]));
+            logger.info("[SERVER_CERT] ServerCert:1 policy signed (reused from sign time)");
+        } else {
+            // Build fresh (single-admin / firstAdmin flow) — use VRK:1 auth
+            byte[] authorizerBytes = HexFormat.of().parseHex(gVRK);
+            byte[] certBytes = java.util.Base64.getDecoder().decode(gVRKCertificate);
+
+            PolicySignRequest sCertPolicySignReq = new PolicySignRequest(sCertPolicy.ToBytes(), "VRK:1");
+            ModelRequest sCertPolicyModelReq = ModelRequest.New("Policy", "1", "VRK:1",
+                    sCertPolicySignReq.GetDraft(), sCertPolicy.ToBytes());
+            sCertPolicyModelReq.SetAuthorizer(authorizerBytes);
+            sCertPolicyModelReq.SetAuthorizerCertificate(certBytes);
+            sCertPolicyModelReq.SetAuthorization(
+                    Midgard.SignWithVrk(sCertPolicyModelReq.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
+            SignatureResponse sCertPolicySignResp = Midgard.SignModel(settings, sCertPolicyModelReq);
+            sCertPolicy.AddSignature(java.util.Base64.getDecoder().decode(sCertPolicySignResp.Signatures[0]));
+            logger.info("[SERVER_CERT] ServerCert:1 policy signed (fresh build)");
+        }
+
+        // --- Step 2: Build sCert:1 model with signed policy attached ---
+        ModelRequest req;
+        if (existingChangesetReq != null && existingChangesetReq.getRequestModel() != null) {
+            req = ModelRequest.FromBytes(Base64.getDecoder().decode(existingChangesetReq.getRequestModel()));
+        } else {
+            ObjectNode metadata = objectMapper.createObjectNode();
+            metadata.put("realm", realm.getName());
+            metadata.put("clientId", draft.getClientId());
+            metadata.put("instanceId", draft.getInstanceId());
+            metadata.put("spiffeId", draft.getSpiffeId());
+            metadata.put("requestedLifetime", draft.getRequestedLifetime());
+            byte[] dynamicData = objectMapper.writeValueAsBytes(metadata);
+
+            req = ModelRequest.New("sCert", "1", "Policy:1", tbsCert);
+            req.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
+            req.SetDynamicData(dynamicData);
+
+            byte[] authorizerBytes = HexFormat.of().parseHex(gVRK);
+            byte[] certBytes = java.util.Base64.getDecoder().decode(gVRKCertificate);
+            ModelRequest.InitializeTideRequestWithVrk(req, settings, "sCert:1", authorizerBytes, certBytes);
+        }
+        // Attach the VVK-signed ServerCert:1 policy
+        req.SetPolicy(sCertPolicy.ToBytes());
+
+        // --- Step 3: Sign sCert:1 ---
         SignatureResponse signatureResponse = Midgard.SignModel(settings, req);
 
         // Decode the VVK signature
@@ -141,25 +211,10 @@ public class TideIGACommitter implements ChangeSetCommitter {
         String certPem = ServerCertBuilder.toPem(fullCert);
 
         // Build trust bundle: self-signed VVK CA certificate
-        // The CA cert TBS is signed by VVK via ORK network
+        // The CA cert is signed directly with VRK (not via sCert:1 model, since it's not a server cert)
         byte[] vvkPubBytes = HexFormat.of().parseHex(gVRK);
         byte[] caTbs = ServerCertBuilder.buildVvkCaTbs(vvkPubBytes, realm.getName());
-
-        ModelRequest caReq = ModelRequest.New("sCert", "1", "VRK:1", caTbs);
-        ObjectNode caMeta = objectMapper.createObjectNode();
-        caMeta.put("realm", realm.getName());
-        caMeta.put("clientId", "VVK-CA");
-        caMeta.put("instanceId", "trust-bundle");
-        caMeta.put("spiffeId", "spiffe://tide.realm." + realm.getName());
-        caMeta.put("requestedLifetime", 315360000L); // 10 years
-        caReq.SetDynamicData(objectMapper.writeValueAsBytes(caMeta));
-        caReq.SetAuthorization(Midgard.SignWithVrk(caReq.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
-        caReq.SetAuthorizer(HexFormat.of().parseHex(gVRK));
-        caReq.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(gVRKCertificate));
-
-        SignatureResponse caSignResponse = Midgard.SignModel(settings, caReq);
-        byte[] caSignatureBytes = java.util.Base64.getDecoder().decode(
-                caSignResponse.Signatures[0].replace('-', '+').replace('_', '/'));
+        byte[] caSignatureBytes = Midgard.Sign(settings.VendorRotatingPrivateKey, caTbs);
         String trustBundle = ServerCertBuilder.buildVvkCaCert(vvkPubBytes, realm.getName(), caSignatureBytes);
 
         // Store the signed certificate
@@ -168,7 +223,7 @@ public class TideIGACommitter implements ChangeSetCommitter {
         draft.setDraftStatus(DraftStatus.ACTIVE);
         em.merge(draft);
 
-        // Remove the change request entity
+        // Remove the change request entities
         ChangesetRequestEntity changesetReq = em.find(
                 ChangesetRequestEntity.class,
                 new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), ChangeSetType.SERVER_CERT)

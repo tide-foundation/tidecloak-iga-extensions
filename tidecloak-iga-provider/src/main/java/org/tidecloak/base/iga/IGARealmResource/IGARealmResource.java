@@ -806,20 +806,24 @@ public class IGARealmResource {
                 return Response.status(Response.Status.BAD_REQUEST).entity("{\"error\":\"Missing instanceId\"}").type(MediaType.APPLICATION_JSON).build();
             }
 
-            ServerCertDraftEntity cert;
-            try {
-                cert = em.createNamedQuery("getServerCertByInstanceId", ServerCertDraftEntity.class)
-                        .setParameter("realmId", realm.getId())
-                        .setParameter("instanceId", instanceId)
-                        .getSingleResult();
-            } catch (jakarta.persistence.NoResultException e) {
+            List<ServerCertDraftEntity> certs = em.createNamedQuery("getServerCertByInstanceId", ServerCertDraftEntity.class)
+                    .setParameter("realmId", realm.getId())
+                    .setParameter("instanceId", instanceId)
+                    .getResultList();
+
+            if (certs.isEmpty()) {
                 return Response.status(Response.Status.NOT_FOUND).entity("{\"error\":\"No server cert found for instance " + instanceId + "\"}").type(MediaType.APPLICATION_JSON).build();
             }
 
-            cert.setRevoked(true);
-            cert.setRevokedAt(System.currentTimeMillis());
-            cert.setDraftStatus(DraftStatus.DENIED);
-            em.merge(cert);
+            // Revoke all non-revoked entries for this instance
+            for (ServerCertDraftEntity cert : certs) {
+                if (!Boolean.TRUE.equals(cert.getRevoked())) {
+                    cert.setRevoked(true);
+                    cert.setRevokedAt(System.currentTimeMillis());
+                    cert.setDraftStatus(DraftStatus.DENIED);
+                    em.merge(cert);
+                }
+            }
             em.flush();
 
             return Response.ok("{\"message\":\"Server certificate revoked for instance " + instanceId + "\"}").type(MediaType.APPLICATION_JSON).build();
@@ -2512,7 +2516,7 @@ public class IGARealmResource {
             String jsonUrls = objectMapper.writeValueAsString(urls);
             String draft = jsonUrls + "|" + clientJsonUrls + "|" + vendorSettingsString;
 
-            ModelRequest req = ModelRequest.New("TidecloakUpdateSettings", "1", "VRK:1", draft.getBytes(StandardCharsets.UTF_8));
+            ModelRequest req = ModelRequest.New("tcUpdateSettings", "1", "VRK:1", draft.getBytes(StandardCharsets.UTF_8));
             req.SetAuthorization(Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
             req.SetAuthorizer(jakarta.xml.bind.DatatypeConverter.parseHexBinary(config.getFirst("gVRK")));
             req.SetAuthorizerCertificate(Base64.getDecoder().decode(config.getFirst("gVRKCertificate")));

@@ -1,6 +1,7 @@
 package org.tidecloak.tide.iga.authorizer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.core.MediaType;
@@ -16,6 +17,7 @@ import org.midgard.models.Policy.*;
 import org.midgard.models.RequestExtensions.*;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactory;
 import org.tidecloak.base.iga.ChangeSetProcessors.models.ChangeSetRequest;
+import org.tidecloak.base.iga.serveridentity.ServerCertBuilder;
 import org.tidecloak.base.iga.utils.BasicIGAUtils;
 import org.tidecloak.jpa.entities.*;
 import org.tidecloak.jpa.entities.Licensing.LicenseHistoryEntity;
@@ -27,6 +29,7 @@ import org.tidecloak.shared.enums.WorkflowType;
 import org.tidecloak.shared.enums.models.WorkflowParams;
 import org.tidecloak.shared.models.SecretKeys;
 import org.tidecloak.base.iga.ChangeSetProcessors.ChangeSetProcessorFactoryProvider;
+import org.tidecloak.base.iga.interfaces.ChangesetRequestAdapter;
 
 import javax.xml.bind.DatatypeConverter;
 import java.util.*;
@@ -76,14 +79,143 @@ public class MultiAdmin implements Authorizer{
         }
 
         Object draftEntity = draftEntities.get(0);
+
+        // --- SERVER_CERT: build the sCert:1 ModelRequest at sign time ---
+        // The requestModel is NOT built at creation time (ServerIdentityResourceProvider),
+        // so we must build it here so the enclave has something to process.
+        if (changeSet.getType() == ChangeSetType.SERVER_CERT && changesetRequestEntity.getRequestModel() == null) {
+            if (!(draftEntity instanceof ServerCertDraftEntity draft)) {
+                throw new BadRequestException("Expected ServerCertDraftEntity for SERVER_CERT sign");
+            }
+
+            MultivaluedHashMap<String, String> config = componentModel.getConfig();
+
+            String currentSecretKeys = config.getFirst("clientSecret");
+            SecretKeys secretKeys = mapper.readValue(currentSecretKeys, SecretKeys.class);
+
+            String gVRK = config.getFirst("gVRK");
+            String gVRKCertificate = config.getFirst("gVRKCertificate");
+
+            // Build X.509 TBS certificate (same as commitServerCert)
+            String issuerCn = "tide.realm." + realm.getName();
+            byte[] tbsCert = ServerCertBuilder.buildTbs(
+                    draft.getPublicKey(),
+                    draft.getClientId(),
+                    realm.getName(),
+                    issuerCn,
+                    draft.getSpiffeId(),
+                    draft.getRequestedLifetime()
+            );
+
+            // Build DynamicData JSON
+            ObjectNode metadata = mapper.createObjectNode();
+            metadata.put("realm", realm.getName());
+            metadata.put("clientId", draft.getClientId());
+            metadata.put("instanceId", draft.getInstanceId());
+            metadata.put("spiffeId", draft.getSpiffeId());
+            metadata.put("requestedLifetime", draft.getRequestedLifetime());
+            byte[] dynamicData = mapper.writeValueAsBytes(metadata);
+
+            // Create sCert:1 ModelRequest with Policy:1 auth flow
+            // Use longer expiry (24h) since this needs admin approval
+            ModelRequest sCertReq = ModelRequest.New("sCert", "1", "Policy:1", tbsCert);
+            sCertReq.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
+            sCertReq.SetDynamicData(dynamicData);
+
+            // Build signing settings for InitializeTideRequestWithVrk
+            int threshold = Integer.parseInt(System.getenv("THRESHOLD_T"));
+            int max = Integer.parseInt(System.getenv("THRESHOLD_N"));
+
+            SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
+            settings.VVKId = config.getFirst("vvkId");
+            settings.HomeOrkUrl = config.getFirst("systemHomeOrk");
+            settings.PayerPublicKey = config.getFirst("payerPublic");
+            settings.ObfuscatedVendorPublicKey = config.getFirst("obfGVVK");
+            settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
+            settings.Threshold_T = threshold;
+            settings.Threshold_N = max;
+
+            byte[] authorizerBytes = HexFormat.of().parseHex(gVRK);
+            byte[] certBytes = java.util.Base64.getDecoder().decode(gVRKCertificate);
+
+            // Initialize the request via VRK: creates tideReqInit:1, signs it,
+            // and sets the creation authorization signature on the model
+            ModelRequest.InitializeTideRequestWithVrk(sCertReq, settings, "sCert:1", authorizerBytes, certBytes);
+
+            // --- Resolve admin policy to attach to policy model requests ---
+            String policyRoleIdForCert = changeSet.getPolicyRoleId();
+            TideRoleDraftEntity tideAdminForCert = BasicIGAUtils.resolvePolicyRole(em, session, policyRoleIdForCert);
+            byte[] adminPolicyBytes = null;
+            if (tideAdminForCert != null && tideAdminForCert.getInitCert() != null) {
+                Policy adminPolicy = Policy.From(Base64.getDecoder().decode(tideAdminForCert.getInitCert()));
+                adminPolicyBytes = adminPolicy.ToBytes();
+            }
+
+            // --- Build ServerCert:1 policy ModelRequest (Policy:1 auth, for enclave approval) ---
+            String vvkIdForPolicy = config.getFirst("vvkId");
+
+            PolicyParameters sCertPolicyParams = new PolicyParameters();
+            sCertPolicyParams.put("realm", realm.getName());
+            // Calculate threshold from active tide-realm-admin count
+            RoleModel tideAdminRole = session.clients()
+                    .getClientByClientId(realm, org.keycloak.models.Constants.REALM_MANAGEMENT_CLIENT_ID)
+                    .getRole(org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+            int adminCount = ChangesetRequestAdapter.getNumberOfActiveAdmins(session, realm, tideAdminRole, em);
+            int approvalThreshold = Math.max(1, (int) (0.7 * Math.max(1, adminCount)));
+            sCertPolicyParams.put("threshold", approvalThreshold);
+            sCertPolicyParams.put("role", org.tidecloak.shared.Constants.TIDE_REALM_ADMIN);
+            sCertPolicyParams.put("resource", "realm-management");
+
+            Policy sCertPolicy = new Policy(
+                    "ServerCert:1",
+                    new String[]{"sCert:1"},
+                    vvkIdForPolicy,
+                    ApprovalType.EXPLICIT,
+                    ExecutionType.PUBLIC,
+                    sCertPolicyParams
+            );
+
+            // Use Policy:1 auth (NOT VRK:1) to avoid VRK revocation
+            PolicySignRequest sCertPolicySignReq = new PolicySignRequest(sCertPolicy.ToBytes(), "Policy:1");
+            ModelRequest sCertPolicyModelReq = ModelRequest.New(
+                    "Policy", "1", "Policy:1",
+                    sCertPolicySignReq.GetDraft(),
+                    sCertPolicy.ToBytes()
+            );
+            sCertPolicyModelReq.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
+            // Initialize via VRK (sets creation auth) — this does NOT revoke the VRK
+            ModelRequest.InitializeTideRequestWithVrk(sCertPolicyModelReq, settings, "Policy:1", authorizerBytes, certBytes);
+            // Attach admin policy so the ORK can authorize this Policy:1 request
+            if (adminPolicyBytes != null) sCertPolicyModelReq.SetPolicy(adminPolicyBytes);
+
+            // Store as separate entity for enclave approval
+            String sCertPolicyKey = changeSet.getChangeSetId() + "-scpo";
+            ChangesetRequestEntity sCertPolicyEntity = new ChangesetRequestEntity();
+            sCertPolicyEntity.setChangesetRequestId(sCertPolicyKey);
+            sCertPolicyEntity.setChangesetType(ChangeSetType.POLICY);
+            sCertPolicyEntity.setRequestModel(Base64.getEncoder().encodeToString(sCertPolicyModelReq.Encode()));
+            sCertPolicyEntity.setTimestamp(System.currentTimeMillis());
+            em.persist(sCertPolicyEntity);
+
+            // Don't attach policy to sCert yet — policies get signed at commit time
+            // Store sCert model without policy (policy attached after policies are VVK-signed)
+            String encodedModel = Base64.getEncoder().encodeToString(sCertReq.Encode());
+            changesetRequestEntity.setRequestModel(encodedModel);
+
+            em.flush();
+
+            System.out.println("[MultiAdmin.sign] Built sCert:1 + ServerCert:1 policy for enclave approval");
+        }
+
         var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
         System.out.println("[MultiAdmin.sign] changeSetId=" + changeSet.getChangeSetId() + " authorityAssignment=" + (authorityAssignment != null ? authorityAssignment.getChangesetRequestId() : "null"));
 
         // Set the VVK-signed custom policy on the stored requestModel
         // The policy in initCert should already be VVK-signed (done by frontend during policy commit, keylessh pattern)
+        // Skip for SERVER_CERT — the ServerCert:1 policy was already set above during model construction.
         String policyRoleId = changeSet.getPolicyRoleId();
         TideRoleDraftEntity tideAdmin = BasicIGAUtils.resolvePolicyRole(em, session, policyRoleId);
-        if (tideAdmin != null && tideAdmin.getInitCert() != null && changesetRequestEntity.getRequestModel() != null) {
+        if (changeSet.getType() != ChangeSetType.SERVER_CERT && tideAdmin != null && tideAdmin.getInitCert() != null && changesetRequestEntity.getRequestModel() != null) {
             Policy policy = Policy.From(Base64.getDecoder().decode(tideAdmin.getInitCert()));
 
             // Set the signed policy on the model request
@@ -132,7 +264,27 @@ public class MultiAdmin implements Authorizer{
         firstResponse.put("changeSetType", changeSet.getType() != null ? changeSet.getType().name() : null);
         responses.add(firstResponse);
 
-        // --- Second (POLICY, only for authority assignments) ---
+        // --- SERVER_CERT policies: send to enclave for admin doken approval ---
+        if (changeSet.getType() == ChangeSetType.SERVER_CERT) {
+            // ServerCert:1 policy
+            String sCertPolicyKey = changeSet.getChangeSetId() + "-scpo";
+            ChangesetRequestEntity sCertPolicyReqEntity = em.find(
+                    ChangesetRequestEntity.class,
+                    new ChangesetRequestEntity.Key(sCertPolicyKey, ChangeSetType.POLICY)
+            );
+            if (sCertPolicyReqEntity != null) {
+                Map<String, Object> sCertPolicyResponse = new HashMap<>();
+                sCertPolicyResponse.put("message", "Opening Enclave to request approval.");
+                sCertPolicyResponse.put("changesetId", sCertPolicyKey);
+                sCertPolicyResponse.put("requiresApprovalPopup", true);
+                sCertPolicyResponse.put("changeSetDraftRequests", sCertPolicyReqEntity.getRequestModel());
+                sCertPolicyResponse.put("actionType", "NONE");
+                sCertPolicyResponse.put("changeSetType", ChangeSetType.POLICY.name());
+                responses.add(sCertPolicyResponse);
+            }
+        }
+
+        // --- POLICY for authority assignments ---
         if (authorityAssignment != null) {
             System.out.println("[MultiAdmin.sign] Looking for POLICY entity with key=" + authorityAssignment.getChangesetRequestId());
             ChangesetRequestEntity policyReqEntity = em.find(

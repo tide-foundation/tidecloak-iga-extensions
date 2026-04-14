@@ -21,6 +21,7 @@ import org.tidecloak.shared.enums.DraftStatus;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Base64;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -98,18 +99,16 @@ public class ServerIdentityResourceProvider implements RealmResourceProvider {
 
             // Check for existing pending request for same instance
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-            try {
-                ServerCertDraftEntity existing = em.createNamedQuery("getServerCertByInstanceId", ServerCertDraftEntity.class)
-                        .setParameter("realmId", realm.getId())
-                        .setParameter("instanceId", instanceId)
-                        .getSingleResult();
+            List<ServerCertDraftEntity> existingEntries = em.createNamedQuery("getServerCertByInstanceId", ServerCertDraftEntity.class)
+                    .setParameter("realmId", realm.getId())
+                    .setParameter("instanceId", instanceId)
+                    .getResultList();
 
+            for (ServerCertDraftEntity existing : existingEntries) {
                 if (existing.getDraftStatus() == DraftStatus.DRAFT) {
                     return errorResponse(Response.Status.CONFLICT,
                             "A pending certificate request already exists for instance " + instanceId);
                 }
-            } catch (NoResultException ignored) {
-                // No existing request - good
             }
 
             // Create draft entity
@@ -131,60 +130,16 @@ public class ServerIdentityResourceProvider implements RealmResourceProvider {
 
             em.persist(draft);
 
-            // Build a ModelRequest for enclave approval signing
-            // The draft is the cert request metadata, the model is ServerCert:1
-            String requestModelB64 = null;
-            try {
-                org.keycloak.component.ComponentModel componentModel = realm.getComponentsStream()
-                        .filter(x -> "tide-vendor-key".equals(x.getProviderId()))
-                        .findFirst()
-                        .orElse(null);
-
-                if (componentModel != null) {
-                    org.keycloak.common.util.MultivaluedHashMap<String, String> config = componentModel.getConfig();
-                    String currentSecretKeys = config.getFirst("clientSecret");
-                    org.tidecloak.shared.models.SecretKeys secretKeys = objectMapper.readValue(
-                            currentSecretKeys, org.tidecloak.shared.models.SecretKeys.class);
-
-                    // Build TBS cert as draft
-                    String issuerCn = "tide.realm." + realm.getName();
-                    byte[] tbsCert = ServerCertBuilder.buildTbs(
-                            publicKey, clientId, realm.getName(), issuerCn, spiffeId, requestedLifetime);
-
-                    ObjectNode metadata = objectMapper.createObjectNode();
-                    metadata.put("realm", realm.getName());
-                    metadata.put("clientId", clientId);
-                    metadata.put("instanceId", instanceId);
-                    metadata.put("spiffeId", spiffeId);
-                    metadata.put("requestedLifetime", requestedLifetime);
-
-                    org.midgard.models.ModelRequest modelReq = org.midgard.models.ModelRequest.New(
-                            "sCert", "1", "VRK:1", tbsCert);
-                    modelReq.SetDynamicData(objectMapper.writeValueAsBytes(metadata));
-
-                    String gVRK = config.getFirst("gVRK");
-                    String gVRKCertificate = config.getFirst("gVRKCertificate");
-
-                    modelReq.SetAuthorization(org.midgard.Midgard.SignWithVrk(
-                            modelReq.GetDataToAuthorize(), secretKeys.activeVrk));
-                    modelReq.SetAuthorizer(java.util.HexFormat.of().parseHex(gVRK));
-                    modelReq.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(gVRKCertificate));
-
-                    requestModelB64 = java.util.Base64.getEncoder().encodeToString(modelReq.Encode());
-                }
-            } catch (Exception e) {
-                logger.warn("Could not build model request for SERVER_CERT enclave approval", e);
-            }
-
             // Create changeset request entity (links to IGA approval flow)
+            // Model request is built at commit time by TideIGACommitter (needs Midgard)
             ChangesetRequestEntity changeRequest = new ChangesetRequestEntity();
             changeRequest.setChangesetRequestId(changeRequestId);
             changeRequest.setChangesetType(ChangeSetType.SERVER_CERT);
             changeRequest.setDraftRequest(objectMapper.writeValueAsString(request));
-            changeRequest.setRequestModel(requestModelB64);
+            // requestModel is built at sign/commit time by the authorizer (needs Midgard)
             changeRequest.setTimestamp(System.currentTimeMillis());
-            changeRequest.setRequestedBy("server:" + instanceId);
-            changeRequest.setRequestedByUsername(clientId + "/" + instanceId);
+            changeRequest.setRequestedBy(instanceId);
+            changeRequest.setRequestedByUsername(clientId);
 
             em.persist(changeRequest);
             em.flush();
@@ -298,156 +253,7 @@ public class ServerIdentityResourceProvider implements RealmResourceProvider {
         }
     }
 
-    /**
-     * Renew a server certificate. Requires the current cert's instanceId and a public key.
-     * Auto-approves if an ACTIVE cert exists for this instance (no quorum needed).
-     * Triggers VVK signing and returns the new cert directly.
-     */
-    @POST
-    @Path("renew")
-    @Consumes(MediaType.APPLICATION_JSON)
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response renewCertificate(String body) {
-        try {
-            RealmModel realm = session.getContext().getRealm();
-            var request = objectMapper.readTree(body);
-
-            String instanceId = getRequiredField(request, "instanceId");
-            String publicKey = getRequiredField(request, "publicKey");
-            long requestedLifetime = request.has("requestedLifetime")
-                    ? request.get("requestedLifetime").asLong(86400)
-                    : 86400;
-
-            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-
-            // Find existing ACTIVE cert for this instance
-            ServerCertDraftEntity existing;
-            try {
-                existing = em.createNamedQuery("getApprovedServerCertByClientAndInstance", ServerCertDraftEntity.class)
-                        .setParameter("realmId", realm.getId())
-                        .setParameter("clientId", existing_clientId(em, realm, instanceId))
-                        .setParameter("instanceId", instanceId)
-                        .setParameter("draftStatus", org.tidecloak.shared.enums.DraftStatus.ACTIVE)
-                        .getSingleResult();
-            } catch (NoResultException e) {
-                return errorResponse(Response.Status.FORBIDDEN,
-                        "No active certificate found for instance " + instanceId + ". Initial cert requires admin quorum.");
-            }
-
-            if (existing.getRevoked()) {
-                return errorResponse(Response.Status.FORBIDDEN,
-                        "Certificate for instance " + instanceId + " has been revoked. Request a new cert.");
-            }
-
-            // Auto-renew: update the existing record with new key and re-sign
-            String fingerprint = computeFingerprint(publicKey);
-            existing.setPublicKey(publicKey);
-            existing.setPublicKeyFingerprint(fingerprint);
-            existing.setRequestedLifetime(requestedLifetime);
-            existing.setTimestamp(System.currentTimeMillis());
-
-            // Trigger VVK signing via the commit handler
-            // Build the TBS and sign it
-            org.keycloak.component.ComponentModel componentModel = realm.getComponentsStream()
-                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))
-                    .findFirst()
-                    .orElseThrow(() -> new RuntimeException("No tide-vendor-key component found"));
-
-            org.keycloak.common.util.MultivaluedHashMap<String, String> config = componentModel.getConfig();
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-
-            String currentSecretKeys = config.getFirst("clientSecret");
-            org.tidecloak.shared.models.SecretKeys secretKeys = mapper.readValue(currentSecretKeys, org.tidecloak.shared.models.SecretKeys.class);
-
-            org.midgard.models.SignRequestSettingsMidgard settings = new org.midgard.models.SignRequestSettingsMidgard();
-            settings.VVKId = config.getFirst("vvkId");
-            settings.HomeOrkUrl = config.getFirst("systemHomeOrk");
-            settings.PayerPublicKey = config.getFirst("payerPublic");
-            settings.ObfuscatedVendorPublicKey = config.getFirst("obfGVVK");
-            settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
-            settings.Threshold_T = Integer.parseInt(System.getenv("THRESHOLD_T"));
-            settings.Threshold_N = Integer.parseInt(System.getenv("THRESHOLD_N"));
-
-            String gVRK = config.getFirst("gVRK");
-            String gVRKCertificate = config.getFirst("gVRKCertificate");
-
-            String issuerCn = "tide.realm." + realm.getName();
-            byte[] tbsCert = ServerCertBuilder.buildTbs(
-                    publicKey, existing.getClientId(), realm.getName(),
-                    issuerCn, existing.getSpiffeId(), requestedLifetime);
-
-            com.fasterxml.jackson.databind.node.ObjectNode metadata = mapper.createObjectNode();
-            metadata.put("realm", realm.getName());
-            metadata.put("clientId", existing.getClientId());
-            metadata.put("instanceId", instanceId);
-            metadata.put("spiffeId", existing.getSpiffeId());
-            metadata.put("requestedLifetime", requestedLifetime);
-
-            org.midgard.models.ModelRequest req = org.midgard.models.ModelRequest.New("sCert", "1", "VRK:1", tbsCert);
-            req.SetDynamicData(mapper.writeValueAsBytes(metadata));
-            req.SetAuthorization(org.midgard.Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
-            req.SetAuthorizer(java.util.HexFormat.of().parseHex(gVRK));
-            req.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(gVRKCertificate));
-
-            org.midgard.models.SignatureResponse signatureResponse = org.midgard.Midgard.SignModel(settings, req);
-
-            byte[] signatureBytes = java.util.Base64.getDecoder().decode(
-                    signatureResponse.Signatures[0].replace('-', '+').replace('_', '/'));
-            byte[] fullCert = ServerCertBuilder.assembleCertificate(tbsCert, signatureBytes);
-            String certPem = ServerCertBuilder.toPem(fullCert);
-
-            // Build trust bundle (self-signed VVK CA cert)
-            byte[] vvkPubBytes = java.util.HexFormat.of().parseHex(gVRK);
-            byte[] caTbs = ServerCertBuilder.buildVvkCaTbs(vvkPubBytes, realm.getName());
-            org.midgard.models.ModelRequest caReq = org.midgard.models.ModelRequest.New("sCert", "1", "VRK:1", caTbs);
-            com.fasterxml.jackson.databind.node.ObjectNode caMeta = mapper.createObjectNode();
-            caMeta.put("realm", realm.getName());
-            caMeta.put("clientId", "VVK-CA");
-            caMeta.put("instanceId", "trust-bundle");
-            caMeta.put("spiffeId", "spiffe://tide.realm." + realm.getName());
-            caMeta.put("requestedLifetime", 315360000L);
-            caReq.SetDynamicData(mapper.writeValueAsBytes(caMeta));
-            caReq.SetAuthorization(org.midgard.Midgard.SignWithVrk(caReq.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
-            caReq.SetAuthorizer(java.util.HexFormat.of().parseHex(gVRK));
-            caReq.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(gVRKCertificate));
-            org.midgard.models.SignatureResponse caSignResp = org.midgard.Midgard.SignModel(settings, caReq);
-            byte[] caSignBytes = java.util.Base64.getDecoder().decode(
-                    caSignResp.Signatures[0].replace('-', '+').replace('_', '/'));
-            String trustBundle = ServerCertBuilder.buildVvkCaCert(vvkPubBytes, realm.getName(), caSignBytes);
-
-            existing.setCertificate(certPem);
-            existing.setTrustBundle(trustBundle);
-            em.merge(existing);
-            em.flush();
-
-            ObjectNode response = objectMapper.createObjectNode();
-            response.put("status", "RENEWED");
-            response.put("certificate", certPem);
-            response.put("trustBundle", trustBundle);
-            response.put("spiffeId", existing.getSpiffeId());
-
-            return Response.ok(objectMapper.writeValueAsString(response))
-                    .type(MediaType.APPLICATION_JSON_TYPE)
-                    .build();
-
-        } catch (Exception e) {
-            logger.error("Failed to renew server certificate", e);
-            return errorResponse(Response.Status.INTERNAL_SERVER_ERROR,
-                    "Failed to renew certificate: " + e.getMessage());
-        }
-    }
-
-    private String existing_clientId(EntityManager em, RealmModel realm, String instanceId) {
-        try {
-            ServerCertDraftEntity cert = em.createNamedQuery("getServerCertByInstanceId", ServerCertDraftEntity.class)
-                    .setParameter("realmId", realm.getId())
-                    .setParameter("instanceId", instanceId)
-                    .getSingleResult();
-            return cert.getClientId();
-        } catch (NoResultException e) {
-            return "";
-        }
-    }
+    // Renewal deferred - will be handled via re-request + commit flow
 
     // --- Helpers ---
 
