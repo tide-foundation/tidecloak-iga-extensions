@@ -109,11 +109,11 @@ public class MultiAdmin implements Authorizer{
 
             // Build DynamicData JSON
             ObjectNode metadata = mapper.createObjectNode();
+            metadata.put("type", "server-cert");
             metadata.put("realm", realm.getName());
             metadata.put("clientId", draft.getClientId());
             metadata.put("instanceId", draft.getInstanceId());
             metadata.put("spiffeId", draft.getSpiffeId());
-            metadata.put("requestedLifetime", draft.getRequestedLifetime());
             byte[] dynamicData = mapper.writeValueAsBytes(metadata);
 
             // Create ServerCert:1 ModelRequest with Policy:1 auth flow
@@ -215,10 +215,9 @@ public class MultiAdmin implements Authorizer{
             if (adminPolicyBytes != null) caReq.SetPolicy(adminPolicyBytes);
             // Set DynamicData for contract validation
             ObjectNode caMetadata = mapper.createObjectNode();
+            caMetadata.put("type", "ca-cert");
             caMetadata.put("realm", realm.getName());
             caMetadata.put("clientId", "VVK-CA");
-            caMetadata.put("instanceId", "ca");
-            caMetadata.put("spiffeId", "spiffe://tide.realm." + realm.getName() + "/client/VVK-CA/instance/ca");
             caReq.SetDynamicData(mapper.writeValueAsBytes(caMetadata));
 
             String caKey = changeSet.getChangeSetId() + "-ca";
@@ -229,9 +228,30 @@ public class MultiAdmin implements Authorizer{
             caEntity.setTimestamp(System.currentTimeMillis());
             em.persist(caEntity);
 
+            // --- Build public key signing request (VVK signs the raw public key) ---
+            byte[] pubKeyBytes = Base64.getUrlDecoder().decode(draft.getPublicKey());
+            ModelRequest pkReq = ModelRequest.New("ServerCert", "1", "Policy:1", pubKeyBytes);
+            pkReq.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
+            ModelRequest.InitializeTideRequestWithVrk(pkReq, settings, "ServerCert:1", authorizerBytes, certBytes);
+            if (adminPolicyBytes != null) pkReq.SetPolicy(adminPolicyBytes);
+            ObjectNode pkMetadata = mapper.createObjectNode();
+            pkMetadata.put("type", "public-key");
+            pkMetadata.put("realm", realm.getName());
+            pkMetadata.put("clientId", draft.getClientId());
+            pkMetadata.put("instanceId", draft.getInstanceId());
+            pkReq.SetDynamicData(mapper.writeValueAsBytes(pkMetadata));
+
+            String pkKey = changeSet.getChangeSetId() + "-pk";
+            ChangesetRequestEntity pkEntity = new ChangesetRequestEntity();
+            pkEntity.setChangesetRequestId(pkKey);
+            pkEntity.setChangesetType(ChangeSetType.SERVER_CERT);
+            pkEntity.setRequestModel(Base64.getEncoder().encodeToString(pkReq.Encode()));
+            pkEntity.setTimestamp(System.currentTimeMillis());
+            em.persist(pkEntity);
+
             em.flush();
 
-            System.out.println("[MultiAdmin.sign] Built ServerCert:1 + ServerCert:1 policy + VVK CA cert for enclave approval");
+            System.out.println("[MultiAdmin.sign] Built ServerCert:1 + policy + VVK CA cert + public key sig for enclave approval");
         }
 
         var authorityAssignment = BasicIGAUtils.authorityAssignment(session, draftEntity, em);
@@ -324,6 +344,22 @@ public class MultiAdmin implements Authorizer{
                 caResponse.put("actionType", "NONE");
                 caResponse.put("changeSetType", ChangeSetType.SERVER_CERT.name());
                 responses.add(caResponse);
+            }
+            // Public key signature
+            String pkKey = changeSet.getChangeSetId() + "-pk";
+            ChangesetRequestEntity pkReqEntity = em.find(
+                    ChangesetRequestEntity.class,
+                    new ChangesetRequestEntity.Key(pkKey, ChangeSetType.SERVER_CERT)
+            );
+            if (pkReqEntity != null) {
+                Map<String, Object> pkResponse = new HashMap<>();
+                pkResponse.put("message", "Opening Enclave to request approval.");
+                pkResponse.put("changesetId", pkKey);
+                pkResponse.put("requiresApprovalPopup", true);
+                pkResponse.put("changeSetDraftRequests", pkReqEntity.getRequestModel());
+                pkResponse.put("actionType", "NONE");
+                pkResponse.put("changeSetType", ChangeSetType.SERVER_CERT.name());
+                responses.add(pkResponse);
             }
         }
 

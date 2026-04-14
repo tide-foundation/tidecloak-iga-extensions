@@ -180,11 +180,11 @@ public class TideIGACommitter implements ChangeSetCommitter {
             req = ModelRequest.FromBytes(Base64.getDecoder().decode(existingChangesetReq.getRequestModel()));
         } else {
             ObjectNode metadata = objectMapper.createObjectNode();
+            metadata.put("type", "server-cert");
             metadata.put("realm", realm.getName());
             metadata.put("clientId", draft.getClientId());
             metadata.put("instanceId", draft.getInstanceId());
             metadata.put("spiffeId", draft.getSpiffeId());
-            metadata.put("requestedLifetime", draft.getRequestedLifetime());
             byte[] dynamicData = objectMapper.writeValueAsBytes(metadata);
 
             req = ModelRequest.New("ServerCert", "1", "Policy:1", tbsCert);
@@ -244,9 +244,33 @@ public class TideIGACommitter implements ChangeSetCommitter {
         byte[] fullCaCert = ServerCertBuilder.assembleCertificate(caTbsForAssembly, caSignatureBytes);
         String trustBundle = ServerCertBuilder.toPem(fullCaCert);
 
+        // --- Sign the raw public key ---
+        String pkKey = changeSet.getChangeSetId() + "-pk";
+        ChangesetRequestEntity pkEntity = em.find(
+                ChangesetRequestEntity.class,
+                new ChangesetRequestEntity.Key(pkKey, ChangeSetType.SERVER_CERT)
+        );
+
+        String signedPublicKey = null;
+        if (pkEntity != null && pkEntity.getRequestModel() != null) {
+            ModelRequest pkReq = ModelRequest.FromBytes(Base64.getDecoder().decode(pkEntity.getRequestModel()));
+            byte[] signedPubKeyDraft = pkReq.GetDraft();
+            pkReq.SetPolicy(sCertPolicy.ToBytes());
+            SignatureResponse pkSignResponse = Midgard.SignModel(settings, pkReq);
+            byte[] pkSignatureBytes = java.util.Base64.getDecoder().decode(
+                    pkSignResponse.Signatures[0].replace('-', '+').replace('_', '/'));
+            // Store as base64: publicKeyBytes + "." + signatureBytes
+            signedPublicKey = java.util.Base64.getEncoder().encodeToString(signedPubKeyDraft)
+                    + "." + java.util.Base64.getEncoder().encodeToString(pkSignatureBytes);
+            logger.info("[SERVER_CERT] Public key signed via ORK network");
+        }
+
         // Store the signed certificate
         draft.setCertificate(certPem);
         draft.setTrustBundle(trustBundle);
+        if (signedPublicKey != null) {
+            draft.setSignedPolicy(signedPublicKey); // Reuse signedPolicy field for signed public key
+        }
         draft.setDraftStatus(DraftStatus.ACTIVE);
         em.merge(draft);
 
@@ -266,6 +290,14 @@ public class TideIGACommitter implements ChangeSetCommitter {
                 caEntity.getAdminAuthorizations().clear();
             }
             em.remove(caEntity);
+        }
+
+        // Clean up the public key entity
+        if (pkEntity != null) {
+            if (pkEntity.getAdminAuthorizations() != null) {
+                pkEntity.getAdminAuthorizations().clear();
+            }
+            em.remove(pkEntity);
         }
 
         em.flush();
