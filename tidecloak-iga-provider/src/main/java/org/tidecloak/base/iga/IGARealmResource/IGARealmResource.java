@@ -858,6 +858,8 @@ public class IGARealmResource {
                 node.put("status", draft.getDraftStatus().name());
                 node.put("revoked", draft.getRevoked());
                 node.put("timestamp", draft.getTimestamp());
+                node.put("publicKey", draft.getPublicKey());
+                node.put("signedPublicKey", draft.getSignedPolicy());
                 results.add(node);
             }
 
