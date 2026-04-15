@@ -121,7 +121,7 @@ public class TideIGACommitter implements ChangeSetCommitter {
                 new ChangesetRequestEntity.Key(changeSet.getChangeSetId(), ChangeSetType.SERVER_CERT)
         );
 
-        // --- Build sCert:1 model (uses AuthorizerPack auth, no policy needed) ---
+        // --- Build sCert:1 model ---
         ModelRequest req;
         if (existingChangesetReq != null && existingChangesetReq.getRequestModel() != null) {
             req = ModelRequest.FromBytes(Base64.getDecoder().decode(existingChangesetReq.getRequestModel()));
@@ -134,7 +134,7 @@ public class TideIGACommitter implements ChangeSetCommitter {
             metadata.put("spiffeId", draft.getSpiffeId());
             byte[] dynamicData = objectMapper.writeValueAsBytes(metadata);
 
-            req = ModelRequest.New("ServerCert", "1", "AuthorizerPack:1", tbsCert);
+            req = ModelRequest.New("ServerCert", "1", "Policy:1", tbsCert);
             req.SetCustomExpiry((System.currentTimeMillis() / 1000) + 86400);
             req.SetDynamicData(dynamicData);
 
