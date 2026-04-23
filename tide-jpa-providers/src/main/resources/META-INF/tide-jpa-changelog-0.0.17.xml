@@ -20,8 +20,7 @@
         <rollback>
             <dropColumn tableName="LICENSE_HISTORY" columnName="WALLET_ID"/>
         </rollback>
-                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
-                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.2.xsd">
+    </changeSet>
 
     <changeSet author="tide" id="server-cert-draft-table">
         <createTable tableName="SERVER_CERT_DRAFT">
