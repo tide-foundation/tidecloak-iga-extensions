@@ -80,6 +80,9 @@ public class ServerCertDraftEntity {
     @Column(name = "TIMESTAMP")
     private Long timestamp = System.currentTimeMillis();
 
+    @Column(name = "SIGNED_POLICY", length = 8192)
+    private String signedPolicy;
+
     @Column(name = "REVOKED")
     private Boolean revoked = false;
 
@@ -129,6 +132,9 @@ public class ServerCertDraftEntity {
 
     public Boolean getRevoked() { return revoked; }
     public void setRevoked(Boolean revoked) { this.revoked = revoked; }
+
+    public String getSignedPolicy() { return signedPolicy; }
+    public void setSignedPolicy(String signedPolicy) { this.signedPolicy = signedPolicy; }
 
     public Long getRevokedAt() { return revokedAt; }
     public void setRevokedAt(Long revokedAt) { this.revokedAt = revokedAt; }

@@ -806,20 +806,24 @@ public class IGARealmResource {
                 return Response.status(Response.Status.BAD_REQUEST).entity("{\"error\":\"Missing instanceId\"}").type(MediaType.APPLICATION_JSON).build();
             }
 
-            ServerCertDraftEntity cert;
-            try {
-                cert = em.createNamedQuery("getServerCertByInstanceId", ServerCertDraftEntity.class)
-                        .setParameter("realmId", realm.getId())
-                        .setParameter("instanceId", instanceId)
-                        .getSingleResult();
-            } catch (jakarta.persistence.NoResultException e) {
+            List<ServerCertDraftEntity> certs = em.createNamedQuery("getServerCertByInstanceId", ServerCertDraftEntity.class)
+                    .setParameter("realmId", realm.getId())
+                    .setParameter("instanceId", instanceId)
+                    .getResultList();
+
+            if (certs.isEmpty()) {
                 return Response.status(Response.Status.NOT_FOUND).entity("{\"error\":\"No server cert found for instance " + instanceId + "\"}").type(MediaType.APPLICATION_JSON).build();
             }
 
-            cert.setRevoked(true);
-            cert.setRevokedAt(System.currentTimeMillis());
-            cert.setDraftStatus(DraftStatus.DENIED);
-            em.merge(cert);
+            // Revoke all non-revoked entries for this instance
+            for (ServerCertDraftEntity cert : certs) {
+                if (!Boolean.TRUE.equals(cert.getRevoked())) {
+                    cert.setRevoked(true);
+                    cert.setRevokedAt(System.currentTimeMillis());
+                    cert.setDraftStatus(DraftStatus.DENIED);
+                    em.merge(cert);
+                }
+            }
             em.flush();
 
             return Response.ok("{\"message\":\"Server certificate revoked for instance " + instanceId + "\"}").type(MediaType.APPLICATION_JSON).build();
@@ -854,6 +858,8 @@ public class IGARealmResource {
                 node.put("status", draft.getDraftStatus().name());
                 node.put("revoked", draft.getRevoked());
                 node.put("timestamp", draft.getTimestamp());
+                node.put("publicKey", draft.getPublicKey());
+                node.put("signedPublicKey", draft.getSignedPolicy());
                 results.add(node);
             }
 
