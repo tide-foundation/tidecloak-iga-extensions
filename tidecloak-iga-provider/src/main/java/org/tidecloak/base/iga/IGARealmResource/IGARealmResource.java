@@ -792,6 +792,78 @@ public class IGARealmResource {
     }
 
     @POST
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Path("server-cert/revoke")
+    public Response revokeServerCert(String body) {
+        try {
+            auth.realm().requireManageRealm();
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            RealmModel realm = session.getContext().getRealm();
+
+            com.fasterxml.jackson.databind.JsonNode json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(body);
+            String instanceId = json.has("instanceId") ? json.get("instanceId").asText() : null;
+            if (instanceId == null || instanceId.isEmpty()) {
+                return Response.status(Response.Status.BAD_REQUEST).entity("{\"error\":\"Missing instanceId\"}").type(MediaType.APPLICATION_JSON).build();
+            }
+
+            ServerCertDraftEntity cert;
+            try {
+                cert = em.createNamedQuery("getServerCertByInstanceId", ServerCertDraftEntity.class)
+                        .setParameter("realmId", realm.getId())
+                        .setParameter("instanceId", instanceId)
+                        .getSingleResult();
+            } catch (jakarta.persistence.NoResultException e) {
+                return Response.status(Response.Status.NOT_FOUND).entity("{\"error\":\"No server cert found for instance " + instanceId + "\"}").type(MediaType.APPLICATION_JSON).build();
+            }
+
+            cert.setRevoked(true);
+            cert.setRevokedAt(System.currentTimeMillis());
+            cert.setDraftStatus(DraftStatus.DENIED);
+            em.merge(cert);
+            em.flush();
+
+            return Response.ok("{\"message\":\"Server certificate revoked for instance " + instanceId + "\"}").type(MediaType.APPLICATION_JSON).build();
+        } catch (Exception e) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("{\"error\":\"" + e.getMessage() + "\"}").type(MediaType.APPLICATION_JSON).build();
+        }
+    }
+
+    @GET
+    @Path("server-cert/requests")
+    public Response getServerCertRequests() {
+        try {
+            auth.realm().requireManageRealm();
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            RealmModel realm = session.getContext().getRealm();
+
+            List<ServerCertDraftEntity> drafts = em.createNamedQuery("getServerCertDraftsByRealmNotStatus", ServerCertDraftEntity.class)
+                    .setParameter("realmId", realm.getId())
+                    .setParameter("draftStatus", DraftStatus.DENIED)
+                    .getResultList();
+
+            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            var results = mapper.createArrayNode();
+            for (ServerCertDraftEntity draft : drafts) {
+                var node = mapper.createObjectNode();
+                node.put("id", draft.getId());
+                node.put("changeRequestId", draft.getChangeRequestId());
+                node.put("clientId", draft.getClientId());
+                node.put("instanceId", draft.getInstanceId());
+                node.put("spiffeId", draft.getSpiffeId());
+                node.put("fingerprint", draft.getPublicKeyFingerprint());
+                node.put("status", draft.getDraftStatus().name());
+                node.put("revoked", draft.getRevoked());
+                node.put("timestamp", draft.getTimestamp());
+                results.add(node);
+            }
+
+            return Response.ok(mapper.writeValueAsString(results)).type(MediaType.APPLICATION_JSON).build();
+        } catch (Exception e) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("{\"error\":\"" + e.getMessage() + "\"}").type(MediaType.APPLICATION_JSON).build();
+        }
+    }
+
+    @POST
     @Path("generate-default-user-context")
     public Response generateDefaultUserContext(@Parameter(description = "Clients to generate the default user context for") List<String> clients) {
         auth.realm().requireManageRealm();

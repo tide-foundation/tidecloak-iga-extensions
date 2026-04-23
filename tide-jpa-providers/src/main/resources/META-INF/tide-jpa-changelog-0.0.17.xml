@@ -20,6 +20,50 @@
         <rollback>
             <dropColumn tableName="LICENSE_HISTORY" columnName="WALLET_ID"/>
         </rollback>
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.2.xsd">
+
+    <changeSet author="tide" id="server-cert-draft-table">
+        <createTable tableName="SERVER_CERT_DRAFT">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(36)"/>
+            <column name="REALM_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CLIENT_ID" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="INSTANCE_ID" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="SPIFFE_ID" type="VARCHAR(512)"/>
+            <column name="PUBLIC_KEY" type="VARCHAR(4096)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="PUBLIC_KEY_FINGERPRINT" type="VARCHAR(255)"/>
+            <column name="REQUESTED_LIFETIME" type="BIGINT"/>
+            <column name="CERTIFICATE" type="VARCHAR(8192)"/>
+            <column name="TRUST_BUNDLE" type="VARCHAR(8192)"/>
+            <column name="DRAFT_STATUS" type="VARCHAR(36)" defaultValue="DRAFT"/>
+            <column name="TIMESTAMP" type="BIGINT"/>
+            <column name="REVOKED" type="BOOLEAN" defaultValueBoolean="false"/>
+            <column name="REVOKED_AT" type="BIGINT"/>
+        </createTable>
+
+        <createIndex tableName="SERVER_CERT_DRAFT" indexName="IDX_SERVER_CERT_REALM">
+            <column name="REALM_ID"/>
+        </createIndex>
+
+        <createIndex tableName="SERVER_CERT_DRAFT" indexName="IDX_SERVER_CERT_INSTANCE">
+            <column name="REALM_ID"/>
+            <column name="INSTANCE_ID"/>
+        </createIndex>
+
+        <createIndex tableName="SERVER_CERT_DRAFT" indexName="IDX_SERVER_CERT_REQUEST">
+            <column name="CHANGE_REQUEST_ID"/>
+        </createIndex>
     </changeSet>
 
 </databaseChangeLog>
