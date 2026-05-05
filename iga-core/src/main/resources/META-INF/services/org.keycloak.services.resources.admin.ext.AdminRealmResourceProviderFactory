@@ -1,1 +1,2 @@
 org.tidecloak.iga.rest.IgaAdminResourceProviderFactory
+org.tidecloak.iga.rest.TideAdminCompatResourceProviderFactory

@@ -35,7 +35,7 @@ public class IgaChangeRequestService {
      */
     public boolean isIgaEnabled(RealmModel realm) {
         if ("master".equals(realm.getName())) return false;
-        return "true".equals(realm.getAttribute("iga.enabled"));
+        return "true".equals(realm.getAttribute("isIGAEnabled"));
     }
 
     /**
