@@ -29,6 +29,7 @@ import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.providers.IgaConflictException;
+import org.tidecloak.iga.providers.IgaFirstAdminSignPreviewService;
 import org.tidecloak.iga.providers.IgaForsetiContractService;
 import org.tidecloak.iga.providers.IgaLicenseHistoryService;
 import org.tidecloak.iga.providers.IgaLicensingDraftService;
@@ -88,6 +89,17 @@ public class IgaAdminResource {
 
     private IgaLicenseHistoryService getLicenseHistoryService() {
         return new IgaLicenseHistoryService(getEm());
+    }
+
+    private IgaFirstAdminSignPreviewService getFirstAdminSignPreviewService() {
+        return new IgaFirstAdminSignPreviewService(
+                getEm(),
+                session,
+                realm,
+                getService(),
+                getRolePolicyService(),
+                getAuthorizerService(),
+                getForsetiContractService());
     }
 
     private String currentUserId() {
@@ -206,6 +218,29 @@ public class IgaAdminResource {
         // Re-fetch to return updated state
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
         return Response.ok(toRepresentation(updated, service)).build();
+    }
+
+    // -------------------------------------------------------------------------
+    // POST /iga/change-requests/{id}/first-admin-sign-preview
+    // -------------------------------------------------------------------------
+
+    /**
+     * Resolve a change request to its full signing payload (all foreign keys
+     * expanded to full entity data), log it, and return it. No cryptography is
+     * performed — this is a prototype for the FirstAdmin signing flow. The real
+     * Midgard.signClaims() call will replace the log line once Midgard is updated.
+     */
+    @POST
+    @Path("change-requests/{id}/first-admin-sign-preview")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response firstAdminSignPreview(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        Map<String, Object> payload = getFirstAdminSignPreviewService().buildAndLog(id);
+        if (payload == null) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        return Response.ok(payload).build();
     }
 
     // -------------------------------------------------------------------------
