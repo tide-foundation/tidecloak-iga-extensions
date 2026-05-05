@@ -21,9 +21,11 @@ import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaCommentEntity;
+import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.providers.IgaConflictException;
+import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
 
 import jakarta.persistence.EntityManager;
@@ -58,6 +60,10 @@ public class IgaAdminResource {
 
     private IgaAuthorizerService getAuthorizerService() {
         return new IgaAuthorizerService(getEm());
+    }
+
+    private IgaRolePolicyService getRolePolicyService() {
+        return new IgaRolePolicyService(getEm());
     }
 
     private String currentUserId() {
@@ -473,6 +479,139 @@ public class IgaAdminResource {
         }
         service.delete(id);
         return Response.noContent().build();
+    }
+
+    // -------------------------------------------------------------------------
+    // Role Policies
+    // -------------------------------------------------------------------------
+
+    @GET
+    @Path("role-policies")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<IgaRolePolicyRepresentation> listRolePolicies() {
+        auth.realm().requireManageRealm();
+
+        return getRolePolicyService().listByRealm(realm.getId()).stream()
+                .map(this::toRolePolicyRepresentation)
+                .collect(Collectors.toList());
+    }
+
+    @GET
+    @Path("role-policies/{id}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getRolePolicy(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        IgaRolePolicyEntity entity = getRolePolicyService().findById(id);
+        if (entity == null || !realm.getId().equals(entity.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        return Response.ok(toRolePolicyRepresentation(entity)).build();
+    }
+
+    @GET
+    @Path("role-policies/role/{roleId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getRolePolicyByRole(@PathParam("roleId") String roleId) {
+        auth.realm().requireManageRealm();
+
+        IgaRolePolicyEntity entity = getRolePolicyService()
+                .findByRealmAndRole(realm.getId(), roleId);
+        if (entity == null) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        return Response.ok(toRolePolicyRepresentation(entity)).build();
+    }
+
+    @POST
+    @Path("role-policies")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response upsertRolePolicy(IgaRolePolicyRepresentation rep) {
+        auth.realm().requireManageRealm();
+
+        if (rep == null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Missing request body"))
+                    .build();
+        }
+        if (rep.getRoleId() == null || rep.getRoleId().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "roleId is required"))
+                    .build();
+        }
+        if (rep.getPolicy() == null || rep.getPolicy().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "policy is required"))
+                    .build();
+        }
+        if (rep.getPolicySig() == null || rep.getPolicySig().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "policySig is required"))
+                    .build();
+        }
+        if (rep.getPolicySig().length() > 512) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "policySig exceeds maximum length of 512 characters"))
+                    .build();
+        }
+
+        IgaRolePolicyEntity upserted = getRolePolicyService().upsert(
+                realm.getId(),
+                rep.getRoleId(),
+                rep.getPolicy(),
+                rep.getPolicySig(),
+                rep.getContractId(),
+                rep.getApprovalType(),
+                rep.getExecutionType(),
+                rep.getThreshold(),
+                rep.getPolicyData());
+        return Response.ok(toRolePolicyRepresentation(upserted)).build();
+    }
+
+    @DELETE
+    @Path("role-policies/role/{roleId}")
+    public Response deleteRolePolicyByRole(@PathParam("roleId") String roleId) {
+        auth.realm().requireManageRealm();
+
+        IgaRolePolicyService service = getRolePolicyService();
+        IgaRolePolicyEntity existing = service.findByRealmAndRole(realm.getId(), roleId);
+        if (existing == null) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        service.deleteByRealmAndRole(realm.getId(), roleId);
+        return Response.noContent().build();
+    }
+
+    @DELETE
+    @Path("role-policies/{id}")
+    public Response deleteRolePolicy(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        IgaRolePolicyService service = getRolePolicyService();
+        IgaRolePolicyEntity existing = service.findById(id);
+        if (existing == null || !realm.getId().equals(existing.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        service.deleteById(id);
+        return Response.noContent().build();
+    }
+
+    private IgaRolePolicyRepresentation toRolePolicyRepresentation(IgaRolePolicyEntity entity) {
+        IgaRolePolicyRepresentation rep = new IgaRolePolicyRepresentation();
+        rep.setId(entity.getId());
+        rep.setRealmId(entity.getRealmId());
+        rep.setRoleId(entity.getRoleId());
+        rep.setPolicy(entity.getPolicy());
+        rep.setPolicySig(entity.getPolicySig());
+        rep.setContractId(entity.getContractId());
+        rep.setApprovalType(entity.getApprovalType());
+        rep.setExecutionType(entity.getExecutionType());
+        rep.setThreshold(entity.getThreshold());
+        rep.setPolicyData(entity.getPolicyData());
+        rep.setCreatedAt(entity.getCreatedAt());
+        rep.setUpdatedAt(entity.getUpdatedAt());
+        return rep;
     }
 
     private IgaAuthorizerRepresentation toAuthorizerRepresentation(IgaAuthorizerEntity entity) {

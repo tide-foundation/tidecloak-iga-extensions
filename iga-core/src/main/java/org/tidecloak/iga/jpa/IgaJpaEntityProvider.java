@@ -5,6 +5,7 @@ import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaCommentEntity;
+import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 
 import java.util.List;
 
@@ -16,7 +17,8 @@ public class IgaJpaEntityProvider implements JpaEntityProvider {
                 IgaChangeRequestEntity.class,
                 IgaAuthorizationEntity.class,
                 IgaCommentEntity.class,
-                IgaAuthorizerEntity.class
+                IgaAuthorizerEntity.class,
+                IgaRolePolicyEntity.class
         );
     }
 

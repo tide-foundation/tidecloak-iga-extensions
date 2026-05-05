@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!-- 1: Create IGA_ROLE_POLICY table -->
+    <changeSet id="iga-1.3.0-1" author="tidecloak-iga">
+        <createTable tableName="IGA_ROLE_POLICY">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="REALM_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ROLE_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="POLICY" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="POLICY_SIG" type="VARCHAR(512)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CONTRACT_ID" type="VARCHAR(36)"/>
+            <column name="APPROVAL_TYPE" type="VARCHAR(64)"/>
+            <column name="EXECUTION_TYPE" type="VARCHAR(64)"/>
+            <column name="THRESHOLD" type="INT"/>
+            <column name="POLICY_DATA" type="TEXT"/>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="UPDATED_AT" type="BIGINT"/>
+        </createTable>
+    </changeSet>
+
+    <!-- 2: Unique constraint on (REALM_ID, ROLE_ID) -->
+    <changeSet id="iga-1.3.0-2" author="tidecloak-iga">
+        <addUniqueConstraint tableName="IGA_ROLE_POLICY"
+                             columnNames="REALM_ID, ROLE_ID"
+                             constraintName="UQ_IGA_ROLE_POLICY_REALM_ROLE"/>
+    </changeSet>
+
+    <!-- 3: Index on REALM_ID for the common per-realm lookup -->
+    <changeSet id="iga-1.3.0-3" author="tidecloak-iga">
+        <createIndex tableName="IGA_ROLE_POLICY" indexName="IDX_IGA_ROLE_POLICY_REALM">
+            <column name="REALM_ID"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>
