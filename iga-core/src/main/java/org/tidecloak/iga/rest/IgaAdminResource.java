@@ -37,8 +37,11 @@ import org.tidecloak.iga.providers.IgaLicensingDraftService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
+import org.tidecloak.iga.baseline.IgaBaselineService;
 import org.tidecloak.iga.signers.IgaSigner;
 import org.tidecloak.iga.signers.IgaSigners;
+import com.fasterxml.jackson.databind.JsonNode;
+import java.util.LinkedHashMap;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
@@ -305,6 +308,128 @@ public class IgaAdminResource {
         IgaChangeRequestService service = getService();
         service.deny(id, currentUserId());
         return Response.noContent().build();
+    }
+
+    // -------------------------------------------------------------------------
+    // Baseline approval — single CR that snapshots every unsigned row in the
+    // realm so one ceremony retroactively signs all pre-IGA data.
+    // -------------------------------------------------------------------------
+
+    @POST
+    @Path("baseline-review")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response createBaselineReview() {
+        auth.realm().requireManageRealm();
+
+        IgaBaselineService baselineService = new IgaBaselineService(getEm());
+
+        // Conflict check: a PENDING BASELINE_APPROVAL already exists for the realm.
+        IgaChangeRequestEntity existing = baselineService.findPending(realm.getId());
+        if (existing != null) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of(
+                            "error", "A PENDING BASELINE_APPROVAL change request already exists for this realm",
+                            "changeRequestId", existing.getId()))
+                    .build();
+        }
+
+        IgaBaselineService.BaselineResult result = baselineService.buildAndPersist(realm, currentUserId());
+        if (result.cr == null) {
+            return Response.ok(Map.of(
+                    "message", "No unsigned rows to baseline",
+                    "row_count", 0))
+                    .build();
+        }
+
+        return Response.status(Response.Status.CREATED)
+                .entity(Map.of(
+                        "changeRequestId", result.cr.getId(),
+                        "summary", result.summary,
+                        "totalRows", result.totalRows))
+                .build();
+    }
+
+    // -------------------------------------------------------------------------
+    // GET /iga/change-requests/{id}/baseline-summary
+    // Paginated review without transferring the whole rows_json payload.
+    // -------------------------------------------------------------------------
+
+    @GET
+    @Path("change-requests/{id}/baseline-summary")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getBaselineSummary(@PathParam("id") String id,
+                                        @QueryParam("table") String table,
+                                        @QueryParam("page") Integer page,
+                                        @QueryParam("size") Integer size) {
+        auth.realm().requireManageRealm();
+
+        EntityManager em = getEm();
+        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
+        if (cr == null || !realm.getId().equals(cr.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        if (!IgaBaselineService.ACTION_TYPE.equals(cr.getActionType())) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Change request is not a BASELINE_APPROVAL"))
+                    .build();
+        }
+
+        JsonNode rows = IgaBaselineService.parseRows(cr.getRowsJson());
+        JsonNode tables = rows.get("tables");
+
+        if (table == null || table.isBlank()) {
+            // Summary view: tableName -> count
+            Map<String, Integer> summary = new LinkedHashMap<>();
+            long total = 0;
+            if (tables != null && tables.isObject()) {
+                java.util.Iterator<String> it = tables.fieldNames();
+                while (it.hasNext()) {
+                    String name = it.next();
+                    JsonNode arr = tables.get(name);
+                    int count = (arr != null && arr.isArray()) ? arr.size() : 0;
+                    summary.put(name, count);
+                    total += count;
+                }
+            }
+            return Response.ok(Map.of(
+                    "summary", summary,
+                    "totalRows", total))
+                    .build();
+        }
+
+        // Sliced view for one table.
+        int p = (page != null) ? page : 0;
+        int s = (size != null) ? size : 50;
+        if (p < 0) p = 0;
+        if (s <= 0) s = 50;
+        if (s > 1000) s = 1000;
+
+        JsonNode arr = (tables != null) ? tables.get(table) : null;
+        if (arr == null || !arr.isArray()) {
+            return Response.ok(Map.of(
+                    "table", table,
+                    "page", p,
+                    "size", s,
+                    "total", 0,
+                    "rows", List.of()))
+                    .build();
+        }
+
+        int total = arr.size();
+        int from = Math.min(p * s, total);
+        int to = Math.min(from + s, total);
+
+        List<JsonNode> slice = new java.util.ArrayList<>(to - from);
+        for (int i = from; i < to; i++) {
+            slice.add(arr.get(i));
+        }
+        return Response.ok(Map.of(
+                "table", table,
+                "page", p,
+                "size", s,
+                "total", total,
+                "rows", slice))
+                .build();
     }
 
     // -------------------------------------------------------------------------

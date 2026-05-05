@@ -1,6 +1,7 @@
 package org.tidecloak.iga.replay;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
@@ -13,6 +14,8 @@ import org.keycloak.models.RoleModel;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.Query;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -40,8 +43,22 @@ public class IgaReplayDispatcher {
 
     private static void doReplay(KeycloakSession session, IgaChangeRequestEntity cr, String finalSignature) {
         RealmModel realm = session.realms().getRealm(cr.getRealmId());
-        List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
         EntityManager em = getEm(session);
+
+        // BASELINE_APPROVAL has a structured rows_json with a top-level
+        // "tables" object — it doesn't match the flat List shape used by
+        // every other action. Handle it before the generic parse.
+        if ("BASELINE_APPROVAL".equals(cr.getActionType())) {
+            replayBaselineApproval(em, cr, finalSignature);
+            IgaChangeRequestEntity managedBaseline = em.find(IgaChangeRequestEntity.class, cr.getId());
+            if (managedBaseline != null) {
+                managedBaseline.setStatus("APPROVED");
+                managedBaseline.setResolvedAt(System.currentTimeMillis());
+            }
+            return;
+        }
+
+        List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
 
         switch (cr.getActionType()) {
             case "CREATE_USER" -> replayCreateUser(session, realm, rows, finalSignature, em);
@@ -346,6 +363,114 @@ public class IgaReplayDispatcher {
         ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
         RoleModel role = session.roles().getRoleById(realm, roleId);
         if (scope != null && role != null) scope.deleteScopeMapping(role);
+    }
+
+    // -------------------------------------------------------------------------
+    // BASELINE_APPROVAL replay — sweep every snapshotted unsigned row and
+    // stamp the final signature on it. Uses native SQL because the SIGNATURE
+    // column was added by a Liquibase changelog at the DB layer; the JPA
+    // entity classes don't (yet) expose `signature` as a Hibernate field.
+    // -------------------------------------------------------------------------
+
+    private static void replayBaselineApproval(EntityManager em, IgaChangeRequestEntity cr, String finalSignature) {
+        if (finalSignature == null || finalSignature.isEmpty()) {
+            log.warnf("BASELINE_APPROVAL %s has no final signature; skipping signature writes", cr.getId());
+            return;
+        }
+        JsonNode root;
+        try {
+            root = MAPPER.readTree(cr.getRowsJson());
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to parse BASELINE rows_json for CR " + cr.getId(), e);
+        }
+        JsonNode tables = root.get("tables");
+        if (tables == null || !tables.isObject()) {
+            log.warnf("BASELINE_APPROVAL %s has no tables payload", cr.getId());
+            return;
+        }
+
+        // Info tables — single id column
+        updateBatchById(em, tables, "user_entity",
+                "UPDATE USER_ENTITY SET SIGNATURE = ? WHERE ID IN (:ids) AND SIGNATURE IS NULL",
+                "id", finalSignature);
+        updateBatchById(em, tables, "keycloak_role",
+                "UPDATE KEYCLOAK_ROLE SET SIGNATURE = ? WHERE ID IN (:ids) AND SIGNATURE IS NULL",
+                "id", finalSignature);
+        updateBatchById(em, tables, "keycloak_group",
+                "UPDATE KEYCLOAK_GROUP SET SIGNATURE = ? WHERE ID IN (:ids) AND SIGNATURE IS NULL",
+                "id", finalSignature);
+        updateBatchById(em, tables, "client",
+                "UPDATE CLIENT SET SIGNATURE = ? WHERE ID IN (:ids) AND SIGNATURE IS NULL",
+                "id", finalSignature);
+        updateBatchById(em, tables, "protocol_mapper",
+                "UPDATE PROTOCOL_MAPPER SET SIGNATURE = ? WHERE ID IN (:ids) AND SIGNATURE IS NULL",
+                "id", finalSignature);
+
+        // Relationship tables — composite key match, one update per row
+        updatePairs(em, tables, "user_role_mapping",
+                "UPDATE USER_ROLE_MAPPING SET SIGNATURE = ? WHERE USER_ID = ? AND ROLE_ID = ?",
+                "USER_ID", "ROLE_ID", finalSignature);
+        updatePairs(em, tables, "user_group_membership",
+                "UPDATE USER_GROUP_MEMBERSHIP SET SIGNATURE = ? WHERE USER_ID = ? AND GROUP_ID = ?",
+                "USER", "GROUP", finalSignature);
+        updatePairs(em, tables, "group_role_mapping",
+                "UPDATE GROUP_ROLE_MAPPING SET SIGNATURE = ? WHERE GROUP_ID = ? AND ROLE_ID = ?",
+                "GROUP", "ROLE", finalSignature);
+        updatePairs(em, tables, "composite_role",
+                "UPDATE COMPOSITE_ROLE SET SIGNATURE = ? WHERE COMPOSITE = ? AND CHILD_ROLE = ?",
+                "COMPOSITE", "CHILD_ROLE", finalSignature);
+        updatePairs(em, tables, "client_scope_client",
+                "UPDATE CLIENT_SCOPE_CLIENT SET SIGNATURE = ? WHERE CLIENT_ID = ? AND SCOPE_ID = ?",
+                "CLIENT_ID", "SCOPE_ID", finalSignature);
+        updatePairs(em, tables, "client_scope_role_mapping",
+                "UPDATE CLIENT_SCOPE_ROLE_MAPPING SET SIGNATURE = ? WHERE SCOPE_ID = ? AND ROLE_ID = ?",
+                "SCOPE_ID", "ROLE_ID", finalSignature);
+    }
+
+    /**
+     * Batch-update rows by primary id using a single native SQL statement.
+     * Uses the Hibernate-supported `:ids` IN-list parameter form.
+     */
+    private static void updateBatchById(EntityManager em, JsonNode tables, String tableName,
+                                         String sql, String idKey, String sig) {
+        JsonNode arr = tables.get(tableName);
+        if (arr == null || !arr.isArray() || arr.size() == 0) return;
+
+        List<String> ids = new ArrayList<>(arr.size());
+        for (JsonNode row : arr) {
+            JsonNode v = row.get(idKey);
+            if (v != null && !v.isNull()) ids.add(v.asText());
+        }
+        if (ids.isEmpty()) return;
+
+        Query q = em.createNativeQuery(sql);
+        q.setParameter(1, sig);
+        q.setParameter("ids", ids);
+        int updated = q.executeUpdate();
+        log.debugf("BASELINE replay: updated %d rows in %s", updated, tableName);
+    }
+
+    /**
+     * Run one UPDATE per row for relationship tables (composite primary key).
+     * Native SQL with positional parameters: ?1=signature, ?2=key1, ?3=key2.
+     */
+    private static void updatePairs(EntityManager em, JsonNode tables, String tableName,
+                                     String sql, String key1, String key2, String sig) {
+        JsonNode arr = tables.get(tableName);
+        if (arr == null || !arr.isArray() || arr.size() == 0) return;
+
+        int total = 0;
+        for (JsonNode row : arr) {
+            JsonNode v1 = row.get(key1);
+            JsonNode v2 = row.get(key2);
+            if (v1 == null || v1.isNull() || v2 == null || v2.isNull()) continue;
+            Query q = em.createNativeQuery(sql);
+            q.setParameter(1, sig);
+            q.setParameter(2, v1.asText());
+            q.setParameter(3, v2.asText());
+            total += q.executeUpdate();
+        }
+        log.debugf("BASELINE replay: updated %d rows in %s", total, tableName);
     }
 
     // -------------------------------------------------------------------------
