@@ -23,11 +23,13 @@ import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaCommentEntity;
 import org.tidecloak.iga.entities.IgaForsetiContractEntity;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
+import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.providers.IgaConflictException;
 import org.tidecloak.iga.providers.IgaForsetiContractService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
+import org.tidecloak.iga.providers.IgaServerCertDraftService;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
 
 import jakarta.persistence.EntityManager;
@@ -70,6 +72,10 @@ public class IgaAdminResource {
 
     private IgaForsetiContractService getForsetiContractService() {
         return new IgaForsetiContractService(getEm());
+    }
+
+    private IgaServerCertDraftService getServerCertDraftService() {
+        return new IgaServerCertDraftService(getEm(), getService());
     }
 
     private String currentUserId() {
@@ -673,6 +679,192 @@ public class IgaAdminResource {
         }
         service.deleteById(id);
         return Response.noContent().build();
+    }
+
+    // -------------------------------------------------------------------------
+    // Server Cert Drafts (workload TLS / SPIFFE cert request flow)
+    // -------------------------------------------------------------------------
+
+    @GET
+    @Path("server-certs")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<IgaServerCertDraftRepresentation> listServerCerts() {
+        auth.realm().requireManageRealm();
+        return getServerCertDraftService().listByRealm(realm.getId()).stream()
+                .map(this::toServerCertDraftRepresentation)
+                .collect(Collectors.toList());
+    }
+
+    @GET
+    @Path("server-certs/active")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<IgaServerCertDraftRepresentation> listActiveServerCerts() {
+        auth.realm().requireManageRealm();
+        return getServerCertDraftService().listActive(realm.getId()).stream()
+                .map(this::toServerCertDraftRepresentation)
+                .collect(Collectors.toList());
+    }
+
+    @GET
+    @Path("server-certs/{id}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getServerCert(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+        IgaServerCertDraftEntity entity = getServerCertDraftService().findById(id);
+        if (entity == null || !realm.getId().equals(entity.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        return Response.ok(toServerCertDraftRepresentation(entity)).build();
+    }
+
+    @GET
+    @Path("server-certs/instance/{instanceId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<IgaServerCertDraftRepresentation> listServerCertsByInstance(
+            @PathParam("instanceId") String instanceId) {
+        auth.realm().requireManageRealm();
+        return getServerCertDraftService()
+                .findByRealmAndInstance(realm.getId(), instanceId).stream()
+                .map(this::toServerCertDraftRepresentation)
+                .collect(Collectors.toList());
+    }
+
+    @POST
+    @Path("server-certs/request")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response requestServerCert(IgaServerCertDraftRepresentation rep) {
+        auth.realm().requireManageRealm();
+
+        if (rep == null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Missing request body"))
+                    .build();
+        }
+        if (rep.getClientId() == null || rep.getClientId().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "clientId is required"))
+                    .build();
+        }
+        if (rep.getInstanceId() == null || rep.getInstanceId().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "instanceId is required"))
+                    .build();
+        }
+        if (rep.getPublicKey() == null || rep.getPublicKey().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "publicKey is required"))
+                    .build();
+        }
+        if (rep.getPublicKey().length() > 4096) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "publicKey exceeds maximum length of 4096 characters"))
+                    .build();
+        }
+        if (rep.getSpiffeId() != null && rep.getSpiffeId().length() > 512) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "spiffeId exceeds maximum length of 512 characters"))
+                    .build();
+        }
+        if (rep.getSignedPolicy() != null && rep.getSignedPolicy().length() > 8192) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "signedPolicy exceeds maximum length of 8192 characters"))
+                    .build();
+        }
+
+        IgaServerCertDraftEntity created = getServerCertDraftService().createRequest(
+                realm,
+                currentUserId(),
+                rep.getClientId(),
+                rep.getInstanceId(),
+                rep.getSpiffeId(),
+                rep.getPublicKey(),
+                rep.getPublicKeyFingerprint(),
+                rep.getRequestedLifetime(),
+                rep.getSignedPolicy());
+        return Response.status(Response.Status.CREATED)
+                .entity(toServerCertDraftRepresentation(created))
+                .build();
+    }
+
+    @POST
+    @Path("server-certs/{id}/issue")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response issueServerCert(@PathParam("id") String id, Map<String, Object> body) {
+        auth.realm().requireManageRealm();
+
+        IgaServerCertDraftService service = getServerCertDraftService();
+        IgaServerCertDraftEntity entity = service.findById(id);
+        if (entity == null || !realm.getId().equals(entity.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+
+        String certificate = body != null ? (String) body.get("certificate") : null;
+        String trustBundle = body != null ? (String) body.get("trustBundle") : null;
+        if (certificate == null || certificate.isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "certificate is required"))
+                    .build();
+        }
+        if (trustBundle == null || trustBundle.isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "trustBundle is required"))
+                    .build();
+        }
+
+        IgaServerCertDraftEntity updated = service.issueCert(id, certificate, trustBundle);
+        return Response.ok(toServerCertDraftRepresentation(updated)).build();
+    }
+
+    @POST
+    @Path("server-certs/{id}/revoke")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response revokeServerCert(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        IgaServerCertDraftService service = getServerCertDraftService();
+        IgaServerCertDraftEntity entity = service.findById(id);
+        if (entity == null || !realm.getId().equals(entity.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        IgaServerCertDraftEntity updated = service.revoke(id);
+        return Response.ok(toServerCertDraftRepresentation(updated)).build();
+    }
+
+    @DELETE
+    @Path("server-certs/{id}")
+    public Response deleteServerCert(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        IgaServerCertDraftService service = getServerCertDraftService();
+        IgaServerCertDraftEntity entity = service.findById(id);
+        if (entity == null || !realm.getId().equals(entity.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        service.deleteById(id);
+        return Response.noContent().build();
+    }
+
+    private IgaServerCertDraftRepresentation toServerCertDraftRepresentation(IgaServerCertDraftEntity entity) {
+        IgaServerCertDraftRepresentation rep = new IgaServerCertDraftRepresentation();
+        rep.setId(entity.getId());
+        rep.setChangeRequestId(entity.getChangeRequest() != null ? entity.getChangeRequest().getId() : null);
+        rep.setRealmId(entity.getRealmId());
+        rep.setClientId(entity.getClientId());
+        rep.setInstanceId(entity.getInstanceId());
+        rep.setSpiffeId(entity.getSpiffeId());
+        rep.setPublicKey(entity.getPublicKey());
+        rep.setPublicKeyFingerprint(entity.getPublicKeyFingerprint());
+        rep.setRequestedLifetime(entity.getRequestedLifetime());
+        rep.setCertificate(entity.getCertificate());
+        rep.setTrustBundle(entity.getTrustBundle());
+        rep.setSignedPolicy(entity.getSignedPolicy());
+        rep.setRevoked(entity.isRevoked());
+        rep.setRevokedAt(entity.getRevokedAt());
+        rep.setCreatedAt(entity.getCreatedAt());
+        rep.setUpdatedAt(entity.getUpdatedAt());
+        return rep;
     }
 
     private IgaForsetiContractRepresentation toForsetiContractRepresentation(IgaForsetiContractEntity entity) {

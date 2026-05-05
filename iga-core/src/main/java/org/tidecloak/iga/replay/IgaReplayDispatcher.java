@@ -2,6 +2,7 @@ package org.tidecloak.iga.replay;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientScopeModel;
@@ -23,6 +24,7 @@ import java.util.function.Consumer;
  */
 public class IgaReplayDispatcher {
 
+    private static final Logger log = Logger.getLogger(IgaReplayDispatcher.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<List<Map<String, Object>>> LIST_MAP_REF =
             new TypeReference<List<Map<String, Object>>>() {};
@@ -77,6 +79,7 @@ public class IgaReplayDispatcher {
                     r -> scopeAddRoleDirect(session, realm, r));
             case "SCOPE_REMOVE_ROLE" -> replayRevoke(session, realm, rows, em,
                     r -> scopeRemoveRoleDirect(session, realm, r));
+            case "REQUEST_SERVER_CERT" -> replayRequestServerCert(cr);
             default -> throw new IllegalArgumentException("Unknown IGA action: " + cr.getActionType());
         }
 
@@ -175,6 +178,22 @@ public class IgaReplayDispatcher {
                         .executeUpdate();
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Server cert request — sidecar approval (no model write here)
+    // -------------------------------------------------------------------------
+
+    /**
+     * REQUEST_SERVER_CERT approval grants the workload the right to receive a
+     * cert. The sidecar IGA_SERVER_CERT_DRAFT is NOT touched here — issuance
+     * is decoupled and happens via POST /iga/server-certs/{draftId}/issue once
+     * the signing infrastructure produces the cert + trust bundle. The
+     * surrounding doReplay() will mark the parent change request APPROVED.
+     */
+    private static void replayRequestServerCert(IgaChangeRequestEntity cr) {
+        log.infof("REQUEST_SERVER_CERT approved for change request %s — awaiting cert issuance via /iga/server-certs/{draftId}/issue",
+                cr.getId());
     }
 
     // -------------------------------------------------------------------------
