@@ -52,27 +52,18 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public GroupModel createGroup(RealmModel realm, String id, Type type, String name, GroupModel toParent) {
-        if (!isIgaActive(realm)) {
-            GroupModel base = super.createGroup(realm, id, type, name, toParent);
-            if (base == null) return null;
-            GroupEntity groupEntity = em.find(GroupEntity.class, base.getId());
-            if (groupEntity == null) return base;
-            return new IgaGroupAdapter(igaSession, realm, em, groupEntity);
+        GroupModel base = super.createGroup(realm, id, type, name, toParent);
+        if (base == null) return null;
+        GroupEntity entity = em.find(GroupEntity.class, base.getId());
+        if (isIgaActive(realm) && entity != null) {
+            String parentId = (toParent != null) ? toParent.getId() : null;
+            Map<String, Object> row = parentId != null
+                    ? Map.of("ID", base.getId(), "NAME", name, "REALM_ID", realm.getId(), "PARENT_GROUP", parentId)
+                    : Map.of("ID", base.getId(), "NAME", name, "REALM_ID", realm.getId());
+            getService().create(realm, "GROUP", base.getId(), "CREATE_GROUP", List.of(row), null);
         }
-        String groupId = (id != null) ? id : KeycloakModelUtils.generateId();
-        String parentId = (toParent != null) ? toParent.getId() : null;
-        IgaChangeRequestService service = getService();
-        Map<String, Object> row = parentId != null
-                ? Map.of("ID", groupId, "NAME", name, "REALM_ID", realm.getId(), "PARENT_GROUP", parentId)
-                : Map.of("ID", groupId, "NAME", name, "REALM_ID", realm.getId());
-        service.create(realm, "GROUP", groupId, "CREATE_GROUP", List.of(row), null);
-        // Return a stub backed by a transient GroupEntity
-        GroupEntity stub = new GroupEntity();
-        stub.setId(groupId);
-        stub.setName(name);
-        stub.setRealm(realm.getId());
-        stub.setParentId(parentId != null ? parentId : GroupEntity.TOP_PARENT_ID);
-        return new IgaGroupAdapter(igaSession, realm, em, stub);
+        if (entity == null) return base;
+        return new IgaGroupAdapter(igaSession, realm, em, entity);
     }
 
     @Override
@@ -95,28 +86,21 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public RoleModel addRealmRole(RealmModel realm, String id, String name) {
-        if (!isIgaActive(realm)) {
-            RoleModel base = super.addRealmRole(realm, id, name);
-            if (base == null) return null;
-            RoleEntity entity = em.find(RoleEntity.class, base.getId());
-            if (entity == null) return base;
-            return new IgaRoleAdapter(igaSession, realm, em, entity);
+        RoleModel base = super.addRealmRole(realm, id, name);
+        if (base == null) return null;
+        RoleEntity entity = em.find(RoleEntity.class, base.getId());
+        if (isIgaActive(realm) && entity != null) {
+            getService().create(realm, "ROLE", base.getId(), "CREATE_ROLE",
+                    List.of(Map.of(
+                            "ID", base.getId(),
+                            "NAME", name,
+                            "REALM_ID", realm.getId(),
+                            "CLIENT_ROLE", false
+                    )),
+                    null);
         }
-        IgaChangeRequestService service = getService();
-        service.create(realm, "ROLE", id, "CREATE_ROLE",
-                List.of(Map.of(
-                        "ID", id,
-                        "NAME", name,
-                        "REALM_ID", realm.getId(),
-                        "CLIENT_ROLE", false
-                )),
-                null);
-        RoleEntity stub = new RoleEntity();
-        stub.setId(id);
-        stub.setName(name);
-        stub.setRealmId(realm.getId());
-        stub.setClientRole(false);
-        return new IgaRoleAdapter(igaSession, realm, em, stub);
+        if (entity == null) return base;
+        return new IgaRoleAdapter(igaSession, realm, em, entity);
     }
 
     @Override
@@ -127,31 +111,23 @@ public class IgaRealmProvider extends JpaRealmProvider {
     @Override
     public RoleModel addClientRole(ClientModel client, String id, String name) {
         RealmModel realm = client.getRealm();
-        if (!isIgaActive(realm)) {
-            RoleModel base = super.addClientRole(client, id, name);
-            if (base == null) return null;
-            RoleEntity entity = em.find(RoleEntity.class, base.getId());
-            if (entity == null) return base;
-            return new IgaRoleAdapter(igaSession, realm, em, entity);
+        RoleModel base = super.addClientRole(client, id, name);
+        if (base == null) return null;
+        RoleEntity entity = em.find(RoleEntity.class, base.getId());
+        if (isIgaActive(realm) && entity != null) {
+            getService().create(realm, "ROLE", base.getId(), "CREATE_ROLE",
+                    List.of(Map.of(
+                            "ID", base.getId(),
+                            "NAME", name,
+                            "REALM_ID", realm.getId(),
+                            "CLIENT_ID", client.getId(),
+                            "CLIENT_REALM_CONSTRAINT", realm.getId(),
+                            "CLIENT_ROLE", true
+                    )),
+                    null);
         }
-        IgaChangeRequestService service = getService();
-        service.create(realm, "ROLE", id, "CREATE_ROLE",
-                List.of(Map.of(
-                        "ID", id,
-                        "NAME", name,
-                        "REALM_ID", realm.getId(),
-                        "CLIENT_ID", client.getId(),
-                        "CLIENT_REALM_CONSTRAINT", realm.getId(),
-                        "CLIENT_ROLE", true
-                )),
-                null);
-        RoleEntity stub = new RoleEntity();
-        stub.setId(id);
-        stub.setName(name);
-        stub.setRealmId(realm.getId());
-        stub.setClientId(client.getId());
-        stub.setClientRole(true);
-        return new IgaRoleAdapter(igaSession, realm, em, stub);
+        if (entity == null) return base;
+        return new IgaRoleAdapter(igaSession, realm, em, entity);
     }
 
     @Override
@@ -174,23 +150,20 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public ClientModel addClient(RealmModel realm, String id, String clientId) {
-        if (!isIgaActive(realm)) {
-            ClientModel base = super.addClient(realm, id, clientId);
-            if (base == null) return null;
-            ClientEntity entity = em.find(ClientEntity.class, base.getId());
-            if (entity == null) return base;
-            return new IgaClientAdapter(realm, em, igaSession, entity);
+        ClientModel base = super.addClient(realm, id, clientId);
+        if (base == null) return null;
+        ClientEntity entity = em.find(ClientEntity.class, base.getId());
+        if (isIgaActive(realm) && entity != null) {
+            getService().create(realm, "CLIENT", base.getId(), "CREATE_CLIENT",
+                    List.of(Map.of(
+                            "ID", base.getId(),
+                            "CLIENT_ID", clientId,
+                            "REALM_ID", realm.getId()
+                    )),
+                    null);
         }
-        IgaChangeRequestService service = getService();
-        String resolvedId = (id != null) ? id : KeycloakModelUtils.generateId();
-        service.create(realm, "CLIENT", resolvedId, "CREATE_CLIENT",
-                List.of(Map.of("ID", resolvedId, "REALM_ID", realm.getId())),
-                null);
-        ClientEntity stub = new ClientEntity();
-        stub.setId(resolvedId);
-        stub.setClientId(clientId);
-        stub.setRealmId(realm.getId());
-        return new IgaClientAdapter(realm, em, igaSession, stub);
+        if (entity == null) return base;
+        return new IgaClientAdapter(realm, em, igaSession, entity);
     }
 
     @Override

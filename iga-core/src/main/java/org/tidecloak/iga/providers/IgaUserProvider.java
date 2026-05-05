@@ -31,38 +31,24 @@ public class IgaUserProvider extends JpaUserProvider {
 
     @Override
     public UserModel addUser(RealmModel realm, String username) {
+        UserModel base = super.addUser(realm, username);
+        if (base == null) return null;
         IgaChangeRequestService service = getService();
-        if (!service.isIgaEnabled(realm)) {
-            return super.addUser(realm, username);
-        }
-        // Check if replay is active
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
-        if ("true".equals(replay)) {
-            return super.addUser(realm, username);
+        if (service.isIgaEnabled(realm) && !"true".equals(replay)) {
+            service.create(realm, "USER", base.getId(), "CREATE_USER",
+                    List.of(Map.of(
+                            "ID", base.getId(),
+                            "USERNAME", username.toLowerCase(),
+                            "REALM_ID", realm.getId()
+                    )),
+                    getCurrentUserId());
         }
-
-        String generatedId = KeycloakModelUtils.generateId();
-        String requestedBy = getCurrentUserId();
-        service.create(realm, "USER", generatedId, "CREATE_USER",
-                List.of(Map.of(
-                        "ID", generatedId,
-                        "USERNAME", username.toLowerCase(),
-                        "REALM_ID", realm.getId(),
-                        "CREATED_TIMESTAMP", System.currentTimeMillis(),
-                        "EMAIL_VERIFIED", false,
-                        "ENABLED", true
-                )),
-                requestedBy);
-
-        // Return a stub user backed by a transient UserEntity
-        UserEntity stub = new UserEntity();
-        stub.setId(generatedId);
-        stub.setUsername(username.toLowerCase());
-        stub.setRealmId(realm.getId());
-        stub.setCreatedTimestamp(System.currentTimeMillis());
-        stub.setEmailVerified(false);
-        stub.setEnabled(true);
-        return new IgaUserAdapter(igaSession, realm, em, stub);
+        if (base instanceof org.keycloak.models.jpa.UserAdapter) {
+            UserEntity entity = ((org.keycloak.models.jpa.UserAdapter) base).getEntity();
+            return new IgaUserAdapter(igaSession, realm, em, entity);
+        }
+        return base;
     }
 
     @Override
