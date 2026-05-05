@@ -1,5 +1,6 @@
 package org.tidecloak.iga.providers;
 
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -31,19 +32,27 @@ public class IgaUserProvider extends JpaUserProvider {
 
     @Override
     public UserModel addUser(RealmModel realm, String username) {
-        UserModel base = super.addUser(realm, username);
-        if (base == null) return null;
         IgaChangeRequestService service = getService();
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         if (service.isIgaEnabled(realm) && !"true".equals(replay)) {
-            service.create(realm, "USER", base.getId(), "CREATE_USER",
-                    List.of(Map.of(
-                            "ID", base.getId(),
-                            "USERNAME", username.toLowerCase(),
-                            "REALM_ID", realm.getId()
-                    )),
-                    getCurrentUserId());
+            String userId = KeycloakModelUtils.generateId();
+            String[] crIdHolder = new String[1];
+            KeycloakModelUtils.runJobInTransaction(igaSession.getKeycloakSessionFactory(), newSession -> {
+                RealmModel newRealm = newSession.realms().getRealm(realm.getId());
+                EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
+                IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
+                crIdHolder[0] = newService.create(newRealm, "USER", userId, "CREATE_USER",
+                        List.of(Map.of(
+                                "ID", userId,
+                                "USERNAME", username.toLowerCase(),
+                                "REALM_ID", realm.getId()
+                        )),
+                        getCurrentUserId()).getId();
+            });
+            throw new org.tidecloak.iga.providers.IgaPendingApprovalException(crIdHolder[0], "USER", "CREATE_USER");
         }
+        UserModel base = super.addUser(realm, username);
+        if (base == null) return null;
         if (base instanceof org.keycloak.models.jpa.UserAdapter) {
             UserEntity entity = ((org.keycloak.models.jpa.UserAdapter) base).getEntity();
             return new IgaUserAdapter(igaSession, realm, em, entity);

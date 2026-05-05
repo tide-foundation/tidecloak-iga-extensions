@@ -46,22 +46,41 @@ public class IgaRealmProvider extends JpaRealmProvider {
         return !"true".equals(replay);
     }
 
+    /**
+     * Persist the change request in a SEPARATE Keycloak session/transaction so it survives
+     * the rollback caused by the pending-approval exception we throw afterwards.
+     * Throws the exception to interrupt the original write flow.
+     */
+    private void recordAndThrow(RealmModel realm, String entityType, String entityId,
+                                 String actionType, List<Map<String, Object>> rows) {
+        String[] crIdHolder = new String[1];
+        KeycloakModelUtils.runJobInTransaction(igaSession.getKeycloakSessionFactory(), newSession -> {
+            RealmModel newRealm = newSession.realms().getRealm(realm.getId());
+            EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
+            IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
+            crIdHolder[0] = newService.create(newRealm, entityType, entityId, actionType, rows, null).getId();
+        });
+        throw new IgaPendingApprovalException(crIdHolder[0], entityType, actionType);
+    }
+
     // -------------------------------------------------------------------------
     // GROUP
     // -------------------------------------------------------------------------
 
     @Override
     public GroupModel createGroup(RealmModel realm, String id, Type type, String name, GroupModel toParent) {
+        if (isIgaActive(realm)) {
+            String groupId = (id != null) ? id : KeycloakModelUtils.generateId();
+            String parentId = (toParent != null) ? toParent.getId() : null;
+            Map<String, Object> row = parentId != null
+                    ? Map.of("ID", groupId, "NAME", name, "REALM_ID", realm.getId(), "PARENT_GROUP", parentId)
+                    : Map.of("ID", groupId, "NAME", name, "REALM_ID", realm.getId());
+            recordAndThrow(realm, "GROUP", groupId, "CREATE_GROUP", List.of(row));
+            return null; // unreachable
+        }
         GroupModel base = super.createGroup(realm, id, type, name, toParent);
         if (base == null) return null;
         GroupEntity entity = em.find(GroupEntity.class, base.getId());
-        if (isIgaActive(realm) && entity != null) {
-            String parentId = (toParent != null) ? toParent.getId() : null;
-            Map<String, Object> row = parentId != null
-                    ? Map.of("ID", base.getId(), "NAME", name, "REALM_ID", realm.getId(), "PARENT_GROUP", parentId)
-                    : Map.of("ID", base.getId(), "NAME", name, "REALM_ID", realm.getId());
-            getService().create(realm, "GROUP", base.getId(), "CREATE_GROUP", List.of(row), null);
-        }
         if (entity == null) return base;
         return new IgaGroupAdapter(igaSession, realm, em, entity);
     }
@@ -86,19 +105,20 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public RoleModel addRealmRole(RealmModel realm, String id, String name) {
-        RoleModel base = super.addRealmRole(realm, id, name);
-        if (base == null) return null;
-        RoleEntity entity = em.find(RoleEntity.class, base.getId());
-        if (isIgaActive(realm) && entity != null) {
-            getService().create(realm, "ROLE", base.getId(), "CREATE_ROLE",
+        if (isIgaActive(realm)) {
+            String roleId = (id != null) ? id : KeycloakModelUtils.generateId();
+            recordAndThrow(realm, "ROLE", roleId, "CREATE_ROLE",
                     List.of(Map.of(
-                            "ID", base.getId(),
+                            "ID", roleId,
                             "NAME", name,
                             "REALM_ID", realm.getId(),
                             "CLIENT_ROLE", false
-                    )),
-                    null);
+                    )));
+            return null; // unreachable
         }
+        RoleModel base = super.addRealmRole(realm, id, name);
+        if (base == null) return null;
+        RoleEntity entity = em.find(RoleEntity.class, base.getId());
         if (entity == null) return base;
         return new IgaRoleAdapter(igaSession, realm, em, entity);
     }
@@ -111,21 +131,22 @@ public class IgaRealmProvider extends JpaRealmProvider {
     @Override
     public RoleModel addClientRole(ClientModel client, String id, String name) {
         RealmModel realm = client.getRealm();
-        RoleModel base = super.addClientRole(client, id, name);
-        if (base == null) return null;
-        RoleEntity entity = em.find(RoleEntity.class, base.getId());
-        if (isIgaActive(realm) && entity != null) {
-            getService().create(realm, "ROLE", base.getId(), "CREATE_ROLE",
+        if (isIgaActive(realm)) {
+            String roleId = (id != null) ? id : KeycloakModelUtils.generateId();
+            recordAndThrow(realm, "ROLE", roleId, "CREATE_ROLE",
                     List.of(Map.of(
-                            "ID", base.getId(),
+                            "ID", roleId,
                             "NAME", name,
                             "REALM_ID", realm.getId(),
                             "CLIENT_ID", client.getId(),
                             "CLIENT_REALM_CONSTRAINT", realm.getId(),
                             "CLIENT_ROLE", true
-                    )),
-                    null);
+                    )));
+            return null; // unreachable
         }
+        RoleModel base = super.addClientRole(client, id, name);
+        if (base == null) return null;
+        RoleEntity entity = em.find(RoleEntity.class, base.getId());
         if (entity == null) return base;
         return new IgaRoleAdapter(igaSession, realm, em, entity);
     }
@@ -150,18 +171,19 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public ClientModel addClient(RealmModel realm, String id, String clientId) {
+        if (isIgaActive(realm)) {
+            String resolvedId = (id != null) ? id : KeycloakModelUtils.generateId();
+            recordAndThrow(realm, "CLIENT", resolvedId, "CREATE_CLIENT",
+                    List.of(Map.of(
+                            "ID", resolvedId,
+                            "CLIENT_ID", clientId,
+                            "REALM_ID", realm.getId()
+                    )));
+            return null; // unreachable
+        }
         ClientModel base = super.addClient(realm, id, clientId);
         if (base == null) return null;
         ClientEntity entity = em.find(ClientEntity.class, base.getId());
-        if (isIgaActive(realm) && entity != null) {
-            getService().create(realm, "CLIENT", base.getId(), "CREATE_CLIENT",
-                    List.of(Map.of(
-                            "ID", base.getId(),
-                            "CLIENT_ID", clientId,
-                            "REALM_ID", realm.getId()
-                    )),
-                    null);
-        }
         if (entity == null) return base;
         return new IgaClientAdapter(realm, em, igaSession, entity);
     }
