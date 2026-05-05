@@ -22,6 +22,7 @@ import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaCommentEntity;
 import org.tidecloak.iga.entities.IgaForsetiContractEntity;
+import org.tidecloak.iga.entities.IgaLicenseHistoryEntity;
 import org.tidecloak.iga.entities.IgaLicensingDraftEntity;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
@@ -29,6 +30,7 @@ import org.tidecloak.iga.providers.IgaAuthorizerService;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.providers.IgaConflictException;
 import org.tidecloak.iga.providers.IgaForsetiContractService;
+import org.tidecloak.iga.providers.IgaLicenseHistoryService;
 import org.tidecloak.iga.providers.IgaLicensingDraftService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
@@ -82,6 +84,10 @@ public class IgaAdminResource {
 
     private IgaLicensingDraftService getLicensingDraftService() {
         return new IgaLicensingDraftService(getEm(), getService());
+    }
+
+    private IgaLicenseHistoryService getLicenseHistoryService() {
+        return new IgaLicenseHistoryService(getEm());
     }
 
     private String currentUserId() {
@@ -918,6 +924,149 @@ public class IgaAdminResource {
         }
         service.deleteById(id);
         return Response.noContent().build();
+    }
+
+    // -------------------------------------------------------------------------
+    // License History (append-only audit log) + issuance endpoint
+    // -------------------------------------------------------------------------
+
+    @GET
+    @Path("licensing/history")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<IgaLicenseHistoryRepresentation> listLicenseHistory() {
+        auth.realm().requireManageRealm();
+        return getLicenseHistoryService().listByRealm(realm.getId()).stream()
+                .map(this::toLicenseHistoryRepresentation)
+                .collect(Collectors.toList());
+    }
+
+    @GET
+    @Path("licensing/history/{id}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getLicenseHistory(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+        IgaLicenseHistoryEntity entity = getLicenseHistoryService().findById(id);
+        if (entity == null || !realm.getId().equals(entity.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        return Response.ok(toLicenseHistoryRepresentation(entity)).build();
+    }
+
+    @GET
+    @Path("licensing/history/excluding-active")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<IgaLicenseHistoryRepresentation> listLicenseHistoryExcludingActive(
+            @QueryParam("activeGvrk") String activeGvrk) {
+        auth.realm().requireManageRealm();
+
+        List<IgaLicenseHistoryEntity> all = getLicenseHistoryService().listByRealm(realm.getId());
+        if (activeGvrk == null || activeGvrk.isBlank()) {
+            return all.stream()
+                    .map(this::toLicenseHistoryRepresentation)
+                    .collect(Collectors.toList());
+        }
+        return all.stream()
+                .filter(h -> !activeGvrk.equals(h.getGvrk()))
+                .map(this::toLicenseHistoryRepresentation)
+                .collect(Collectors.toList());
+    }
+
+    @POST
+    @Path("licensing/drafts/{draftId}/issue")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response issueLicense(@PathParam("draftId") String draftId, Map<String, Object> body) {
+        auth.realm().requireManageRealm();
+
+        IgaLicensingDraftService draftService = getLicensingDraftService();
+        IgaLicensingDraftEntity draft = draftService.findById(draftId);
+        if (draft == null || !realm.getId().equals(draft.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+
+        if (body == null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Missing request body"))
+                    .build();
+        }
+
+        String providerId = (String) body.get("providerId");
+        String vrk = (String) body.get("vrk");
+        String gvrk = (String) body.get("gvrk");
+        String signature = (String) body.get("signature");
+
+        if (providerId == null || providerId.isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "providerId is required"))
+                    .build();
+        }
+        if (vrk == null || vrk.isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "vrk is required"))
+                    .build();
+        }
+        if (gvrk == null || gvrk.isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "gvrk is required"))
+                    .build();
+        }
+        if (signature == null || signature.isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "signature is required"))
+                    .build();
+        }
+
+        String gvrkCertificate = (String) body.get("gvrkCertificate");
+        String vvkId = (String) body.get("vvkId");
+        String customerId = (String) body.get("customerId");
+        String vendorId = (String) body.get("vendorId");
+        String payerPub = (String) body.get("payerPub");
+        String walletId = (String) body.get("walletId");
+        Object expiryRaw = body.get("expiry");
+        Long expiry = null;
+        if (expiryRaw instanceof Number) {
+            expiry = ((Number) expiryRaw).longValue();
+        } else if (expiryRaw instanceof String && !((String) expiryRaw).isBlank()) {
+            try { expiry = Long.parseLong((String) expiryRaw); } catch (NumberFormatException ignored) {}
+        }
+
+        IgaLicenseHistoryEntity history = getLicenseHistoryService().record(
+                realm.getId(),
+                providerId,
+                vrk,
+                gvrk,
+                gvrkCertificate,
+                vvkId,
+                customerId,
+                vendorId,
+                payerPub,
+                walletId,
+                expiry);
+
+        draftService.setSignature(draftId, signature);
+
+        return Response.ok(Map.of(
+                "historyId", history.getId(),
+                "draftId", draftId
+        )).build();
+    }
+
+    private IgaLicenseHistoryRepresentation toLicenseHistoryRepresentation(IgaLicenseHistoryEntity entity) {
+        IgaLicenseHistoryRepresentation rep = new IgaLicenseHistoryRepresentation();
+        rep.setId(entity.getId());
+        rep.setRealmId(entity.getRealmId());
+        rep.setProviderId(entity.getProviderId());
+        rep.setVrk(entity.getVrk());
+        rep.setGvrk(entity.getGvrk());
+        rep.setGvrkCertificate(entity.getGvrkCertificate());
+        rep.setVvkId(entity.getVvkId());
+        rep.setCustomerId(entity.getCustomerId());
+        rep.setVendorId(entity.getVendorId());
+        rep.setPayerPub(entity.getPayerPub());
+        rep.setWalletId(entity.getWalletId());
+        rep.setExpiry(entity.getExpiry());
+        rep.setCreatedAt(entity.getCreatedAt());
+        return rep;
     }
 
     private IgaLicensingDraftRepresentation toLicensingDraftRepresentation(IgaLicensingDraftEntity entity) {
