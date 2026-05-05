@@ -21,10 +21,12 @@ import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaCommentEntity;
+import org.tidecloak.iga.entities.IgaForsetiContractEntity;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.providers.IgaConflictException;
+import org.tidecloak.iga.providers.IgaForsetiContractService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
 
@@ -64,6 +66,10 @@ public class IgaAdminResource {
 
     private IgaRolePolicyService getRolePolicyService() {
         return new IgaRolePolicyService(getEm());
+    }
+
+    private IgaForsetiContractService getForsetiContractService() {
+        return new IgaForsetiContractService(getEm());
     }
 
     private String currentUserId() {
@@ -595,6 +601,90 @@ public class IgaAdminResource {
         }
         service.deleteById(id);
         return Response.noContent().build();
+    }
+
+    // -------------------------------------------------------------------------
+    // Forseti Contracts
+    // -------------------------------------------------------------------------
+
+    @GET
+    @Path("forseti-contracts")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<IgaForsetiContractRepresentation> listForsetiContracts() {
+        auth.realm().requireManageRealm();
+
+        return getForsetiContractService().listByRealm(realm.getId()).stream()
+                .map(this::toForsetiContractRepresentation)
+                .collect(Collectors.toList());
+    }
+
+    @GET
+    @Path("forseti-contracts/{id}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getForsetiContract(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        IgaForsetiContractEntity entity = getForsetiContractService().findById(id);
+        if (entity == null || !realm.getId().equals(entity.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        return Response.ok(toForsetiContractRepresentation(entity)).build();
+    }
+
+    @POST
+    @Path("forseti-contracts")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response upsertForsetiContract(IgaForsetiContractRepresentation rep) {
+        auth.realm().requireManageRealm();
+
+        if (rep == null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Missing request body"))
+                    .build();
+        }
+        if (rep.getContractCode() == null || rep.getContractCode().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "contractCode is required"))
+                    .build();
+        }
+        if (rep.getContractCode().length() > 1_048_576) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "contractCode exceeds maximum length of 1048576 characters"))
+                    .build();
+        }
+
+        IgaForsetiContractEntity upserted = getForsetiContractService().upsert(
+                realm.getId(),
+                rep.getContractCode(),
+                rep.getName());
+        return Response.ok(toForsetiContractRepresentation(upserted)).build();
+    }
+
+    @DELETE
+    @Path("forseti-contracts/{id}")
+    public Response deleteForsetiContract(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        IgaForsetiContractService service = getForsetiContractService();
+        IgaForsetiContractEntity existing = service.findById(id);
+        if (existing == null || !realm.getId().equals(existing.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        service.deleteById(id);
+        return Response.noContent().build();
+    }
+
+    private IgaForsetiContractRepresentation toForsetiContractRepresentation(IgaForsetiContractEntity entity) {
+        IgaForsetiContractRepresentation rep = new IgaForsetiContractRepresentation();
+        rep.setId(entity.getId());
+        rep.setRealmId(entity.getRealmId());
+        rep.setContractHash(entity.getContractHash());
+        rep.setContractCode(entity.getContractCode());
+        rep.setName(entity.getName());
+        rep.setCreatedAt(entity.getCreatedAt());
+        rep.setUpdatedAt(entity.getUpdatedAt());
+        return rep;
     }
 
     private IgaRolePolicyRepresentation toRolePolicyRepresentation(IgaRolePolicyEntity entity) {
