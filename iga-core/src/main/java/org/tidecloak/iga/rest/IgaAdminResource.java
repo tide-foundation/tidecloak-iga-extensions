@@ -18,8 +18,10 @@ import org.keycloak.models.UserModel;
 import org.keycloak.services.resources.admin.AdminEventBuilder;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
+import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaCommentEntity;
+import org.tidecloak.iga.providers.IgaAuthorizerService;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.providers.IgaConflictException;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
@@ -52,6 +54,10 @@ public class IgaAdminResource {
 
     private IgaChangeRequestService getService() {
         return new IgaChangeRequestService(getEm(), session);
+    }
+
+    private IgaAuthorizerService getAuthorizerService() {
+        return new IgaAuthorizerService(getEm());
     }
 
     private String currentUserId() {
@@ -374,6 +380,111 @@ public class IgaAdminResource {
 
         getService().deleteComment(commentId);
         return Response.noContent().build();
+    }
+
+    // -------------------------------------------------------------------------
+    // Authorizers
+    // -------------------------------------------------------------------------
+
+    @GET
+    @Path("authorizers")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<IgaAuthorizerRepresentation> listAuthorizers(@QueryParam("type") String type) {
+        auth.realm().requireManageRealm();
+
+        IgaAuthorizerService service = getAuthorizerService();
+        List<IgaAuthorizerEntity> results;
+        if (type != null && !type.isBlank()) {
+            results = service.listByRealmAndType(realm.getId(), type);
+        } else {
+            results = service.listByRealm(realm.getId());
+        }
+        return results.stream()
+                .map(this::toAuthorizerRepresentation)
+                .collect(Collectors.toList());
+    }
+
+    @GET
+    @Path("authorizers/{id}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getAuthorizer(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        IgaAuthorizerEntity entity = getAuthorizerService().findById(id);
+        if (entity == null || !realm.getId().equals(entity.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        return Response.ok(toAuthorizerRepresentation(entity)).build();
+    }
+
+    @POST
+    @Path("authorizers")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response createAuthorizer(IgaAuthorizerRepresentation rep) {
+        auth.realm().requireManageRealm();
+
+        if (rep == null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Missing request body"))
+                    .build();
+        }
+        if (rep.getProviderId() == null || rep.getProviderId().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "providerId is required"))
+                    .build();
+        }
+        if (rep.getType() == null || rep.getType().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "type is required"))
+                    .build();
+        }
+        if (rep.getAuthorizer() == null || rep.getAuthorizer().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "authorizer is required"))
+                    .build();
+        }
+        if (rep.getAuthorizerCertificate() == null || rep.getAuthorizerCertificate().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "authorizerCertificate is required"))
+                    .build();
+        }
+
+        IgaAuthorizerEntity created = getAuthorizerService().create(
+                realm.getId(),
+                rep.getProviderId(),
+                rep.getType(),
+                rep.getAuthorizer(),
+                rep.getAuthorizerCertificate());
+        return Response.status(Response.Status.CREATED)
+                .entity(toAuthorizerRepresentation(created))
+                .build();
+    }
+
+    @DELETE
+    @Path("authorizers/{id}")
+    public Response deleteAuthorizer(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        IgaAuthorizerService service = getAuthorizerService();
+        IgaAuthorizerEntity entity = service.findById(id);
+        if (entity == null || !realm.getId().equals(entity.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        service.delete(id);
+        return Response.noContent().build();
+    }
+
+    private IgaAuthorizerRepresentation toAuthorizerRepresentation(IgaAuthorizerEntity entity) {
+        IgaAuthorizerRepresentation rep = new IgaAuthorizerRepresentation();
+        rep.setId(entity.getId());
+        rep.setRealmId(entity.getRealmId());
+        rep.setProviderId(entity.getProviderId());
+        rep.setType(entity.getType());
+        rep.setAuthorizer(entity.getAuthorizer());
+        rep.setAuthorizerCertificate(entity.getAuthorizerCertificate());
+        rep.setCreatedAt(entity.getCreatedAt());
+        return rep;
     }
 
     private Response validateCommentText(String comment) {

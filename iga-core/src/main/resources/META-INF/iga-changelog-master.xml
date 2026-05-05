@@ -6,5 +6,6 @@
 
     <include file="META-INF/iga-changelog-1.0.0.xml"/>
     <include file="META-INF/iga-changelog-1.1.0.xml"/>
+    <include file="META-INF/iga-changelog-1.2.0.xml"/>
 
 </databaseChangeLog>
