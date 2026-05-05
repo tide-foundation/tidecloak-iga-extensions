@@ -3,6 +3,7 @@ package org.tidecloak.iga.jpa;
 import org.keycloak.connections.jpa.entityprovider.JpaEntityProvider;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.entities.IgaCommentEntity;
 
 import java.util.List;
 
@@ -10,7 +11,7 @@ public class IgaJpaEntityProvider implements JpaEntityProvider {
 
     @Override
     public List<Class<?>> getEntities() {
-        return List.of(IgaChangeRequestEntity.class, IgaAuthorizationEntity.class);
+        return List.of(IgaChangeRequestEntity.class, IgaAuthorizationEntity.class, IgaCommentEntity.class);
     }
 
     @Override

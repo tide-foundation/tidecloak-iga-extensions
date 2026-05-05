@@ -1,6 +1,7 @@
 package org.tidecloak.iga.rest;
 
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.PUT;
@@ -13,10 +14,12 @@ import jakarta.ws.rs.core.Response;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.UserModel;
 import org.keycloak.services.resources.admin.AdminEventBuilder;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.entities.IgaCommentEntity;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.providers.IgaConflictException;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
@@ -55,6 +58,16 @@ public class IgaAdminResource {
         try {
             if (auth != null && auth.adminAuth() != null && auth.adminAuth().getUser() != null) {
                 return auth.adminAuth().getUser().getId();
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private UserModel currentUser() {
+        try {
+            if (auth != null && auth.adminAuth() != null) {
+                return auth.adminAuth().getUser();
             }
         } catch (Exception ignored) {
         }
@@ -233,6 +246,159 @@ public class IgaAdminResource {
             if (a.getPartialSig() != null) combined.append(a.getPartialSig());
         }
         return combined.toString();
+    }
+
+    // -------------------------------------------------------------------------
+    // Comments
+    // -------------------------------------------------------------------------
+
+    @GET
+    @Path("change-requests/{id}/comments")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response listComments(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        EntityManager em = getEm();
+        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
+        if (cr == null || !realm.getId().equals(cr.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+
+        List<IgaCommentEntity> comments = getService().listComments(id);
+        List<IgaCommentRepresentation> reps = comments.stream()
+                .map(this::toCommentRepresentation)
+                .collect(Collectors.toList());
+        return Response.ok(reps).build();
+    }
+
+    @POST
+    @Path("change-requests/{id}/comments")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response addComment(@PathParam("id") String id, Map<String, Object> body) {
+        auth.realm().requireManageRealm();
+
+        EntityManager em = getEm();
+        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
+        if (cr == null || !realm.getId().equals(cr.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+
+        String comment = body != null ? (String) body.get("comment") : null;
+        Response validation = validateCommentText(comment);
+        if (validation != null) return validation;
+
+        UserModel user = currentUser();
+        if (user == null) {
+            return Response.status(Response.Status.UNAUTHORIZED)
+                    .entity(Map.of("error", "No authenticated admin user"))
+                    .build();
+        }
+
+        IgaCommentEntity created = getService().addComment(id, user.getId(), user.getUsername(), comment);
+        return Response.status(Response.Status.CREATED)
+                .entity(toCommentRepresentation(created))
+                .build();
+    }
+
+    @PUT
+    @Path("change-requests/{id}/comments/{commentId}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response updateComment(@PathParam("id") String id,
+                                   @PathParam("commentId") String commentId,
+                                   Map<String, Object> body) {
+        auth.realm().requireManageRealm();
+
+        EntityManager em = getEm();
+        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
+        if (cr == null || !realm.getId().equals(cr.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+
+        IgaCommentEntity existing = em.find(IgaCommentEntity.class, commentId);
+        if (existing == null || existing.getChangeRequest() == null
+                || !id.equals(existing.getChangeRequest().getId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+
+        String currentUserId = currentUserId();
+        if (currentUserId == null || !currentUserId.equals(existing.getUserId())) {
+            return Response.status(Response.Status.FORBIDDEN)
+                    .entity(Map.of("error", "Only the comment author may edit this comment"))
+                    .build();
+        }
+
+        String newText = body != null ? (String) body.get("comment") : null;
+        Response validation = validateCommentText(newText);
+        if (validation != null) return validation;
+
+        IgaCommentEntity updated = getService().updateComment(commentId, newText);
+        return Response.ok(toCommentRepresentation(updated)).build();
+    }
+
+    @DELETE
+    @Path("change-requests/{id}/comments/{commentId}")
+    public Response deleteComment(@PathParam("id") String id,
+                                   @PathParam("commentId") String commentId) {
+        // Both authors and realm admins may delete; we don't pre-call requireManageRealm()
+        // here because authors who lack manage-realm should still be able to delete their own.
+        EntityManager em = getEm();
+        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
+        if (cr == null || !realm.getId().equals(cr.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+
+        IgaCommentEntity existing = em.find(IgaCommentEntity.class, commentId);
+        if (existing == null || existing.getChangeRequest() == null
+                || !id.equals(existing.getChangeRequest().getId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+
+        String currentUserId = currentUserId();
+        boolean isAuthor = currentUserId != null && currentUserId.equals(existing.getUserId());
+        boolean isAdmin = false;
+        if (!isAuthor) {
+            try {
+                auth.realm().requireManageRealm();
+                isAdmin = true;
+            } catch (Exception e) {
+                // not a realm admin
+            }
+        }
+        if (!isAuthor && !isAdmin) {
+            return Response.status(Response.Status.FORBIDDEN)
+                    .entity(Map.of("error", "Only the comment author or a realm admin may delete this comment"))
+                    .build();
+        }
+
+        getService().deleteComment(commentId);
+        return Response.noContent().build();
+    }
+
+    private Response validateCommentText(String comment) {
+        if (comment == null || comment.isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Comment text must be non-empty"))
+                    .build();
+        }
+        if (comment.length() > 2000) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Comment text exceeds maximum length of 2000 characters"))
+                    .build();
+        }
+        return null;
+    }
+
+    private IgaCommentRepresentation toCommentRepresentation(IgaCommentEntity entity) {
+        IgaCommentRepresentation rep = new IgaCommentRepresentation();
+        rep.setId(entity.getId());
+        rep.setUserId(entity.getUserId());
+        rep.setUsername(entity.getUsername());
+        rep.setComment(entity.getComment());
+        rep.setCreatedAt(entity.getCreatedAt());
+        rep.setUpdatedAt(entity.getUpdatedAt());
+        return rep;
     }
 
     private IgaChangeRequestRepresentation toRepresentation(IgaChangeRequestEntity cr,

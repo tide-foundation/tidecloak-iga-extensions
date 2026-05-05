@@ -7,6 +7,7 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.entities.IgaCommentEntity;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
@@ -147,5 +148,65 @@ public class IgaChangeRequestService {
         } catch (JsonProcessingException e) {
             throw new RuntimeException("Failed to serialize rows to JSON", e);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Comments
+    // -------------------------------------------------------------------------
+
+    /**
+     * Add a free-form admin comment to a change request.
+     */
+    public IgaCommentEntity addComment(String changeRequestId, String userId, String username, String comment) {
+        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, changeRequestId);
+        if (cr == null) {
+            throw new IllegalArgumentException("Change request not found: " + changeRequestId);
+        }
+        IgaCommentEntity entity = new IgaCommentEntity();
+        entity.setId(UUID.randomUUID().toString());
+        entity.setChangeRequest(cr);
+        entity.setUserId(userId);
+        entity.setUsername(username);
+        entity.setComment(comment);
+        entity.setCreatedAt(System.currentTimeMillis());
+        em.persist(entity);
+        em.flush();
+        return entity;
+    }
+
+    /**
+     * Update the text of an existing comment. Sets updatedAt.
+     */
+    public IgaCommentEntity updateComment(String commentId, String newText) {
+        IgaCommentEntity entity = em.find(IgaCommentEntity.class, commentId);
+        if (entity == null) {
+            throw new IllegalArgumentException("Comment not found: " + commentId);
+        }
+        entity.setComment(newText);
+        entity.setUpdatedAt(System.currentTimeMillis());
+        em.flush();
+        return entity;
+    }
+
+    /**
+     * Delete a comment by id.
+     */
+    public void deleteComment(String commentId) {
+        IgaCommentEntity entity = em.find(IgaCommentEntity.class, commentId);
+        if (entity == null) {
+            throw new IllegalArgumentException("Comment not found: " + commentId);
+        }
+        em.remove(entity);
+        em.flush();
+    }
+
+    /**
+     * List comments for a change request, ordered by createdAt ASC.
+     */
+    public List<IgaCommentEntity> listComments(String changeRequestId) {
+        TypedQuery<IgaCommentEntity> query = em.createNamedQuery(
+                "IgaComment.findByChangeRequest", IgaCommentEntity.class);
+        query.setParameter("crId", changeRequestId);
+        return query.getResultList();
     }
 }
