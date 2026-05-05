@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!-- 1: Create IGA_LICENSING_DRAFT table -->
+    <changeSet id="iga-1.6.0-1" author="tidecloak-iga">
+        <createTable tableName="IGA_LICENSING_DRAFT">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(36)"/>
+            <column name="REALM_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ACTION_TYPE" type="VARCHAR(64)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="SIGNATURE" type="clob"/>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="UPDATED_AT" type="BIGINT"/>
+        </createTable>
+    </changeSet>
+
+    <!-- 2: Foreign key from IGA_LICENSING_DRAFT.CHANGE_REQUEST_ID to IGA_CHANGE_REQUEST.ID -->
+    <changeSet id="iga-1.6.0-2" author="tidecloak-iga">
+        <addForeignKeyConstraint constraintName="FK_IGA_LICENSING_DRAFT_CR"
+                                 baseTableName="IGA_LICENSING_DRAFT"
+                                 baseColumnNames="CHANGE_REQUEST_ID"
+                                 referencedTableName="IGA_CHANGE_REQUEST"
+                                 referencedColumnNames="ID"
+                                 onDelete="SET NULL"/>
+    </changeSet>
+
+    <!-- 3: Index on REALM_ID for the common per-realm lookup -->
+    <changeSet id="iga-1.6.0-3" author="tidecloak-iga">
+        <createIndex tableName="IGA_LICENSING_DRAFT" indexName="IDX_IGA_LICENSING_DRAFT_REALM">
+            <column name="REALM_ID"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>

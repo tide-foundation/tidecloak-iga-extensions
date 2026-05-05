@@ -22,12 +22,14 @@ import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaCommentEntity;
 import org.tidecloak.iga.entities.IgaForsetiContractEntity;
+import org.tidecloak.iga.entities.IgaLicensingDraftEntity;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.providers.IgaConflictException;
 import org.tidecloak.iga.providers.IgaForsetiContractService;
+import org.tidecloak.iga.providers.IgaLicensingDraftService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
@@ -76,6 +78,10 @@ public class IgaAdminResource {
 
     private IgaServerCertDraftService getServerCertDraftService() {
         return new IgaServerCertDraftService(getEm(), getService());
+    }
+
+    private IgaLicensingDraftService getLicensingDraftService() {
+        return new IgaLicensingDraftService(getEm(), getService());
     }
 
     private String currentUserId() {
@@ -844,6 +850,86 @@ public class IgaAdminResource {
         }
         service.deleteById(id);
         return Response.noContent().build();
+    }
+
+    // -------------------------------------------------------------------------
+    // Licensing Drafts (realm license install/rotate flow)
+    // -------------------------------------------------------------------------
+
+    @POST
+    @Path("licensing/trigger")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response triggerLicensing(Map<String, Object> body) {
+        auth.realm().requireManageRealm();
+
+        String actionType = body != null ? (String) body.get("actionType") : null;
+        if (actionType == null || actionType.isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "actionType is required"))
+                    .build();
+        }
+        if (!"INSTALL_LICENSE".equals(actionType) && !"ROTATE_LICENSE".equals(actionType)) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "actionType must be INSTALL_LICENSE or ROTATE_LICENSE"))
+                    .build();
+        }
+
+        IgaLicensingDraftEntity created = getLicensingDraftService().createRequest(
+                realm,
+                currentUserId(),
+                actionType);
+        return Response.status(Response.Status.CREATED)
+                .entity(toLicensingDraftRepresentation(created))
+                .build();
+    }
+
+    @GET
+    @Path("licensing/drafts")
+    @Produces(MediaType.APPLICATION_JSON)
+    public List<IgaLicensingDraftRepresentation> listLicensingDrafts() {
+        auth.realm().requireManageRealm();
+        return getLicensingDraftService().listByRealm(realm.getId()).stream()
+                .map(this::toLicensingDraftRepresentation)
+                .collect(Collectors.toList());
+    }
+
+    @GET
+    @Path("licensing/drafts/{id}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getLicensingDraft(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+        IgaLicensingDraftEntity entity = getLicensingDraftService().findById(id);
+        if (entity == null || !realm.getId().equals(entity.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        return Response.ok(toLicensingDraftRepresentation(entity)).build();
+    }
+
+    @DELETE
+    @Path("licensing/drafts/{id}")
+    public Response deleteLicensingDraft(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        IgaLicensingDraftService service = getLicensingDraftService();
+        IgaLicensingDraftEntity entity = service.findById(id);
+        if (entity == null || !realm.getId().equals(entity.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        service.deleteById(id);
+        return Response.noContent().build();
+    }
+
+    private IgaLicensingDraftRepresentation toLicensingDraftRepresentation(IgaLicensingDraftEntity entity) {
+        IgaLicensingDraftRepresentation rep = new IgaLicensingDraftRepresentation();
+        rep.setId(entity.getId());
+        rep.setChangeRequestId(entity.getChangeRequest() != null ? entity.getChangeRequest().getId() : null);
+        rep.setRealmId(entity.getRealmId());
+        rep.setActionType(entity.getActionType());
+        rep.setSignature(entity.getSignature());
+        rep.setCreatedAt(entity.getCreatedAt());
+        rep.setUpdatedAt(entity.getUpdatedAt());
+        return rep;
     }
 
     private IgaServerCertDraftRepresentation toServerCertDraftRepresentation(IgaServerCertDraftEntity entity) {

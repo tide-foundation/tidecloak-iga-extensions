@@ -80,6 +80,7 @@ public class IgaReplayDispatcher {
             case "SCOPE_REMOVE_ROLE" -> replayRevoke(session, realm, rows, em,
                     r -> scopeRemoveRoleDirect(session, realm, r));
             case "REQUEST_SERVER_CERT" -> replayRequestServerCert(cr);
+            case "INSTALL_LICENSE", "ROTATE_LICENSE" -> replayLicenseAction(cr);
             default -> throw new IllegalArgumentException("Unknown IGA action: " + cr.getActionType());
         }
 
@@ -194,6 +195,23 @@ public class IgaReplayDispatcher {
     private static void replayRequestServerCert(IgaChangeRequestEntity cr) {
         log.infof("REQUEST_SERVER_CERT approved for change request %s — awaiting cert issuance via /iga/server-certs/{draftId}/issue",
                 cr.getId());
+    }
+
+    // -------------------------------------------------------------------------
+    // License install/rotate — sidecar approval (no model write here)
+    // -------------------------------------------------------------------------
+
+    /**
+     * INSTALL_LICENSE / ROTATE_LICENSE approval grants the realm permission to
+     * install or rotate a license. The sidecar IGA_LICENSING_DRAFT is NOT
+     * touched here — issuance is decoupled and happens via
+     * POST /iga/licensing/drafts/{draftId}/issue once the licensing
+     * infrastructure produces the signed license. The surrounding doReplay()
+     * will mark the parent change request APPROVED.
+     */
+    private static void replayLicenseAction(IgaChangeRequestEntity cr) {
+        log.infof("License action %s approved for change request %s — awaiting issuance via /iga/licensing/drafts/{draftId}/issue",
+                cr.getActionType(), cr.getId());
     }
 
     // -------------------------------------------------------------------------
