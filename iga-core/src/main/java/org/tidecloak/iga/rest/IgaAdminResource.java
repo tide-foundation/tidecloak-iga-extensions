@@ -1,5 +1,6 @@
 package org.tidecloak.iga.rest;
 
+import jakarta.enterprise.inject.Vetoed;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
@@ -47,6 +48,7 @@ import java.util.stream.Collectors;
  * JAX-RS resource at path "iga" providing change request approval workflow endpoints.
  */
 @Path("iga")
+@Vetoed
 public class IgaAdminResource {
 
     private final KeycloakSession session;
