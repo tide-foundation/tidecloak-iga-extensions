@@ -37,6 +37,8 @@ import org.tidecloak.iga.providers.IgaLicensingDraftService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
+import org.tidecloak.iga.signers.IgaSigner;
+import org.tidecloak.iga.signers.IgaSigners;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
@@ -203,21 +205,29 @@ public class IgaAdminResource {
         }
 
         String partialSig = body != null ? (String) body.get("partialSig") : null;
-        String authorizedBy = currentUserId();
 
-        IgaChangeRequestService service = getService();
-        service.authorize(id, authorizedBy, partialSig);
+        UserModel admin = currentUser();
+        if (admin == null) {
+            return Response.status(Response.Status.UNAUTHORIZED)
+                    .entity(Map.of("error", "No authenticated admin user"))
+                    .build();
+        }
 
-        long count = service.countAuthorizations(id);
-        int threshold = getThreshold();
+        IgaSigner signer = IgaSigners.resolveSigner(session, realm);
+        signer.record(session, cr, admin, partialSig);
 
-        if (count >= threshold) {
-            // Combine partial sigs (concatenation — pluggable later)
-            String finalSignature = combineSignatures(id, em);
+        List<IgaAuthorizationEntity> all = em.createNamedQuery(
+                        "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
+                .setParameter("changeRequestId", cr.getId())
+                .getResultList();
+
+        if (all.size() >= signer.getThreshold(realm)) {
+            String finalSignature = signer.combineFinal(session, cr, all);
             IgaReplayDispatcher.replay(session, cr, finalSignature);
         }
 
         // Re-fetch to return updated state
+        IgaChangeRequestService service = getService();
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
         return Response.ok(toRepresentation(updated, service)).build();
     }
@@ -300,26 +310,6 @@ public class IgaAdminResource {
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
-
-    private int getThreshold() {
-        String val = realm.getAttribute("iga.threshold");
-        if (val != null) {
-            try { return Integer.parseInt(val); } catch (NumberFormatException ignored) {}
-        }
-        return 1;
-    }
-
-    private String combineSignatures(String changeRequestId, EntityManager em) {
-        TypedQuery<IgaAuthorizationEntity> q = em.createNamedQuery(
-                "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class);
-        q.setParameter("changeRequestId", changeRequestId);
-        List<IgaAuthorizationEntity> auths = q.getResultList();
-        StringBuilder combined = new StringBuilder();
-        for (IgaAuthorizationEntity a : auths) {
-            if (a.getPartialSig() != null) combined.append(a.getPartialSig());
-        }
-        return combined.toString();
-    }
 
     // -------------------------------------------------------------------------
     // Comments
