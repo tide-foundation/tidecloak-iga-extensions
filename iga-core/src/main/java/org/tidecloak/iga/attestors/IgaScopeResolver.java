@@ -1,4 +1,4 @@
-package org.tidecloak.iga.signers;
+package org.tidecloak.iga.attestors;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;

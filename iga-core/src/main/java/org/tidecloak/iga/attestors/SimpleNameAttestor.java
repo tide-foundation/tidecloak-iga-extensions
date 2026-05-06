@@ -1,4 +1,4 @@
-package org.tidecloak.iga.signers;
+package org.tidecloak.iga.attestors;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,8 +17,8 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Default {@link IgaSigner} that performs no cryptography. It simply records
- * the authorizing admin's username as the "signature" and combines all the
+ * Default {@link IgaAttestor} that performs no cryptography. It simply records
+ * the authorizing admin's username as the "attestation" and combines all the
  * recorded usernames + timestamps into a small JSON array.
  *
  * <p>Scope-based authorization is enforced via {@link IgaScopeResolver} before
@@ -26,13 +26,13 @@ import java.util.UUID;
  * the change request carries an {@code iga.approverRole} attribute, the admin
  * must hold the named realm role (or roles, when {@code iga.scopeMode=all}).
  */
-public class SimpleNameSigner implements IgaSigner {
+public class SimpleNameAttestor implements IgaAttestor {
 
     public static final String ID = "simple";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    public SimpleNameSigner(KeycloakSession session) {
+    public SimpleNameAttestor(KeycloakSession session) {
         // session is supplied via the per-call parameter; constructor arg is kept
         // to match the factory's create(session) wiring.
     }
@@ -46,7 +46,7 @@ public class SimpleNameSigner implements IgaSigner {
     public IgaAuthorizationEntity record(KeycloakSession session,
                                          IgaChangeRequestEntity cr,
                                          UserModel admin,
-                                         String signaturePayload) {
+                                         String attestationPayload) {
         RealmModel realm = session.realms().getRealm(cr.getRealmId());
         IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
         IgaScopeResolver.requireApprover(realm, admin, scope);
@@ -56,7 +56,7 @@ public class SimpleNameSigner implements IgaSigner {
         auth.setId(UUID.randomUUID().toString());
         auth.setChangeRequest(cr);
         auth.setAuthorizedBy(admin.getId());
-        // The "name" is the signature for the simple signer; ignore signaturePayload.
+        // The "name" is the attestation for the simple attestor; ignore attestationPayload.
         auth.setPartialSig(admin.getUsername());
         auth.setCreatedAt(System.currentTimeMillis());
         em.persist(auth);
@@ -80,7 +80,7 @@ public class SimpleNameSigner implements IgaSigner {
         try {
             return MAPPER.writeValueAsString(list);
         } catch (JsonProcessingException e) {
-            throw new RuntimeException("Failed to serialize SimpleNameSigner final signature", e);
+            throw new RuntimeException("Failed to serialize SimpleNameAttestor final attestation", e);
         }
     }
 

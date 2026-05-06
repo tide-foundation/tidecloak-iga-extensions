@@ -1,4 +1,4 @@
-package org.tidecloak.iga.signers;
+package org.tidecloak.iga.attestors;
 
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
@@ -10,13 +10,13 @@ import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import java.util.List;
 
 /**
- * SPI for pluggable IGA approval/signing mechanisms.
+ * SPI for pluggable IGA approval/attestation mechanisms.
  *
  * Implementations record one admin's authorization on a change request and,
- * once the threshold is met, combine all authorizations into a final signature
- * string that is written to the SIGNATURE column on commit.
+ * once the threshold is met, combine all authorizations into a final attestation
+ * string that is written to the ATTESTATION column on commit.
  */
-public interface IgaSigner extends Provider {
+public interface IgaAttestor extends Provider {
 
     /** Identifier matching the corresponding factory id. */
     String getId();
@@ -29,19 +29,19 @@ public interface IgaSigner extends Provider {
      * {@link jakarta.ws.rs.ForbiddenException} when the admin lacks the
      * required approver role(s).
      *
-     * @param session          Keycloak session
-     * @param cr               the change request being authorized
-     * @param admin            the authorizing admin user
-     * @param signaturePayload free-form input from caller (partial sig, "" or null for simple)
+     * @param session            Keycloak session
+     * @param cr                 the change request being authorized
+     * @param admin              the authorizing admin user
+     * @param attestationPayload free-form input from caller (partial sig, "" or null for simple)
      * @return the persisted authorization entity
      */
     IgaAuthorizationEntity record(KeycloakSession session,
                                   IgaChangeRequestEntity cr,
                                   UserModel admin,
-                                  String signaturePayload);
+                                  String attestationPayload);
 
     /**
-     * Once threshold met, produce the final string to write to the SIGNATURE column.
+     * Once threshold met, produce the final string to write to the ATTESTATION column.
      */
     String combineFinal(KeycloakSession session,
                         IgaChangeRequestEntity cr,

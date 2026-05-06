@@ -38,8 +38,8 @@ import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
 import org.tidecloak.iga.baseline.IgaBaselineService;
-import org.tidecloak.iga.signers.IgaSigner;
-import org.tidecloak.iga.signers.IgaSigners;
+import org.tidecloak.iga.attestors.IgaAttestor;
+import org.tidecloak.iga.attestors.IgaAttestors;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.util.LinkedHashMap;
 
@@ -216,17 +216,17 @@ public class IgaAdminResource {
                     .build();
         }
 
-        IgaSigner signer = IgaSigners.resolveSigner(session, realm);
-        signer.record(session, cr, admin, partialSig);
+        IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
+        attestor.record(session, cr, admin, partialSig);
 
         List<IgaAuthorizationEntity> all = em.createNamedQuery(
                         "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
                 .setParameter("changeRequestId", cr.getId())
                 .getResultList();
 
-        if (all.size() >= signer.getThreshold(session, realm, cr)) {
-            String finalSignature = signer.combineFinal(session, cr, all);
-            IgaReplayDispatcher.replay(session, cr, finalSignature);
+        if (all.size() >= attestor.getThreshold(session, realm, cr)) {
+            String finalAttestation = attestor.combineFinal(session, cr, all);
+            IgaReplayDispatcher.replay(session, cr, finalAttestation);
         }
 
         // Re-fetch to return updated state

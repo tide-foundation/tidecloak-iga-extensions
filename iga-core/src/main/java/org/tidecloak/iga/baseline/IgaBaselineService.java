@@ -21,9 +21,9 @@ import java.util.UUID;
  * every unsigned row in every IGA-tracked table for a realm, so that one
  * approval ceremony retroactively signs all pre-IGA data.
  *
- * Read queries use native SQL because the SIGNATURE column was added by the
+ * Read queries use native SQL because the ATTESTATION column was added by the
  * IGA Liquibase changelog at the DB layer; the Keycloak JPA entity classes
- * do not (yet) declare a `signature` field. Native SQL keeps us decoupled
+ * do not (yet) declare an `attestation` field. Native SQL keeps us decoupled
  * from any future JPA mapping.
  */
 public class IgaBaselineService {
@@ -148,22 +148,22 @@ public class IgaBaselineService {
 
         out.put(T_USER, queryRows(
                 "SELECT ID AS id, USERNAME AS \"_username\", EMAIL AS \"_email\" " +
-                        "FROM USER_ENTITY WHERE REALM_ID = ? AND SIGNATURE IS NULL",
+                        "FROM USER_ENTITY WHERE REALM_ID = ? AND ATTESTATION IS NULL",
                 List.of(realmId), List.of("id", "_username", "_email")));
 
         out.put(T_ROLE, queryRows(
                 "SELECT ID AS id, NAME AS \"_name\" " +
-                        "FROM KEYCLOAK_ROLE WHERE REALM_ID = ? AND SIGNATURE IS NULL",
+                        "FROM KEYCLOAK_ROLE WHERE REALM_ID = ? AND ATTESTATION IS NULL",
                 List.of(realmId), List.of("id", "_name")));
 
         out.put(T_GROUP, queryRows(
                 "SELECT ID AS id, NAME AS \"_name\" " +
-                        "FROM KEYCLOAK_GROUP WHERE REALM_ID = ? AND SIGNATURE IS NULL",
+                        "FROM KEYCLOAK_GROUP WHERE REALM_ID = ? AND ATTESTATION IS NULL",
                 List.of(realmId), List.of("id", "_name")));
 
         out.put(T_CLIENT, queryRows(
                 "SELECT ID AS id, CLIENT_ID AS \"_clientId\" " +
-                        "FROM CLIENT WHERE REALM_ID = ? AND SIGNATURE IS NULL",
+                        "FROM CLIENT WHERE REALM_ID = ? AND ATTESTATION IS NULL",
                 List.of(realmId), List.of("id", "_clientId")));
 
         // PROTOCOL_MAPPER: scoped to clients in the realm. Each row also carries
@@ -172,7 +172,7 @@ public class IgaBaselineService {
                 "SELECT pm.ID AS id, pm.NAME AS \"_name\", c.ID AS \"_clientId\" " +
                         "FROM PROTOCOL_MAPPER pm " +
                         "JOIN CLIENT c ON pm.CLIENT_ID = c.ID " +
-                        "WHERE c.REALM_ID = ? AND pm.SIGNATURE IS NULL",
+                        "WHERE c.REALM_ID = ? AND pm.ATTESTATION IS NULL",
                 List.of(realmId), List.of("id", "_name", "_clientId")));
 
         // -------- Relationship tables (no direct realm column) --------
@@ -185,7 +185,7 @@ public class IgaBaselineService {
                         "FROM USER_ROLE_MAPPING urm " +
                         "JOIN USER_ENTITY u ON urm.USER_ID = u.ID " +
                         "LEFT JOIN KEYCLOAK_ROLE r ON urm.ROLE_ID = r.ID " +
-                        "WHERE u.REALM_ID = ? AND urm.SIGNATURE IS NULL",
+                        "WHERE u.REALM_ID = ? AND urm.ATTESTATION IS NULL",
                 List.of(realmId), List.of("USER_ID", "ROLE_ID", "_user", "_role")));
 
         // USER_GROUP_MEMBERSHIP — column names map to USER_ID, GROUP_ID; the
@@ -197,7 +197,7 @@ public class IgaBaselineService {
                         "FROM USER_GROUP_MEMBERSHIP ugm " +
                         "JOIN USER_ENTITY u ON ugm.USER_ID = u.ID " +
                         "LEFT JOIN KEYCLOAK_GROUP g ON ugm.GROUP_ID = g.ID " +
-                        "WHERE u.REALM_ID = ? AND ugm.SIGNATURE IS NULL",
+                        "WHERE u.REALM_ID = ? AND ugm.ATTESTATION IS NULL",
                 List.of(realmId), List.of("USER", "GROUP", "_user", "_group")));
 
         // GROUP_ROLE_MAPPING — group has REALM_ID directly
@@ -207,7 +207,7 @@ public class IgaBaselineService {
                         "FROM GROUP_ROLE_MAPPING grm " +
                         "JOIN KEYCLOAK_GROUP g ON grm.GROUP_ID = g.ID " +
                         "LEFT JOIN KEYCLOAK_ROLE r ON grm.ROLE_ID = r.ID " +
-                        "WHERE g.REALM_ID = ? AND grm.SIGNATURE IS NULL",
+                        "WHERE g.REALM_ID = ? AND grm.ATTESTATION IS NULL",
                 List.of(realmId), List.of("GROUP", "ROLE", "_group", "_role")));
 
         // COMPOSITE_ROLE — join via parent role for realm scope
@@ -217,7 +217,7 @@ public class IgaBaselineService {
                         "FROM COMPOSITE_ROLE cr " +
                         "JOIN KEYCLOAK_ROLE rp ON cr.COMPOSITE = rp.ID " +
                         "LEFT JOIN KEYCLOAK_ROLE rc ON cr.CHILD_ROLE = rc.ID " +
-                        "WHERE rp.REALM_ID = ? AND cr.SIGNATURE IS NULL",
+                        "WHERE rp.REALM_ID = ? AND cr.ATTESTATION IS NULL",
                 List.of(realmId), List.of("COMPOSITE", "CHILD_ROLE", "_parent", "_child")));
 
         // CLIENT_SCOPE_CLIENT — join via CLIENT for realm scope
@@ -227,7 +227,7 @@ public class IgaBaselineService {
                         "FROM CLIENT_SCOPE_CLIENT csc " +
                         "JOIN CLIENT c ON csc.CLIENT_ID = c.ID " +
                         "LEFT JOIN CLIENT_SCOPE cs ON csc.SCOPE_ID = cs.ID " +
-                        "WHERE c.REALM_ID = ? AND csc.SIGNATURE IS NULL",
+                        "WHERE c.REALM_ID = ? AND csc.ATTESTATION IS NULL",
                 List.of(realmId), List.of("CLIENT_ID", "SCOPE_ID", "_client", "_scope")));
 
         // CLIENT_SCOPE_ROLE_MAPPING — CLIENT_SCOPE has REALM_ID
@@ -237,7 +237,7 @@ public class IgaBaselineService {
                         "FROM CLIENT_SCOPE_ROLE_MAPPING csrm " +
                         "JOIN CLIENT_SCOPE cs ON csrm.SCOPE_ID = cs.ID " +
                         "LEFT JOIN KEYCLOAK_ROLE r ON csrm.ROLE_ID = r.ID " +
-                        "WHERE cs.REALM_ID = ? AND csrm.SIGNATURE IS NULL",
+                        "WHERE cs.REALM_ID = ? AND csrm.ATTESTATION IS NULL",
                 List.of(realmId), List.of("SCOPE_ID", "ROLE_ID", "_scope", "_role")));
 
         // -------- Attribute tables (intercepted by IGA 1.8.0+) --------
@@ -248,7 +248,7 @@ public class IgaBaselineService {
                 "SELECT ua.USER_ID AS \"user_id\", ua.NAME AS \"name\", ua.VALUE AS \"value\" " +
                         "FROM USER_ATTRIBUTE ua " +
                         "JOIN USER_ENTITY u ON ua.USER_ID = u.ID " +
-                        "WHERE u.REALM_ID = ? AND ua.SIGNATURE IS NULL",
+                        "WHERE u.REALM_ID = ? AND ua.ATTESTATION IS NULL",
                 List.of(realmId), List.of("user_id", "name", "value")));
 
         // CLIENT_ATTRIBUTES — join to CLIENT for realm scope
@@ -256,7 +256,7 @@ public class IgaBaselineService {
                 "SELECT ca.CLIENT_ID AS \"client_id\", ca.NAME AS \"name\", ca.VALUE AS \"value\" " +
                         "FROM CLIENT_ATTRIBUTES ca " +
                         "JOIN CLIENT c ON ca.CLIENT_ID = c.ID " +
-                        "WHERE c.REALM_ID = ? AND ca.SIGNATURE IS NULL",
+                        "WHERE c.REALM_ID = ? AND ca.ATTESTATION IS NULL",
                 List.of(realmId), List.of("client_id", "name", "value")));
 
         // CLIENT_SCOPE_ATTRIBUTES — CLIENT_SCOPE has REALM_ID
@@ -264,7 +264,7 @@ public class IgaBaselineService {
                 "SELECT csa.SCOPE_ID AS \"scope_id\", csa.NAME AS \"name\", csa.VALUE AS \"value\" " +
                         "FROM CLIENT_SCOPE_ATTRIBUTES csa " +
                         "JOIN CLIENT_SCOPE cs ON csa.SCOPE_ID = cs.ID " +
-                        "WHERE cs.REALM_ID = ? AND csa.SIGNATURE IS NULL",
+                        "WHERE cs.REALM_ID = ? AND csa.ATTESTATION IS NULL",
                 List.of(realmId), List.of("scope_id", "name", "value")));
 
         // GROUP_ATTRIBUTE — KEYCLOAK_GROUP has REALM_ID
@@ -272,7 +272,7 @@ public class IgaBaselineService {
                 "SELECT ga.GROUP_ID AS \"group_id\", ga.NAME AS \"name\", ga.VALUE AS \"value\" " +
                         "FROM GROUP_ATTRIBUTE ga " +
                         "JOIN KEYCLOAK_GROUP g ON ga.GROUP_ID = g.ID " +
-                        "WHERE g.REALM_ID = ? AND ga.SIGNATURE IS NULL",
+                        "WHERE g.REALM_ID = ? AND ga.ATTESTATION IS NULL",
                 List.of(realmId), List.of("group_id", "name", "value")));
 
         // ROLE_ATTRIBUTE — KEYCLOAK_ROLE has REALM_ID
@@ -280,13 +280,13 @@ public class IgaBaselineService {
                 "SELECT ra.ROLE_ID AS \"role_id\", ra.NAME AS \"name\", ra.VALUE AS \"value\" " +
                         "FROM ROLE_ATTRIBUTE ra " +
                         "JOIN KEYCLOAK_ROLE r ON ra.ROLE_ID = r.ID " +
-                        "WHERE r.REALM_ID = ? AND ra.SIGNATURE IS NULL",
+                        "WHERE r.REALM_ID = ? AND ra.ATTESTATION IS NULL",
                 List.of(realmId), List.of("role_id", "name", "value")));
 
         // REALM_ATTRIBUTE — direct REALM_ID column
         out.put(T_REALM_ATTRIBUTE, queryRows(
                 "SELECT REALM_ID AS \"realm_id\", NAME AS \"name\", VALUE AS \"value\" " +
-                        "FROM REALM_ATTRIBUTE WHERE REALM_ID = ? AND SIGNATURE IS NULL",
+                        "FROM REALM_ATTRIBUTE WHERE REALM_ID = ? AND ATTESTATION IS NULL",
                 List.of(realmId), List.of("realm_id", "name", "value")));
 
         return out;

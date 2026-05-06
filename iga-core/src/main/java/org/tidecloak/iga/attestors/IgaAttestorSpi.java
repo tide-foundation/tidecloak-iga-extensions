@@ -1,13 +1,13 @@
-package org.tidecloak.iga.signers;
+package org.tidecloak.iga.attestors;
 
 import org.keycloak.provider.Provider;
 import org.keycloak.provider.ProviderFactory;
 import org.keycloak.provider.Spi;
 
 /**
- * Keycloak SPI registration for pluggable IGA signers.
+ * Keycloak SPI registration for pluggable IGA attestors.
  */
-public class IgaSignerSpi implements Spi {
+public class IgaAttestorSpi implements Spi {
 
     @Override
     public boolean isInternal() {
@@ -16,17 +16,17 @@ public class IgaSignerSpi implements Spi {
 
     @Override
     public String getName() {
-        return "iga-signer";
+        return "iga-attestor";
     }
 
     @Override
     public Class<? extends Provider> getProviderClass() {
-        return IgaSigner.class;
+        return IgaAttestor.class;
     }
 
     @Override
     @SuppressWarnings("rawtypes")
     public Class<? extends ProviderFactory> getProviderFactoryClass() {
-        return IgaSignerFactory.class;
+        return IgaAttestorFactory.class;
     }
 }

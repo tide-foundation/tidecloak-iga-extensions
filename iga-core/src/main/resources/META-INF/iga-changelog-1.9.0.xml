@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      1.9.0: Rename the SIGNATURE column to ATTESTATION on every IGA-tracked
+      table. This aligns the column name with the new "attestation" naming
+      across iga-core (signers package -> attestors package, IgaSigner ->
+      IgaAttestor, etc.). The 11 entity tables from the original migrations
+      and the 8 attribute tables added in 1.8.0 are all renamed.
+
+      Author: tidecloak-iga
+    -->
+
+    <!-- ===== 11 entity tables (added in earlier migrations) ===== -->
+
+    <!-- 1: USER_ENTITY.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-1" author="tidecloak-iga">
+        <renameColumn tableName="USER_ENTITY"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 2: KEYCLOAK_ROLE.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-2" author="tidecloak-iga">
+        <renameColumn tableName="KEYCLOAK_ROLE"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 3: KEYCLOAK_GROUP.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-3" author="tidecloak-iga">
+        <renameColumn tableName="KEYCLOAK_GROUP"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 4: CLIENT.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-4" author="tidecloak-iga">
+        <renameColumn tableName="CLIENT"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 5: PROTOCOL_MAPPER.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-5" author="tidecloak-iga">
+        <renameColumn tableName="PROTOCOL_MAPPER"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 6: USER_ROLE_MAPPING.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-6" author="tidecloak-iga">
+        <renameColumn tableName="USER_ROLE_MAPPING"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 7: USER_GROUP_MEMBERSHIP.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-7" author="tidecloak-iga">
+        <renameColumn tableName="USER_GROUP_MEMBERSHIP"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 8: GROUP_ROLE_MAPPING.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-8" author="tidecloak-iga">
+        <renameColumn tableName="GROUP_ROLE_MAPPING"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 9: COMPOSITE_ROLE.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-9" author="tidecloak-iga">
+        <renameColumn tableName="COMPOSITE_ROLE"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 10: CLIENT_SCOPE_CLIENT.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-10" author="tidecloak-iga">
+        <renameColumn tableName="CLIENT_SCOPE_CLIENT"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 11: CLIENT_SCOPE_ROLE_MAPPING.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-11" author="tidecloak-iga">
+        <renameColumn tableName="CLIENT_SCOPE_ROLE_MAPPING"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- ===== 8 attribute tables (added in 1.8.0) ===== -->
+
+    <!-- 12: USER_ATTRIBUTE.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-12" author="tidecloak-iga">
+        <renameColumn tableName="USER_ATTRIBUTE"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 13: CLIENT_ATTRIBUTES.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-13" author="tidecloak-iga">
+        <renameColumn tableName="CLIENT_ATTRIBUTES"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 14: CLIENT_SCOPE_ATTRIBUTES.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-14" author="tidecloak-iga">
+        <renameColumn tableName="CLIENT_SCOPE_ATTRIBUTES"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 15: GROUP_ATTRIBUTE.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-15" author="tidecloak-iga">
+        <renameColumn tableName="GROUP_ATTRIBUTE"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 16: ROLE_ATTRIBUTE.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-16" author="tidecloak-iga">
+        <renameColumn tableName="ROLE_ATTRIBUTE"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 17: REALM_ATTRIBUTE.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-17" author="tidecloak-iga">
+        <renameColumn tableName="REALM_ATTRIBUTE"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 18: FED_USER_ATTRIBUTE.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-18" author="tidecloak-iga">
+        <renameColumn tableName="FED_USER_ATTRIBUTE"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+    <!-- 19: RESOURCE_ATTRIBUTE.SIGNATURE -> ATTESTATION -->
+    <changeSet id="iga-1.9.0-19" author="tidecloak-iga">
+        <renameColumn tableName="RESOURCE_ATTRIBUTE"
+                      oldColumnName="SIGNATURE"
+                      newColumnName="ATTESTATION"
+                      columnDataType="VARCHAR(2048)"/>
+    </changeSet>
+
+</databaseChangeLog>

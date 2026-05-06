@@ -1,22 +1,22 @@
-package org.tidecloak.iga.signers;
+package org.tidecloak.iga.attestors;
 
 import org.keycloak.Config;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
 
 /**
- * Factory for the default {@link SimpleNameSigner}.
+ * Factory for the default {@link SimpleNameAttestor}.
  */
-public class SimpleNameSignerFactory implements IgaSignerFactory {
+public class SimpleNameAttestorFactory implements IgaAttestorFactory {
 
     @Override
-    public IgaSigner create(KeycloakSession session) {
-        return new SimpleNameSigner(session);
+    public IgaAttestor create(KeycloakSession session) {
+        return new SimpleNameAttestor(session);
     }
 
     @Override
     public String getId() {
-        return SimpleNameSigner.ID;
+        return SimpleNameAttestor.ID;
     }
 
     @Override

@@ -22,7 +22,7 @@ import java.util.function.Consumer;
 
 /**
  * Replays an approved IGA change request by invoking the real Keycloak model
- * operations with IGA_REPLAY_ACTIVE set, then writing the final signature
+ * operations with IGA_REPLAY_ACTIVE set, then writing the final attestation
  * onto the affected rows via JPQL UPDATE.
  */
 public class IgaReplayDispatcher {
@@ -32,16 +32,16 @@ public class IgaReplayDispatcher {
     private static final TypeReference<List<Map<String, Object>>> LIST_MAP_REF =
             new TypeReference<List<Map<String, Object>>>() {};
 
-    public static void replay(KeycloakSession session, IgaChangeRequestEntity cr, String finalSignature) {
+    public static void replay(KeycloakSession session, IgaChangeRequestEntity cr, String finalAttestation) {
         session.setAttribute("IGA_REPLAY_ACTIVE", "true");
         try {
-            doReplay(session, cr, finalSignature);
+            doReplay(session, cr, finalAttestation);
         } finally {
             session.removeAttribute("IGA_REPLAY_ACTIVE");
         }
     }
 
-    private static void doReplay(KeycloakSession session, IgaChangeRequestEntity cr, String finalSignature) {
+    private static void doReplay(KeycloakSession session, IgaChangeRequestEntity cr, String finalAttestation) {
         RealmModel realm = session.realms().getRealm(cr.getRealmId());
         EntityManager em = getEm(session);
 
@@ -49,7 +49,7 @@ public class IgaReplayDispatcher {
         // "tables" object — it doesn't match the flat List shape used by
         // every other action. Handle it before the generic parse.
         if ("BASELINE_APPROVAL".equals(cr.getActionType())) {
-            replayBaselineApproval(em, cr, finalSignature);
+            replayBaselineApproval(em, cr, finalAttestation);
             IgaChangeRequestEntity managedBaseline = em.find(IgaChangeRequestEntity.class, cr.getId());
             if (managedBaseline != null) {
                 managedBaseline.setStatus("APPROVED");
@@ -61,38 +61,38 @@ public class IgaReplayDispatcher {
         List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
 
         switch (cr.getActionType()) {
-            case "CREATE_USER" -> replayCreateUser(session, realm, rows, finalSignature, em);
-            case "CREATE_ROLE" -> replayCreateRole(session, realm, rows, finalSignature, em);
-            case "CREATE_GROUP" -> replayCreateGroup(session, realm, rows, finalSignature, em);
-            case "CREATE_CLIENT" -> replayCreateClient(session, realm, rows, finalSignature, em);
-            case "ADD_PROTOCOL_MAPPER" -> replayAddProtocolMapper(session, realm, cr, rows, finalSignature, em);
-            case "GRANT_ROLES" -> replayRelationship(session, realm, rows, finalSignature, em,
-                    "UPDATE UserRoleMappingEntity e SET e.signature = :sig WHERE e.userId = :k1 AND e.roleId = :k2",
+            case "CREATE_USER" -> replayCreateUser(session, realm, rows, finalAttestation, em);
+            case "CREATE_ROLE" -> replayCreateRole(session, realm, rows, finalAttestation, em);
+            case "CREATE_GROUP" -> replayCreateGroup(session, realm, rows, finalAttestation, em);
+            case "CREATE_CLIENT" -> replayCreateClient(session, realm, rows, finalAttestation, em);
+            case "ADD_PROTOCOL_MAPPER" -> replayAddProtocolMapper(session, realm, cr, rows, finalAttestation, em);
+            case "GRANT_ROLES" -> replayRelationship(session, realm, rows, finalAttestation, em,
+                    "UPDATE UserRoleMappingEntity e SET e.attestation = :sig WHERE e.userId = :k1 AND e.roleId = :k2",
                     r -> grantRoleDirect(session, realm, r));
             case "REVOKE_ROLES" -> replayRevoke(session, realm, rows, em,
                     r -> revokeRoleDirect(session, realm, r));
-            case "JOIN_GROUPS" -> replayRelationship(session, realm, rows, finalSignature, em,
-                    "UPDATE UserGroupMembershipEntity e SET e.signature = :sig WHERE e.user = :k1 AND e.group = :k2",
+            case "JOIN_GROUPS" -> replayRelationship(session, realm, rows, finalAttestation, em,
+                    "UPDATE UserGroupMembershipEntity e SET e.attestation = :sig WHERE e.user = :k1 AND e.group = :k2",
                     r -> joinGroupDirect(session, realm, r));
             case "LEAVE_GROUPS" -> replayRevoke(session, realm, rows, em,
                     r -> leaveGroupDirect(session, realm, r));
-            case "GROUP_GRANT_ROLES" -> replayRelationship(session, realm, rows, finalSignature, em,
-                    "UPDATE GroupRoleMappingEntity e SET e.signature = :sig WHERE e.group = :k1 AND e.role = :k2",
+            case "GROUP_GRANT_ROLES" -> replayRelationship(session, realm, rows, finalAttestation, em,
+                    "UPDATE GroupRoleMappingEntity e SET e.attestation = :sig WHERE e.group = :k1 AND e.role = :k2",
                     r -> groupGrantRoleDirect(session, realm, r));
             case "GROUP_REVOKE_ROLES" -> replayRevoke(session, realm, rows, em,
                     r -> groupRevokeRoleDirect(session, realm, r));
-            case "ADD_COMPOSITE" -> replayRelationship(session, realm, rows, finalSignature, em,
-                    "UPDATE CompositeRoleEntity e SET e.signature = :sig WHERE e.composite = :k1 AND e.childRole = :k2",
+            case "ADD_COMPOSITE" -> replayRelationship(session, realm, rows, finalAttestation, em,
+                    "UPDATE CompositeRoleEntity e SET e.attestation = :sig WHERE e.composite = :k1 AND e.childRole = :k2",
                     r -> addCompositeDirect(session, realm, r));
             case "REMOVE_COMPOSITE" -> replayRevoke(session, realm, rows, em,
                     r -> removeCompositeDirect(session, realm, r));
-            case "ASSIGN_SCOPE" -> replayRelationship(session, realm, rows, finalSignature, em,
-                    "UPDATE ClientScopeClientMappingEntity e SET e.signature = :sig WHERE e.clientId = :k1 AND e.clientScopeId = :k2",
+            case "ASSIGN_SCOPE" -> replayRelationship(session, realm, rows, finalAttestation, em,
+                    "UPDATE ClientScopeClientMappingEntity e SET e.attestation = :sig WHERE e.clientId = :k1 AND e.clientScopeId = :k2",
                     r -> assignScopeDirect(session, realm, r));
             case "REMOVE_SCOPE" -> replayRevoke(session, realm, rows, em,
                     r -> removeScopeDirect(session, realm, r));
-            case "SCOPE_ADD_ROLE" -> replayRelationship(session, realm, rows, finalSignature, em,
-                    "UPDATE ClientScopeRoleMappingEntity e SET e.signature = :sig WHERE e.clientScope = :k1 AND e.role = :k2",
+            case "SCOPE_ADD_ROLE" -> replayRelationship(session, realm, rows, finalAttestation, em,
+                    "UPDATE ClientScopeRoleMappingEntity e SET e.attestation = :sig WHERE e.clientScope = :k1 AND e.role = :k2",
                     r -> scopeAddRoleDirect(session, realm, r));
             case "SCOPE_REMOVE_ROLE" -> replayRevoke(session, realm, rows, em,
                     r -> scopeRemoveRoleDirect(session, realm, r));
@@ -100,17 +100,17 @@ public class IgaReplayDispatcher {
             case "INSTALL_LICENSE", "ROTATE_LICENSE" -> replayLicenseAction(cr);
 
             // ----- Attribute writes -----
-            case "SET_USER_ATTRIBUTE" -> replaySetUserAttribute(session, realm, rows, finalSignature, em);
+            case "SET_USER_ATTRIBUTE" -> replaySetUserAttribute(session, realm, rows, finalAttestation, em);
             case "REMOVE_USER_ATTRIBUTE" -> replayRemoveUserAttribute(session, realm, rows, em);
-            case "SET_CLIENT_ATTRIBUTE" -> replaySetClientAttribute(session, realm, rows, finalSignature, em);
+            case "SET_CLIENT_ATTRIBUTE" -> replaySetClientAttribute(session, realm, rows, finalAttestation, em);
             case "REMOVE_CLIENT_ATTRIBUTE" -> replayRemoveClientAttribute(session, realm, rows, em);
-            case "SET_CLIENT_SCOPE_ATTRIBUTE" -> replaySetClientScopeAttribute(session, realm, rows, finalSignature, em);
+            case "SET_CLIENT_SCOPE_ATTRIBUTE" -> replaySetClientScopeAttribute(session, realm, rows, finalAttestation, em);
             case "REMOVE_CLIENT_SCOPE_ATTRIBUTE" -> replayRemoveClientScopeAttribute(session, realm, rows, em);
-            case "SET_GROUP_ATTRIBUTE" -> replaySetGroupAttribute(session, realm, rows, finalSignature, em);
+            case "SET_GROUP_ATTRIBUTE" -> replaySetGroupAttribute(session, realm, rows, finalAttestation, em);
             case "REMOVE_GROUP_ATTRIBUTE" -> replayRemoveGroupAttribute(session, realm, rows, em);
-            case "SET_ROLE_ATTRIBUTE" -> replaySetRoleAttribute(session, realm, rows, finalSignature, em);
+            case "SET_ROLE_ATTRIBUTE" -> replaySetRoleAttribute(session, realm, rows, finalAttestation, em);
             case "REMOVE_ROLE_ATTRIBUTE" -> replayRemoveRoleAttribute(session, realm, rows, em);
-            case "SET_REALM_ATTRIBUTE" -> replaySetRealmAttribute(session, realm, rows, finalSignature, em);
+            case "SET_REALM_ATTRIBUTE" -> replaySetRealmAttribute(session, realm, rows, finalAttestation, em);
             case "REMOVE_REALM_ATTRIBUTE" -> replayRemoveRealmAttribute(session, realm, rows, em);
 
             default -> throw new IllegalArgumentException("Unknown IGA action: " + cr.getActionType());
@@ -135,7 +135,7 @@ public class IgaReplayDispatcher {
             String username = str(row, "USERNAME");
             // Use the 5-arg addUser to supply our own ID
             session.users().addUser(realm, userId, username, false, false);
-            em.createQuery("UPDATE UserEntity e SET e.signature = :sig WHERE e.id = :id")
+            em.createQuery("UPDATE UserEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig)
                     .setParameter("id", userId)
                     .executeUpdate();
@@ -157,7 +157,7 @@ public class IgaReplayDispatcher {
             } else {
                 session.roles().addRealmRole(realm, id, name);
             }
-            em.createQuery("UPDATE RoleEntity e SET e.signature = :sig WHERE e.id = :id")
+            em.createQuery("UPDATE RoleEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig)
                     .setParameter("id", id)
                     .executeUpdate();
@@ -172,7 +172,7 @@ public class IgaReplayDispatcher {
             String parentId = str(row, "PARENT_GROUP");
             GroupModel parent = (parentId != null) ? session.groups().getGroupById(realm, parentId) : null;
             session.groups().createGroup(realm, id, name, parent);
-            em.createQuery("UPDATE GroupEntity e SET e.signature = :sig WHERE e.id = :id")
+            em.createQuery("UPDATE GroupEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig)
                     .setParameter("id", id)
                     .executeUpdate();
@@ -184,7 +184,7 @@ public class IgaReplayDispatcher {
         for (Map<String, Object> row : rows) {
             String id = str(row, "ID");
             session.clients().addClient(realm, id, id);
-            em.createQuery("UPDATE ClientEntity e SET e.signature = :sig WHERE e.id = :id")
+            em.createQuery("UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig)
                     .setParameter("id", id)
                     .executeUpdate();
@@ -205,7 +205,7 @@ public class IgaReplayDispatcher {
                 model.setProtocol(str(row, "PROTOCOL"));
                 model.setProtocolMapper(str(row, "PROTOCOL_MAPPER_NAME"));
                 client.addProtocolMapper(model);
-                em.createQuery("UPDATE ProtocolMapperEntity e SET e.signature = :sig WHERE e.id = :id")
+                em.createQuery("UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.id = :id")
                         .setParameter("sig", sig)
                         .setParameter("id", mapperId)
                         .executeUpdate();
@@ -256,7 +256,7 @@ public class IgaReplayDispatcher {
         for (Map<String, Object> row : rows) {
             addOp.accept(row);
         }
-        // Signature update uses the first row's keys
+        // Attestation update uses the first row's keys
         if (!rows.isEmpty() && sig != null && !sig.isEmpty()) {
             Map<String, Object> row = rows.get(0);
             // Determine k1/k2 from the JPQL pattern — we extract via the row values by position
@@ -386,10 +386,10 @@ public class IgaReplayDispatcher {
     // Approach: rebuild the attribute(s) by calling the underlying model's
     // setAttribute/removeAttribute (with IGA_REPLAY_ACTIVE = true so the IGA
     // wrappers pass straight through), then UPDATE the just-written rows with
-    // the final signature via JPQL. The attribute entities
+    // the final attestation via JPQL. The attribute entities
     // (UserAttributeEntity / ClientAttributeEntity / ClientScopeAttributeEntity
     // / GroupAttributeEntity / RoleAttributeEntity / RealmAttributeEntity) all
-    // declare a {@code signature} field (see tidecloak-override).
+    // declare an {@code attestation} field (see tidecloak-override).
     //
     // Multi-value SET requests carry one row per value. We group rows by
     // (parent_id, name) so the model write is a single setAttribute(name,
@@ -425,7 +425,7 @@ public class IgaReplayDispatcher {
                 java.util.List<String> values = ne.getValue();
                 user.setAttribute(name, values);
                 stampSigJpql(em,
-                        "UPDATE UserAttributeEntity e SET e.signature = :sig " +
+                        "UPDATE UserAttributeEntity e SET e.attestation = :sig " +
                                 "WHERE e.user.id = :pid AND e.name = :name",
                         sig, userId, name);
             }
@@ -454,7 +454,7 @@ public class IgaReplayDispatcher {
             if (client == null || name == null) continue;
             client.setAttribute(name, value);
             stampSigJpql(em,
-                    "UPDATE ClientAttributeEntity e SET e.signature = :sig " +
+                    "UPDATE ClientAttributeEntity e SET e.attestation = :sig " +
                             "WHERE e.client.id = :pid AND e.name = :name",
                     sig, clientId, name);
         }
@@ -482,7 +482,7 @@ public class IgaReplayDispatcher {
             if (scope == null || name == null) continue;
             scope.setAttribute(name, value);
             stampSigJpql(em,
-                    "UPDATE ClientScopeAttributeEntity e SET e.signature = :sig " +
+                    "UPDATE ClientScopeAttributeEntity e SET e.attestation = :sig " +
                             "WHERE e.clientScope.id = :pid AND e.name = :name",
                     sig, scopeId, name);
         }
@@ -512,7 +512,7 @@ public class IgaReplayDispatcher {
                 java.util.List<String> values = ne.getValue();
                 group.setAttribute(name, values);
                 stampSigJpql(em,
-                        "UPDATE GroupAttributeEntity e SET e.signature = :sig " +
+                        "UPDATE GroupAttributeEntity e SET e.attestation = :sig " +
                                 "WHERE e.group.id = :pid AND e.name = :name",
                         sig, groupId, name);
             }
@@ -543,7 +543,7 @@ public class IgaReplayDispatcher {
                 java.util.List<String> values = ne.getValue();
                 role.setAttribute(name, values);
                 stampSigJpql(em,
-                        "UPDATE RoleAttributeEntity e SET e.signature = :sig " +
+                        "UPDATE RoleAttributeEntity e SET e.attestation = :sig " +
                                 "WHERE e.role.id = :pid AND e.name = :name",
                         sig, roleId, name);
             }
@@ -574,7 +574,7 @@ public class IgaReplayDispatcher {
             if (target == null || name == null) continue;
             target.setAttribute(name, value);
             stampSigJpql(em,
-                    "UPDATE RealmAttributeEntity e SET e.signature = :sig " +
+                    "UPDATE RealmAttributeEntity e SET e.attestation = :sig " +
                             "WHERE e.realm.id = :pid AND e.name = :name",
                     sig, realmId, name);
         }
@@ -593,9 +593,9 @@ public class IgaReplayDispatcher {
     }
 
     /**
-     * Run a JPQL UPDATE that stamps the final signature on every row of an
+     * Run a JPQL UPDATE that stamps the final attestation on every row of an
      * attribute entity matching (parent_id, name). Multi-value attributes share
-     * the (parent_id, name) tuple — every row gets the same signature.
+     * the (parent_id, name) tuple — every row gets the same attestation.
      */
     private static void stampSigJpql(EntityManager em, String jpql, String sig, String parentId, String name) {
         if (sig == null || sig.isEmpty()) return;
@@ -608,14 +608,14 @@ public class IgaReplayDispatcher {
 
     // -------------------------------------------------------------------------
     // BASELINE_APPROVAL replay — sweep every snapshotted unsigned row and
-    // stamp the final signature on it. Uses native SQL because the SIGNATURE
+    // stamp the final attestation on it. Uses native SQL because the ATTESTATION
     // column was added by a Liquibase changelog at the DB layer; the JPA
-    // entity classes don't (yet) expose `signature` as a Hibernate field.
+    // entity classes don't (yet) expose `attestation` as a Hibernate field.
     // -------------------------------------------------------------------------
 
-    private static void replayBaselineApproval(EntityManager em, IgaChangeRequestEntity cr, String finalSignature) {
-        if (finalSignature == null || finalSignature.isEmpty()) {
-            log.warnf("BASELINE_APPROVAL %s has no final signature; skipping signature writes", cr.getId());
+    private static void replayBaselineApproval(EntityManager em, IgaChangeRequestEntity cr, String finalAttestation) {
+        if (finalAttestation == null || finalAttestation.isEmpty()) {
+            log.warnf("BASELINE_APPROVAL %s has no final attestation; skipping attestation writes", cr.getId());
             return;
         }
         JsonNode root;
@@ -632,40 +632,40 @@ public class IgaReplayDispatcher {
 
         // Info tables — single id column
         updateBatchById(em, tables, "user_entity",
-                "UPDATE USER_ENTITY SET SIGNATURE = ? WHERE ID IN (:ids) AND SIGNATURE IS NULL",
-                "id", finalSignature);
+                "UPDATE USER_ENTITY SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",
+                "id", finalAttestation);
         updateBatchById(em, tables, "keycloak_role",
-                "UPDATE KEYCLOAK_ROLE SET SIGNATURE = ? WHERE ID IN (:ids) AND SIGNATURE IS NULL",
-                "id", finalSignature);
+                "UPDATE KEYCLOAK_ROLE SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",
+                "id", finalAttestation);
         updateBatchById(em, tables, "keycloak_group",
-                "UPDATE KEYCLOAK_GROUP SET SIGNATURE = ? WHERE ID IN (:ids) AND SIGNATURE IS NULL",
-                "id", finalSignature);
+                "UPDATE KEYCLOAK_GROUP SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",
+                "id", finalAttestation);
         updateBatchById(em, tables, "client",
-                "UPDATE CLIENT SET SIGNATURE = ? WHERE ID IN (:ids) AND SIGNATURE IS NULL",
-                "id", finalSignature);
+                "UPDATE CLIENT SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",
+                "id", finalAttestation);
         updateBatchById(em, tables, "protocol_mapper",
-                "UPDATE PROTOCOL_MAPPER SET SIGNATURE = ? WHERE ID IN (:ids) AND SIGNATURE IS NULL",
-                "id", finalSignature);
+                "UPDATE PROTOCOL_MAPPER SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",
+                "id", finalAttestation);
 
         // Relationship tables — composite key match, one update per row
         updatePairs(em, tables, "user_role_mapping",
-                "UPDATE USER_ROLE_MAPPING SET SIGNATURE = ? WHERE USER_ID = ? AND ROLE_ID = ?",
-                "USER_ID", "ROLE_ID", finalSignature);
+                "UPDATE USER_ROLE_MAPPING SET ATTESTATION = ? WHERE USER_ID = ? AND ROLE_ID = ?",
+                "USER_ID", "ROLE_ID", finalAttestation);
         updatePairs(em, tables, "user_group_membership",
-                "UPDATE USER_GROUP_MEMBERSHIP SET SIGNATURE = ? WHERE USER_ID = ? AND GROUP_ID = ?",
-                "USER", "GROUP", finalSignature);
+                "UPDATE USER_GROUP_MEMBERSHIP SET ATTESTATION = ? WHERE USER_ID = ? AND GROUP_ID = ?",
+                "USER", "GROUP", finalAttestation);
         updatePairs(em, tables, "group_role_mapping",
-                "UPDATE GROUP_ROLE_MAPPING SET SIGNATURE = ? WHERE GROUP_ID = ? AND ROLE_ID = ?",
-                "GROUP", "ROLE", finalSignature);
+                "UPDATE GROUP_ROLE_MAPPING SET ATTESTATION = ? WHERE GROUP_ID = ? AND ROLE_ID = ?",
+                "GROUP", "ROLE", finalAttestation);
         updatePairs(em, tables, "composite_role",
-                "UPDATE COMPOSITE_ROLE SET SIGNATURE = ? WHERE COMPOSITE = ? AND CHILD_ROLE = ?",
-                "COMPOSITE", "CHILD_ROLE", finalSignature);
+                "UPDATE COMPOSITE_ROLE SET ATTESTATION = ? WHERE COMPOSITE = ? AND CHILD_ROLE = ?",
+                "COMPOSITE", "CHILD_ROLE", finalAttestation);
         updatePairs(em, tables, "client_scope_client",
-                "UPDATE CLIENT_SCOPE_CLIENT SET SIGNATURE = ? WHERE CLIENT_ID = ? AND SCOPE_ID = ?",
-                "CLIENT_ID", "SCOPE_ID", finalSignature);
+                "UPDATE CLIENT_SCOPE_CLIENT SET ATTESTATION = ? WHERE CLIENT_ID = ? AND SCOPE_ID = ?",
+                "CLIENT_ID", "SCOPE_ID", finalAttestation);
         updatePairs(em, tables, "client_scope_role_mapping",
-                "UPDATE CLIENT_SCOPE_ROLE_MAPPING SET SIGNATURE = ? WHERE SCOPE_ID = ? AND ROLE_ID = ?",
-                "SCOPE_ID", "ROLE_ID", finalSignature);
+                "UPDATE CLIENT_SCOPE_ROLE_MAPPING SET ATTESTATION = ? WHERE SCOPE_ID = ? AND ROLE_ID = ?",
+                "SCOPE_ID", "ROLE_ID", finalAttestation);
 
         // ----- Attribute tables (1.8.0+) -----
         // Each row in the snapshot carries (parent_id, name, value); the
@@ -674,34 +674,34 @@ public class IgaReplayDispatcher {
         // (parent_id, name) AND value = :val to pin a single row precisely
         // (or "value IS NULL" when value is null).
         updateAttributeRowsJpql(em, tables, "user_attribute",
-                "UPDATE UserAttributeEntity e SET e.signature = :sig " +
+                "UPDATE UserAttributeEntity e SET e.attestation = :sig " +
                         "WHERE e.user.id = :pid AND e.name = :name AND e.value %s",
-                "user_id", finalSignature);
+                "user_id", finalAttestation);
         updateAttributeRowsJpql(em, tables, "client_attributes",
-                "UPDATE ClientAttributeEntity e SET e.signature = :sig " +
+                "UPDATE ClientAttributeEntity e SET e.attestation = :sig " +
                         "WHERE e.client.id = :pid AND e.name = :name AND e.value %s",
-                "client_id", finalSignature);
+                "client_id", finalAttestation);
         updateAttributeRowsJpql(em, tables, "client_scope_attributes",
-                "UPDATE ClientScopeAttributeEntity e SET e.signature = :sig " +
+                "UPDATE ClientScopeAttributeEntity e SET e.attestation = :sig " +
                         "WHERE e.clientScope.id = :pid AND e.name = :name AND e.value %s",
-                "scope_id", finalSignature);
+                "scope_id", finalAttestation);
         updateAttributeRowsJpql(em, tables, "group_attribute",
-                "UPDATE GroupAttributeEntity e SET e.signature = :sig " +
+                "UPDATE GroupAttributeEntity e SET e.attestation = :sig " +
                         "WHERE e.group.id = :pid AND e.name = :name AND e.value %s",
-                "group_id", finalSignature);
+                "group_id", finalAttestation);
         updateAttributeRowsJpql(em, tables, "role_attribute",
-                "UPDATE RoleAttributeEntity e SET e.signature = :sig " +
+                "UPDATE RoleAttributeEntity e SET e.attestation = :sig " +
                         "WHERE e.role.id = :pid AND e.name = :name AND e.value %s",
-                "role_id", finalSignature);
+                "role_id", finalAttestation);
         updateAttributeRowsJpql(em, tables, "realm_attribute",
-                "UPDATE RealmAttributeEntity e SET e.signature = :sig " +
+                "UPDATE RealmAttributeEntity e SET e.attestation = :sig " +
                         "WHERE e.realm.id = :pid AND e.name = :name AND e.value %s",
-                "realm_id", finalSignature);
+                "realm_id", finalAttestation);
     }
 
     /**
      * Update each (parent_id, name, value) attribute row with the final
-     * signature using JPQL. The {@code value} field may be NULL (single-value
+     * attestation using JPQL. The {@code value} field may be NULL (single-value
      * clear), so we pick {@code IS NULL} vs {@code = :val} dynamically — JPQL
      * (like SQL) does not fold {@code col = NULL} to TRUE for NULL values.
      */
@@ -754,7 +754,7 @@ public class IgaReplayDispatcher {
 
     /**
      * Run one UPDATE per row for relationship tables (composite primary key).
-     * Native SQL with positional parameters: ?1=signature, ?2=key1, ?3=key2.
+     * Native SQL with positional parameters: ?1=attestation, ?2=key1, ?3=key2.
      */
     private static void updatePairs(EntityManager em, JsonNode tables, String tableName,
                                      String sql, String key1, String key2, String sig) {
