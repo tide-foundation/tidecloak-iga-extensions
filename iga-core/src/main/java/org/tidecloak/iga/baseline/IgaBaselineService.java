@@ -48,6 +48,14 @@ public class IgaBaselineService {
     public static final String T_CLIENT_SCOPE_CLIENT = "client_scope_client";
     public static final String T_CLIENT_SCOPE_ROLE = "client_scope_role_mapping";
 
+    // Attribute tables (added in IGA 1.8.0 — intercepted by the workflow).
+    public static final String T_USER_ATTRIBUTE = "user_attribute";
+    public static final String T_CLIENT_ATTRIBUTES = "client_attributes";
+    public static final String T_CLIENT_SCOPE_ATTRIBUTES = "client_scope_attributes";
+    public static final String T_GROUP_ATTRIBUTE = "group_attribute";
+    public static final String T_ROLE_ATTRIBUTE = "role_attribute";
+    public static final String T_REALM_ATTRIBUTE = "realm_attribute";
+
     private final EntityManager em;
 
     public IgaBaselineService(EntityManager em) {
@@ -231,6 +239,55 @@ public class IgaBaselineService {
                         "LEFT JOIN KEYCLOAK_ROLE r ON csrm.ROLE_ID = r.ID " +
                         "WHERE cs.REALM_ID = ? AND csrm.SIGNATURE IS NULL",
                 List.of(realmId), List.of("SCOPE_ID", "ROLE_ID", "_scope", "_role")));
+
+        // -------- Attribute tables (intercepted by IGA 1.8.0+) --------
+        // Each table joins to its parent entity for realm scoping.
+
+        // USER_ATTRIBUTE — join to USER_ENTITY for realm scope
+        out.put(T_USER_ATTRIBUTE, queryRows(
+                "SELECT ua.USER_ID AS \"user_id\", ua.NAME AS \"name\", ua.VALUE AS \"value\" " +
+                        "FROM USER_ATTRIBUTE ua " +
+                        "JOIN USER_ENTITY u ON ua.USER_ID = u.ID " +
+                        "WHERE u.REALM_ID = ? AND ua.SIGNATURE IS NULL",
+                List.of(realmId), List.of("user_id", "name", "value")));
+
+        // CLIENT_ATTRIBUTES — join to CLIENT for realm scope
+        out.put(T_CLIENT_ATTRIBUTES, queryRows(
+                "SELECT ca.CLIENT_ID AS \"client_id\", ca.NAME AS \"name\", ca.VALUE AS \"value\" " +
+                        "FROM CLIENT_ATTRIBUTES ca " +
+                        "JOIN CLIENT c ON ca.CLIENT_ID = c.ID " +
+                        "WHERE c.REALM_ID = ? AND ca.SIGNATURE IS NULL",
+                List.of(realmId), List.of("client_id", "name", "value")));
+
+        // CLIENT_SCOPE_ATTRIBUTES — CLIENT_SCOPE has REALM_ID
+        out.put(T_CLIENT_SCOPE_ATTRIBUTES, queryRows(
+                "SELECT csa.SCOPE_ID AS \"scope_id\", csa.NAME AS \"name\", csa.VALUE AS \"value\" " +
+                        "FROM CLIENT_SCOPE_ATTRIBUTES csa " +
+                        "JOIN CLIENT_SCOPE cs ON csa.SCOPE_ID = cs.ID " +
+                        "WHERE cs.REALM_ID = ? AND csa.SIGNATURE IS NULL",
+                List.of(realmId), List.of("scope_id", "name", "value")));
+
+        // GROUP_ATTRIBUTE — KEYCLOAK_GROUP has REALM_ID
+        out.put(T_GROUP_ATTRIBUTE, queryRows(
+                "SELECT ga.GROUP_ID AS \"group_id\", ga.NAME AS \"name\", ga.VALUE AS \"value\" " +
+                        "FROM GROUP_ATTRIBUTE ga " +
+                        "JOIN KEYCLOAK_GROUP g ON ga.GROUP_ID = g.ID " +
+                        "WHERE g.REALM_ID = ? AND ga.SIGNATURE IS NULL",
+                List.of(realmId), List.of("group_id", "name", "value")));
+
+        // ROLE_ATTRIBUTE — KEYCLOAK_ROLE has REALM_ID
+        out.put(T_ROLE_ATTRIBUTE, queryRows(
+                "SELECT ra.ROLE_ID AS \"role_id\", ra.NAME AS \"name\", ra.VALUE AS \"value\" " +
+                        "FROM ROLE_ATTRIBUTE ra " +
+                        "JOIN KEYCLOAK_ROLE r ON ra.ROLE_ID = r.ID " +
+                        "WHERE r.REALM_ID = ? AND ra.SIGNATURE IS NULL",
+                List.of(realmId), List.of("role_id", "name", "value")));
+
+        // REALM_ATTRIBUTE — direct REALM_ID column
+        out.put(T_REALM_ATTRIBUTE, queryRows(
+                "SELECT REALM_ID AS \"realm_id\", NAME AS \"name\", VALUE AS \"value\" " +
+                        "FROM REALM_ATTRIBUTE WHERE REALM_ID = ? AND SIGNATURE IS NULL",
+                List.of(realmId), List.of("realm_id", "name", "value")));
 
         return out;
     }

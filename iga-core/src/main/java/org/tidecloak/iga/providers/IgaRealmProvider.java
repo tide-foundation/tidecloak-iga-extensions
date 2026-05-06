@@ -9,9 +9,11 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.jpa.JpaRealmProvider;
+import org.keycloak.models.jpa.RealmAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.jpa.entities.ClientScopeEntity;
 import org.keycloak.models.jpa.entities.GroupEntity;
+import org.keycloak.models.jpa.entities.RealmEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 
@@ -44,6 +46,38 @@ public class IgaRealmProvider extends JpaRealmProvider {
         if (!service.isIgaEnabled(realm)) return false;
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
+    }
+
+    // -------------------------------------------------------------------------
+    // REALM lookup — wrap with IgaRealmAdapter so realm-attribute writes are
+    // intercepted. We only override these two; everything else stays in
+    // JpaRealmProvider via super.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public RealmModel getRealm(String id) {
+        RealmModel base = super.getRealm(id);
+        if (base == null) return null;
+        if (base instanceof RealmAdapter ra) {
+            RealmEntity entity = ra.getEntity();
+            if (entity != null) {
+                return new IgaRealmAdapter(igaSession, em, entity);
+            }
+        }
+        return base;
+    }
+
+    @Override
+    public RealmModel getRealmByName(String name) {
+        RealmModel base = super.getRealmByName(name);
+        if (base == null) return null;
+        if (base instanceof RealmAdapter ra) {
+            RealmEntity entity = ra.getEntity();
+            if (entity != null) {
+                return new IgaRealmAdapter(igaSession, em, entity);
+            }
+        }
+        return base;
     }
 
     /**

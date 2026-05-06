@@ -92,6 +92,37 @@ public final class IgaScopeResolver {
                 // Client scope scopes have no first-class iga.approverRole today;
                 // fall through to the realm default.
                 break;
+            // -----------------------------------------------------------------
+            // Attribute writes — resolve scopes from the parent entity. The
+            // attribute itself never carries iga.approverRole; the scope rules
+            // live on the user/group/role/client/realm being mutated.
+            // -----------------------------------------------------------------
+            case "SET_USER_ATTRIBUTE":
+            case "REMOVE_USER_ATTRIBUTE":
+                resolveUserScopesFromRows(session, realm, cr, scope, "USER_ID");
+                break;
+            case "SET_CLIENT_ATTRIBUTE":
+            case "REMOVE_CLIENT_ATTRIBUTE":
+                resolveClientScopesFromRows(session, realm, cr, scope, "CLIENT_ID");
+                break;
+            case "SET_CLIENT_SCOPE_ATTRIBUTE":
+            case "REMOVE_CLIENT_SCOPE_ATTRIBUTE":
+                // Client scopes have no first-class iga.approverRole today;
+                // fall through to the realm default.
+                break;
+            case "SET_GROUP_ATTRIBUTE":
+            case "REMOVE_GROUP_ATTRIBUTE":
+                resolveGroupScopesFromRows(session, realm, cr, scope, "GROUP_ID");
+                break;
+            case "SET_ROLE_ATTRIBUTE":
+            case "REMOVE_ROLE_ATTRIBUTE":
+                resolveRoleScopesFromRows(session, realm, cr, scope, "ROLE_ID");
+                break;
+            case "SET_REALM_ATTRIBUTE":
+            case "REMOVE_REALM_ATTRIBUTE":
+                // Realm-level attribute writes have no per-entity scope; fall
+                // through to the realm-default approver/threshold.
+                break;
             // CREATE_USER / CREATE_ROLE / CREATE_GROUP / CREATE_CLIENT and
             // realm-wide action types (BASELINE_APPROVAL, REQUEST_SERVER_CERT,
             // INSTALL_LICENSE, ROTATE_LICENSE) intentionally leave the scope empty.

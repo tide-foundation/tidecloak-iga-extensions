@@ -98,6 +98,21 @@ public class IgaReplayDispatcher {
                     r -> scopeRemoveRoleDirect(session, realm, r));
             case "REQUEST_SERVER_CERT" -> replayRequestServerCert(cr);
             case "INSTALL_LICENSE", "ROTATE_LICENSE" -> replayLicenseAction(cr);
+
+            // ----- Attribute writes -----
+            case "SET_USER_ATTRIBUTE" -> replaySetUserAttribute(session, realm, rows, finalSignature, em);
+            case "REMOVE_USER_ATTRIBUTE" -> replayRemoveUserAttribute(session, realm, rows, em);
+            case "SET_CLIENT_ATTRIBUTE" -> replaySetClientAttribute(session, realm, rows, finalSignature, em);
+            case "REMOVE_CLIENT_ATTRIBUTE" -> replayRemoveClientAttribute(session, realm, rows, em);
+            case "SET_CLIENT_SCOPE_ATTRIBUTE" -> replaySetClientScopeAttribute(session, realm, rows, finalSignature, em);
+            case "REMOVE_CLIENT_SCOPE_ATTRIBUTE" -> replayRemoveClientScopeAttribute(session, realm, rows, em);
+            case "SET_GROUP_ATTRIBUTE" -> replaySetGroupAttribute(session, realm, rows, finalSignature, em);
+            case "REMOVE_GROUP_ATTRIBUTE" -> replayRemoveGroupAttribute(session, realm, rows, em);
+            case "SET_ROLE_ATTRIBUTE" -> replaySetRoleAttribute(session, realm, rows, finalSignature, em);
+            case "REMOVE_ROLE_ATTRIBUTE" -> replayRemoveRoleAttribute(session, realm, rows, em);
+            case "SET_REALM_ATTRIBUTE" -> replaySetRealmAttribute(session, realm, rows, finalSignature, em);
+            case "REMOVE_REALM_ATTRIBUTE" -> replayRemoveRealmAttribute(session, realm, rows, em);
+
             default -> throw new IllegalArgumentException("Unknown IGA action: " + cr.getActionType());
         }
 
@@ -366,6 +381,222 @@ public class IgaReplayDispatcher {
     }
 
     // -------------------------------------------------------------------------
+    // Attribute replays.
+    //
+    // Approach: rebuild the attribute(s) by calling the underlying model's
+    // setAttribute/removeAttribute (with IGA_REPLAY_ACTIVE = true so the IGA
+    // wrappers pass straight through), then UPDATE the just-written rows with
+    // the final signature via native SQL. Native SQL is required because the
+    // SIGNATURE column on USER_ATTRIBUTE / CLIENT_ATTRIBUTES /
+    // CLIENT_SCOPE_ATTRIBUTES / GROUP_ATTRIBUTE / ROLE_ATTRIBUTE /
+    // REALM_ATTRIBUTE is added by Liquibase only — the JPA entities in
+    // model-jpa do not declare a signature field.
+    //
+    // Multi-value SET requests carry one row per value. We group rows by
+    // (parent_id, name) so the model write is a single setAttribute(name,
+    // values) call, matching the original admin intent.
+    // -------------------------------------------------------------------------
+
+    private static java.util.Map<String, java.util.LinkedHashMap<String, java.util.List<String>>>
+            groupByParentAndName(List<Map<String, Object>> rows, String parentKey) {
+        java.util.Map<String, java.util.LinkedHashMap<String, java.util.List<String>>> out = new java.util.LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            String pid = str(row, parentKey);
+            String name = str(row, "NAME");
+            String value = str(row, "VALUE");
+            if (pid == null || name == null) continue;
+            out.computeIfAbsent(pid, k -> new java.util.LinkedHashMap<>())
+                    .computeIfAbsent(name, k -> new java.util.ArrayList<>())
+                    .add(value);
+        }
+        return out;
+    }
+
+    // ----- USER -----
+
+    private static void replaySetUserAttribute(KeycloakSession session, RealmModel realm,
+                                                List<Map<String, Object>> rows, String sig, EntityManager em) {
+        var grouped = groupByParentAndName(rows, "USER_ID");
+        for (var ue : grouped.entrySet()) {
+            String userId = ue.getKey();
+            org.keycloak.models.UserModel user = session.users().getUserById(realm, userId);
+            if (user == null) continue;
+            for (var ne : ue.getValue().entrySet()) {
+                String name = ne.getKey();
+                java.util.List<String> values = ne.getValue();
+                user.setAttribute(name, values);
+                stampSig(em,
+                        "UPDATE USER_ATTRIBUTE SET SIGNATURE = ? WHERE USER_ID = ? AND NAME = ?",
+                        sig, userId, name);
+            }
+        }
+    }
+
+    private static void replayRemoveUserAttribute(KeycloakSession session, RealmModel realm,
+                                                   List<Map<String, Object>> rows, EntityManager em) {
+        for (Map<String, Object> row : rows) {
+            String userId = str(row, "USER_ID");
+            String name = str(row, "NAME");
+            org.keycloak.models.UserModel user = session.users().getUserById(realm, userId);
+            if (user != null && name != null) user.removeAttribute(name);
+        }
+    }
+
+    // ----- CLIENT -----
+
+    private static void replaySetClientAttribute(KeycloakSession session, RealmModel realm,
+                                                  List<Map<String, Object>> rows, String sig, EntityManager em) {
+        for (Map<String, Object> row : rows) {
+            String clientId = str(row, "CLIENT_ID");
+            String name = str(row, "NAME");
+            String value = str(row, "VALUE");
+            ClientModel client = session.clients().getClientById(realm, clientId);
+            if (client == null || name == null) continue;
+            client.setAttribute(name, value);
+            stampSig(em,
+                    "UPDATE CLIENT_ATTRIBUTES SET SIGNATURE = ? WHERE CLIENT_ID = ? AND NAME = ?",
+                    sig, clientId, name);
+        }
+    }
+
+    private static void replayRemoveClientAttribute(KeycloakSession session, RealmModel realm,
+                                                     List<Map<String, Object>> rows, EntityManager em) {
+        for (Map<String, Object> row : rows) {
+            String clientId = str(row, "CLIENT_ID");
+            String name = str(row, "NAME");
+            ClientModel client = session.clients().getClientById(realm, clientId);
+            if (client != null && name != null) client.removeAttribute(name);
+        }
+    }
+
+    // ----- CLIENT_SCOPE -----
+
+    private static void replaySetClientScopeAttribute(KeycloakSession session, RealmModel realm,
+                                                       List<Map<String, Object>> rows, String sig, EntityManager em) {
+        for (Map<String, Object> row : rows) {
+            String scopeId = str(row, "SCOPE_ID");
+            String name = str(row, "NAME");
+            String value = str(row, "VALUE");
+            ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
+            if (scope == null || name == null) continue;
+            scope.setAttribute(name, value);
+            stampSig(em,
+                    "UPDATE CLIENT_SCOPE_ATTRIBUTES SET SIGNATURE = ? WHERE SCOPE_ID = ? AND NAME = ?",
+                    sig, scopeId, name);
+        }
+    }
+
+    private static void replayRemoveClientScopeAttribute(KeycloakSession session, RealmModel realm,
+                                                          List<Map<String, Object>> rows, EntityManager em) {
+        for (Map<String, Object> row : rows) {
+            String scopeId = str(row, "SCOPE_ID");
+            String name = str(row, "NAME");
+            ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
+            if (scope != null && name != null) scope.removeAttribute(name);
+        }
+    }
+
+    // ----- GROUP -----
+
+    private static void replaySetGroupAttribute(KeycloakSession session, RealmModel realm,
+                                                 List<Map<String, Object>> rows, String sig, EntityManager em) {
+        var grouped = groupByParentAndName(rows, "GROUP_ID");
+        for (var ge : grouped.entrySet()) {
+            String groupId = ge.getKey();
+            GroupModel group = session.groups().getGroupById(realm, groupId);
+            if (group == null) continue;
+            for (var ne : ge.getValue().entrySet()) {
+                String name = ne.getKey();
+                java.util.List<String> values = ne.getValue();
+                group.setAttribute(name, values);
+                stampSig(em,
+                        "UPDATE GROUP_ATTRIBUTE SET SIGNATURE = ? WHERE GROUP_ID = ? AND NAME = ?",
+                        sig, groupId, name);
+            }
+        }
+    }
+
+    private static void replayRemoveGroupAttribute(KeycloakSession session, RealmModel realm,
+                                                    List<Map<String, Object>> rows, EntityManager em) {
+        for (Map<String, Object> row : rows) {
+            String groupId = str(row, "GROUP_ID");
+            String name = str(row, "NAME");
+            GroupModel group = session.groups().getGroupById(realm, groupId);
+            if (group != null && name != null) group.removeAttribute(name);
+        }
+    }
+
+    // ----- ROLE -----
+
+    private static void replaySetRoleAttribute(KeycloakSession session, RealmModel realm,
+                                                List<Map<String, Object>> rows, String sig, EntityManager em) {
+        var grouped = groupByParentAndName(rows, "ROLE_ID");
+        for (var re : grouped.entrySet()) {
+            String roleId = re.getKey();
+            RoleModel role = session.roles().getRoleById(realm, roleId);
+            if (role == null) continue;
+            for (var ne : re.getValue().entrySet()) {
+                String name = ne.getKey();
+                java.util.List<String> values = ne.getValue();
+                role.setAttribute(name, values);
+                stampSig(em,
+                        "UPDATE ROLE_ATTRIBUTE SET SIGNATURE = ? WHERE ROLE_ID = ? AND NAME = ?",
+                        sig, roleId, name);
+            }
+        }
+    }
+
+    private static void replayRemoveRoleAttribute(KeycloakSession session, RealmModel realm,
+                                                   List<Map<String, Object>> rows, EntityManager em) {
+        for (Map<String, Object> row : rows) {
+            String roleId = str(row, "ROLE_ID");
+            String name = str(row, "NAME");
+            RoleModel role = session.roles().getRoleById(realm, roleId);
+            if (role != null && name != null) role.removeAttribute(name);
+        }
+    }
+
+    // ----- REALM -----
+
+    private static void replaySetRealmAttribute(KeycloakSession session, RealmModel realm,
+                                                 List<Map<String, Object>> rows, String sig, EntityManager em) {
+        for (Map<String, Object> row : rows) {
+            String realmId = str(row, "REALM_ID");
+            String name = str(row, "NAME");
+            String value = str(row, "VALUE");
+            RealmModel target = (realmId != null && realmId.equals(realm.getId()))
+                    ? realm
+                    : session.realms().getRealm(realmId);
+            if (target == null || name == null) continue;
+            target.setAttribute(name, value);
+            stampSig(em,
+                    "UPDATE REALM_ATTRIBUTE SET SIGNATURE = ? WHERE REALM_ID = ? AND NAME = ?",
+                    sig, realmId, name);
+        }
+    }
+
+    private static void replayRemoveRealmAttribute(KeycloakSession session, RealmModel realm,
+                                                    List<Map<String, Object>> rows, EntityManager em) {
+        for (Map<String, Object> row : rows) {
+            String realmId = str(row, "REALM_ID");
+            String name = str(row, "NAME");
+            RealmModel target = (realmId != null && realmId.equals(realm.getId()))
+                    ? realm
+                    : session.realms().getRealm(realmId);
+            if (target != null && name != null) target.removeAttribute(name);
+        }
+    }
+
+    private static void stampSig(EntityManager em, String sql, String sig, String parentId, String name) {
+        if (sig == null || sig.isEmpty()) return;
+        Query q = em.createNativeQuery(sql);
+        q.setParameter(1, sig);
+        q.setParameter(2, parentId);
+        q.setParameter(3, name);
+        q.executeUpdate();
+    }
+
+    // -------------------------------------------------------------------------
     // BASELINE_APPROVAL replay — sweep every snapshotted unsigned row and
     // stamp the final signature on it. Uses native SQL because the SIGNATURE
     // column was added by a Liquibase changelog at the DB layer; the JPA
@@ -425,6 +656,60 @@ public class IgaReplayDispatcher {
         updatePairs(em, tables, "client_scope_role_mapping",
                 "UPDATE CLIENT_SCOPE_ROLE_MAPPING SET SIGNATURE = ? WHERE SCOPE_ID = ? AND ROLE_ID = ?",
                 "SCOPE_ID", "ROLE_ID", finalSignature);
+
+        // ----- Attribute tables (1.8.0+) -----
+        // Each row in the snapshot carries (parent_id, name, value); the
+        // composite key for the row is (parent_id, name, value) because
+        // multi-value attributes share parent_id+name. We update by
+        // (parent_id, name) AND VALUE = ? to pin a single row precisely.
+        updateAttributeRows(em, tables, "user_attribute",
+                "UPDATE USER_ATTRIBUTE SET SIGNATURE = ? WHERE USER_ID = ? AND NAME = ? AND VALUE %s",
+                "user_id", finalSignature);
+        updateAttributeRows(em, tables, "client_attributes",
+                "UPDATE CLIENT_ATTRIBUTES SET SIGNATURE = ? WHERE CLIENT_ID = ? AND NAME = ? AND VALUE %s",
+                "client_id", finalSignature);
+        updateAttributeRows(em, tables, "client_scope_attributes",
+                "UPDATE CLIENT_SCOPE_ATTRIBUTES SET SIGNATURE = ? WHERE SCOPE_ID = ? AND NAME = ? AND VALUE %s",
+                "scope_id", finalSignature);
+        updateAttributeRows(em, tables, "group_attribute",
+                "UPDATE GROUP_ATTRIBUTE SET SIGNATURE = ? WHERE GROUP_ID = ? AND NAME = ? AND VALUE %s",
+                "group_id", finalSignature);
+        updateAttributeRows(em, tables, "role_attribute",
+                "UPDATE ROLE_ATTRIBUTE SET SIGNATURE = ? WHERE ROLE_ID = ? AND NAME = ? AND VALUE %s",
+                "role_id", finalSignature);
+        updateAttributeRows(em, tables, "realm_attribute",
+                "UPDATE REALM_ATTRIBUTE SET SIGNATURE = ? WHERE REALM_ID = ? AND NAME = ? AND VALUE %s",
+                "realm_id", finalSignature);
+    }
+
+    /**
+     * Update each (parent_id, name, value) attribute row with the final
+     * signature. The {@code value} column may be NULL (single-value clear),
+     * so we pick {@code IS NULL} vs {@code = ?} dynamically — most JDBC
+     * drivers don't fold {@code col = NULL} to TRUE for NULL values.
+     */
+    private static void updateAttributeRows(EntityManager em, JsonNode tables, String tableName,
+                                             String sqlTemplate, String parentKey, String sig) {
+        JsonNode arr = tables.get(tableName);
+        if (arr == null || !arr.isArray() || arr.size() == 0) return;
+
+        int total = 0;
+        for (JsonNode row : arr) {
+            JsonNode pid = row.get(parentKey);
+            JsonNode name = row.get("name");
+            JsonNode value = row.get("value");
+            if (pid == null || pid.isNull() || name == null || name.isNull()) continue;
+
+            boolean valueNull = (value == null || value.isNull());
+            String sql = String.format(sqlTemplate, valueNull ? "IS NULL" : "= ?");
+            Query q = em.createNativeQuery(sql);
+            q.setParameter(1, sig);
+            q.setParameter(2, pid.asText());
+            q.setParameter(3, name.asText());
+            if (!valueNull) q.setParameter(4, value.asText());
+            total += q.executeUpdate();
+        }
+        log.debugf("BASELINE replay: updated %d rows in %s", total, tableName);
     }
 
     /**

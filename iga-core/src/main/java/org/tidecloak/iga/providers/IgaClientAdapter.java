@@ -9,6 +9,7 @@ import org.keycloak.models.jpa.ClientAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
 
 import jakarta.persistence.EntityManager;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -64,6 +65,54 @@ public class IgaClientAdapter extends ClientAdapter {
         service.create(realm, "CLIENT", clientId, "REMOVE_SCOPE",
                 List.of(Map.of("CLIENT_ID", clientId, "SCOPE_ID", scope.getId())),
                 null);
+    }
+
+    // -------------------------------------------------------------------------
+    // Attribute interception (CLIENT_ATTRIBUTES).
+    //
+    // Same one-pending-CR-per-entity rule as the rest of the inline-pattern
+    // operations: admins must drain a client's pending CR before issuing
+    // another one for that client.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void setAttribute(String name, String value) {
+        if (!isIgaActive()) {
+            super.setAttribute(name, value);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientId = getId();
+        checkNoPendingCr(service, clientId);
+        Map<String, Object> row = new HashMap<>();
+        row.put("CLIENT_ID", clientId);
+        row.put("NAME", name);
+        row.put("VALUE", value);
+        service.create(realm, "CLIENT", clientId, "SET_CLIENT_ATTRIBUTE",
+                List.of(row), null);
+    }
+
+    @Override
+    public void removeAttribute(String name) {
+        if (!isIgaActive()) {
+            super.removeAttribute(name);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientId = getId();
+        checkNoPendingCr(service, clientId);
+        Map<String, Object> row = new HashMap<>();
+        row.put("CLIENT_ID", clientId);
+        row.put("NAME", name);
+        service.create(realm, "CLIENT", clientId, "REMOVE_CLIENT_ATTRIBUTE",
+                List.of(row), null);
+    }
+
+    private void checkNoPendingCr(IgaChangeRequestService service, String clientId) {
+        var existing = service.findPending(realm.getId(), "CLIENT", clientId);
+        if (existing != null) {
+            throw new IgaConflictException(existing.getId());
+        }
     }
 
     @Override

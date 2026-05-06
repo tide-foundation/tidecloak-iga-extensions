@@ -9,6 +9,8 @@ import org.keycloak.models.jpa.UserAdapter;
 import org.keycloak.models.jpa.entities.UserEntity;
 
 import jakarta.persistence.EntityManager;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -96,6 +98,81 @@ public class IgaUserAdapter extends UserAdapter {
         service.create(realm, "USER", userId, "LEAVE_GROUPS",
                 List.of(Map.of("USER", userId, "GROUP", group.getId())),
                 requestedBy);
+    }
+
+    // -------------------------------------------------------------------------
+    // Attribute interception (USER_ATTRIBUTE)
+    //
+    // KNOWN LIMITATION: the existing one-pending-CR-per-entity rule means that
+    // if an admin sets attribute A on user U, then tries to set attribute B on
+    // the same user before the first CR is approved/denied, the second attempt
+    // returns 409 IgaConflictException. Admins must drain the existing pending
+    // CR (approve or deny) before issuing a new one for the same entity.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void setSingleAttribute(String name, String value) {
+        if (!isIgaActive()) {
+            super.setSingleAttribute(name, value);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String userId = getId();
+        checkNoPendingCr(service, userId);
+        Map<String, Object> row = new HashMap<>();
+        row.put("USER_ID", userId);
+        row.put("NAME", name);
+        row.put("VALUE", value);
+        service.create(realm, "USER", userId, "SET_USER_ATTRIBUTE",
+                List.of(row), getCurrentUserId());
+    }
+
+    @Override
+    public void setAttribute(String name, List<String> values) {
+        if (!isIgaActive()) {
+            super.setAttribute(name, values);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String userId = getId();
+        checkNoPendingCr(service, userId);
+        // Multi-value: emit one row per value so replay can persist each one.
+        List<Map<String, Object>> rows = new ArrayList<>();
+        if (values != null) {
+            for (String v : values) {
+                Map<String, Object> row = new HashMap<>();
+                row.put("USER_ID", userId);
+                row.put("NAME", name);
+                row.put("VALUE", v);
+                rows.add(row);
+            }
+        }
+        if (rows.isEmpty()) {
+            // Empty values means "remove all" — represent as a single null-value
+            // row so replay can detect it as a clear.
+            Map<String, Object> row = new HashMap<>();
+            row.put("USER_ID", userId);
+            row.put("NAME", name);
+            row.put("VALUE", null);
+            rows.add(row);
+        }
+        service.create(realm, "USER", userId, "SET_USER_ATTRIBUTE", rows, getCurrentUserId());
+    }
+
+    @Override
+    public void removeAttribute(String name) {
+        if (!isIgaActive()) {
+            super.removeAttribute(name);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String userId = getId();
+        checkNoPendingCr(service, userId);
+        Map<String, Object> row = new HashMap<>();
+        row.put("USER_ID", userId);
+        row.put("NAME", name);
+        service.create(realm, "USER", userId, "REMOVE_USER_ATTRIBUTE",
+                List.of(row), getCurrentUserId());
     }
 
     private void checkNoPendingCr(IgaChangeRequestService service, String userId) {
