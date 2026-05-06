@@ -386,11 +386,10 @@ public class IgaReplayDispatcher {
     // Approach: rebuild the attribute(s) by calling the underlying model's
     // setAttribute/removeAttribute (with IGA_REPLAY_ACTIVE = true so the IGA
     // wrappers pass straight through), then UPDATE the just-written rows with
-    // the final signature via native SQL. Native SQL is required because the
-    // SIGNATURE column on USER_ATTRIBUTE / CLIENT_ATTRIBUTES /
-    // CLIENT_SCOPE_ATTRIBUTES / GROUP_ATTRIBUTE / ROLE_ATTRIBUTE /
-    // REALM_ATTRIBUTE is added by Liquibase only — the JPA entities in
-    // model-jpa do not declare a signature field.
+    // the final signature via JPQL. The attribute entities
+    // (UserAttributeEntity / ClientAttributeEntity / ClientScopeAttributeEntity
+    // / GroupAttributeEntity / RoleAttributeEntity / RealmAttributeEntity) all
+    // declare a {@code signature} field (see tidecloak-override).
     //
     // Multi-value SET requests carry one row per value. We group rows by
     // (parent_id, name) so the model write is a single setAttribute(name,
@@ -425,8 +424,9 @@ public class IgaReplayDispatcher {
                 String name = ne.getKey();
                 java.util.List<String> values = ne.getValue();
                 user.setAttribute(name, values);
-                stampSig(em,
-                        "UPDATE USER_ATTRIBUTE SET SIGNATURE = ? WHERE USER_ID = ? AND NAME = ?",
+                stampSigJpql(em,
+                        "UPDATE UserAttributeEntity e SET e.signature = :sig " +
+                                "WHERE e.user.id = :pid AND e.name = :name",
                         sig, userId, name);
             }
         }
@@ -453,8 +453,9 @@ public class IgaReplayDispatcher {
             ClientModel client = session.clients().getClientById(realm, clientId);
             if (client == null || name == null) continue;
             client.setAttribute(name, value);
-            stampSig(em,
-                    "UPDATE CLIENT_ATTRIBUTES SET SIGNATURE = ? WHERE CLIENT_ID = ? AND NAME = ?",
+            stampSigJpql(em,
+                    "UPDATE ClientAttributeEntity e SET e.signature = :sig " +
+                            "WHERE e.client.id = :pid AND e.name = :name",
                     sig, clientId, name);
         }
     }
@@ -480,8 +481,9 @@ public class IgaReplayDispatcher {
             ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
             if (scope == null || name == null) continue;
             scope.setAttribute(name, value);
-            stampSig(em,
-                    "UPDATE CLIENT_SCOPE_ATTRIBUTES SET SIGNATURE = ? WHERE SCOPE_ID = ? AND NAME = ?",
+            stampSigJpql(em,
+                    "UPDATE ClientScopeAttributeEntity e SET e.signature = :sig " +
+                            "WHERE e.clientScope.id = :pid AND e.name = :name",
                     sig, scopeId, name);
         }
     }
@@ -509,8 +511,9 @@ public class IgaReplayDispatcher {
                 String name = ne.getKey();
                 java.util.List<String> values = ne.getValue();
                 group.setAttribute(name, values);
-                stampSig(em,
-                        "UPDATE GROUP_ATTRIBUTE SET SIGNATURE = ? WHERE GROUP_ID = ? AND NAME = ?",
+                stampSigJpql(em,
+                        "UPDATE GroupAttributeEntity e SET e.signature = :sig " +
+                                "WHERE e.group.id = :pid AND e.name = :name",
                         sig, groupId, name);
             }
         }
@@ -539,8 +542,9 @@ public class IgaReplayDispatcher {
                 String name = ne.getKey();
                 java.util.List<String> values = ne.getValue();
                 role.setAttribute(name, values);
-                stampSig(em,
-                        "UPDATE ROLE_ATTRIBUTE SET SIGNATURE = ? WHERE ROLE_ID = ? AND NAME = ?",
+                stampSigJpql(em,
+                        "UPDATE RoleAttributeEntity e SET e.signature = :sig " +
+                                "WHERE e.role.id = :pid AND e.name = :name",
                         sig, roleId, name);
             }
         }
@@ -569,8 +573,9 @@ public class IgaReplayDispatcher {
                     : session.realms().getRealm(realmId);
             if (target == null || name == null) continue;
             target.setAttribute(name, value);
-            stampSig(em,
-                    "UPDATE REALM_ATTRIBUTE SET SIGNATURE = ? WHERE REALM_ID = ? AND NAME = ?",
+            stampSigJpql(em,
+                    "UPDATE RealmAttributeEntity e SET e.signature = :sig " +
+                            "WHERE e.realm.id = :pid AND e.name = :name",
                     sig, realmId, name);
         }
     }
@@ -587,13 +592,18 @@ public class IgaReplayDispatcher {
         }
     }
 
-    private static void stampSig(EntityManager em, String sql, String sig, String parentId, String name) {
+    /**
+     * Run a JPQL UPDATE that stamps the final signature on every row of an
+     * attribute entity matching (parent_id, name). Multi-value attributes share
+     * the (parent_id, name) tuple — every row gets the same signature.
+     */
+    private static void stampSigJpql(EntityManager em, String jpql, String sig, String parentId, String name) {
         if (sig == null || sig.isEmpty()) return;
-        Query q = em.createNativeQuery(sql);
-        q.setParameter(1, sig);
-        q.setParameter(2, parentId);
-        q.setParameter(3, name);
-        q.executeUpdate();
+        em.createQuery(jpql)
+                .setParameter("sig", sig)
+                .setParameter("pid", parentId)
+                .setParameter("name", name)
+                .executeUpdate();
     }
 
     // -------------------------------------------------------------------------
@@ -661,35 +671,42 @@ public class IgaReplayDispatcher {
         // Each row in the snapshot carries (parent_id, name, value); the
         // composite key for the row is (parent_id, name, value) because
         // multi-value attributes share parent_id+name. We update by
-        // (parent_id, name) AND VALUE = ? to pin a single row precisely.
-        updateAttributeRows(em, tables, "user_attribute",
-                "UPDATE USER_ATTRIBUTE SET SIGNATURE = ? WHERE USER_ID = ? AND NAME = ? AND VALUE %s",
+        // (parent_id, name) AND value = :val to pin a single row precisely
+        // (or "value IS NULL" when value is null).
+        updateAttributeRowsJpql(em, tables, "user_attribute",
+                "UPDATE UserAttributeEntity e SET e.signature = :sig " +
+                        "WHERE e.user.id = :pid AND e.name = :name AND e.value %s",
                 "user_id", finalSignature);
-        updateAttributeRows(em, tables, "client_attributes",
-                "UPDATE CLIENT_ATTRIBUTES SET SIGNATURE = ? WHERE CLIENT_ID = ? AND NAME = ? AND VALUE %s",
+        updateAttributeRowsJpql(em, tables, "client_attributes",
+                "UPDATE ClientAttributeEntity e SET e.signature = :sig " +
+                        "WHERE e.client.id = :pid AND e.name = :name AND e.value %s",
                 "client_id", finalSignature);
-        updateAttributeRows(em, tables, "client_scope_attributes",
-                "UPDATE CLIENT_SCOPE_ATTRIBUTES SET SIGNATURE = ? WHERE SCOPE_ID = ? AND NAME = ? AND VALUE %s",
+        updateAttributeRowsJpql(em, tables, "client_scope_attributes",
+                "UPDATE ClientScopeAttributeEntity e SET e.signature = :sig " +
+                        "WHERE e.clientScope.id = :pid AND e.name = :name AND e.value %s",
                 "scope_id", finalSignature);
-        updateAttributeRows(em, tables, "group_attribute",
-                "UPDATE GROUP_ATTRIBUTE SET SIGNATURE = ? WHERE GROUP_ID = ? AND NAME = ? AND VALUE %s",
+        updateAttributeRowsJpql(em, tables, "group_attribute",
+                "UPDATE GroupAttributeEntity e SET e.signature = :sig " +
+                        "WHERE e.group.id = :pid AND e.name = :name AND e.value %s",
                 "group_id", finalSignature);
-        updateAttributeRows(em, tables, "role_attribute",
-                "UPDATE ROLE_ATTRIBUTE SET SIGNATURE = ? WHERE ROLE_ID = ? AND NAME = ? AND VALUE %s",
+        updateAttributeRowsJpql(em, tables, "role_attribute",
+                "UPDATE RoleAttributeEntity e SET e.signature = :sig " +
+                        "WHERE e.role.id = :pid AND e.name = :name AND e.value %s",
                 "role_id", finalSignature);
-        updateAttributeRows(em, tables, "realm_attribute",
-                "UPDATE REALM_ATTRIBUTE SET SIGNATURE = ? WHERE REALM_ID = ? AND NAME = ? AND VALUE %s",
+        updateAttributeRowsJpql(em, tables, "realm_attribute",
+                "UPDATE RealmAttributeEntity e SET e.signature = :sig " +
+                        "WHERE e.realm.id = :pid AND e.name = :name AND e.value %s",
                 "realm_id", finalSignature);
     }
 
     /**
      * Update each (parent_id, name, value) attribute row with the final
-     * signature. The {@code value} column may be NULL (single-value clear),
-     * so we pick {@code IS NULL} vs {@code = ?} dynamically — most JDBC
-     * drivers don't fold {@code col = NULL} to TRUE for NULL values.
+     * signature using JPQL. The {@code value} field may be NULL (single-value
+     * clear), so we pick {@code IS NULL} vs {@code = :val} dynamically — JPQL
+     * (like SQL) does not fold {@code col = NULL} to TRUE for NULL values.
      */
-    private static void updateAttributeRows(EntityManager em, JsonNode tables, String tableName,
-                                             String sqlTemplate, String parentKey, String sig) {
+    private static void updateAttributeRowsJpql(EntityManager em, JsonNode tables, String tableName,
+                                                 String jpqlTemplate, String parentKey, String sig) {
         JsonNode arr = tables.get(tableName);
         if (arr == null || !arr.isArray() || arr.size() == 0) return;
 
@@ -701,12 +718,12 @@ public class IgaReplayDispatcher {
             if (pid == null || pid.isNull() || name == null || name.isNull()) continue;
 
             boolean valueNull = (value == null || value.isNull());
-            String sql = String.format(sqlTemplate, valueNull ? "IS NULL" : "= ?");
-            Query q = em.createNativeQuery(sql);
-            q.setParameter(1, sig);
-            q.setParameter(2, pid.asText());
-            q.setParameter(3, name.asText());
-            if (!valueNull) q.setParameter(4, value.asText());
+            String jpql = String.format(jpqlTemplate, valueNull ? "IS NULL" : "= :val");
+            Query q = em.createQuery(jpql)
+                    .setParameter("sig", sig)
+                    .setParameter("pid", pid.asText())
+                    .setParameter("name", name.asText());
+            if (!valueNull) q.setParameter("val", value.asText());
             total += q.executeUpdate();
         }
         log.debugf("BASELINE replay: updated %d rows in %s", total, tableName);
