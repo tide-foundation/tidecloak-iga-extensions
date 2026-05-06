@@ -224,7 +224,7 @@ public class IgaAdminResource {
                 .setParameter("changeRequestId", cr.getId())
                 .getResultList();
 
-        if (all.size() >= signer.getThreshold(realm)) {
+        if (all.size() >= signer.getThreshold(session, realm, cr)) {
             String finalSignature = signer.combineFinal(session, cr, all);
             IgaReplayDispatcher.replay(session, cr, finalSignature);
         }

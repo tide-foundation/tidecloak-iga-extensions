@@ -20,6 +20,11 @@ import java.util.UUID;
  * Default {@link IgaSigner} that performs no cryptography. It simply records
  * the authorizing admin's username as the "signature" and combines all the
  * recorded usernames + timestamps into a small JSON array.
+ *
+ * <p>Scope-based authorization is enforced via {@link IgaScopeResolver} before
+ * the authorization is persisted: when a group, role or client affected by
+ * the change request carries an {@code iga.approverRole} attribute, the admin
+ * must hold the named realm role (or roles, when {@code iga.scopeMode=all}).
  */
 public class SimpleNameSigner implements IgaSigner {
 
@@ -42,6 +47,10 @@ public class SimpleNameSigner implements IgaSigner {
                                          IgaChangeRequestEntity cr,
                                          UserModel admin,
                                          String signaturePayload) {
+        RealmModel realm = session.realms().getRealm(cr.getRealmId());
+        IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
+        IgaScopeResolver.requireApprover(realm, admin, scope);
+
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         IgaAuthorizationEntity auth = new IgaAuthorizationEntity();
         auth.setId(UUID.randomUUID().toString());
@@ -76,15 +85,9 @@ public class SimpleNameSigner implements IgaSigner {
     }
 
     @Override
-    public int getThreshold(RealmModel realm) {
-        String val = realm.getAttribute("iga.threshold");
-        if (val != null) {
-            try {
-                return Integer.parseInt(val);
-            } catch (NumberFormatException ignored) {
-            }
-        }
-        return 1;
+    public int getThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr) {
+        IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
+        return IgaScopeResolver.resolveThreshold(realm, scope);
     }
 
     @Override

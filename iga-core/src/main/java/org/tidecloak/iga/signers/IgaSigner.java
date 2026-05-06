@@ -22,7 +22,12 @@ public interface IgaSigner extends Provider {
     String getId();
 
     /**
-     * Record one admin's authorization on a change request.
+     * Validate the admin can approve the given change request and persist the
+     * authorization record. Implementations MUST consult any scope-based
+     * approval policies attached to the entities affected by the CR
+     * (see {@link IgaScopeResolver}) and throw a JAX-RS
+     * {@link jakarta.ws.rs.ForbiddenException} when the admin lacks the
+     * required approver role(s).
      *
      * @param session          Keycloak session
      * @param cr               the change request being authorized
@@ -43,7 +48,9 @@ public interface IgaSigner extends Provider {
                         List<IgaAuthorizationEntity> authorizations);
 
     /**
-     * Threshold for this realm. Defaults to realm attribute "iga.threshold" or 1.
+     * Threshold for THIS specific change request. Implementations consult
+     * scope policies attached to the affected entities and the realm fallback
+     * attribute {@code iga.threshold}.
      */
-    int getThreshold(RealmModel realm);
+    int getThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr);
 }
