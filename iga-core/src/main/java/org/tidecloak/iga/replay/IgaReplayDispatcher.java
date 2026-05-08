@@ -750,10 +750,10 @@ public class IgaReplayDispatcher {
 
     /**
      * Replay CREATE_CLIENT_SCOPE: realm.addClientScope(id, name) plus optional
-     * protocol/description, then stamp the attestation onto CLIENT_SCOPE via
-     * native SQL. JPQL via {@code e.attestation} is not yet possible until the
-     * tidecloak-override commit lands an {@code attestation} field on
-     * {@code ClientScopeEntity}; native SQL writes to the Liquibase column.
+     * protocol/description, then stamp the attestation onto ClientScopeEntity
+     * via JPQL. Requires the tidecloak-override commit that adds an
+     * {@code attestation} field on {@code ClientScopeEntity}; without it this
+     * UPDATE will fail at runtime.
      */
     private static void replayCreateClientScope(KeycloakSession session, RealmModel realm,
                                                   List<Map<String, Object>> rows, String sig, EntityManager em) {
@@ -768,9 +768,9 @@ public class IgaReplayDispatcher {
             if (protocol != null) scope.setProtocol(protocol);
             if (description != null) scope.setDescription(description);
             if (sig != null && !sig.isEmpty()) {
-                em.createNativeQuery("UPDATE CLIENT_SCOPE SET ATTESTATION = ? WHERE ID = ?")
-                        .setParameter(1, sig)
-                        .setParameter(2, id)
+                em.createQuery("UPDATE ClientScopeEntity e SET e.attestation = :sig WHERE e.id = :id")
+                        .setParameter("sig", sig)
+                        .setParameter("id", id)
                         .executeUpdate();
             }
         }
