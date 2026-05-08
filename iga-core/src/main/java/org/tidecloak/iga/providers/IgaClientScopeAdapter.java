@@ -2,6 +2,7 @@ package org.tidecloak.iga.providers;
 
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.ProtocolMapperModel;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.jpa.ClientScopeAdapter;
@@ -9,6 +10,7 @@ import org.keycloak.models.jpa.entities.ClientScopeEntity;
 
 import jakarta.persistence.EntityManager;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -108,5 +110,70 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         if (existing != null) {
             throw new IgaConflictException(existing.getId());
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Protocol mappers on a CLIENT_SCOPE.
+    //
+    // Mirrors IgaClientAdapter, but the parent entity_type is "CLIENT_SCOPE"
+    // so IgaScopeResolver can resolve scope rules against the parent scope
+    // attributes when one is configured.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public ProtocolMapperModel addProtocolMapper(ProtocolMapperModel model) {
+        if (!isIgaActive()) {
+            return super.addProtocolMapper(model);
+        }
+        IgaChangeRequestService service = getService();
+        String scopeId = getId();
+        String mapperId = model.getId() != null ? model.getId() : java.util.UUID.randomUUID().toString();
+        service.create(realm, "CLIENT_SCOPE", scopeId, "ADD_PROTOCOL_MAPPER",
+                List.of(Map.of(
+                        "ID", mapperId,
+                        "NAME", model.getName(),
+                        "PROTOCOL", model.getProtocol(),
+                        "PROTOCOL_MAPPER_NAME", model.getProtocolMapper(),
+                        "CLIENT_SCOPE_ID", scopeId
+                )),
+                null);
+        model.setId(mapperId);
+        return model;
+    }
+
+    @Override
+    public void updateProtocolMapper(ProtocolMapperModel mapping) {
+        if (!isIgaActive()) {
+            super.updateProtocolMapper(mapping);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String scopeId = getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("ID", mapping.getId());
+        row.put("NAME", mapping.getName());
+        row.put("PROTOCOL", mapping.getProtocol());
+        row.put("PROTOCOL_MAPPER_NAME", mapping.getProtocolMapper());
+        row.put("CLIENT_SCOPE_ID", scopeId);
+        if (mapping.getConfig() != null) {
+            row.put("config", new LinkedHashMap<>(mapping.getConfig()));
+        }
+        service.create(realm, "CLIENT_SCOPE", scopeId, "UPDATE_PROTOCOL_MAPPER",
+                List.of(row), null);
+    }
+
+    @Override
+    public void removeProtocolMapper(ProtocolMapperModel mapping) {
+        if (!isIgaActive()) {
+            super.removeProtocolMapper(mapping);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String scopeId = getId();
+        Map<String, Object> row = new HashMap<>();
+        row.put("ID", mapping.getId());
+        row.put("CLIENT_SCOPE_ID", scopeId);
+        service.create(realm, "CLIENT_SCOPE", scopeId, "REMOVE_PROTOCOL_MAPPER",
+                List.of(row), null);
     }
 }

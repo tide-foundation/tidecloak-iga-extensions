@@ -246,6 +246,26 @@ public class IgaRealmProvider extends JpaRealmProvider {
     // -------------------------------------------------------------------------
 
     @Override
+    public ClientScopeModel addClientScope(RealmModel realm, String id, String name) {
+        if (isIgaActive(realm)) {
+            String resolvedId = (id != null) ? id : KeycloakModelUtils.generateId();
+            recordAndThrow(realm, "CLIENT_SCOPE", resolvedId, "CREATE_CLIENT_SCOPE",
+                    List.of(Map.of(
+                            "ID", resolvedId,
+                            "NAME", name,
+                            "REALM_ID", realm.getId(),
+                            "PROTOCOL", "openid-connect"
+                    )));
+            return null; // unreachable
+        }
+        ClientScopeModel base = super.addClientScope(realm, id, name);
+        if (base == null) return null;
+        ClientScopeEntity entity = em.find(ClientScopeEntity.class, base.getId());
+        if (entity == null) return base;
+        return new IgaClientScopeAdapter(realm, em, igaSession, entity);
+    }
+
+    @Override
     public ClientScopeModel getClientScopeById(RealmModel realm, String id) {
         ClientScopeModel base = super.getClientScopeById(realm, id);
         if (base == null) return null;

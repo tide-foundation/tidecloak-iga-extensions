@@ -9,9 +9,12 @@ import org.keycloak.models.jpa.ClientAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
 
 import jakarta.persistence.EntityManager;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Wraps ClientAdapter and intercepts scope/mapper operations for IGA.
@@ -135,5 +138,80 @@ public class IgaClientAdapter extends ClientAdapter {
         // Return a stub model with the assigned id
         model.setId(mapperId);
         return model;
+    }
+
+    @Override
+    public void updateProtocolMapper(ProtocolMapperModel mapping) {
+        if (!isIgaActive()) {
+            super.updateProtocolMapper(mapping);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientId = getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("ID", mapping.getId());
+        row.put("NAME", mapping.getName());
+        row.put("PROTOCOL", mapping.getProtocol());
+        row.put("PROTOCOL_MAPPER_NAME", mapping.getProtocolMapper());
+        row.put("CLIENT_ID", clientId);
+        if (mapping.getConfig() != null) {
+            row.put("config", new LinkedHashMap<>(mapping.getConfig()));
+        }
+        service.create(realm, "CLIENT", clientId, "UPDATE_PROTOCOL_MAPPER",
+                List.of(row), null);
+    }
+
+    @Override
+    public void removeProtocolMapper(ProtocolMapperModel mapping) {
+        if (!isIgaActive()) {
+            super.removeProtocolMapper(mapping);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientId = getId();
+        Map<String, Object> row = new HashMap<>();
+        row.put("ID", mapping.getId());
+        row.put("CLIENT_ID", clientId);
+        service.create(realm, "CLIENT", clientId, "REMOVE_PROTOCOL_MAPPER",
+                List.of(row), null);
+    }
+
+    // -------------------------------------------------------------------------
+    // Web origins / redirect URIs — full set replacement.
+    //
+    // The CLIENT_WEB_ORIGINS and CLIENT_REDIRECT_URIS tables are list-collection
+    // tables and have no entity class for per-row attestation. Coverage is
+    // provided by the change request snapshot in rows_json; on replay we apply
+    // the full set.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void setWebOrigins(Set<String> webOrigins) {
+        if (!isIgaActive()) {
+            super.setWebOrigins(webOrigins);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientId = getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("client_id", clientId);
+        row.put("values", webOrigins == null ? new ArrayList<String>() : new ArrayList<>(webOrigins));
+        service.create(realm, "CLIENT", clientId, "UPDATE_CLIENT_WEB_ORIGINS",
+                List.of(row), null);
+    }
+
+    @Override
+    public void setRedirectUris(Set<String> redirectUris) {
+        if (!isIgaActive()) {
+            super.setRedirectUris(redirectUris);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientId = getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("client_id", clientId);
+        row.put("values", redirectUris == null ? new ArrayList<String>() : new ArrayList<>(redirectUris));
+        service.create(realm, "CLIENT", clientId, "UPDATE_CLIENT_REDIRECT_URIS",
+                List.of(row), null);
     }
 }

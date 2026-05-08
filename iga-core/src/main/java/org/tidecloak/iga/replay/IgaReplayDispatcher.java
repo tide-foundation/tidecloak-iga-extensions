@@ -113,6 +113,16 @@ public class IgaReplayDispatcher {
             case "SET_REALM_ATTRIBUTE" -> replaySetRealmAttribute(session, realm, rows, finalAttestation, em);
             case "REMOVE_REALM_ATTRIBUTE" -> replayRemoveRealmAttribute(session, realm, rows, em);
 
+            // ----- Realm column / structural writes -----
+            case "SET_REALM_CONFIG" -> replaySetRealmConfig(session, realm, rows);
+            case "UPDATE_CLIENT_WEB_ORIGINS" -> replayUpdateClientWebOrigins(session, realm, rows);
+            case "UPDATE_CLIENT_REDIRECT_URIS" -> replayUpdateClientRedirectUris(session, realm, rows);
+            case "ADD_REALM_DEFAULT_GROUP" -> replayAddRealmDefaultGroup(session, realm, rows);
+            case "REMOVE_REALM_DEFAULT_GROUP" -> replayRemoveRealmDefaultGroup(session, realm, rows);
+            case "CREATE_CLIENT_SCOPE" -> replayCreateClientScope(session, realm, rows, finalAttestation, em);
+            case "UPDATE_PROTOCOL_MAPPER" -> replayUpdateProtocolMapper(session, realm, rows, finalAttestation, em);
+            case "REMOVE_PROTOCOL_MAPPER" -> replayRemoveProtocolMapper(session, realm, rows);
+
             default -> throw new IllegalArgumentException("Unknown IGA action: " + cr.getActionType());
         }
 
@@ -592,6 +602,240 @@ public class IgaReplayDispatcher {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Realm column / structural replays.
+    //
+    // These replay handlers re-invoke the underlying model setters with
+    // IGA_REPLAY_ACTIVE = "true" so the IGA wrappers pass through. Where an
+    // attestation can sensibly land on an entity we stamp it; for the
+    // list-collection tables (web_origins, redirect_uris, realm_default_groups)
+    // we accept that the change request itself is the audit record.
+    // -------------------------------------------------------------------------
+
+    private static void replaySetRealmConfig(KeycloakSession session, RealmModel realm,
+                                              List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String key = str(row, "key");
+            String value = str(row, "value");
+            if (key == null) continue;
+            applyRealmConfig(session, realm, key, value);
+        }
+        // No per-attestation write — REALM has no ATTESTATION column. The CR
+        // is the audit trail.
+    }
+
+    private static void applyRealmConfig(KeycloakSession session, RealmModel realm, String key, String value) {
+        switch (key) {
+            // Tier 1
+            case "setEnabled" -> realm.setEnabled(parseBool(value));
+            case "setSslRequired" -> {
+                if (value != null) realm.setSslRequired(org.keycloak.common.enums.SslRequired.valueOf(value));
+            }
+            case "setPasswordPolicy" -> {
+                if (value != null) realm.setPasswordPolicy(org.keycloak.models.PasswordPolicy.parse(session, value));
+            }
+            case "setOTPPolicy" -> realm.setOTPPolicy(parseOtpPolicy(value));
+            case "setBruteForceProtected" -> realm.setBruteForceProtected(parseBool(value));
+            case "setPermanentLockout" -> realm.setPermanentLockout(parseBool(value));
+            case "setRegistrationAllowed" -> realm.setRegistrationAllowed(parseBool(value));
+            case "setVerifyEmail" -> realm.setVerifyEmail(parseBool(value));
+            case "setResetPasswordAllowed" -> realm.setResetPasswordAllowed(parseBool(value));
+            case "setBrowserFlow" -> realm.setBrowserFlow(lookupFlow(realm, value));
+            case "setDirectGrantFlow" -> realm.setDirectGrantFlow(lookupFlow(realm, value));
+            case "setResetCredentialsFlow" -> realm.setResetCredentialsFlow(lookupFlow(realm, value));
+            case "setClientAuthenticationFlow" -> realm.setClientAuthenticationFlow(lookupFlow(realm, value));
+            case "setNotBefore" -> realm.setNotBefore(parseInt(value));
+            // Tier 2
+            case "setName" -> realm.setName(value);
+            case "setRegistrationFlow" -> realm.setRegistrationFlow(lookupFlow(realm, value));
+            case "setFirstBrokerLoginFlow" -> realm.setFirstBrokerLoginFlow(lookupFlow(realm, value));
+            case "setRegistrationEmailAsUsername" -> realm.setRegistrationEmailAsUsername(parseBool(value));
+            case "setEditUsernameAllowed" -> realm.setEditUsernameAllowed(parseBool(value));
+            case "setLoginWithEmailAllowed" -> realm.setLoginWithEmailAllowed(parseBool(value));
+            case "setDuplicateEmailsAllowed" -> realm.setDuplicateEmailsAllowed(parseBool(value));
+            case "setRememberMe" -> realm.setRememberMe(parseBool(value));
+            case "setFailureFactor" -> realm.setFailureFactor(parseInt(value));
+            case "setMaxFailureWaitSeconds" -> realm.setMaxFailureWaitSeconds(parseInt(value));
+            default -> log.warnf("SET_REALM_CONFIG replay: unknown setter '%s' — skipping", key);
+        }
+    }
+
+    private static org.keycloak.models.AuthenticationFlowModel lookupFlow(RealmModel realm, String flowId) {
+        if (flowId == null) return null;
+        return realm.getAuthenticationFlowById(flowId);
+    }
+
+    private static org.keycloak.models.OTPPolicy parseOtpPolicy(String value) {
+        if (value == null) return null;
+        // Format: algorithm:digits:period:initialCounter:lookAheadWindow:type:reusable
+        String[] parts = value.split(":", -1);
+        if (parts.length < 7) {
+            log.warnf("setOTPPolicy replay: malformed value '%s'", value);
+            return null;
+        }
+        org.keycloak.models.OTPPolicy p = new org.keycloak.models.OTPPolicy();
+        p.setAlgorithm(parts[0]);
+        p.setDigits(Integer.parseInt(parts[1]));
+        p.setPeriod(Integer.parseInt(parts[2]));
+        p.setInitialCounter(Integer.parseInt(parts[3]));
+        p.setLookAheadWindow(Integer.parseInt(parts[4]));
+        p.setType(parts[5]);
+        p.setCodeReusable(Boolean.parseBoolean(parts[6]));
+        return p;
+    }
+
+    private static boolean parseBool(String v) {
+        return Boolean.parseBoolean(v);
+    }
+
+    private static int parseInt(String v) {
+        if (v == null) return 0;
+        try { return Integer.parseInt(v); } catch (NumberFormatException e) { return 0; }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static java.util.List<String> strList(Object v) {
+        if (v == null) return java.util.Collections.emptyList();
+        if (v instanceof java.util.List<?> raw) {
+            java.util.List<String> out = new java.util.ArrayList<>(raw.size());
+            for (Object o : raw) out.add(o == null ? null : o.toString());
+            return out;
+        }
+        return java.util.Collections.emptyList();
+    }
+
+    private static void replayUpdateClientWebOrigins(KeycloakSession session, RealmModel realm,
+                                                      List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String clientId = str(row, "client_id");
+            if (clientId == null) clientId = str(row, "CLIENT_ID");
+            ClientModel client = clientId == null ? null : session.clients().getClientById(realm, clientId);
+            if (client == null) continue;
+            client.setWebOrigins(new java.util.LinkedHashSet<>(strList(row.get("values"))));
+        }
+    }
+
+    private static void replayUpdateClientRedirectUris(KeycloakSession session, RealmModel realm,
+                                                        List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String clientId = str(row, "client_id");
+            if (clientId == null) clientId = str(row, "CLIENT_ID");
+            ClientModel client = clientId == null ? null : session.clients().getClientById(realm, clientId);
+            if (client == null) continue;
+            client.setRedirectUris(new java.util.LinkedHashSet<>(strList(row.get("values"))));
+        }
+    }
+
+    private static void replayAddRealmDefaultGroup(KeycloakSession session, RealmModel realm,
+                                                    List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String groupId = str(row, "GROUP_ID");
+            if (groupId == null) continue;
+            GroupModel group = session.groups().getGroupById(realm, groupId);
+            if (group == null) continue;
+            realm.addDefaultGroup(group);
+        }
+    }
+
+    private static void replayRemoveRealmDefaultGroup(KeycloakSession session, RealmModel realm,
+                                                       List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String groupId = str(row, "GROUP_ID");
+            if (groupId == null) continue;
+            GroupModel group = session.groups().getGroupById(realm, groupId);
+            if (group == null) continue;
+            realm.removeDefaultGroup(group);
+        }
+    }
+
+    /**
+     * Replay CREATE_CLIENT_SCOPE: realm.addClientScope(id, name) plus optional
+     * protocol/description, then stamp the attestation onto CLIENT_SCOPE via
+     * native SQL. JPQL via {@code e.attestation} is not yet possible until the
+     * tidecloak-override commit lands an {@code attestation} field on
+     * {@code ClientScopeEntity}; native SQL writes to the Liquibase column.
+     */
+    private static void replayCreateClientScope(KeycloakSession session, RealmModel realm,
+                                                  List<Map<String, Object>> rows, String sig, EntityManager em) {
+        for (Map<String, Object> row : rows) {
+            String id = str(row, "ID");
+            String name = str(row, "NAME");
+            String protocol = str(row, "PROTOCOL");
+            String description = str(row, "DESCRIPTION");
+            if (id == null || name == null) continue;
+            ClientScopeModel scope = realm.addClientScope(id, name);
+            if (scope == null) continue;
+            if (protocol != null) scope.setProtocol(protocol);
+            if (description != null) scope.setDescription(description);
+            if (sig != null && !sig.isEmpty()) {
+                em.createNativeQuery("UPDATE CLIENT_SCOPE SET ATTESTATION = ? WHERE ID = ?")
+                        .setParameter(1, sig)
+                        .setParameter(2, id)
+                        .executeUpdate();
+            }
+        }
+    }
+
+    private static void replayUpdateProtocolMapper(KeycloakSession session, RealmModel realm,
+                                                    List<Map<String, Object>> rows, String sig, EntityManager em) {
+        for (Map<String, Object> row : rows) {
+            String mapperId = str(row, "ID");
+            if (mapperId == null) continue;
+            String clientId = str(row, "CLIENT_ID");
+            String scopeId = str(row, "CLIENT_SCOPE_ID");
+            org.keycloak.models.ProtocolMapperModel mapper = new org.keycloak.models.ProtocolMapperModel();
+            mapper.setId(mapperId);
+            mapper.setName(str(row, "NAME"));
+            mapper.setProtocol(str(row, "PROTOCOL"));
+            mapper.setProtocolMapper(str(row, "PROTOCOL_MAPPER_NAME"));
+            Object cfg = row.get("config");
+            if (cfg instanceof Map<?, ?> cfgMap) {
+                java.util.Map<String, String> config = new java.util.LinkedHashMap<>();
+                for (Map.Entry<?, ?> e : cfgMap.entrySet()) {
+                    if (e.getKey() != null) {
+                        config.put(e.getKey().toString(), e.getValue() == null ? null : e.getValue().toString());
+                    }
+                }
+                mapper.setConfig(config);
+            } else {
+                mapper.setConfig(new java.util.LinkedHashMap<>());
+            }
+            if (clientId != null) {
+                ClientModel client = session.clients().getClientById(realm, clientId);
+                if (client != null) client.updateProtocolMapper(mapper);
+            } else if (scopeId != null) {
+                ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
+                if (scope != null) scope.updateProtocolMapper(mapper);
+            }
+            if (sig != null && !sig.isEmpty()) {
+                em.createQuery("UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.id = :id")
+                        .setParameter("sig", sig)
+                        .setParameter("id", mapperId)
+                        .executeUpdate();
+            }
+        }
+    }
+
+    private static void replayRemoveProtocolMapper(KeycloakSession session, RealmModel realm,
+                                                    List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String mapperId = str(row, "ID");
+            if (mapperId == null) continue;
+            String clientId = str(row, "CLIENT_ID");
+            String scopeId = str(row, "CLIENT_SCOPE_ID");
+            org.keycloak.models.ProtocolMapperModel mapper = new org.keycloak.models.ProtocolMapperModel();
+            mapper.setId(mapperId);
+            if (clientId != null) {
+                ClientModel client = session.clients().getClientById(realm, clientId);
+                if (client != null) client.removeProtocolMapper(mapper);
+            } else if (scopeId != null) {
+                ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
+                if (scope != null) scope.removeProtocolMapper(mapper);
+            }
+            // No attestation write — the row is being deleted.
+        }
+    }
+
     /**
      * Run a JPQL UPDATE that stamps the final attestation on every row of an
      * attribute entity matching (parent_id, name). Multi-value attributes share
@@ -642,6 +886,9 @@ public class IgaReplayDispatcher {
                 "id", finalAttestation);
         updateBatchById(em, tables, "client",
                 "UPDATE CLIENT SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",
+                "id", finalAttestation);
+        updateBatchById(em, tables, "client_scope",
+                "UPDATE CLIENT_SCOPE SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",
                 "id", finalAttestation);
         updateBatchById(em, tables, "protocol_mapper",
                 "UPDATE PROTOCOL_MAPPER SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",

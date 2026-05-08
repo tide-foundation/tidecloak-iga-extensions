@@ -84,13 +84,36 @@ public final class IgaScopeResolver {
                 break;
             case "ASSIGN_SCOPE":
             case "REMOVE_SCOPE":
-            case "ADD_PROTOCOL_MAPPER":
                 resolveClientScopesFromRows(session, realm, cr, scope, "CLIENT_ID");
+                break;
+            case "ADD_PROTOCOL_MAPPER":
+            case "UPDATE_PROTOCOL_MAPPER":
+            case "REMOVE_PROTOCOL_MAPPER":
+                // Protocol mappers may live under a client OR a client scope.
+                // Walk both possible parent ids; the row-shape carries one or
+                // the other so the lookups for the absent one are no-ops.
+                resolveClientScopesFromRows(session, realm, cr, scope, "CLIENT_ID");
+                // Client scope scopes have no first-class iga.approverRole
+                // today, so we don't walk CLIENT_SCOPE_ID as a parent — falls
+                // through to the realm default.
                 break;
             case "SCOPE_ADD_ROLE":
             case "SCOPE_REMOVE_ROLE":
                 // Client scope scopes have no first-class iga.approverRole today;
                 // fall through to the realm default.
+                break;
+            // -----------------------------------------------------------------
+            // Realm-level structural writes — no per-entity scope; fall through
+            // to the realm-default approver/threshold.
+            // -----------------------------------------------------------------
+            case "SET_REALM_CONFIG":
+            case "ADD_REALM_DEFAULT_GROUP":
+            case "REMOVE_REALM_DEFAULT_GROUP":
+            case "CREATE_CLIENT_SCOPE":
+                break;
+            case "UPDATE_CLIENT_WEB_ORIGINS":
+            case "UPDATE_CLIENT_REDIRECT_URIS":
+                resolveClientScopesFromRows(session, realm, cr, scope, "client_id");
                 break;
             // -----------------------------------------------------------------
             // Attribute writes — resolve scopes from the parent entity. The

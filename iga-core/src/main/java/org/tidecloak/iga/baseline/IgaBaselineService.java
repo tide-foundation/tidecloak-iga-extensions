@@ -40,6 +40,7 @@ public class IgaBaselineService {
     public static final String T_ROLE = "keycloak_role";
     public static final String T_GROUP = "keycloak_group";
     public static final String T_CLIENT = "client";
+    public static final String T_CLIENT_SCOPE = "client_scope";
     public static final String T_PROTOCOL_MAPPER = "protocol_mapper";
     public static final String T_USER_ROLE = "user_role_mapping";
     public static final String T_USER_GROUP = "user_group_membership";
@@ -165,6 +166,12 @@ public class IgaBaselineService {
                 "SELECT ID AS id, CLIENT_ID AS \"_clientId\" " +
                         "FROM CLIENT WHERE REALM_ID = ? AND ATTESTATION IS NULL",
                 List.of(realmId), List.of("id", "_clientId")));
+
+        // CLIENT_SCOPE — added in IGA 2.0.0. Direct REALM_ID column.
+        out.put(T_CLIENT_SCOPE, queryRows(
+                "SELECT ID AS id, NAME AS \"_name\" " +
+                        "FROM CLIENT_SCOPE WHERE REALM_ID = ? AND ATTESTATION IS NULL",
+                List.of(realmId), List.of("id", "_name")));
 
         // PROTOCOL_MAPPER: scoped to clients in the realm. Each row also carries
         // its parent client id for replay convenience.
