@@ -876,42 +876,50 @@ public class IgaReplayDispatcher {
 
         // Info tables — single id column
         updateBatchById(em, tables, "user_entity",
-                "UPDATE USER_ENTITY SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",
+                "UPDATE UserEntity e SET e.attestation = :sig WHERE e.id IN :ids AND e.attestation IS NULL",
                 "id", finalAttestation);
         updateBatchById(em, tables, "keycloak_role",
-                "UPDATE KEYCLOAK_ROLE SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",
+                "UPDATE RoleEntity e SET e.attestation = :sig WHERE e.id IN :ids AND e.attestation IS NULL",
                 "id", finalAttestation);
         updateBatchById(em, tables, "keycloak_group",
-                "UPDATE KEYCLOAK_GROUP SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",
+                "UPDATE GroupEntity e SET e.attestation = :sig WHERE e.id IN :ids AND e.attestation IS NULL",
                 "id", finalAttestation);
         updateBatchById(em, tables, "client",
-                "UPDATE CLIENT SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",
+                "UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id IN :ids AND e.attestation IS NULL",
                 "id", finalAttestation);
         updateBatchById(em, tables, "client_scope",
-                "UPDATE CLIENT_SCOPE SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",
+                "UPDATE ClientScopeEntity e SET e.attestation = :sig WHERE e.id IN :ids AND e.attestation IS NULL",
                 "id", finalAttestation);
         updateBatchById(em, tables, "protocol_mapper",
-                "UPDATE PROTOCOL_MAPPER SET ATTESTATION = ? WHERE ID IN (:ids) AND ATTESTATION IS NULL",
+                "UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.id IN :ids AND e.attestation IS NULL",
                 "id", finalAttestation);
 
-        // Relationship tables — composite key match, one update per row
+        // Relationship tables — composite key match, one update per row.
+        // JPQL navigates @ManyToOne relations via dotted paths (e.g. e.user.id);
+        // plain @Column scalars are referenced by their field name.
         updatePairs(em, tables, "user_role_mapping",
-                "UPDATE USER_ROLE_MAPPING SET ATTESTATION = ? WHERE USER_ID = ? AND ROLE_ID = ?",
+                "UPDATE UserRoleMappingEntity e SET e.attestation = :sig " +
+                        "WHERE e.user.id = :k1 AND e.roleId = :k2 AND e.attestation IS NULL",
                 "USER_ID", "ROLE_ID", finalAttestation);
         updatePairs(em, tables, "user_group_membership",
-                "UPDATE USER_GROUP_MEMBERSHIP SET ATTESTATION = ? WHERE USER_ID = ? AND GROUP_ID = ?",
+                "UPDATE UserGroupMembershipEntity e SET e.attestation = :sig " +
+                        "WHERE e.user.id = :k1 AND e.groupId = :k2 AND e.attestation IS NULL",
                 "USER", "GROUP", finalAttestation);
         updatePairs(em, tables, "group_role_mapping",
-                "UPDATE GROUP_ROLE_MAPPING SET ATTESTATION = ? WHERE GROUP_ID = ? AND ROLE_ID = ?",
+                "UPDATE GroupRoleMappingEntity e SET e.attestation = :sig " +
+                        "WHERE e.group.id = :k1 AND e.roleId = :k2 AND e.attestation IS NULL",
                 "GROUP", "ROLE", finalAttestation);
         updatePairs(em, tables, "composite_role",
-                "UPDATE COMPOSITE_ROLE SET ATTESTATION = ? WHERE COMPOSITE = ? AND CHILD_ROLE = ?",
+                "UPDATE CompositeRoleEntity e SET e.attestation = :sig " +
+                        "WHERE e.parentRole.id = :k1 AND e.childRole.id = :k2 AND e.attestation IS NULL",
                 "COMPOSITE", "CHILD_ROLE", finalAttestation);
         updatePairs(em, tables, "client_scope_client",
-                "UPDATE CLIENT_SCOPE_CLIENT SET ATTESTATION = ? WHERE CLIENT_ID = ? AND SCOPE_ID = ?",
+                "UPDATE ClientScopeClientMappingEntity e SET e.attestation = :sig " +
+                        "WHERE e.clientId = :k1 AND e.clientScopeId = :k2 AND e.attestation IS NULL",
                 "CLIENT_ID", "SCOPE_ID", finalAttestation);
         updatePairs(em, tables, "client_scope_role_mapping",
-                "UPDATE CLIENT_SCOPE_ROLE_MAPPING SET ATTESTATION = ? WHERE SCOPE_ID = ? AND ROLE_ID = ?",
+                "UPDATE ClientScopeRoleMappingEntity e SET e.attestation = :sig " +
+                        "WHERE e.clientScope.id = :k1 AND e.role.id = :k2 AND e.attestation IS NULL",
                 "SCOPE_ID", "ROLE_ID", finalAttestation);
 
         // ----- Attribute tables (1.8.0+) -----
@@ -977,11 +985,12 @@ public class IgaReplayDispatcher {
     }
 
     /**
-     * Batch-update rows by primary id using a single native SQL statement.
-     * Uses the Hibernate-supported `:ids` IN-list parameter form.
+     * Batch-update rows by primary id using a single JPQL statement.
+     * The JPQL is expected to use named parameters {@code :sig} (final
+     * attestation) and {@code :ids} (collection of row ids).
      */
     private static void updateBatchById(EntityManager em, JsonNode tables, String tableName,
-                                         String sql, String idKey, String sig) {
+                                         String jpql, String idKey, String sig) {
         JsonNode arr = tables.get(tableName);
         if (arr == null || !arr.isArray() || arr.size() == 0) return;
 
@@ -992,8 +1001,8 @@ public class IgaReplayDispatcher {
         }
         if (ids.isEmpty()) return;
 
-        Query q = em.createNativeQuery(sql);
-        q.setParameter(1, sig);
+        Query q = em.createQuery(jpql);
+        q.setParameter("sig", sig);
         q.setParameter("ids", ids);
         int updated = q.executeUpdate();
         log.debugf("BASELINE replay: updated %d rows in %s", updated, tableName);
@@ -1001,10 +1010,10 @@ public class IgaReplayDispatcher {
 
     /**
      * Run one UPDATE per row for relationship tables (composite primary key).
-     * Native SQL with positional parameters: ?1=attestation, ?2=key1, ?3=key2.
+     * JPQL with named parameters: :sig=attestation, :k1=key1, :k2=key2.
      */
     private static void updatePairs(EntityManager em, JsonNode tables, String tableName,
-                                     String sql, String key1, String key2, String sig) {
+                                     String jpql, String key1, String key2, String sig) {
         JsonNode arr = tables.get(tableName);
         if (arr == null || !arr.isArray() || arr.size() == 0) return;
 
@@ -1013,10 +1022,10 @@ public class IgaReplayDispatcher {
             JsonNode v1 = row.get(key1);
             JsonNode v2 = row.get(key2);
             if (v1 == null || v1.isNull() || v2 == null || v2.isNull()) continue;
-            Query q = em.createNativeQuery(sql);
-            q.setParameter(1, sig);
-            q.setParameter(2, v1.asText());
-            q.setParameter(3, v2.asText());
+            Query q = em.createQuery(jpql);
+            q.setParameter("sig", sig);
+            q.setParameter("k1", v1.asText());
+            q.setParameter("k2", v2.asText());
             total += q.executeUpdate();
         }
         log.debugf("BASELINE replay: updated %d rows in %s", total, tableName);

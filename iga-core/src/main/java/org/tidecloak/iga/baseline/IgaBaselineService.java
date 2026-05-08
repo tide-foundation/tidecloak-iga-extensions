@@ -21,10 +21,11 @@ import java.util.UUID;
  * every unsigned row in every IGA-tracked table for a realm, so that one
  * approval ceremony retroactively signs all pre-IGA data.
  *
- * Read queries use native SQL because the ATTESTATION column was added by the
- * IGA Liquibase changelog at the DB layer; the Keycloak JPA entity classes
- * do not (yet) declare an `attestation` field. Native SQL keeps us decoupled
- * from any future JPA mapping.
+ * Read queries use JPQL: every IGA-tracked entity (USER_ENTITY, KEYCLOAK_ROLE,
+ * KEYCLOAK_GROUP, CLIENT, CLIENT_SCOPE, PROTOCOL_MAPPER, the relationship
+ * tables, and the six attribute tables) declares an {@code attestation} field
+ * via the tidecloak-override module, so we can navigate them with the standard
+ * Keycloak JPA pattern.
  */
 public class IgaBaselineService {
 
@@ -145,178 +146,152 @@ public class IgaBaselineService {
     private Map<String, List<Map<String, Object>>> collectAllUnsignedRows(String realmId) {
         Map<String, List<Map<String, Object>>> out = new LinkedHashMap<>();
 
-        // -------- Info tables (have a direct REALM_ID column or equivalent) --------
+        // -------- Info tables (have a direct realm field or equivalent) --------
 
         out.put(T_USER, queryRows(
-                "SELECT ID AS id, USERNAME AS \"_username\", EMAIL AS \"_email\" " +
-                        "FROM USER_ENTITY WHERE REALM_ID = ? AND ATTESTATION IS NULL",
+                "SELECT u.id, u.username, u.email FROM UserEntity u " +
+                        "WHERE u.realmId = ?1 AND u.attestation IS NULL",
                 List.of(realmId), List.of("id", "_username", "_email")));
 
         out.put(T_ROLE, queryRows(
-                "SELECT ID AS id, NAME AS \"_name\" " +
-                        "FROM KEYCLOAK_ROLE WHERE REALM_ID = ? AND ATTESTATION IS NULL",
+                "SELECT r.id, r.name FROM RoleEntity r " +
+                        "WHERE r.realmId = ?1 AND r.attestation IS NULL",
                 List.of(realmId), List.of("id", "_name")));
 
+        // GroupEntity's realm field is named `realm` (column REALM_ID).
         out.put(T_GROUP, queryRows(
-                "SELECT ID AS id, NAME AS \"_name\" " +
-                        "FROM KEYCLOAK_GROUP WHERE REALM_ID = ? AND ATTESTATION IS NULL",
+                "SELECT g.id, g.name FROM GroupEntity g " +
+                        "WHERE g.realm = ?1 AND g.attestation IS NULL",
                 List.of(realmId), List.of("id", "_name")));
 
         out.put(T_CLIENT, queryRows(
-                "SELECT ID AS id, CLIENT_ID AS \"_clientId\" " +
-                        "FROM CLIENT WHERE REALM_ID = ? AND ATTESTATION IS NULL",
+                "SELECT c.id, c.clientId FROM ClientEntity c " +
+                        "WHERE c.realmId = ?1 AND c.attestation IS NULL",
                 List.of(realmId), List.of("id", "_clientId")));
 
-        // CLIENT_SCOPE — added in IGA 2.0.0. Direct REALM_ID column.
+        // CLIENT_SCOPE — added in IGA 2.0.0. Direct realmId field.
         out.put(T_CLIENT_SCOPE, queryRows(
-                "SELECT ID AS id, NAME AS \"_name\" " +
-                        "FROM CLIENT_SCOPE WHERE REALM_ID = ? AND ATTESTATION IS NULL",
+                "SELECT cs.id, cs.name FROM ClientScopeEntity cs " +
+                        "WHERE cs.realmId = ?1 AND cs.attestation IS NULL",
                 List.of(realmId), List.of("id", "_name")));
 
         // PROTOCOL_MAPPER: scoped to clients in the realm. Each row also carries
         // its parent client id for replay convenience.
         out.put(T_PROTOCOL_MAPPER, queryRows(
-                "SELECT pm.ID AS id, pm.NAME AS \"_name\", c.ID AS \"_clientId\" " +
-                        "FROM PROTOCOL_MAPPER pm " +
-                        "JOIN CLIENT c ON pm.CLIENT_ID = c.ID " +
-                        "WHERE c.REALM_ID = ? AND pm.ATTESTATION IS NULL",
+                "SELECT pm.id, pm.name, pm.client.id FROM ProtocolMapperEntity pm " +
+                        "WHERE pm.client.realmId = ?1 AND pm.attestation IS NULL",
                 List.of(realmId), List.of("id", "_name", "_clientId")));
 
         // -------- Relationship tables (no direct realm column) --------
 
-        // USER_ROLE_MAPPING — join via USER_ENTITY for realm scope, also via
-        // KEYCLOAK_ROLE for the friendly role name display.
+        // USER_ROLE_MAPPING — navigate through `user` for realm scope; explicit
+        // entity join to RoleEntity by id for the friendly role name.
         out.put(T_USER_ROLE, queryRows(
-                "SELECT urm.USER_ID AS \"USER_ID\", urm.ROLE_ID AS \"ROLE_ID\", " +
-                        "u.USERNAME AS \"_user\", r.NAME AS \"_role\" " +
-                        "FROM USER_ROLE_MAPPING urm " +
-                        "JOIN USER_ENTITY u ON urm.USER_ID = u.ID " +
-                        "LEFT JOIN KEYCLOAK_ROLE r ON urm.ROLE_ID = r.ID " +
-                        "WHERE u.REALM_ID = ? AND urm.ATTESTATION IS NULL",
+                "SELECT urm.user.id, urm.roleId, urm.user.username, r.name " +
+                        "FROM UserRoleMappingEntity urm " +
+                        "LEFT JOIN RoleEntity r ON r.id = urm.roleId " +
+                        "WHERE urm.user.realmId = ?1 AND urm.attestation IS NULL",
                 List.of(realmId), List.of("USER_ID", "ROLE_ID", "_user", "_role")));
 
-        // USER_GROUP_MEMBERSHIP — column names map to USER_ID, GROUP_ID; the
-        // payload exposes them under the canonical "USER" / "GROUP" labels
-        // already used by the rest of the IGA replay code.
+        // USER_GROUP_MEMBERSHIP — payload still uses canonical "USER"/"GROUP" labels.
         out.put(T_USER_GROUP, queryRows(
-                "SELECT ugm.USER_ID AS \"USER\", ugm.GROUP_ID AS \"GROUP\", " +
-                        "u.USERNAME AS \"_user\", g.NAME AS \"_group\" " +
-                        "FROM USER_GROUP_MEMBERSHIP ugm " +
-                        "JOIN USER_ENTITY u ON ugm.USER_ID = u.ID " +
-                        "LEFT JOIN KEYCLOAK_GROUP g ON ugm.GROUP_ID = g.ID " +
-                        "WHERE u.REALM_ID = ? AND ugm.ATTESTATION IS NULL",
+                "SELECT ugm.user.id, ugm.groupId, ugm.user.username, g.name " +
+                        "FROM UserGroupMembershipEntity ugm " +
+                        "LEFT JOIN GroupEntity g ON g.id = ugm.groupId " +
+                        "WHERE ugm.user.realmId = ?1 AND ugm.attestation IS NULL",
                 List.of(realmId), List.of("USER", "GROUP", "_user", "_group")));
 
-        // GROUP_ROLE_MAPPING — group has REALM_ID directly
+        // GROUP_ROLE_MAPPING — group has realm field directly
         out.put(T_GROUP_ROLE, queryRows(
-                "SELECT grm.GROUP_ID AS \"GROUP\", grm.ROLE_ID AS \"ROLE\", " +
-                        "g.NAME AS \"_group\", r.NAME AS \"_role\" " +
-                        "FROM GROUP_ROLE_MAPPING grm " +
-                        "JOIN KEYCLOAK_GROUP g ON grm.GROUP_ID = g.ID " +
-                        "LEFT JOIN KEYCLOAK_ROLE r ON grm.ROLE_ID = r.ID " +
-                        "WHERE g.REALM_ID = ? AND grm.ATTESTATION IS NULL",
+                "SELECT grm.group.id, grm.roleId, grm.group.name, r.name " +
+                        "FROM GroupRoleMappingEntity grm " +
+                        "LEFT JOIN RoleEntity r ON r.id = grm.roleId " +
+                        "WHERE grm.group.realm = ?1 AND grm.attestation IS NULL",
                 List.of(realmId), List.of("GROUP", "ROLE", "_group", "_role")));
 
-        // COMPOSITE_ROLE — join via parent role for realm scope
+        // COMPOSITE_ROLE — entity uses parentRole/childRole (both ManyToOne)
         out.put(T_COMPOSITE, queryRows(
-                "SELECT cr.COMPOSITE AS \"COMPOSITE\", cr.CHILD_ROLE AS \"CHILD_ROLE\", " +
-                        "rp.NAME AS \"_parent\", rc.NAME AS \"_child\" " +
-                        "FROM COMPOSITE_ROLE cr " +
-                        "JOIN KEYCLOAK_ROLE rp ON cr.COMPOSITE = rp.ID " +
-                        "LEFT JOIN KEYCLOAK_ROLE rc ON cr.CHILD_ROLE = rc.ID " +
-                        "WHERE rp.REALM_ID = ? AND cr.ATTESTATION IS NULL",
+                "SELECT cr.parentRole.id, cr.childRole.id, cr.parentRole.name, cr.childRole.name " +
+                        "FROM CompositeRoleEntity cr " +
+                        "WHERE cr.parentRole.realmId = ?1 AND cr.attestation IS NULL",
                 List.of(realmId), List.of("COMPOSITE", "CHILD_ROLE", "_parent", "_child")));
 
-        // CLIENT_SCOPE_CLIENT — join via CLIENT for realm scope
+        // CLIENT_SCOPE_CLIENT — clientId/clientScopeId are plain @Column scalars,
+        // so we explicit-join their parent entities for the friendly names.
         out.put(T_CLIENT_SCOPE_CLIENT, queryRows(
-                "SELECT csc.CLIENT_ID AS \"CLIENT_ID\", csc.SCOPE_ID AS \"SCOPE_ID\", " +
-                        "c.CLIENT_ID AS \"_client\", cs.NAME AS \"_scope\" " +
-                        "FROM CLIENT_SCOPE_CLIENT csc " +
-                        "JOIN CLIENT c ON csc.CLIENT_ID = c.ID " +
-                        "LEFT JOIN CLIENT_SCOPE cs ON csc.SCOPE_ID = cs.ID " +
-                        "WHERE c.REALM_ID = ? AND csc.ATTESTATION IS NULL",
+                "SELECT csc.clientId, csc.clientScopeId, c.clientId, cs.name " +
+                        "FROM ClientScopeClientMappingEntity csc " +
+                        "JOIN ClientEntity c ON c.id = csc.clientId " +
+                        "LEFT JOIN ClientScopeEntity cs ON cs.id = csc.clientScopeId " +
+                        "WHERE c.realmId = ?1 AND csc.attestation IS NULL",
                 List.of(realmId), List.of("CLIENT_ID", "SCOPE_ID", "_client", "_scope")));
 
-        // CLIENT_SCOPE_ROLE_MAPPING — CLIENT_SCOPE has REALM_ID
+        // CLIENT_SCOPE_ROLE_MAPPING — clientScope and role are ManyToOne
         out.put(T_CLIENT_SCOPE_ROLE, queryRows(
-                "SELECT csrm.SCOPE_ID AS \"SCOPE_ID\", csrm.ROLE_ID AS \"ROLE_ID\", " +
-                        "cs.NAME AS \"_scope\", r.NAME AS \"_role\" " +
-                        "FROM CLIENT_SCOPE_ROLE_MAPPING csrm " +
-                        "JOIN CLIENT_SCOPE cs ON csrm.SCOPE_ID = cs.ID " +
-                        "LEFT JOIN KEYCLOAK_ROLE r ON csrm.ROLE_ID = r.ID " +
-                        "WHERE cs.REALM_ID = ? AND csrm.ATTESTATION IS NULL",
+                "SELECT csrm.clientScope.id, csrm.role.id, csrm.clientScope.name, csrm.role.name " +
+                        "FROM ClientScopeRoleMappingEntity csrm " +
+                        "WHERE csrm.clientScope.realmId = ?1 AND csrm.attestation IS NULL",
                 List.of(realmId), List.of("SCOPE_ID", "ROLE_ID", "_scope", "_role")));
 
         // -------- Attribute tables (intercepted by IGA 1.8.0+) --------
         // Each table joins to its parent entity for realm scoping.
 
-        // USER_ATTRIBUTE — join to USER_ENTITY for realm scope
+        // USER_ATTRIBUTE — UserEntity has realmId
         out.put(T_USER_ATTRIBUTE, queryRows(
-                "SELECT ua.USER_ID AS \"user_id\", ua.NAME AS \"name\", ua.VALUE AS \"value\" " +
-                        "FROM USER_ATTRIBUTE ua " +
-                        "JOIN USER_ENTITY u ON ua.USER_ID = u.ID " +
-                        "WHERE u.REALM_ID = ? AND ua.ATTESTATION IS NULL",
+                "SELECT ua.user.id, ua.name, ua.value FROM UserAttributeEntity ua " +
+                        "WHERE ua.user.realmId = ?1 AND ua.attestation IS NULL",
                 List.of(realmId), List.of("user_id", "name", "value")));
 
-        // CLIENT_ATTRIBUTES — join to CLIENT for realm scope
+        // CLIENT_ATTRIBUTES — ClientEntity has realmId
         out.put(T_CLIENT_ATTRIBUTES, queryRows(
-                "SELECT ca.CLIENT_ID AS \"client_id\", ca.NAME AS \"name\", ca.VALUE AS \"value\" " +
-                        "FROM CLIENT_ATTRIBUTES ca " +
-                        "JOIN CLIENT c ON ca.CLIENT_ID = c.ID " +
-                        "WHERE c.REALM_ID = ? AND ca.ATTESTATION IS NULL",
+                "SELECT ca.client.id, ca.name, ca.value FROM ClientAttributeEntity ca " +
+                        "WHERE ca.client.realmId = ?1 AND ca.attestation IS NULL",
                 List.of(realmId), List.of("client_id", "name", "value")));
 
-        // CLIENT_SCOPE_ATTRIBUTES — CLIENT_SCOPE has REALM_ID
+        // CLIENT_SCOPE_ATTRIBUTES — ClientScopeEntity has realmId
         out.put(T_CLIENT_SCOPE_ATTRIBUTES, queryRows(
-                "SELECT csa.SCOPE_ID AS \"scope_id\", csa.NAME AS \"name\", csa.VALUE AS \"value\" " +
-                        "FROM CLIENT_SCOPE_ATTRIBUTES csa " +
-                        "JOIN CLIENT_SCOPE cs ON csa.SCOPE_ID = cs.ID " +
-                        "WHERE cs.REALM_ID = ? AND csa.ATTESTATION IS NULL",
+                "SELECT csa.clientScope.id, csa.name, csa.value FROM ClientScopeAttributeEntity csa " +
+                        "WHERE csa.clientScope.realmId = ?1 AND csa.attestation IS NULL",
                 List.of(realmId), List.of("scope_id", "name", "value")));
 
-        // GROUP_ATTRIBUTE — KEYCLOAK_GROUP has REALM_ID
+        // GROUP_ATTRIBUTE — GroupEntity's realm field is `realm`
         out.put(T_GROUP_ATTRIBUTE, queryRows(
-                "SELECT ga.GROUP_ID AS \"group_id\", ga.NAME AS \"name\", ga.VALUE AS \"value\" " +
-                        "FROM GROUP_ATTRIBUTE ga " +
-                        "JOIN KEYCLOAK_GROUP g ON ga.GROUP_ID = g.ID " +
-                        "WHERE g.REALM_ID = ? AND ga.ATTESTATION IS NULL",
+                "SELECT ga.group.id, ga.name, ga.value FROM GroupAttributeEntity ga " +
+                        "WHERE ga.group.realm = ?1 AND ga.attestation IS NULL",
                 List.of(realmId), List.of("group_id", "name", "value")));
 
-        // ROLE_ATTRIBUTE — KEYCLOAK_ROLE has REALM_ID
+        // ROLE_ATTRIBUTE — RoleEntity has realmId
         out.put(T_ROLE_ATTRIBUTE, queryRows(
-                "SELECT ra.ROLE_ID AS \"role_id\", ra.NAME AS \"name\", ra.VALUE AS \"value\" " +
-                        "FROM ROLE_ATTRIBUTE ra " +
-                        "JOIN KEYCLOAK_ROLE r ON ra.ROLE_ID = r.ID " +
-                        "WHERE r.REALM_ID = ? AND ra.ATTESTATION IS NULL",
+                "SELECT ra.role.id, ra.name, ra.value FROM RoleAttributeEntity ra " +
+                        "WHERE ra.role.realmId = ?1 AND ra.attestation IS NULL",
                 List.of(realmId), List.of("role_id", "name", "value")));
 
-        // REALM_ATTRIBUTE — direct REALM_ID column
+        // REALM_ATTRIBUTE — RealmEntity exposes id; navigate via the @ManyToOne realm
         out.put(T_REALM_ATTRIBUTE, queryRows(
-                "SELECT REALM_ID AS \"realm_id\", NAME AS \"name\", VALUE AS \"value\" " +
-                        "FROM REALM_ATTRIBUTE WHERE REALM_ID = ? AND ATTESTATION IS NULL",
+                "SELECT rea.realm.id, rea.name, rea.value FROM RealmAttributeEntity rea " +
+                        "WHERE rea.realm.id = ?1 AND rea.attestation IS NULL",
                 List.of(realmId), List.of("realm_id", "name", "value")));
 
         return out;
     }
 
     /**
-     * Run a positional native query and convert each result tuple into a
-     * Map<String, Object> using the supplied column-name list. Aliases set
-     * via SQL `AS` are honored on most JDBC drivers, but Hibernate's native
-     * query handling is inconsistent across drivers — so we use positional
-     * mapping to be robust.
+     * Run a positional JPQL query and convert each result tuple into a
+     * Map<String, Object> using the supplied column-name list. JPQL projections
+     * return {@code Object[]} (or a scalar for single-column SELECTs); we map
+     * positionally onto the supplied logical column names so the JSON snapshot
+     * shape is independent of the underlying entity/field naming.
      */
     @SuppressWarnings("unchecked")
-    private List<Map<String, Object>> queryRows(String sql, List<Object> params, List<String> columns) {
-        Query q = em.createNativeQuery(sql);
+    private List<Map<String, Object>> queryRows(String jpql, List<Object> params, List<String> columns) {
+        Query q = em.createQuery(jpql);
         for (int i = 0; i < params.size(); i++) {
             q.setParameter(i + 1, params.get(i));
         }
-        List<Object[]> rows = (List<Object[]>) q.getResultList();
+        List<Object> rows = q.getResultList();
         List<Map<String, Object>> out = new ArrayList<>(rows.size());
         for (Object o : rows) {
-            // Single-column rows come back as a scalar, not Object[]; we don't
-            // currently issue any single-column queries here but guard anyway.
+            // Single-column rows come back as a scalar, not Object[].
             Object[] arr = (o instanceof Object[]) ? (Object[]) o : new Object[]{o};
             Map<String, Object> row = new LinkedHashMap<>();
             for (int i = 0; i < columns.size() && i < arr.length; i++) {
