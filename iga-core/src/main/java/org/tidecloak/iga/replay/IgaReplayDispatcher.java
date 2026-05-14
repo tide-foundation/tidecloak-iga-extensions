@@ -67,32 +67,38 @@ public class IgaReplayDispatcher {
             case "CREATE_CLIENT" -> replayCreateClient(session, realm, rows, finalAttestation, em);
             case "ADD_PROTOCOL_MAPPER" -> replayAddProtocolMapper(session, realm, cr, rows, finalAttestation, em);
             case "GRANT_ROLES" -> replayRelationship(session, realm, rows, finalAttestation, em,
-                    "UPDATE UserRoleMappingEntity e SET e.attestation = :sig WHERE e.userId = :k1 AND e.roleId = :k2",
+                    "UPDATE UserRoleMappingEntity e SET e.attestation = :sig WHERE e.user.id = :k1 AND e.roleId = :k2",
+                    "USER_ID", "ROLE_ID",
                     r -> grantRoleDirect(session, realm, r));
             case "REVOKE_ROLES" -> replayRevoke(session, realm, rows, em,
                     r -> revokeRoleDirect(session, realm, r));
             case "JOIN_GROUPS" -> replayRelationship(session, realm, rows, finalAttestation, em,
-                    "UPDATE UserGroupMembershipEntity e SET e.attestation = :sig WHERE e.user = :k1 AND e.group = :k2",
+                    "UPDATE UserGroupMembershipEntity e SET e.attestation = :sig WHERE e.user.id = :k1 AND e.groupId = :k2",
+                    "USER", "GROUP",
                     r -> joinGroupDirect(session, realm, r));
             case "LEAVE_GROUPS" -> replayRevoke(session, realm, rows, em,
                     r -> leaveGroupDirect(session, realm, r));
             case "GROUP_GRANT_ROLES" -> replayRelationship(session, realm, rows, finalAttestation, em,
-                    "UPDATE GroupRoleMappingEntity e SET e.attestation = :sig WHERE e.group = :k1 AND e.role = :k2",
+                    "UPDATE GroupRoleMappingEntity e SET e.attestation = :sig WHERE e.group.id = :k1 AND e.roleId = :k2",
+                    "GROUP", "ROLE",
                     r -> groupGrantRoleDirect(session, realm, r));
             case "GROUP_REVOKE_ROLES" -> replayRevoke(session, realm, rows, em,
                     r -> groupRevokeRoleDirect(session, realm, r));
             case "ADD_COMPOSITE" -> replayRelationship(session, realm, rows, finalAttestation, em,
-                    "UPDATE CompositeRoleEntity e SET e.attestation = :sig WHERE e.composite = :k1 AND e.childRole = :k2",
+                    "UPDATE CompositeRoleEntity e SET e.attestation = :sig WHERE e.parentRole.id = :k1 AND e.childRole.id = :k2",
+                    "COMPOSITE", "CHILD_ROLE",
                     r -> addCompositeDirect(session, realm, r));
             case "REMOVE_COMPOSITE" -> replayRevoke(session, realm, rows, em,
                     r -> removeCompositeDirect(session, realm, r));
             case "ASSIGN_SCOPE" -> replayRelationship(session, realm, rows, finalAttestation, em,
                     "UPDATE ClientScopeClientMappingEntity e SET e.attestation = :sig WHERE e.clientId = :k1 AND e.clientScopeId = :k2",
+                    "CLIENT_ID", "SCOPE_ID",
                     r -> assignScopeDirect(session, realm, r));
             case "REMOVE_SCOPE" -> replayRevoke(session, realm, rows, em,
                     r -> removeScopeDirect(session, realm, r));
             case "SCOPE_ADD_ROLE" -> replayRelationship(session, realm, rows, finalAttestation, em,
-                    "UPDATE ClientScopeRoleMappingEntity e SET e.attestation = :sig WHERE e.clientScope = :k1 AND e.role = :k2",
+                    "UPDATE ClientScopeRoleMappingEntity e SET e.attestation = :sig WHERE e.clientScope.id = :k1 AND e.role.id = :k2",
+                    "SCOPE_ID", "ROLE_ID",
                     r -> scopeAddRoleDirect(session, realm, r));
             case "SCOPE_REMOVE_ROLE" -> replayRevoke(session, realm, rows, em,
                     r -> scopeRemoveRoleDirect(session, realm, r));
@@ -262,22 +268,22 @@ public class IgaReplayDispatcher {
 
     private static void replayRelationship(KeycloakSession session, RealmModel realm,
                                             List<Map<String, Object>> rows, String sig, EntityManager em,
-                                            String updateJpql, Consumer<Map<String, Object>> addOp) {
+                                            String updateJpql, String rowKey1, String rowKey2,
+                                            Consumer<Map<String, Object>> addOp) {
         for (Map<String, Object> row : rows) {
             addOp.accept(row);
         }
-        // Attestation update uses the first row's keys
-        if (!rows.isEmpty() && sig != null && !sig.isEmpty()) {
-            Map<String, Object> row = rows.get(0);
-            // Determine k1/k2 from the JPQL pattern — we extract via the row values by position
-            List<Object> keys = extractKeys(row, updateJpql);
-            if (keys.size() >= 2) {
-                em.createQuery(updateJpql)
-                        .setParameter("sig", sig)
-                        .setParameter("k1", keys.get(0))
-                        .setParameter("k2", keys.get(1))
-                        .executeUpdate();
-            }
+        // Stamp the attestation onto each row using the explicit row-key pair.
+        if (sig == null || sig.isEmpty()) return;
+        for (Map<String, Object> row : rows) {
+            String k1 = str(row, rowKey1);
+            String k2 = str(row, rowKey2);
+            if (k1 == null || k2 == null) continue;
+            em.createQuery(updateJpql)
+                    .setParameter("sig", sig)
+                    .setParameter("k1", k1)
+                    .setParameter("k2", k2)
+                    .executeUpdate();
         }
     }
 
@@ -1052,46 +1058,4 @@ public class IgaReplayDispatcher {
         return v != null ? v.toString() : null;
     }
 
-    /**
-     * Extract the two relationship key values from the row based on the JPQL WHERE clause params :k1 and :k2.
-     * We map the JPQL entity field names to row key names.
-     */
-    private static List<Object> extractKeys(Map<String, Object> row, String jpql) {
-        // Parse key names from JPQL: "e.fieldA = :k1 AND e.fieldB = :k2"
-        // Simple heuristic: look for patterns "e.<field> = :k1" and "e.<field> = :k2"
-        java.util.regex.Pattern k1Pat = java.util.regex.Pattern.compile("e\\.(\\w+)\\s*=\\s*:k1");
-        java.util.regex.Pattern k2Pat = java.util.regex.Pattern.compile("e\\.(\\w+)\\s*=\\s*:k2");
-        java.util.regex.Matcher m1 = k1Pat.matcher(jpql);
-        java.util.regex.Matcher m2 = k2Pat.matcher(jpql);
-        if (m1.find() && m2.find()) {
-            String field1 = m1.group(1);
-            String field2 = m2.group(1);
-            // Map JPA field names to row map keys (camelCase -> uppercase)
-            Object v1 = findValue(row, field1);
-            Object v2 = findValue(row, field2);
-            if (v1 != null && v2 != null) return List.of(v1, v2);
-        }
-        return List.of();
-    }
-
-    private static Object findValue(Map<String, Object> row, String jpaField) {
-        // Try exact match first, then uppercase
-        if (row.containsKey(jpaField)) return row.get(jpaField);
-        String upper = jpaField.toUpperCase();
-        if (row.containsKey(upper)) return row.get(upper);
-        // Try common mappings
-        return switch (jpaField) {
-            case "userId" -> row.get("USER_ID");
-            case "roleId" -> row.get("ROLE_ID");
-            case "user" -> row.get("USER");
-            case "group" -> row.get("GROUP");
-            case "role" -> row.get("ROLE");
-            case "composite" -> row.get("COMPOSITE");
-            case "childRole" -> row.get("CHILD_ROLE");
-            case "clientId" -> row.get("CLIENT_ID");
-            case "clientScopeId" -> row.get("SCOPE_ID");
-            case "clientScope" -> row.get("SCOPE_ID");
-            default -> null;
-        };
-    }
 }
