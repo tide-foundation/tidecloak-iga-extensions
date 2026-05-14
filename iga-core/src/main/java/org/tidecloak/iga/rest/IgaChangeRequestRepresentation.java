@@ -20,6 +20,8 @@ public class IgaChangeRequestRepresentation {
     private Long resolvedAt;
     private String resolvedBy;
     private long authorizationCount;
+    private List<IgaCrAuthorizerRepresentation> authorizers;
+    private boolean readyToCommit;
 
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
@@ -56,4 +58,10 @@ public class IgaChangeRequestRepresentation {
 
     public long getAuthorizationCount() { return authorizationCount; }
     public void setAuthorizationCount(long authorizationCount) { this.authorizationCount = authorizationCount; }
+
+    public List<IgaCrAuthorizerRepresentation> getAuthorizers() { return authorizers; }
+    public void setAuthorizers(List<IgaCrAuthorizerRepresentation> authorizers) { this.authorizers = authorizers; }
+
+    public boolean isReadyToCommit() { return readyToCommit; }
+    public void setReadyToCommit(boolean readyToCommit) { this.readyToCommit = readyToCommit; }
 }

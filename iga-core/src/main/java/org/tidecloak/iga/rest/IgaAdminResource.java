@@ -40,6 +40,7 @@ import org.tidecloak.iga.replay.IgaReplayDispatcher;
 import org.tidecloak.iga.baseline.IgaBaselineService;
 import org.tidecloak.iga.attestors.IgaAttestor;
 import org.tidecloak.iga.attestors.IgaAttestors;
+import org.tidecloak.iga.attestors.IgaScopeResolver;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.util.LinkedHashMap;
 
@@ -216,20 +217,94 @@ public class IgaAdminResource {
                     .build();
         }
 
+        // Reject a duplicate signature from the same admin (SimpleNameAttestor
+        // stores the admin's username in PARTIAL_SIG — see SimpleNameAttestor.record).
+        List<IgaAuthorizationEntity> existing = em.createNamedQuery(
+                        "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
+                .setParameter("changeRequestId", cr.getId())
+                .getResultList();
+        for (IgaAuthorizationEntity a : existing) {
+            if (admin.getUsername() != null && admin.getUsername().equals(a.getPartialSig())) {
+                return Response.status(Response.Status.CONFLICT)
+                        .entity(Map.of("error",
+                                "Caller has already signed this change request"))
+                        .build();
+            }
+            if (admin.getId() != null && admin.getId().equals(a.getAuthorizedBy())) {
+                return Response.status(Response.Status.CONFLICT)
+                        .entity(Map.of("error",
+                                "Caller has already signed this change request"))
+                        .build();
+            }
+        }
+
         IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
+        // record() also enforces IgaScopeResolver.requireApprover() internally.
         attestor.record(session, cr, admin, partialSig);
 
+        // NOTE: Even when authCount >= threshold we DO NOT invoke combineFinal()
+        // or IgaReplayDispatcher.replay() here. Commit is now an explicit step
+        // via POST /iga/change-requests/{id}/commit.
+
+        IgaChangeRequestService service = getService();
+        IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
+        return Response.ok(toRepresentation(updated, service)).build();
+    }
+
+    // -------------------------------------------------------------------------
+    // POST /iga/change-requests/{id}/commit
+    // -------------------------------------------------------------------------
+
+    @POST
+    @Path("change-requests/{id}/commit")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response commit(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        EntityManager em = getEm();
+        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
+        if (cr == null || !realm.getId().equals(cr.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        if (!"PENDING".equals(cr.getStatus())) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of("error",
+                            "Change request is not in PENDING state (current=" + cr.getStatus() + ")"))
+                    .build();
+        }
+
+        UserModel admin = currentUser();
+        if (admin == null) {
+            return Response.status(Response.Status.UNAUTHORIZED)
+                    .entity(Map.of("error", "No authenticated admin user"))
+                    .build();
+        }
+
+        // Same approver-role gate the authorize path uses (via SimpleNameAttestor.record).
+        IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
+        IgaScopeResolver.requireApprover(realm, admin, scope);
+
+        IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
         List<IgaAuthorizationEntity> all = em.createNamedQuery(
                         "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
                 .setParameter("changeRequestId", cr.getId())
                 .getResultList();
-
-        if (all.size() >= attestor.getThreshold(session, realm, cr)) {
-            String finalAttestation = attestor.combineFinal(session, cr, all);
-            IgaReplayDispatcher.replay(session, cr, finalAttestation);
+        int threshold = attestor.getThreshold(session, realm, cr);
+        if (all.size() < threshold) {
+            int needed = threshold - all.size();
+            return Response.status(Response.Status.PRECONDITION_FAILED)
+                    .entity(Map.of(
+                            "error", "Need " + needed + " more signature" + (needed == 1 ? "" : "s"),
+                            "threshold", threshold,
+                            "authCount", all.size()))
+                    .build();
         }
 
-        // Re-fetch to return updated state
+        String finalAttestation = attestor.combineFinal(session, cr, all);
+        IgaReplayDispatcher.replay(session, cr, finalAttestation);
+
+        // IgaReplayDispatcher.replay sets status=APPROVED + resolvedAt on the
+        // managed entity for every action type already; nothing else to set.
         IgaChangeRequestService service = getService();
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
         return Response.ok(toRepresentation(updated, service)).build();
@@ -1337,7 +1412,34 @@ public class IgaAdminResource {
             rep.setRows(service.parseRows(cr.getRowsJson()));
         } catch (Exception ignored) {
         }
-        rep.setAuthorizationCount(service.countAuthorizations(cr.getId()));
+        long authCount = service.countAuthorizations(cr.getId());
+        rep.setAuthorizationCount(authCount);
+
+        // Authorizers list — wrapped so a malformed CR can't break list endpoints.
+        try {
+            List<IgaAuthorizationEntity> rows = getEm().createNamedQuery(
+                            "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
+                    .setParameter("changeRequestId", cr.getId())
+                    .getResultList();
+            List<IgaCrAuthorizerRepresentation> authorizers = rows.stream()
+                    .map(a -> new IgaCrAuthorizerRepresentation(
+                            a.getPartialSig(),
+                            a.getCreatedAt() != null ? a.getCreatedAt() : 0L))
+                    .collect(Collectors.toList());
+            rep.setAuthorizers(authorizers);
+        } catch (Exception ignored) {
+        }
+
+        // readyToCommit = PENDING && authCount >= threshold. Threshold resolution
+        // depends on rows_json + realm state, so guard it.
+        try {
+            if ("PENDING".equals(cr.getStatus())) {
+                IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
+                int threshold = attestor.getThreshold(session, realm, cr);
+                rep.setReadyToCommit(authCount >= threshold);
+            }
+        } catch (Exception ignored) {
+        }
         return rep;
     }
 }
