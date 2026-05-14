@@ -1440,6 +1440,24 @@ public class IgaAdminResource {
             }
         } catch (Exception ignored) {
         }
+
+        // Scope-based approval metadata for the admin UI. Resolve once and reuse
+        // for both the threshold and the required approver roles to avoid walking
+        // the affected entities twice.
+        try {
+            IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
+            rep.setThreshold(IgaScopeResolver.resolveThreshold(realm, scope));
+            rep.setRequiredApproverRoles(new java.util.ArrayList<>(scope.requiredApproverRoles));
+            // scopeMode is realm-level today (see IgaScopeResolver.requireApprover);
+            // mirror that derivation exactly so the UI sees the same gate the
+            // server enforces. Default is "any" when the realm attribute is unset
+            // or anything other than "all" (case-insensitive).
+            String mode = realm.getAttribute(IgaScopeResolver.ATTR_SCOPE_MODE);
+            rep.setScopeMode("all".equalsIgnoreCase(mode) ? "all" : "any");
+        } catch (Exception ignored) {
+            // Resolver failures (e.g. malformed rows) should never break the
+            // list/detail endpoint; leave the new fields at their defaults.
+        }
         return rep;
     }
 }

@@ -22,6 +22,9 @@ public class IgaChangeRequestRepresentation {
     private long authorizationCount;
     private List<IgaCrAuthorizerRepresentation> authorizers;
     private boolean readyToCommit;
+    private int threshold;
+    private List<String> requiredApproverRoles;
+    private String scopeMode;
 
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
@@ -64,4 +67,13 @@ public class IgaChangeRequestRepresentation {
 
     public boolean isReadyToCommit() { return readyToCommit; }
     public void setReadyToCommit(boolean readyToCommit) { this.readyToCommit = readyToCommit; }
+
+    public int getThreshold() { return threshold; }
+    public void setThreshold(int threshold) { this.threshold = threshold; }
+
+    public List<String> getRequiredApproverRoles() { return requiredApproverRoles; }
+    public void setRequiredApproverRoles(List<String> requiredApproverRoles) { this.requiredApproverRoles = requiredApproverRoles; }
+
+    public String getScopeMode() { return scopeMode; }
+    public void setScopeMode(String scopeMode) { this.scopeMode = scopeMode; }
 }
