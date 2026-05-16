@@ -35,4 +35,5 @@
     <include file="META-INF/tide-jpa-changelog-0.0.15.xml"/>
     <include file="META-INF/tide-jpa-changelog-0.0.16.xml"/>
     <include file="META-INF/tide-jpa-changelog-0.0.17.xml"/>
+    <include file="META-INF/tide-jpa-changelog-0.0.18.xml"/>
 </databaseChangeLog>
