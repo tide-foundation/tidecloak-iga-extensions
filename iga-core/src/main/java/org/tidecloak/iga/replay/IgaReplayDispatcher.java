@@ -462,6 +462,11 @@ public class IgaReplayDispatcher {
                     // client keeps the original UUID (ID) and human clientId.
                     rep.setId(id);
                     if (clientId != null) rep.setClientId(clientId);
+                    int wo = rep.getWebOrigins() == null ? 0 : rep.getWebOrigins().size();
+                    int ru = rep.getRedirectUris() == null ? 0 : rep.getRedirectUris().size();
+                    log.infof("IGA replay CREATE_CLIENT: full-rep path for clientId=%s "
+                            + "(webOrigins=%d, redirectUris=%d) via RepresentationToModel.createClient",
+                            clientId, wo, ru);
                     org.keycloak.models.utils.RepresentationToModel.createClient(session, realm, rep);
                 } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
                     throw new RuntimeException(
@@ -473,6 +478,10 @@ public class IgaReplayDispatcher {
                 // JAX-RS filter). This is NOT a legacy-CR compatibility shim:
                 // old pending CRs lacking REP_JSON are intentionally discarded
                 // and an admin-created client always has REP_JSON.
+                log.warnf("IGA replay CREATE_CLIENT: REP_JSON MISSING for clientId=%s "
+                        + "— bare client create only (webOrigins/redirectUris/attributes/flows "
+                        + "WILL BE LOST). The JAX-RS rep-capture filter did not stash the "
+                        + "POST body on this client create.", clientId);
                 session.clients().addClient(realm, id, clientId != null ? clientId : id);
             }
             em.createQuery("UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id = :id")

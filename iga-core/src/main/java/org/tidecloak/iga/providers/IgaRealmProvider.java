@@ -16,6 +16,7 @@ import org.keycloak.models.jpa.entities.GroupEntity;
 import org.keycloak.models.jpa.entities.RealmEntity;
 import org.keycloak.models.jpa.entities.RoleEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
+import org.jboss.logging.Logger;
 
 import jakarta.persistence.EntityManager;
 import java.util.List;
@@ -26,6 +27,8 @@ import java.util.Map;
  * through the IGA approval workflow when IGA is enabled.
  */
 public class IgaRealmProvider extends JpaRealmProvider {
+
+    private static final Logger log = Logger.getLogger(IgaRealmProvider.class);
 
     private final KeycloakSession igaSession;
 
@@ -258,6 +261,14 @@ public class IgaRealmProvider extends JpaRealmProvider {
                             org.tidecloak.iga.rest.IgaRepresentationCaptureFilter.TYPE_CLIENT);
             if (repJson != null) {
                 row.put("REP_JSON", repJson);
+                log.infof("IGA capture CREATE_CLIENT: stored full REP_JSON for clientId=%s "
+                        + "(%d chars) — full config will replay on commit", clientId, repJson.length());
+            } else {
+                log.warnf("IGA capture CREATE_CLIENT: NO pending rep on request session for "
+                        + "clientId=%s — the JAX-RS IgaRepresentationCaptureFilter did not stash "
+                        + "the POST body (filter not invoked / body not buffered). Replay will "
+                        + "fall back to a bare client create and LOSE webOrigins/redirectUris/"
+                        + "attributes/flows.", clientId);
             }
             recordAndThrow(realm, "CLIENT", resolvedId, "CREATE_CLIENT", List.of(row));
             return null; // unreachable
