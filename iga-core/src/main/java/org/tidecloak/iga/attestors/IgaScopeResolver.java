@@ -146,9 +146,25 @@ public final class IgaScopeResolver {
                 // Realm-level attribute writes have no per-entity scope; fall
                 // through to the realm-default approver/threshold.
                 break;
-            // CREATE_USER / CREATE_ROLE / CREATE_GROUP / CREATE_CLIENT and
-            // realm-wide action types (BASELINE_APPROVAL, REQUEST_SERVER_CERT,
-            // INSTALL_LICENSE, ROTATE_LICENSE) intentionally leave the scope empty.
+            // -----------------------------------------------------------------
+            // Organizations. OrganizationModel supports attributes, so an org
+            // may carry iga.approverRole / iga.threshold and is scoped just
+            // like a group/client. CREATE_ORGANIZATION is realm-wide (no org
+            // exists yet) → empty scope, exactly like the other top-level
+            // creates.
+            // -----------------------------------------------------------------
+            case "UPDATE_ORGANIZATION":
+            case "DELETE_ORGANIZATION":
+            case "ADD_ORG_MEMBER":
+            case "REMOVE_ORG_MEMBER":
+            case "ORG_ADD_IDP":
+            case "ORG_REMOVE_IDP":
+                resolveOrganizationScopesFromRows(session, realm, cr, scope, "ORG_ID");
+                break;
+            // CREATE_USER / CREATE_ROLE / CREATE_GROUP / CREATE_CLIENT /
+            // CREATE_ORGANIZATION and realm-wide action types
+            // (BASELINE_APPROVAL, REQUEST_SERVER_CERT, INSTALL_LICENSE,
+            // ROTATE_LICENSE) intentionally leave the scope empty.
             default:
                 break;
         }
@@ -253,6 +269,41 @@ public final class IgaScopeResolver {
             ClientModel client = session.clients().getClientById(realm, id);
             if (client != null) collectClientScope(client, out);
         }
+    }
+
+    private static void resolveOrganizationScopesFromRows(KeycloakSession session, RealmModel realm,
+                                                          IgaChangeRequestEntity cr, ResolvedScope out,
+                                                          String key) {
+        org.keycloak.organization.OrganizationProvider orgs =
+                session.getProvider(org.keycloak.organization.OrganizationProvider.class);
+        if (orgs == null) return;
+        for (Map<String, Object> row : rows(cr)) {
+            String id = str(row, key);
+            if (id == null) continue;
+            org.keycloak.models.OrganizationModel org = orgs.getById(id);
+            if (org != null) collectOrganizationScope(org, out);
+        }
+    }
+
+    /**
+     * Harvest iga.approverRole / iga.threshold from an organization's
+     * attributes. {@code OrganizationModel} exposes only the full attribute
+     * map (no getFirstAttribute), so read the first value of each key.
+     */
+    private static void collectOrganizationScope(org.keycloak.models.OrganizationModel org,
+                                                 ResolvedScope out) {
+        Map<String, List<String>> attrs = org.getAttributes();
+        if (attrs == null) return;
+        String role = firstAttr(attrs, ATTR_APPROVER_ROLE);
+        if (role != null && !role.isBlank()) {
+            out.requiredApproverRoles.add(role.trim());
+            addThreshold(firstAttr(attrs, ATTR_THRESHOLD), out);
+        }
+    }
+
+    private static String firstAttr(Map<String, List<String>> attrs, String key) {
+        List<String> v = attrs.get(key);
+        return (v == null || v.isEmpty()) ? null : v.get(0);
     }
 
     /** Walk every group the user belongs to (and each group's ancestors) and harvest scope attributes. */

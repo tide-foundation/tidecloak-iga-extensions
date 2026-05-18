@@ -13,6 +13,7 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.representations.idm.ClientRepresentation;
 import org.keycloak.representations.idm.ClientScopeRepresentation;
 import org.keycloak.representations.idm.GroupRepresentation;
+import org.keycloak.representations.idm.OrganizationRepresentation;
 import org.keycloak.representations.idm.RoleRepresentation;
 import org.keycloak.representations.idm.UserRepresentation;
 
@@ -98,6 +99,14 @@ public class IgaRepresentationCaptureFilter
     public static final String TYPE_GROUP = "GROUP";
     public static final String TYPE_CLIENT_SCOPE = "CLIENT_SCOPE";
     public static final String TYPE_CLIENT = "CLIENT";
+    /**
+     * Organizations: matched on {@code POST .../organizations} (create) and
+     * {@code PUT .../organizations/{id}} (update); both carry an
+     * {@code OrganizationRepresentation}. Member/IdP/invitation sub-resources
+     * are NOT captured here — those replays are bare id-based org-provider
+     * calls (ADD_ORG_MEMBER / ORG_ADD_IDP …) and don't need a full rep.
+     */
+    public static final String TYPE_ORGANIZATION = "ORGANIZATION";
 
     @Override
     public void filter(ContainerRequestContext ctx) {
@@ -173,6 +182,7 @@ public class IgaRepresentationCaptureFilter
             case TYPE_GROUP -> MAPPER.readValue(body, GroupRepresentation.class);
             case TYPE_CLIENT_SCOPE -> MAPPER.readValue(body, ClientScopeRepresentation.class);
             case TYPE_CLIENT -> MAPPER.readValue(body, ClientRepresentation.class);
+            case TYPE_ORGANIZATION -> MAPPER.readValue(body, OrganizationRepresentation.class);
             default -> null;
         };
         if (rep == null) {
@@ -222,13 +232,26 @@ public class IgaRepresentationCaptureFilter
                     return TYPE_CLIENT_SCOPE;
                 case "clients":
                     return TYPE_CLIENT;
+                case "organizations":
+                    // POST .../organizations → org create. Member/IdP/
+                    // invitation sub-resources end in members / invitations /
+                    // identity-providers (or {id}) — NOT "organizations" — so
+                    // they are not captured here (intentional: those replays
+                    // are bare id-based org-provider calls).
+                    return TYPE_ORGANIZATION;
                 default:
                     return null;
             }
         }
-        // PUT .../clients/{id} → client update (unchanged legacy behaviour).
-        if ("PUT".equalsIgnoreCase(method) && "clients".equals(prev)) {
-            return TYPE_CLIENT;
+        if ("PUT".equalsIgnoreCase(method)) {
+            // PUT .../clients/{id} → client update (unchanged legacy behaviour).
+            if ("clients".equals(prev)) {
+                return TYPE_CLIENT;
+            }
+            // PUT .../organizations/{id} → org update (full rep, like client).
+            if ("organizations".equals(prev)) {
+                return TYPE_ORGANIZATION;
+            }
         }
         return null;
     }
