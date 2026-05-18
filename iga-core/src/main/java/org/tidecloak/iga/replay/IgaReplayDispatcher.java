@@ -199,7 +199,11 @@ public class IgaReplayDispatcher {
                                             List<Map<String, Object>> rows, String sig, EntityManager em) {
         for (Map<String, Object> row : rows) {
             String id = str(row, "ID");
-            session.clients().addClient(realm, id, id);
+            String clientId = str(row, "CLIENT_ID");
+            // Preserve BOTH the original UUID primary key (ID) and the
+            // admin-entered human clientId (CLIENT_ID). Previously this passed
+            // `id` for both args, so the UUID became the clientId.
+            session.clients().addClient(realm, id, clientId != null ? clientId : id);
             em.createQuery("UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig)
                     .setParameter("id", id)
