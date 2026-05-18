@@ -215,16 +215,37 @@ public class IgaReplayDispatcher {
                                                  IgaChangeRequestEntity cr, List<Map<String, Object>> rows,
                                                  String sig, EntityManager em) {
         for (Map<String, Object> row : rows) {
-            String clientId = str(row, "CLIENT_ID");
             String mapperId = str(row, "ID");
-            ClientModel client = session.clients().getClientById(realm, clientId);
-            if (client != null) {
-                org.keycloak.models.ProtocolMapperModel model = new org.keycloak.models.ProtocolMapperModel();
-                model.setId(mapperId);
-                model.setName(str(row, "NAME"));
-                model.setProtocol(str(row, "PROTOCOL"));
-                model.setProtocolMapper(str(row, "PROTOCOL_MAPPER_NAME"));
-                client.addProtocolMapper(model);
+            // Capture stores the parent's UUID primary key (ClientAdapter.getId()
+            // / ClientScopeAdapter.getId() both return entity.getId()), so
+            // getClientById / getClientScopeById — which look up by id — are the
+            // correct resolvers. The parent may be a CLIENT (CLIENT_ID key, from
+            // IgaClientAdapter) OR a CLIENT_SCOPE (CLIENT_SCOPE_ID key, from
+            // IgaClientScopeAdapter); the latter was previously dropped silently.
+            String clientId = str(row, "CLIENT_ID");
+            String scopeId = str(row, "CLIENT_SCOPE_ID");
+            org.keycloak.models.ProtocolMapperModel model = new org.keycloak.models.ProtocolMapperModel();
+            model.setId(mapperId);
+            model.setName(str(row, "NAME"));
+            model.setProtocol(str(row, "PROTOCOL"));
+            model.setProtocolMapper(str(row, "PROTOCOL_MAPPER_NAME"));
+
+            boolean added = false;
+            if (clientId != null) {
+                ClientModel client = session.clients().getClientById(realm, clientId);
+                if (client != null) {
+                    client.addProtocolMapper(model);
+                    added = true;
+                }
+            } else if (scopeId != null) {
+                ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
+                if (scope != null) {
+                    scope.addProtocolMapper(model);
+                    added = true;
+                }
+            }
+
+            if (added) {
                 em.createQuery("UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.id = :id")
                         .setParameter("sig", sig)
                         .setParameter("id", mapperId)
