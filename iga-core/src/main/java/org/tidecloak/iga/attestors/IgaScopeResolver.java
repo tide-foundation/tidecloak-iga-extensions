@@ -157,6 +157,7 @@ public final class IgaScopeResolver {
             case "DELETE_ORGANIZATION":
             case "ADD_ORG_MEMBER":
             case "REMOVE_ORG_MEMBER":
+            case "ORG_INVITE_MEMBER":
             case "ORG_ADD_IDP":
             case "ORG_REMOVE_IDP":
                 resolveOrganizationScopesFromRows(session, realm, cr, scope, "ORG_ID");

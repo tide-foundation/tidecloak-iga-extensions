@@ -47,10 +47,16 @@ import java.util.Map;
  * org update — there is no standalone domain endpoint) is intercepted as
  * {@code UPDATE_ORGANIZATION}.</p>
  *
- * <p>Invitations ({@code POST .../members} with an email, and
- * {@code POST .../invitations}) are intentionally NOT intercepted here — see
- * the report; they create action tokens and send email at request time and
- * need a dedicated replay design, flagged as a follow-up.</p>
+ * <p>Member <b>invitations</b> (POST {realm}/organizations/{id}/members/
+ * invite-user and .../invite-existing-user → {@code ORG_INVITE_MEMBER}) are
+ * intercepted at the {@code InvitationManager} SPI seam: {@link
+ * #getInvitationManager()} returns an {@link IgaInvitationManager} whose
+ * {@code create(...)} throws {@code IgaPendingApprovalException} BEFORE KC's
+ * {@code OrganizationInvitationResource.sendInvitation} persists the invitation
+ * entity / serializes the action token / sends the e-mail. The real
+ * invitation (token + e-mail) is performed at commit time by replay. See
+ * {@link IgaInvitationManager} for the full ordering proof and governance
+ * model.</p>
  *
  * <h2>IGA_REPLAY_ACTIVE guard</h2>
  * {@link #isIgaActive()} returns {@code false} when the session attribute
@@ -221,6 +227,48 @@ public class IgaOrganizationProvider extends JpaOrganizationProvider {
         row.put("USER_ID", user.getId());
         row.put("REALM_ID", realm.getId());
         recordAndThrow(realm, "ORGANIZATION", organization.getId(), action, List.of(row));
+    }
+
+    // -------------------------------------------------------------------------
+    // MEMBER INVITATION (SPI seam: InvitationManager.create)
+    //
+    // POST {realm}/organizations/{id}/members/invite-user and
+    // .../invite-existing-user → OrganizationInvitationResource.sendInvitation,
+    // whose FIRST persisting side-effect is invitationManager.create(...). By
+    // returning an IgaInvitationManager from getInvitationManager() we throw
+    // IgaPendingApprovalException inside that create(), strictly before the
+    // invitation entity is persisted and therefore before the action token is
+    // serialized and the e-mail is sent. The real invite (token + e-mail) is
+    // performed at commit time by IgaReplayDispatcher.replay, which runs under
+    // IGA_REPLAY_ACTIVE so getInvitationManager() still returns the wrapper but
+    // isIgaActive() is false → create() passes straight through to KC's
+    // JpaInvitationManager and KC's own OrganizationInvitationResource logic.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public org.keycloak.organization.InvitationManager getInvitationManager() {
+        return new IgaInvitationManager(super.getInvitationManager(), this);
+    }
+
+    /**
+     * Record an {@code ORG_INVITE_MEMBER} change request and throw to interrupt
+     * the invitation flow before any token/e-mail. Scoped/keyed by the target
+     * organization ({@code ORG_ID}) exactly like ADD_/REMOVE_ORG_MEMBER so
+     * {@code IgaScopeResolver.collectOrganizationScope} resolves
+     * {@code iga.approverRole}/{@code iga.threshold} off the org. The invitee
+     * identity travels as plain row keys (no REP_JSON — the invite endpoints
+     * are form-encoded, not a JSON representation the capture filter handles)
+     * so replay can reconstruct the exact KC invite call.
+     */
+    void recordOrgInvite(String orgId, String email, String firstName, String lastName) {
+        RealmModel realm = realm();
+        Map<String, Object> row = new java.util.LinkedHashMap<>();
+        row.put("ORG_ID", orgId);
+        if (email != null) row.put("INVITE_EMAIL", email);
+        if (firstName != null) row.put("INVITE_FIRST_NAME", firstName);
+        if (lastName != null) row.put("INVITE_LAST_NAME", lastName);
+        row.put("REALM_ID", realm.getId());
+        recordAndThrow(realm, "ORGANIZATION", orgId, "ORG_INVITE_MEMBER", List.of(row));
     }
 
     // -------------------------------------------------------------------------

@@ -105,6 +105,11 @@ public class IgaRepresentationCaptureFilter
      * {@code OrganizationRepresentation}. Member/IdP/invitation sub-resources
      * are NOT captured here — those replays are bare id-based org-provider
      * calls (ADD_ORG_MEMBER / ORG_ADD_IDP …) and don't need a full rep.
+     * Invitations ({@code .../members/invite-user} /
+     * {@code .../members/invite-existing-user}) are form-encoded, not JSON
+     * representations, and are intercepted at the {@code InvitationManager}
+     * SPI seam ({@code ORG_INVITE_MEMBER}) carrying their payload as plain
+     * {@code INVITE_*} row keys, so they are intentionally not captured here.
      */
     public static final String TYPE_ORGANIZATION = "ORGANIZATION";
 

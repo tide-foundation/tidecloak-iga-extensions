@@ -82,6 +82,19 @@ import java.util.function.Consumer;
  *             (CREATE_ORGANIZATION).</li>
  *         <li>{@code USER_ID} — member user UUID (ADD_ORG_MEMBER /
  *             REMOVE_ORG_MEMBER).</li>
+ *         <li>{@code INVITE_EMAIL}, {@code INVITE_FIRST_NAME},
+ *             {@code INVITE_LAST_NAME} — invitee payload
+ *             ({@code ORG_INVITE_MEMBER}). Captured at the
+ *             {@code InvitationManager.create} SPI seam BEFORE any invitation
+ *             entity / action token / e-mail. Both invite endpoints
+ *             ({@code .../members/invite-user} and
+ *             {@code .../members/invite-existing-user}) converge on
+ *             {@code InvitationManager.create(org,email,firstName,lastName)}
+ *             so the email/name triple alone reconstructs either; replay
+ *             re-resolves an existing user by e-mail vs. a registration link
+ *             exactly like KC's {@code inviteUser}. NOT a {@code REP_JSON}
+ *             action (the invite endpoints are form-encoded, not a JSON
+ *             representation the capture filter handles).</li>
  *         <li>{@code IDP_ALIAS} — identity-provider alias (ORG_ADD_IDP /
  *             ORG_REMOVE_IDP); resolved via
  *             {@code session.identityProviders().getByIdOrAlias}.</li>
@@ -216,6 +229,7 @@ public class IgaReplayDispatcher {
             case "DELETE_ORGANIZATION" -> replayDeleteOrganization(session, realm, rows);
             case "ADD_ORG_MEMBER" -> replayAddOrgMember(session, realm, rows);
             case "REMOVE_ORG_MEMBER" -> replayRemoveOrgMember(session, realm, rows);
+            case "ORG_INVITE_MEMBER" -> replayOrgInviteMember(session, realm, rows);
             case "ORG_ADD_IDP" -> replayOrgAddIdp(session, realm, rows);
             case "ORG_REMOVE_IDP" -> replayOrgRemoveIdp(session, realm, rows);
 
@@ -599,6 +613,162 @@ public class IgaReplayDispatcher {
             }
             orgs.removeMember(model, user);
         }
+    }
+
+    /**
+     * Replay an approved {@code ORG_INVITE_MEMBER}: NOW perform the real
+     * Keycloak invitation (persist invitation, mint action token, send
+     * e-mail). This is a faithful transcription of KC 26.5.5
+     * {@code OrganizationInvitationResource.sendInvitation(UserModel)} (the
+     * exact code reached from BOTH {@code POST .../members/invite-user} and
+     * {@code .../invite-existing-user} — both converge on
+     * {@code sendInvitation} → {@code invitationManager.create(org, email,
+     * firstName, lastName)}). It reuses KC's own {@code InvitationManager},
+     * {@code InviteOrgActionToken} and {@code EmailTemplateProvider
+     * .sendOrgInviteEmail} — NO email templating / token logic is
+     * reimplemented. The only line intentionally NOT reproduced is the
+     * trailing {@code adminEvent.operation(ACTION)...success()} audit event:
+     * it is not part of the invitation mechanics and the approved IGA change
+     * request is itself the authoritative audit record (the dispatcher has no
+     * AdminEventBuilder, exactly like every other replay action — threading
+     * one through replay() would be a broad, fragile signature change for a
+     * non-essential admin event).
+     *
+     * <p>Runs under {@code IGA_REPLAY_ACTIVE=true} (set by {@link #replay}),
+     * so {@code IgaOrganizationProvider.getInvitationManager()} still returns
+     * the {@link org.tidecloak.iga.providers.IgaInvitationManager} wrapper but
+     * {@code isIgaActive()} is {@code false} → its {@code create()} passes
+     * straight through to KC's {@code JpaInvitationManager}. No
+     * re-interception, exactly the same non-reinterception contract as every
+     * other org replay. {@code expiresAt} is computed inside KC's
+     * {@code create()} as {@code Time.currentTime() +
+     * realm.getActionTokenGeneratedByAdminLifespan()} — so token/invitation
+     * validity correctly starts fresh at commit (approval) time, and the
+     * serialized {@code InviteOrgActionToken} inherits that expiry. Replay
+     * runs at most once per CR (commit rejects non-PENDING CRs and
+     * {@code replay()} flips status to APPROVED), so exactly one
+     * invitation/token/e-mail is produced — never a duplicate.</p>
+     */
+    private static void replayOrgInviteMember(KeycloakSession session, RealmModel realm,
+                                              List<Map<String, Object>> rows) {
+        org.keycloak.organization.OrganizationProvider orgs = orgProvider(session);
+        for (Map<String, Object> row : rows) {
+            String orgId = str(row, "ORG_ID");
+            String email = str(row, "INVITE_EMAIL");
+            String firstName = str(row, "INVITE_FIRST_NAME");
+            String lastName = str(row, "INVITE_LAST_NAME");
+            org.keycloak.models.OrganizationModel organization = orgs.getById(orgId);
+            if (organization == null || email == null || email.isBlank()) {
+                log.warnf("ORG_INVITE_MEMBER replay: org=%s email=%s unresolved", orgId, email);
+                continue;
+            }
+            email = email.trim().toLowerCase();
+
+            // Mirror OrganizationInvitationResource.inviteUser's existing-user
+            // resolution: if a real user with this e-mail exists we invite the
+            // existing user, otherwise a transient in-memory user drives the
+            // registration link — exactly KC's branch in inviteUser ->
+            // sendInvitation. (Both invite endpoints funnel here.)
+            org.keycloak.models.UserModel user = session.users().getUserByEmail(realm, email);
+            boolean existingUser = user != null;
+            if (!existingUser) {
+                org.keycloak.storage.adapter.InMemoryUserAdapter tmp =
+                        new org.keycloak.storage.adapter.InMemoryUserAdapter(session, realm, null);
+                tmp.setEmail(email);
+                if (firstName != null && lastName != null) {
+                    tmp.setFirstName(firstName);
+                    tmp.setLastName(lastName);
+                }
+                user = tmp;
+            }
+
+            // === transcription of OrganizationInvitationResource.sendInvitation ===
+            org.keycloak.organization.InvitationManager invitationManager = orgs.getInvitationManager();
+            org.keycloak.models.OrganizationInvitationModel invitation = invitationManager.create(
+                    organization, user.getEmail(), user.getFirstName(), user.getLastName());
+
+            String link = user.getId() == null
+                    ? createRegistrationLink(session, realm, organization, user, invitation)
+                    : createInvitationLink(session, realm, organization, user, invitation);
+            invitation.setInviteLink(link);
+
+            try {
+                long expMinutes = java.util.concurrent.TimeUnit.SECONDS.toMinutes(
+                        realm.getActionTokenGeneratedByAdminLifespan());
+                session.getProvider(org.keycloak.email.EmailTemplateProvider.class)
+                        .setRealm(realm)
+                        .setUser(user)
+                        .sendOrgInviteEmail(organization, link, expMinutes);
+            } catch (org.keycloak.email.EmailException e) {
+                throw new RuntimeException(
+                        "ORG_INVITE_MEMBER replay: failed to send invite e-mail (org=" + orgId
+                                + ", email=" + email + ")", e);
+            }
+        }
+    }
+
+    // Link/token builders: verbatim transcription of the private helpers in
+    // OrganizationInvitationResource (createInvitationLink / createRegistration
+    // Link / createToken / resolveAccountClientBaseUrl) so the e-mailed link is
+    // byte-for-byte what stock KC would have produced at request time.
+
+    private static String createInvitationLink(KeycloakSession session, RealmModel realm,
+                                                org.keycloak.models.OrganizationModel organization,
+                                                org.keycloak.models.UserModel user,
+                                                org.keycloak.models.OrganizationInvitationModel invitation) {
+        return org.keycloak.services.resources.LoginActionsService
+                .actionTokenProcessor(session.getContext().getUri())
+                .queryParam("key", createInviteToken(session, realm, organization, user, invitation))
+                .build(realm.getName()).toString();
+    }
+
+    private static String createRegistrationLink(KeycloakSession session, RealmModel realm,
+                                                  org.keycloak.models.OrganizationModel organization,
+                                                  org.keycloak.models.UserModel user,
+                                                  org.keycloak.models.OrganizationInvitationModel invitation) {
+        return org.keycloak.protocol.oidc.OIDCLoginProtocolService
+                .registrationsUrl(session.getContext().getUri().getBaseUriBuilder())
+                .queryParam(org.keycloak.OAuth2Constants.RESPONSE_TYPE,
+                        org.keycloak.protocol.oidc.utils.OIDCResponseType.CODE)
+                .queryParam(org.keycloak.models.Constants.CLIENT_ID,
+                        org.keycloak.models.Constants.ACCOUNT_MANAGEMENT_CLIENT_ID)
+                .queryParam(org.keycloak.models.Constants.TOKEN,
+                        createInviteToken(session, realm, organization, user, invitation))
+                .buildFromMap(Map.of("realm", realm.getName(), "protocol",
+                        org.keycloak.protocol.oidc.OIDCLoginProtocol.LOGIN_PROTOCOL)).toString();
+    }
+
+    private static String createInviteToken(KeycloakSession session, RealmModel realm,
+                                             org.keycloak.models.OrganizationModel organization,
+                                             org.keycloak.models.UserModel user,
+                                             org.keycloak.models.OrganizationInvitationModel invitation) {
+        org.keycloak.authentication.actiontoken.inviteorg.InviteOrgActionToken token =
+                new org.keycloak.authentication.actiontoken.inviteorg.InviteOrgActionToken(
+                        user.getId(), invitation.getExpiresAt(), user.getEmail(),
+                        org.keycloak.models.Constants.ACCOUNT_MANAGEMENT_CLIENT_ID);
+        token.setOrgId(organization.getId());
+        token.id(invitation.getId());
+        if (organization.getRedirectUrl() == null || organization.getRedirectUrl().isBlank()) {
+            token.setRedirectUri(resolveAccountClientBaseUrl(session, realm));
+        } else {
+            token.setRedirectUri(organization.getRedirectUrl());
+        }
+        return token.serialize(session, realm, session.getContext().getUri());
+    }
+
+    private static String resolveAccountClientBaseUrl(KeycloakSession session, RealmModel realm) {
+        org.keycloak.models.ClientModel accountClient =
+                realm.getClientByClientId(org.keycloak.models.Constants.ACCOUNT_MANAGEMENT_CLIENT_ID);
+        if (accountClient != null) {
+            String baseUrl = accountClient.getBaseUrl();
+            if (baseUrl != null && !baseUrl.isBlank()) {
+                return org.keycloak.services.util.ResolveRelative
+                        .resolveRelativeUri(session, accountClient.getRootUrl(), baseUrl);
+            }
+        }
+        return org.keycloak.services.Urls
+                .accountBase(session.getContext().getUri().getBaseUri())
+                .path("/").build(realm.getName()).toString();
     }
 
     private static void replayOrgAddIdp(KeycloakSession session, RealmModel realm,
