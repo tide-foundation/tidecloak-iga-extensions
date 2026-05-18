@@ -48,14 +48,22 @@ import java.util.Set;
  *       {@link ClientRepresentation} via
  *       {@link ModelToRepresentation#toRepresentation(org.keycloak.models.ClientModel, KeycloakSession)},
  *       persists the {@code CREATE_CLIENT} change request (with the full
- *       {@code REP_JSON}) in a SEPARATE transaction, and throws
+ *       {@code REP_JSON}) in a SEPARATE transaction, marks the REQUEST
+ *       transaction rollback-only, and throws
  *       {@link IgaPendingApprovalException} → HTTP 202. The scratch entity is
- *       never committed: the exception propagates out, the main Keycloak
- *       transaction is rolled back (the exact same rollback that already
- *       produced the 202 when the throw used to happen at {@code addClient}),
- *       so nothing the create flow touched reaches the DB. Because the throw
- *       happens LATE — after the full entity graph is built — there are no
- *       transient references at the (possible) auto-flush, which is precisely
+ *       never committed: mapping the exception to a 202 fully CONSUMES it (it
+ *       does NOT propagate to {@code DefaultKeycloakSession#close()}), so the
+ *       request tx is NOT auto-rolled-back by exception propagation — it would
+ *       in fact be {@code commit()}ed and leak the scratch client (the original
+ *       throw-at-{@code addClient} only escaped this because it threw BEFORE
+ *       {@code super.addClient}, persisting nothing). The explicit
+ *       {@code getTransactionManager().setRollbackOnly()} on the request
+ *       session is what makes {@code DefaultKeycloakSession#closeTransaction
+ *       Manager()} call {@code rollback()} instead of {@code commit()}, so
+ *       nothing the create flow touched reaches the DB while the already-built
+ *       202 still stands (same idiom as {@code KeycloakErrorHandler#getResponse}).
+ *       Because the throw happens LATE — after the full entity graph is built —
+ *       there are no transient references at the (possible) auto-flush, which is
  *       why this avoids the {@code TransientPropertyValueException}/cascade that
  *       made the original throw-at-{@code addClient} design necessary.</li>
  * </ul>
@@ -124,8 +132,12 @@ public class IgaClientAdapter extends ClientAdapter {
      *
      * <p>We deliberately do NOT call {@code super.updateClient()}: that would
      * publish a {@code ClientUpdatedEvent} for a client that is about to be
-     * rolled back. Nothing here is committed — the scratch entity dies with the
-     * rolled-back main transaction.</p>
+     * rolled back. Nothing here is committed — after writing the CR we call
+     * {@code igaSession.getTransactionManager().setRollbackOnly()} on the
+     * REQUEST transaction, so {@code DefaultKeycloakSession#close()} rolls back
+     * (not commits) and the scratch entity dies with the rolled-back request
+     * transaction. The CR survives because it was written on a separate
+     * session/tx by {@code runJobInTransaction}.</p>
      */
     @Override
     public void updateClient() {
@@ -156,8 +168,10 @@ public class IgaClientAdapter extends ClientAdapter {
         int redirectUris = rep.getRedirectUris() == null ? 0 : rep.getRedirectUris().size();
         log.infof("IGA capture CREATE_CLIENT: full-rep path for clientId=%s "
                 + "(webOrigins=%d, redirectUris=%d, %d chars) captured at the model-layer "
-                + "terminal seam (RepresentationToModel.createClient#updateClient); full config "
-                + "will replay on commit", getClientId(), webOrigins, redirectUris, repJson.length());
+                + "terminal seam (RepresentationToModel.createClient#updateClient); CR written "
+                + "in a separate tx, request tx marked rollback-only so the scratch client is "
+                + "discarded (zero rows persisted at draft); full config will replay on commit",
+                getClientId(), webOrigins, redirectUris, repJson.length());
 
         // rowsJson contract (must match IgaReplayDispatcher.replayCreateClient):
         // ID = own client UUID, CLIENT_ID = human clientId,
@@ -179,6 +193,44 @@ public class IgaClientAdapter extends ClientAdapter {
             crIdHolder[0] = newService.create(newRealm, "CLIENT", clientUuid,
                     "CREATE_CLIENT", List.of(row), null).getId();
         });
+
+        // CRITICAL (the actual draft-no-persist guarantee): the CR has now been
+        // committed on a SEPARATE session/transaction by runJobInTransaction
+        // (KeycloakModelUtils.runJobInTransactionWithResult does
+        // factory.create() → its own KeycloakTransactionManager + EntityManager,
+        // begin()/commit() decoupled from the request tx; rollback-only is set
+        // there ONLY if its task throws — it survives a request-tx rollback).
+        //
+        // Now mark the REQUEST KeycloakTransaction rollback-only. igaSession is
+        // the thread-bound request session (bound by
+        // resteasy.TransactionalSessionHandler#handle →
+        // KeycloakSessionUtil.setKeycloakSession, with the request tx already
+        // begun); igaSession.getTransactionManager() is therefore the REQUEST
+        // DefaultKeycloakTransactionManager, NOT the runJobInTransaction job tx
+        // (that session was closed when its try-with-resources exited).
+        //
+        // Why this deterministically discards the scratch ClientEntity AND
+        // still returns 202 (KC 26.5.5 tx lifecycle, traced):
+        //   * DefaultKeycloakSession#close() (invoked by
+        //     jaxrs.CloseSessionFilter#closeSession at the end of the response
+        //     pipeline) calls closeTransactionManager(), which does
+        //     `if (transactionManager.getRollbackOnly()) rollback(); else
+        //     commit();`. With this flag set, getRollbackOnly() returns true so
+        //     rollback() runs — JpaKeycloakTransaction#rollback() →
+        //     em.getTransaction().rollback(): the scratch CLIENT INSERT (and
+        //     every row RepresentationToModel.createClient produced) is
+        //     discarded. ZERO client rows reach the DB at draft time.
+        //   * The 202 is unaffected: IgaPendingApprovalExceptionMapper builds
+        //     the 202 Response BEFORE CloseSessionFilter runs, and rollback
+        //     never escalates to a 500 (JpaKeycloakTransaction#rollback cannot
+        //     throw a mapped error; only commit() can). This is the exact idiom
+        //     KeycloakErrorHandler#getResponse uses (tx.setRollbackOnly() then
+        //     return a response) — here applied to a 2xx instead of a 4xx/5xx.
+        //   * Without this flag getRollbackOnly() is false, so close() would
+        //     commit() the request tx and leak the scratch client — the
+        //     observed duplicate-key bug. This is the fix.
+        igaSession.getTransactionManager().setRollbackOnly();
+
         throw new IgaPendingApprovalException(crIdHolder[0], "CLIENT", "CREATE_CLIENT");
     }
 

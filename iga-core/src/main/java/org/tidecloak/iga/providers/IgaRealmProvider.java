@@ -257,10 +257,15 @@ public class IgaRealmProvider extends JpaRealmProvider {
             // line 404, KC 26.5.5) — is the terminal seam where the now
             // complete model is snapshotted to a ClientRepresentation, the
             // CREATE_CLIENT change request (with full REP_JSON) is written in a
-            // separate transaction, and IgaPendingApprovalException is thrown
+            // separate transaction, the REQUEST transaction is marked
+            // rollback-only (igaSession.getTransactionManager()
+            // .setRollbackOnly()) and IgaPendingApprovalException is thrown
             // (→ HTTP 202). The scratch entity is never committed: the
-            // exception rolls back the main transaction exactly as before.
-            // Throwing LATE (full graph built) is what avoids the original
+            // rollback-only flag makes DefaultKeycloakSession#close() roll the
+            // request tx back instead of committing it (mapping the exception
+            // to a 202 CONSUMES it, so without the explicit flag close() would
+            // commit and leak the scratch client). Throwing LATE (full graph
+            // built) is what avoids the original
             // TransientPropertyValueException/cascade.
             ClientModel base = super.addClient(realm, id, clientId);
             if (base == null) return null;
