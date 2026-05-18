@@ -241,37 +241,35 @@ public class IgaRealmProvider extends JpaRealmProvider {
     @Override
     public ClientModel addClient(RealmModel realm, String id, String clientId) {
         if (isIgaActive(realm)) {
-            String resolvedId = (id != null) ? id : KeycloakModelUtils.generateId();
-            // rowsJson contract: ID = own client UUID, CLIENT_ID = human
-            // clientId, CLIENT_UUID = same UUID (referenced-client alias so
-            // replay's resolveClient works uniformly), REALM_ID = realm UUID.
-            Map<String, Object> row = new java.util.LinkedHashMap<>();
-            row.put("ID", resolvedId);
-            row.put("CLIENT_UUID", resolvedId);
-            row.put("CLIENT_ID", clientId);
-            row.put("REALM_ID", realm.getId());
-            // The JAX-RS request filter (IgaRepresentationCaptureFilter)
-            // buffers POST {realm}/clients and stashes the full
-            // ClientRepresentation as a session attribute. If present, capture
-            // the FULL representation so replay can rebuild redirectUris,
-            // webOrigins, attributes, mappers, scopes and flow flags — not just
-            // the bare identity. Absent only for non-REST programmatic callers.
-            String repJson = org.tidecloak.iga.rest.IgaRepresentationCaptureFilter
-                    .pendingRepJson(igaSession,
-                            org.tidecloak.iga.rest.IgaRepresentationCaptureFilter.TYPE_CLIENT);
-            if (repJson != null) {
-                row.put("REP_JSON", repJson);
-                log.infof("IGA capture CREATE_CLIENT: stored full REP_JSON for clientId=%s "
-                        + "(%d chars) — full config will replay on commit", clientId, repJson.length());
-            } else {
-                log.warnf("IGA capture CREATE_CLIENT: NO pending rep on request session for "
-                        + "clientId=%s — the JAX-RS IgaRepresentationCaptureFilter did not stash "
-                        + "the POST body (filter not invoked / body not buffered). Replay will "
-                        + "fall back to a bare client create and LOSE webOrigins/redirectUris/"
-                        + "attributes/flows.", clientId);
-            }
-            recordAndThrow(realm, "CLIENT", resolvedId, "CREATE_CLIENT", List.of(row));
-            return null; // unreachable
+            // Model-layer accumulate-then-veto (replaces the dead JAX-RS
+            // IgaRepresentationCaptureFilter — provider-jar @Provider
+            // ContainerRequestFilters are never discovered by Keycloak's
+            // RESTEasy runtime, see report). We do NOT throw here any more.
+            //
+            // Instead create the REAL (scratch) ClientEntity via super so
+            // Keycloak's RepresentationToModel.createClient can apply the
+            // COMPLETE incoming ClientRepresentation (webOrigins, redirectUris,
+            // attributes, protocol mappers, client scopes, flow flags) to a
+            // genuine ClientAdapter. The IgaClientAdapter is returned in
+            // capture mode: every per-setter override falls through to the real
+            // adapter, and the LAST mutation KC makes in that path —
+            // ClientModel.updateClient() (RepresentationToModel.createClient
+            // line 404, KC 26.5.5) — is the terminal seam where the now
+            // complete model is snapshotted to a ClientRepresentation, the
+            // CREATE_CLIENT change request (with full REP_JSON) is written in a
+            // separate transaction, and IgaPendingApprovalException is thrown
+            // (→ HTTP 202). The scratch entity is never committed: the
+            // exception rolls back the main transaction exactly as before.
+            // Throwing LATE (full graph built) is what avoids the original
+            // TransientPropertyValueException/cascade.
+            ClientModel base = super.addClient(realm, id, clientId);
+            if (base == null) return null;
+            ClientEntity entity = em.find(ClientEntity.class, base.getId());
+            if (entity == null) return base;
+            log.debugf("IGA capture CREATE_CLIENT: scratch client entity created for clientId=%s "
+                    + "(uuid=%s) — accumulating full representation until the model-layer "
+                    + "terminal seam (updateClient)", clientId, base.getId());
+            return new IgaClientAdapter(realm, em, igaSession, entity, /*captureMode=*/ true);
         }
         ClientModel base = super.addClient(realm, id, clientId);
         if (base == null) return null;

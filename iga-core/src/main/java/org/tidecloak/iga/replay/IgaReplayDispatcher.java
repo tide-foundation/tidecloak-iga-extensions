@@ -474,14 +474,18 @@ public class IgaReplayDispatcher {
                 }
             } else {
                 // Safety net for non-rep callers only (e.g. a programmatic
-                // session.clients().addClient that did not pass through the
-                // JAX-RS filter). This is NOT a legacy-CR compatibility shim:
-                // old pending CRs lacking REP_JSON are intentionally discarded
-                // and an admin-created client always has REP_JSON.
+                // session.clients().addClient(...) that did NOT go through
+                // RepresentationToModel.createClient — so the model-layer
+                // capture seam never produced a REP_JSON). This is NOT a
+                // legacy-CR compatibility shim: old pending CRs lacking
+                // REP_JSON are intentionally discarded, and an admin-created
+                // client always has REP_JSON (captured at the model-layer
+                // terminal seam IgaClientAdapter#updateClient).
                 log.warnf("IGA replay CREATE_CLIENT: REP_JSON MISSING for clientId=%s "
                         + "— bare client create only (webOrigins/redirectUris/attributes/flows "
-                        + "WILL BE LOST). The JAX-RS rep-capture filter did not stash the "
-                        + "POST body on this client create.", clientId);
+                        + "WILL BE LOST). The model-layer capture seam did not record a full "
+                        + "representation for this client create (non-REST programmatic caller).",
+                        clientId);
                 session.clients().addClient(realm, id, clientId != null ? clientId : id);
             }
             em.createQuery("UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id = :id")
