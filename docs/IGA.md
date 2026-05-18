@@ -162,32 +162,35 @@ Once IGA is ON, disabling it is itself a governed action.
 The threshold is the number of distinct admin signatures required before a
 change request can be committed. It is resolved at commit time by
 `IgaScopeResolver.resolveThreshold`
-(`iga-core/.../attestors/IgaScopeResolver.java:203-212`).
+(`iga-core/.../attestors/IgaScopeResolver.java:211-230`).
 
 **Precedence (highest to lowest):**
 
 1. **Per-scope-entity `iga.threshold`** — if any group, role, client, or
    organization *affected by this change request* carries an `iga.threshold`
    attribute, the **maximum** of all such positive integer values is used
-   (`IgaScopeResolver.java:204-206`; `addThreshold`,
+   (`IgaScopeResolver.java:213-214`; `addThreshold`,
    `IgaScopeResolver.java:343-350`, only accepts values that parse as an
    integer **greater than 0**).
 2. **Realm attribute `iga.threshold`** — if no scoped threshold applies, the
-   realm attribute `iga.threshold` is parsed as an integer and used
-   (`IgaScopeResolver.java:207-210`).
+   realm attribute `iga.threshold` is parsed as an integer and used, but only
+   when it is a valid integer `>= 1` (the same positivity rule as the
+   per-entity path); a non-integer or `< 1` value is ignored.
 3. **Hardcoded default `1`** — if neither is set, or the realm value is not a
-   valid integer, the threshold is **`1`** (`IgaScopeResolver.java:211`).
+   valid integer `>= 1`, the threshold is **`1`**. `resolveThreshold` also
+   applies a defensive final clamp, so it can never return a value below `1`
+   regardless of the source.
 
-> **Warning — edge case for the realm-level value.** The realm `iga.threshold`
-> is read with a plain `Integer.parseInt` (`IgaScopeResolver.java:209`) and
-> there is **no positivity check** at the realm level (unlike the per-entity
-> path). A non-integer value (for example `"two"`) throws internally, is
-> caught, and the threshold **falls back to `1`**. A non-positive integer
-> (for example `"0"` or `"-1"`) parses successfully and is returned
-> **literally** — a threshold of `0` or a negative number means
-> `signatureCount < threshold` is never true, so a change request can be
-> committed with **no signatures at all**. Always set the realm
-> `iga.threshold` to a positive integer such as `"2"`.
+> **Note — the realm-level value is enforced.** The realm `iga.threshold` is
+> subject to the same positivity rule as the per-entity path. A non-integer
+> value (for example `"two"`) **or** a value `< 1` (for example `"0"` or
+> `"-1"`) is **ignored and treated as `1`** — it never lowers the gate. In
+> addition, `resolveThreshold` applies a defensive final clamp so it can
+> **never** return a value below `1` regardless of the source. The commit
+> gate therefore cannot be disabled by a bad realm value: a change request
+> always requires at least one signature. Set the realm `iga.threshold` to
+> the positive integer you actually want (for example `"2"`); a `"0"` or
+> negative value simply behaves as `1`.
 
 ### Procedure: set the realm-wide default threshold
 
@@ -486,7 +489,7 @@ role.** Why, from the code:
 - With zero `iga.approverRole` attributes anywhere, every change request
   resolves to an empty scope, so `requireApprover` never blocks.
 - With no `iga.threshold` set anywhere, the threshold defaults to **`1`**
-  (`IgaScopeResolver.java:211`).
+  (`IgaScopeResolver.java:212`, defensive clamp at `:229`).
 
 > **Warning**
 > Net effect of zero configuration: a single admin holding `manage-realm` can
@@ -608,9 +611,12 @@ other top-level creates (`IgaScopeResolver.java:165-170`,
   reads the attribute being mutated, the act of enabling IGA is itself not
   governed by design. Plan the enable as a deliberate, trusted operation, and
   configure governance beforehand.
-- **A non-positive realm `iga.threshold` is honored literally.** A value of
-  `"0"` or a negative number parses successfully and makes the threshold gate
-  always pass (commit with zero signatures). Always use a positive integer.
+- **A non-positive realm `iga.threshold` is ignored, not honored.** A value
+  of `"0"`, a negative number, or a non-integer is treated as `1` (the same
+  positivity rule as the per-entity path), and `resolveThreshold` applies a
+  defensive final clamp so it can never return below `1`. A bad realm value
+  therefore cannot disable the commit gate — it simply behaves as `1`. Set
+  `iga.threshold` to the positive integer you actually want.
 
 ## Internals
 

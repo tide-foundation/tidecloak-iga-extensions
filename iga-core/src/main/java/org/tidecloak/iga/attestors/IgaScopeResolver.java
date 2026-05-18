@@ -199,16 +199,34 @@ public final class IgaScopeResolver {
      * Resolve the effective threshold. Returns the maximum of all thresholds
      * declared on scope-marked entities, falling back to the realm
      * {@code iga.threshold} attribute, and finally to 1.
+     *
+     * <p>The realm-level {@code iga.threshold} is subject to the same
+     * positivity rule as the per-entity path (see {@link #addThreshold}): a
+     * non-integer or {@code < 1} value is ignored and treated as the default
+     * {@code 1}. A non-positive realm value must not be honoured literally,
+     * because {@code authCount < threshold} would never trip and the commit
+     * gate could be silently disabled. A defensive final clamp guarantees this
+     * method can never return a value {@code < 1} regardless of the source.</p>
      */
     public static int resolveThreshold(RealmModel realm, ResolvedScope scope) {
+        int resolved = 1;
         if (scope != null && !scope.thresholds.isEmpty()) {
-            return scope.thresholds.stream().mapToInt(Integer::intValue).max().orElse(1);
+            resolved = scope.thresholds.stream().mapToInt(Integer::intValue).max().orElse(1);
+        } else {
+            String t = realm.getAttribute(ATTR_THRESHOLD);
+            if (t != null) {
+                try {
+                    int parsed = Integer.parseInt(t.trim());
+                    // Mirror the per-entity rule (addThreshold, > 0): a
+                    // non-positive realm value is invalid and falls back to
+                    // the default 1 rather than being honoured literally.
+                    if (parsed >= 1) resolved = parsed;
+                } catch (NumberFormatException ignored) { }
+            }
         }
-        String t = realm.getAttribute(ATTR_THRESHOLD);
-        if (t != null) {
-            try { return Integer.parseInt(t); } catch (NumberFormatException ignored) { }
-        }
-        return 1;
+        // Defence-in-depth: never return a threshold that could disable the
+        // commit gate, irrespective of how `resolved` was computed.
+        return Math.max(1, resolved);
     }
 
     // -------------------------------------------------------------------------
