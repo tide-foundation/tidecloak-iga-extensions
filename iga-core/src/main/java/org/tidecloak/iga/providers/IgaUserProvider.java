@@ -36,17 +36,29 @@ public class IgaUserProvider extends JpaUserProvider {
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         if (service.isIgaEnabled(realm) && !"true".equals(replay)) {
             String userId = KeycloakModelUtils.generateId();
+            // Read the captured UserRepresentation off the REQUEST session
+            // BEFORE entering the separate-transaction lambda (the new session
+            // does not carry the JAX-RS filter's attribute). The filter stashed
+            // the full POST {realm}/users body so replay can rebuild enabled,
+            // email, names, attributes, required actions, credentials, role
+            // mappings, groups, service-account link — not just id+username.
+            String repJson = org.tidecloak.iga.rest.IgaRepresentationCaptureFilter
+                    .pendingRepJson(igaSession,
+                            org.tidecloak.iga.rest.IgaRepresentationCaptureFilter.TYPE_USER);
             String[] crIdHolder = new String[1];
             KeycloakModelUtils.runJobInTransaction(igaSession.getKeycloakSessionFactory(), newSession -> {
                 RealmModel newRealm = newSession.realms().getRealm(realm.getId());
                 EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
                 IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
+                Map<String, Object> row = new java.util.LinkedHashMap<>();
+                row.put("ID", userId);
+                row.put("USERNAME", username.toLowerCase());
+                row.put("REALM_ID", realm.getId());
+                if (repJson != null) {
+                    row.put("REP_JSON", repJson);
+                }
                 crIdHolder[0] = newService.create(newRealm, "USER", userId, "CREATE_USER",
-                        List.of(Map.of(
-                                "ID", userId,
-                                "USERNAME", username.toLowerCase(),
-                                "REALM_ID", realm.getId()
-                        )),
+                        List.of(row),
                         getCurrentUserId()).getId();
             });
             throw new org.tidecloak.iga.providers.IgaPendingApprovalException(crIdHolder[0], "USER", "CREATE_USER");

@@ -106,9 +106,24 @@ public class IgaRealmProvider extends JpaRealmProvider {
         if (isIgaActive(realm)) {
             String groupId = (id != null) ? id : KeycloakModelUtils.generateId();
             String parentId = (toParent != null) ? toParent.getId() : null;
-            Map<String, Object> row = parentId != null
-                    ? Map.of("ID", groupId, "NAME", name, "REALM_ID", realm.getId(), "PARENT_GROUP", parentId)
-                    : Map.of("ID", groupId, "NAME", name, "REALM_ID", realm.getId());
+            Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("ID", groupId);
+            row.put("NAME", name);
+            row.put("REALM_ID", realm.getId());
+            if (parentId != null) {
+                row.put("PARENT_GROUP", parentId);
+            }
+            // Full-representation capture: POST {realm}/groups (top-level) or
+            // POST {realm}/groups/{id}/children (child). Replay applies
+            // description + attributes from the rep (Keycloak does NOT recurse
+            // into subGroups on a single create call — sub-groups arrive via
+            // their own child-create requests).
+            String repJson = org.tidecloak.iga.rest.IgaRepresentationCaptureFilter
+                    .pendingRepJson(igaSession,
+                            org.tidecloak.iga.rest.IgaRepresentationCaptureFilter.TYPE_GROUP);
+            if (repJson != null) {
+                row.put("REP_JSON", repJson);
+            }
             recordAndThrow(realm, "GROUP", groupId, "CREATE_GROUP", List.of(row));
             return null; // unreachable
         }
@@ -141,13 +156,21 @@ public class IgaRealmProvider extends JpaRealmProvider {
     public RoleModel addRealmRole(RealmModel realm, String id, String name) {
         if (isIgaActive(realm)) {
             String roleId = (id != null) ? id : KeycloakModelUtils.generateId();
-            recordAndThrow(realm, "ROLE", roleId, "CREATE_ROLE",
-                    List.of(Map.of(
-                            "ID", roleId,
-                            "NAME", name,
-                            "REALM_ID", realm.getId(),
-                            "CLIENT_ROLE", false
-                    )));
+            Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("ID", roleId);
+            row.put("NAME", name);
+            row.put("REALM_ID", realm.getId());
+            row.put("CLIENT_ROLE", false);
+            // Full-representation capture: the JAX-RS filter stashes the POST
+            // {realm}/roles RoleRepresentation so replay can rebuild
+            // description/attributes/composites, not just the bare id+name.
+            String repJson = org.tidecloak.iga.rest.IgaRepresentationCaptureFilter
+                    .pendingRepJson(igaSession,
+                            org.tidecloak.iga.rest.IgaRepresentationCaptureFilter.TYPE_ROLE);
+            if (repJson != null) {
+                row.put("REP_JSON", repJson);
+            }
+            recordAndThrow(realm, "ROLE", roleId, "CREATE_ROLE", List.of(row));
             return null; // unreachable
         }
         RoleModel base = super.addRealmRole(realm, id, name);
@@ -167,18 +190,24 @@ public class IgaRealmProvider extends JpaRealmProvider {
         RealmModel realm = client.getRealm();
         if (isIgaActive(realm)) {
             String roleId = (id != null) ? id : KeycloakModelUtils.generateId();
-            recordAndThrow(realm, "ROLE", roleId, "CREATE_ROLE",
-                    List.of(Map.of(
-                            "ID", roleId,
-                            "NAME", name,
-                            "REALM_ID", realm.getId(),
-                            // rowsJson contract: CLIENT_UUID = client UUID,
-                            // CLIENT_ID = human clientId (never a UUID).
-                            "CLIENT_UUID", client.getId(),
-                            "CLIENT_ID", client.getClientId(),
-                            "CLIENT_REALM_CONSTRAINT", realm.getId(),
-                            "CLIENT_ROLE", true
-                    )));
+            Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("ID", roleId);
+            row.put("NAME", name);
+            row.put("REALM_ID", realm.getId());
+            // rowsJson contract: CLIENT_UUID = client UUID,
+            // CLIENT_ID = human clientId (never a UUID).
+            row.put("CLIENT_UUID", client.getId());
+            row.put("CLIENT_ID", client.getClientId());
+            row.put("CLIENT_REALM_CONSTRAINT", realm.getId());
+            row.put("CLIENT_ROLE", true);
+            // Full-representation capture: POST {realm}/clients/{id}/roles.
+            String repJson = org.tidecloak.iga.rest.IgaRepresentationCaptureFilter
+                    .pendingRepJson(igaSession,
+                            org.tidecloak.iga.rest.IgaRepresentationCaptureFilter.TYPE_ROLE);
+            if (repJson != null) {
+                row.put("REP_JSON", repJson);
+            }
+            recordAndThrow(realm, "ROLE", roleId, "CREATE_ROLE", List.of(row));
             return null; // unreachable
         }
         RoleModel base = super.addClientRole(client, id, name);
@@ -218,14 +247,16 @@ public class IgaRealmProvider extends JpaRealmProvider {
             row.put("CLIENT_UUID", resolvedId);
             row.put("CLIENT_ID", clientId);
             row.put("REALM_ID", realm.getId());
-            // PART B: the JAX-RS request filter (IgaClientRepresentationCaptureFilter)
+            // The JAX-RS request filter (IgaRepresentationCaptureFilter)
             // buffers POST {realm}/clients and stashes the full
             // ClientRepresentation as a session attribute. If present, capture
             // the FULL representation so replay can rebuild redirectUris,
             // webOrigins, attributes, mappers, scopes and flow flags — not just
             // the bare identity. Absent only for non-REST programmatic callers.
-            Object rep = igaSession.getAttribute("IGA_PENDING_CLIENT_REP");
-            if (rep instanceof String repJson && !repJson.isEmpty()) {
+            String repJson = org.tidecloak.iga.rest.IgaRepresentationCaptureFilter
+                    .pendingRepJson(igaSession,
+                            org.tidecloak.iga.rest.IgaRepresentationCaptureFilter.TYPE_CLIENT);
+            if (repJson != null) {
                 row.put("REP_JSON", repJson);
             }
             recordAndThrow(realm, "CLIENT", resolvedId, "CREATE_CLIENT", List.of(row));
@@ -265,13 +296,21 @@ public class IgaRealmProvider extends JpaRealmProvider {
     public ClientScopeModel addClientScope(RealmModel realm, String id, String name) {
         if (isIgaActive(realm)) {
             String resolvedId = (id != null) ? id : KeycloakModelUtils.generateId();
-            recordAndThrow(realm, "CLIENT_SCOPE", resolvedId, "CREATE_CLIENT_SCOPE",
-                    List.of(Map.of(
-                            "ID", resolvedId,
-                            "NAME", name,
-                            "REALM_ID", realm.getId(),
-                            "PROTOCOL", "openid-connect"
-                    )));
+            Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("ID", resolvedId);
+            row.put("NAME", name);
+            row.put("REALM_ID", realm.getId());
+            row.put("PROTOCOL", "openid-connect");
+            // Full-representation capture: POST {realm}/client-scopes. Replay
+            // rebuilds protocol/description/attributes AND protocol mappers
+            // (incl. their full config) from the rep.
+            String repJson = org.tidecloak.iga.rest.IgaRepresentationCaptureFilter
+                    .pendingRepJson(igaSession,
+                            org.tidecloak.iga.rest.IgaRepresentationCaptureFilter.TYPE_CLIENT_SCOPE);
+            if (repJson != null) {
+                row.put("REP_JSON", repJson);
+            }
+            recordAndThrow(realm, "CLIENT_SCOPE", resolvedId, "CREATE_CLIENT_SCOPE", List.of(row));
             return null; // unreachable
         }
         ClientScopeModel base = super.addClientScope(realm, id, name);

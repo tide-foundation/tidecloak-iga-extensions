@@ -134,15 +134,21 @@ public class IgaClientAdapter extends ClientAdapter {
         IgaChangeRequestService service = getService();
         String clientUuid = getId();
         String mapperId = model.getId() != null ? model.getId() : java.util.UUID.randomUUID().toString();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("ID", mapperId);
+        row.put("NAME", model.getName());
+        row.put("PROTOCOL", model.getProtocol());
+        row.put("PROTOCOL_MAPPER_NAME", model.getProtocolMapper());
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        // Capture the FULL mapper config map (same shape as
+        // UPDATE_PROTOCOL_MAPPER) so replay can faithfully recreate the mapper
+        // instead of an empty-config one.
+        if (model.getConfig() != null) {
+            row.put("config", new LinkedHashMap<>(model.getConfig()));
+        }
         service.create(realm, "CLIENT", clientUuid, "ADD_PROTOCOL_MAPPER",
-                List.of(Map.of(
-                        "ID", mapperId,
-                        "NAME", model.getName(),
-                        "PROTOCOL", model.getProtocol(),
-                        "PROTOCOL_MAPPER_NAME", model.getProtocolMapper(),
-                        "CLIENT_UUID", clientUuid,
-                        "CLIENT_ID", getClientId()
-                )),
+                List.of(row),
                 null);
         // Return a stub model with the assigned id
         model.setId(mapperId);
