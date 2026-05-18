@@ -29,6 +29,7 @@ import org.tidecloak.shared.Constants;
 import org.tidecloak.shared.enums.ActionType;
 import org.tidecloak.shared.enums.ChangeSetType;
 import org.tidecloak.shared.enums.DraftStatus;
+import org.tidecloak.jpa.entities.ServerCertDraftEntity;
 import org.tidecloak.jpa.entities.AccessProofDetailEntity;
 import org.tidecloak.jpa.entities.AuthorizerEntity;
 import org.tidecloak.jpa.entities.ChangesetRequestEntity;
@@ -288,6 +289,7 @@ public class BasicIGAUtils {
             case GROUP -> em.find(TideGroupDraftEntity.class, entityId);
             case USER_GROUP_MEMBERSHIP -> em.find(TideUserGroupMembershipEntity.class, entityId);
             case GROUP_MOVE -> em.find(TideGroupMoveDraftEntity.class, entityId);
+            case SERVER_CERT -> em.find(ServerCertDraftEntity.class, entityId);
             default -> null;
         };
     }
@@ -333,6 +335,10 @@ public class BasicIGAUtils {
 
         if (entity instanceof TideGroupMoveDraftEntity) {
             return ChangeSetType.GROUP_MOVE;
+        }
+
+        if (entity instanceof ServerCertDraftEntity) {
+            return ChangeSetType.SERVER_CERT;
         }
 
         return null;
@@ -503,6 +509,14 @@ public class BasicIGAUtils {
                                 .setParameter("requestId", changeSetId)
                                 .getResultList();
 
+                case SERVER_CERT ->
+                        em.createNamedQuery(
+                                        "getServerCertDraftByRequestId",
+                                        ServerCertDraftEntity.class
+                                )
+                                .setParameter("requestId", changeSetId)
+                                .getResultList();
+
                 default -> null;
             };
         } catch (NoResultException e) {
@@ -584,8 +598,12 @@ public class BasicIGAUtils {
                 ((TideGroupMoveDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
                 break;
 
+            case SERVER_CERT:
+                ((ServerCertDraftEntity) draftRecordEntity).setDraftStatus(DraftStatus.APPROVED);
+                break;
+
             case POLICY:
-                // PolicyDraftEntity status is driven by scope (REALM_PENDING → REALM), not draftStatus
+                // PolicyDraftEntity status is driven by scope (REALM_PENDING -> REALM), not draftStatus
                 break;
         }
     }
@@ -715,7 +733,14 @@ public class BasicIGAUtils {
                 break;
 
             case POLICY:
-                // PolicyDraftEntity status is driven by scope (REALM_PENDING → REALM), not draftStatus
+                // PolicyDraftEntity status is driven by scope (REALM_PENDING -> REALM), not draftStatus
+                break;
+
+            case SERVER_CERT:
+                if (draftRecordEntity instanceof ServerCertDraftEntity serverCertDraft) {
+                    serverCertDraft.setDraftStatus(draftStatus);
+                    em.merge(serverCertDraft);
+                }
                 break;
 
             default:

@@ -52,6 +52,9 @@ public class LicenseHistoryEntity {
     @Column(name = "PAYER_PUB", length = 512)
     protected String payerPub;
 
+    @Column(name = "WALLET_ID", length = 512)
+    protected String walletId;
+
     @Column(name = "EXPIRY")
     protected Long expiry;
 
@@ -126,6 +129,15 @@ public class LicenseHistoryEntity {
     public void setPayerPub(String payerPub) {
         this.payerPub = payerPub;
     }
+
+    public String getWalletId() {
+        return walletId;
+    }
+
+    public void setWalletId(String walletId) {
+        this.walletId = walletId;
+    }
+
     public Long getExpiry() {
         return expiry;
     }
