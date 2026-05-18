@@ -47,10 +47,13 @@ public class IgaClientAdapter extends ClientAdapter {
             return;
         }
         IgaChangeRequestService service = getService();
-        String clientId = getId();
-        service.create(realm, "CLIENT", clientId, "ASSIGN_SCOPE",
+        // getId() returns the client's UUID primary key — NOT the human
+        // clientId. rowsJson contract: CLIENT_UUID = uuid, CLIENT_ID = human.
+        String clientUuid = getId();
+        service.create(realm, "CLIENT", clientUuid, "ASSIGN_SCOPE",
                 List.of(Map.of(
-                        "CLIENT_ID", clientId,
+                        "CLIENT_UUID", clientUuid,
+                        "CLIENT_ID", getClientId(),
                         "SCOPE_ID", scope.getId(),
                         "DEFAULT_SCOPE", defaultScope
                 )),
@@ -64,9 +67,12 @@ public class IgaClientAdapter extends ClientAdapter {
             return;
         }
         IgaChangeRequestService service = getService();
-        String clientId = getId();
-        service.create(realm, "CLIENT", clientId, "REMOVE_SCOPE",
-                List.of(Map.of("CLIENT_ID", clientId, "SCOPE_ID", scope.getId())),
+        String clientUuid = getId();
+        service.create(realm, "CLIENT", clientUuid, "REMOVE_SCOPE",
+                List.of(Map.of(
+                        "CLIENT_UUID", clientUuid,
+                        "CLIENT_ID", getClientId(),
+                        "SCOPE_ID", scope.getId())),
                 null);
     }
 
@@ -85,13 +91,14 @@ public class IgaClientAdapter extends ClientAdapter {
             return;
         }
         IgaChangeRequestService service = getService();
-        String clientId = getId();
-        checkNoPendingCr(service, clientId);
+        String clientUuid = getId();
+        checkNoPendingCr(service, clientUuid);
         Map<String, Object> row = new HashMap<>();
-        row.put("CLIENT_ID", clientId);
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
         row.put("NAME", name);
         row.put("VALUE", value);
-        service.create(realm, "CLIENT", clientId, "SET_CLIENT_ATTRIBUTE",
+        service.create(realm, "CLIENT", clientUuid, "SET_CLIENT_ATTRIBUTE",
                 List.of(row), null);
     }
 
@@ -102,17 +109,18 @@ public class IgaClientAdapter extends ClientAdapter {
             return;
         }
         IgaChangeRequestService service = getService();
-        String clientId = getId();
-        checkNoPendingCr(service, clientId);
+        String clientUuid = getId();
+        checkNoPendingCr(service, clientUuid);
         Map<String, Object> row = new HashMap<>();
-        row.put("CLIENT_ID", clientId);
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
         row.put("NAME", name);
-        service.create(realm, "CLIENT", clientId, "REMOVE_CLIENT_ATTRIBUTE",
+        service.create(realm, "CLIENT", clientUuid, "REMOVE_CLIENT_ATTRIBUTE",
                 List.of(row), null);
     }
 
-    private void checkNoPendingCr(IgaChangeRequestService service, String clientId) {
-        var existing = service.findPending(realm.getId(), "CLIENT", clientId);
+    private void checkNoPendingCr(IgaChangeRequestService service, String clientUuid) {
+        var existing = service.findPending(realm.getId(), "CLIENT", clientUuid);
         if (existing != null) {
             throw new IgaConflictException(existing.getId());
         }
@@ -124,15 +132,16 @@ public class IgaClientAdapter extends ClientAdapter {
             return super.addProtocolMapper(model);
         }
         IgaChangeRequestService service = getService();
-        String clientId = getId();
+        String clientUuid = getId();
         String mapperId = model.getId() != null ? model.getId() : java.util.UUID.randomUUID().toString();
-        service.create(realm, "CLIENT", clientId, "ADD_PROTOCOL_MAPPER",
+        service.create(realm, "CLIENT", clientUuid, "ADD_PROTOCOL_MAPPER",
                 List.of(Map.of(
                         "ID", mapperId,
                         "NAME", model.getName(),
                         "PROTOCOL", model.getProtocol(),
                         "PROTOCOL_MAPPER_NAME", model.getProtocolMapper(),
-                        "CLIENT_ID", clientId
+                        "CLIENT_UUID", clientUuid,
+                        "CLIENT_ID", getClientId()
                 )),
                 null);
         // Return a stub model with the assigned id
@@ -147,17 +156,18 @@ public class IgaClientAdapter extends ClientAdapter {
             return;
         }
         IgaChangeRequestService service = getService();
-        String clientId = getId();
+        String clientUuid = getId();
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("ID", mapping.getId());
         row.put("NAME", mapping.getName());
         row.put("PROTOCOL", mapping.getProtocol());
         row.put("PROTOCOL_MAPPER_NAME", mapping.getProtocolMapper());
-        row.put("CLIENT_ID", clientId);
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
         if (mapping.getConfig() != null) {
             row.put("config", new LinkedHashMap<>(mapping.getConfig()));
         }
-        service.create(realm, "CLIENT", clientId, "UPDATE_PROTOCOL_MAPPER",
+        service.create(realm, "CLIENT", clientUuid, "UPDATE_PROTOCOL_MAPPER",
                 List.of(row), null);
     }
 
@@ -168,11 +178,12 @@ public class IgaClientAdapter extends ClientAdapter {
             return;
         }
         IgaChangeRequestService service = getService();
-        String clientId = getId();
+        String clientUuid = getId();
         Map<String, Object> row = new HashMap<>();
         row.put("ID", mapping.getId());
-        row.put("CLIENT_ID", clientId);
-        service.create(realm, "CLIENT", clientId, "REMOVE_PROTOCOL_MAPPER",
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        service.create(realm, "CLIENT", clientUuid, "REMOVE_PROTOCOL_MAPPER",
                 List.of(row), null);
     }
 
@@ -192,11 +203,12 @@ public class IgaClientAdapter extends ClientAdapter {
             return;
         }
         IgaChangeRequestService service = getService();
-        String clientId = getId();
+        String clientUuid = getId();
         Map<String, Object> row = new LinkedHashMap<>();
-        row.put("client_id", clientId);
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
         row.put("values", webOrigins == null ? new ArrayList<String>() : new ArrayList<>(webOrigins));
-        service.create(realm, "CLIENT", clientId, "UPDATE_CLIENT_WEB_ORIGINS",
+        service.create(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_WEB_ORIGINS",
                 List.of(row), null);
     }
 
@@ -207,11 +219,12 @@ public class IgaClientAdapter extends ClientAdapter {
             return;
         }
         IgaChangeRequestService service = getService();
-        String clientId = getId();
+        String clientUuid = getId();
         Map<String, Object> row = new LinkedHashMap<>();
-        row.put("client_id", clientId);
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
         row.put("values", redirectUris == null ? new ArrayList<String>() : new ArrayList<>(redirectUris));
-        service.create(realm, "CLIENT", clientId, "UPDATE_CLIENT_REDIRECT_URIS",
+        service.create(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_REDIRECT_URIS",
                 List.of(row), null);
     }
 }

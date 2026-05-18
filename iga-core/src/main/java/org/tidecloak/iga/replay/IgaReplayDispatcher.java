@@ -24,6 +24,34 @@ import java.util.function.Consumer;
  * Replays an approved IGA change request by invoking the real Keycloak model
  * operations with IGA_REPLAY_ACTIVE set, then writing the final attestation
  * onto the affected rows via JPQL UPDATE.
+ *
+ * <h2>rowsJson key contract (authoritative)</h2>
+ * Every capture site and every replay site MUST follow this contract. There is
+ * NO legacy/old-format fallback — pending change requests created under the old
+ * (pre-contract) convention are intentionally discarded and will fail loudly on
+ * replay rather than silently mis-resolve.
+ *
+ * <ul>
+ *   <li>{@code ID} — the affected row's OWN primary key (UUID). Always.</li>
+ *   <li>{@code REALM_ID} — realm UUID, where applicable.</li>
+ *   <li>{@code CLIENT_UUID} — a <i>referenced</i> client's UUID
+ *       (resolve via {@code session.clients().getClientById(realm, uuid)}).</li>
+ *   <li>{@code CLIENT_ID} — a <i>referenced</i> client's HUMAN identifier
+ *       (e.g. {@code my-app}). NEVER a UUID. This is the one explicit exception
+ *       to the "{@code *_ID} keys hold a UUID" rule, and it exists because it
+ *       matches Keycloak's {@code CLIENT.CLIENT_ID} column, which is the human
+ *       client identifier.</li>
+ *   <li>{@code CLIENT_SCOPE_ID} — a referenced client scope's UUID.</li>
+ *   <li>{@code USER_ID}, {@code ROLE_ID}, {@code GROUP_ID} — referenced entity
+ *       UUIDs. Rule: {@code *_ID} keys that reference another entity hold that
+ *       entity's UUID, EXCEPT {@code CLIENT_ID} (see above).</li>
+ *   <li>Human names: {@code USERNAME}, role {@code NAME}, group {@code NAME},
+ *       scope {@code NAME} — unchanged.</li>
+ *   <li>{@code REP_JSON} — (CREATE_CLIENT only) the full
+ *       {@code ClientRepresentation} captured by the JAX-RS request filter,
+ *       serialized as a JSON string, so replay can rebuild the complete client
+ *       (redirect URIs, web origins, attributes, mappers, scopes, flow flags).</li>
+ * </ul>
  */
 public class IgaReplayDispatcher {
 
@@ -91,8 +119,11 @@ public class IgaReplayDispatcher {
             case "REMOVE_COMPOSITE" -> replayRevoke(session, realm, rows, em,
                     r -> removeCompositeDirect(session, realm, r));
             case "ASSIGN_SCOPE" -> replayRelationship(session, realm, rows, finalAttestation, em,
+                    // e.clientId is the ClientScopeClientMappingEntity column
+                    // holding the client's UUID, so the stamp key is CLIENT_UUID
+                    // (contract), not the human CLIENT_ID.
                     "UPDATE ClientScopeClientMappingEntity e SET e.attestation = :sig WHERE e.clientId = :k1 AND e.clientScopeId = :k2",
-                    "CLIENT_ID", "SCOPE_ID",
+                    "CLIENT_UUID", "SCOPE_ID",
                     r -> assignScopeDirect(session, realm, r));
             case "REMOVE_SCOPE" -> replayRevoke(session, realm, rows, em,
                     r -> removeScopeDirect(session, realm, r));
@@ -165,8 +196,7 @@ public class IgaReplayDispatcher {
             String name = str(row, "NAME");
             boolean clientRole = Boolean.TRUE.equals(row.get("CLIENT_ROLE"));
             if (clientRole) {
-                String clientId = str(row, "CLIENT_ID");
-                ClientModel client = session.clients().getClientById(realm, clientId);
+                ClientModel client = resolveClient(session, realm, row);
                 if (client != null) {
                     session.roles().addClientRole(client, id, name);
                 }
@@ -199,11 +229,40 @@ public class IgaReplayDispatcher {
                                             List<Map<String, Object>> rows, String sig, EntityManager em) {
         for (Map<String, Object> row : rows) {
             String id = str(row, "ID");
+            // CLIENT_ID is the HUMAN client identifier (contract). The own PK
+            // UUID is ID.
             String clientId = str(row, "CLIENT_ID");
-            // Preserve BOTH the original UUID primary key (ID) and the
-            // admin-entered human clientId (CLIENT_ID). Previously this passed
-            // `id` for both args, so the UUID became the clientId.
-            session.clients().addClient(realm, id, clientId != null ? clientId : id);
+            String repJson = str(row, "REP_JSON");
+
+            if (repJson != null && !repJson.isEmpty()) {
+                // Full-config path: rebuild the complete client from the
+                // captured ClientRepresentation via the same builder Keycloak
+                // uses on POST {realm}/clients. IGA_REPLAY_ACTIVE is set by the
+                // surrounding replay() call, so RepresentationToModel.createClient's
+                // internal realm.addClient(...) + setters + addProtocolMapper(...)
+                // pass straight through the IGA wrappers without re-triggering
+                // interception.
+                try {
+                    org.keycloak.representations.idm.ClientRepresentation rep =
+                            MAPPER.readValue(repJson,
+                                    org.keycloak.representations.idm.ClientRepresentation.class);
+                    // Pin identity to the captured values so the replayed
+                    // client keeps the original UUID (ID) and human clientId.
+                    rep.setId(id);
+                    if (clientId != null) rep.setClientId(clientId);
+                    org.keycloak.models.utils.RepresentationToModel.createClient(session, realm, rep);
+                } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                    throw new RuntimeException(
+                            "Failed to deserialize REP_JSON for CREATE_CLIENT replay (CR row id=" + id + ")", e);
+                }
+            } else {
+                // Safety net for non-rep callers only (e.g. a programmatic
+                // session.clients().addClient that did not pass through the
+                // JAX-RS filter). This is NOT a legacy-CR compatibility shim:
+                // old pending CRs lacking REP_JSON are intentionally discarded
+                // and an admin-created client always has REP_JSON.
+                session.clients().addClient(realm, id, clientId != null ? clientId : id);
+            }
             em.createQuery("UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig)
                     .setParameter("id", id)
@@ -216,12 +275,12 @@ public class IgaReplayDispatcher {
                                                  String sig, EntityManager em) {
         for (Map<String, Object> row : rows) {
             String mapperId = str(row, "ID");
-            // Capture stores the parent's UUID primary key (ClientAdapter.getId()
-            // / ClientScopeAdapter.getId() both return entity.getId()), so
-            // getClientById / getClientScopeById — which look up by id — are the
-            // correct resolvers. The parent may be a CLIENT (CLIENT_ID key, from
-            // IgaClientAdapter) OR a CLIENT_SCOPE (CLIENT_SCOPE_ID key, from
-            // IgaClientScopeAdapter); the latter was previously dropped silently.
+            // Parent may be a CLIENT (CLIENT_UUID, from IgaClientAdapter) or a
+            // CLIENT_SCOPE (CLIENT_SCOPE_ID = scope UUID, from
+            // IgaClientScopeAdapter). Client resolution goes through the
+            // contract resolver (CLIENT_UUID → getClientById); a UUID is never
+            // read out of CLIENT_ID.
+            String clientUuid = str(row, "CLIENT_UUID");
             String clientId = str(row, "CLIENT_ID");
             String scopeId = str(row, "CLIENT_SCOPE_ID");
             org.keycloak.models.ProtocolMapperModel model = new org.keycloak.models.ProtocolMapperModel();
@@ -231,8 +290,8 @@ public class IgaReplayDispatcher {
             model.setProtocolMapper(str(row, "PROTOCOL_MAPPER_NAME"));
 
             boolean added = false;
-            if (clientId != null) {
-                ClientModel client = session.clients().getClientById(realm, clientId);
+            if (clientUuid != null || clientId != null) {
+                ClientModel client = resolveClient(session, realm, row);
                 if (client != null) {
                     client.addProtocolMapper(model);
                     added = true;
@@ -389,18 +448,16 @@ public class IgaReplayDispatcher {
     }
 
     private static void assignScopeDirect(KeycloakSession session, RealmModel realm, Map<String, Object> row) {
-        String clientId = str(row, "CLIENT_ID");
         String scopeId = str(row, "SCOPE_ID");
         boolean defaultScope = Boolean.TRUE.equals(row.get("DEFAULT_SCOPE"));
-        ClientModel client = session.clients().getClientById(realm, clientId);
+        ClientModel client = resolveClient(session, realm, row);
         ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
         if (client != null && scope != null) client.addClientScope(scope, defaultScope);
     }
 
     private static void removeScopeDirect(KeycloakSession session, RealmModel realm, Map<String, Object> row) {
-        String clientId = str(row, "CLIENT_ID");
         String scopeId = str(row, "SCOPE_ID");
-        ClientModel client = session.clients().getClientById(realm, clientId);
+        ClientModel client = resolveClient(session, realm, row);
         ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
         if (client != null && scope != null) client.removeClientScope(scope);
     }
@@ -488,25 +545,23 @@ public class IgaReplayDispatcher {
     private static void replaySetClientAttribute(KeycloakSession session, RealmModel realm,
                                                   List<Map<String, Object>> rows, String sig, EntityManager em) {
         for (Map<String, Object> row : rows) {
-            String clientId = str(row, "CLIENT_ID");
             String name = str(row, "NAME");
             String value = str(row, "VALUE");
-            ClientModel client = session.clients().getClientById(realm, clientId);
+            ClientModel client = resolveClient(session, realm, row);
             if (client == null || name == null) continue;
             client.setAttribute(name, value);
             stampSigJpql(em,
                     "UPDATE ClientAttributeEntity e SET e.attestation = :sig " +
                             "WHERE e.client.id = :pid AND e.name = :name",
-                    sig, clientId, name);
+                    sig, client.getId(), name);
         }
     }
 
     private static void replayRemoveClientAttribute(KeycloakSession session, RealmModel realm,
                                                      List<Map<String, Object>> rows, EntityManager em) {
         for (Map<String, Object> row : rows) {
-            String clientId = str(row, "CLIENT_ID");
             String name = str(row, "NAME");
-            ClientModel client = session.clients().getClientById(realm, clientId);
+            ClientModel client = resolveClient(session, realm, row);
             if (client != null && name != null) client.removeAttribute(name);
         }
     }
@@ -738,9 +793,7 @@ public class IgaReplayDispatcher {
     private static void replayUpdateClientWebOrigins(KeycloakSession session, RealmModel realm,
                                                       List<Map<String, Object>> rows) {
         for (Map<String, Object> row : rows) {
-            String clientId = str(row, "client_id");
-            if (clientId == null) clientId = str(row, "CLIENT_ID");
-            ClientModel client = clientId == null ? null : session.clients().getClientById(realm, clientId);
+            ClientModel client = resolveClient(session, realm, row);
             if (client == null) continue;
             client.setWebOrigins(new java.util.LinkedHashSet<>(strList(row.get("values"))));
         }
@@ -749,9 +802,7 @@ public class IgaReplayDispatcher {
     private static void replayUpdateClientRedirectUris(KeycloakSession session, RealmModel realm,
                                                         List<Map<String, Object>> rows) {
         for (Map<String, Object> row : rows) {
-            String clientId = str(row, "client_id");
-            if (clientId == null) clientId = str(row, "CLIENT_ID");
-            ClientModel client = clientId == null ? null : session.clients().getClientById(realm, clientId);
+            ClientModel client = resolveClient(session, realm, row);
             if (client == null) continue;
             client.setRedirectUris(new java.util.LinkedHashSet<>(strList(row.get("values"))));
         }
@@ -812,6 +863,7 @@ public class IgaReplayDispatcher {
         for (Map<String, Object> row : rows) {
             String mapperId = str(row, "ID");
             if (mapperId == null) continue;
+            String clientUuid = str(row, "CLIENT_UUID");
             String clientId = str(row, "CLIENT_ID");
             String scopeId = str(row, "CLIENT_SCOPE_ID");
             org.keycloak.models.ProtocolMapperModel mapper = new org.keycloak.models.ProtocolMapperModel();
@@ -831,8 +883,8 @@ public class IgaReplayDispatcher {
             } else {
                 mapper.setConfig(new java.util.LinkedHashMap<>());
             }
-            if (clientId != null) {
-                ClientModel client = session.clients().getClientById(realm, clientId);
+            if (clientUuid != null || clientId != null) {
+                ClientModel client = resolveClient(session, realm, row);
                 if (client != null) client.updateProtocolMapper(mapper);
             } else if (scopeId != null) {
                 ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
@@ -852,12 +904,13 @@ public class IgaReplayDispatcher {
         for (Map<String, Object> row : rows) {
             String mapperId = str(row, "ID");
             if (mapperId == null) continue;
+            String clientUuid = str(row, "CLIENT_UUID");
             String clientId = str(row, "CLIENT_ID");
             String scopeId = str(row, "CLIENT_SCOPE_ID");
             org.keycloak.models.ProtocolMapperModel mapper = new org.keycloak.models.ProtocolMapperModel();
             mapper.setId(mapperId);
-            if (clientId != null) {
-                ClientModel client = session.clients().getClientById(realm, clientId);
+            if (clientUuid != null || clientId != null) {
+                ClientModel client = resolveClient(session, realm, row);
                 if (client != null) client.removeProtocolMapper(mapper);
             } else if (scopeId != null) {
                 ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
@@ -1081,6 +1134,28 @@ public class IgaReplayDispatcher {
     private static String str(Map<String, Object> row, String key) {
         Object v = row.get(key);
         return v != null ? v.toString() : null;
+    }
+
+    /**
+     * Resolve a <i>referenced</i> client per the rowsJson key contract:
+     * <ol>
+     *   <li>{@code CLIENT_UUID} present → {@code getClientById(realm, uuid)}.</li>
+     *   <li>else {@code CLIENT_ID} present → {@code getClientByClientId(realm,
+     *       humanId)} (CLIENT_ID is the HUMAN identifier, never a UUID).</li>
+     * </ol>
+     * A UUID is NEVER read out of {@code CLIENT_ID}. No legacy fallback.
+     */
+    private static ClientModel resolveClient(KeycloakSession session, RealmModel realm,
+                                             Map<String, Object> row) {
+        String clientUuid = str(row, "CLIENT_UUID");
+        if (clientUuid != null) {
+            return session.clients().getClientById(realm, clientUuid);
+        }
+        String clientId = str(row, "CLIENT_ID");
+        if (clientId != null) {
+            return session.clients().getClientByClientId(realm, clientId);
+        }
+        return null;
     }
 
 }

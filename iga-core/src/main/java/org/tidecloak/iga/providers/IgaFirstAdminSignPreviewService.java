@@ -355,9 +355,12 @@ public class IgaFirstAdminSignPreviewService {
                 if (childId != null) resolved.put("childRole", roleSummaryWithComposites(childId));
             }
             case "ASSIGN_SCOPE", "REMOVE_SCOPE" -> {
-                String clientId = str(row, "CLIENT_ID");
+                // rowsJson contract: CLIENT_UUID holds the client UUID;
+                // clientSummary resolves by UUID via getClientById. CLIENT_ID
+                // is the human identifier and must NOT be passed here.
+                String clientUuid = str(row, "CLIENT_UUID");
                 String scopeId = str(row, "SCOPE_ID");
-                if (clientId != null) resolved.put("client", clientSummary(clientId));
+                if (clientUuid != null) resolved.put("client", clientSummary(clientUuid));
                 if (scopeId != null) resolved.put("clientScope", clientScopeSummary(scopeId));
             }
             case "SCOPE_ADD_ROLE", "SCOPE_REMOVE_ROLE" -> {

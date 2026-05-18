@@ -172,7 +172,10 @@ public class IgaRealmProvider extends JpaRealmProvider {
                             "ID", roleId,
                             "NAME", name,
                             "REALM_ID", realm.getId(),
-                            "CLIENT_ID", client.getId(),
+                            // rowsJson contract: CLIENT_UUID = client UUID,
+                            // CLIENT_ID = human clientId (never a UUID).
+                            "CLIENT_UUID", client.getId(),
+                            "CLIENT_ID", client.getClientId(),
                             "CLIENT_REALM_CONSTRAINT", realm.getId(),
                             "CLIENT_ROLE", true
                     )));
@@ -207,12 +210,25 @@ public class IgaRealmProvider extends JpaRealmProvider {
     public ClientModel addClient(RealmModel realm, String id, String clientId) {
         if (isIgaActive(realm)) {
             String resolvedId = (id != null) ? id : KeycloakModelUtils.generateId();
-            recordAndThrow(realm, "CLIENT", resolvedId, "CREATE_CLIENT",
-                    List.of(Map.of(
-                            "ID", resolvedId,
-                            "CLIENT_ID", clientId,
-                            "REALM_ID", realm.getId()
-                    )));
+            // rowsJson contract: ID = own client UUID, CLIENT_ID = human
+            // clientId, CLIENT_UUID = same UUID (referenced-client alias so
+            // replay's resolveClient works uniformly), REALM_ID = realm UUID.
+            Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("ID", resolvedId);
+            row.put("CLIENT_UUID", resolvedId);
+            row.put("CLIENT_ID", clientId);
+            row.put("REALM_ID", realm.getId());
+            // PART B: the JAX-RS request filter (IgaClientRepresentationCaptureFilter)
+            // buffers POST {realm}/clients and stashes the full
+            // ClientRepresentation as a session attribute. If present, capture
+            // the FULL representation so replay can rebuild redirectUris,
+            // webOrigins, attributes, mappers, scopes and flow flags — not just
+            // the bare identity. Absent only for non-REST programmatic callers.
+            Object rep = igaSession.getAttribute("IGA_PENDING_CLIENT_REP");
+            if (rep instanceof String repJson && !repJson.isEmpty()) {
+                row.put("REP_JSON", repJson);
+            }
+            recordAndThrow(realm, "CLIENT", resolvedId, "CREATE_CLIENT", List.of(row));
             return null; // unreachable
         }
         ClientModel base = super.addClient(realm, id, clientId);
