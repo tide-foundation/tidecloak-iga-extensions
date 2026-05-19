@@ -73,6 +73,40 @@ function mapperByName(list: any[], name: string): any | undefined {
   return list.find((m) => m?.name === name);
 }
 
+/**
+ * Parse the captured client-scope representation out of a change-request body.
+ *
+ * The CR body carries one or more rows; each row has a `REP_JSON` column that
+ * is itself a JSON *string* (the serialized scope rep the replay consumes).
+ * Robust detection must parse that string and read the parsed object — NOT do
+ * a substring search on a stringified CR (which double-escapes every quote, so
+ * `"protocol":"saml"` never appears literally and yields a false negative).
+ *
+ * Returns the first row's parsed rep, or undefined if none is parseable.
+ */
+function parseCapturedScopeRep(crBody: any): any | undefined {
+  const rows: any[] = Array.isArray(crBody?.rows)
+    ? crBody.rows
+    : Array.isArray(crBody)
+      ? crBody
+      : [];
+  for (const row of rows) {
+    // Tolerate either casing for the column key.
+    const repJson = row?.REP_JSON ?? row?.rep_json ?? row?.repJson;
+    if (typeof repJson === 'string' && repJson.length > 0) {
+      try {
+        return JSON.parse(repJson);
+      } catch {
+        /* try the next row */
+      }
+    } else if (repJson && typeof repJson === 'object') {
+      // Already-parsed rep (defensive — should be a string in practice).
+      return repJson;
+    }
+  }
+  return undefined;
+}
+
 test.describe('IGA Phase 2: client-scope governed create/replay', () => {
   // Always clean up both realms, even on failure.
   test.afterAll(async ({ request }) => {
@@ -162,16 +196,33 @@ test.describe('IGA Phase 2: client-scope governed create/replay', () => {
             evidence,
           };
         }
+        // Parse the captured REP_JSON (the JSON string replay consumes) and
+        // assert against the *parsed* rep — the same source of truth for
+        // protocol, mappers and attributes. (A substring search on the
+        // stringified CR double-escapes quotes, so `"protocol":"saml"` never
+        // appears literally → false negative for protocol while loose tokens
+        // like the mapper name still matched. That was the gate bug.)
+        const rep = parseCapturedScopeRep(cr.body);
         const rowsJson = JSON.stringify(cr.body?.rows ?? cr.body ?? {});
-        // The captured REP_JSON must carry the protocol mapper + its
-        // non-default config AND the custom attribute.
-        const carriesProtocol = rowsJson.includes('"protocol":"saml"');
+        const repMappers: any[] = Array.isArray(rep?.protocolMappers)
+          ? rep.protocolMappers
+          : [];
+        const probeMapper = repMappers.find(
+          (m: any) => m?.name === 'probe-mapper',
+        );
+        // The captured REP_JSON must carry the protocol, the protocol mapper +
+        // its non-default config, AND the custom attribute.
+        const carriesProtocol = rep?.protocol === 'saml';
         const carriesMapper =
-          rowsJson.includes('probe-mapper') &&
-          rowsJson.includes('probe-attr-name');
+          !!probeMapper &&
+          probeMapper?.config?.['attribute.name'] === 'probe-attr-name';
         const carriesAttrs =
-          rowsJson.includes('probeAttr') ||
-          rowsJson.includes('consent.screen.text');
+          probeMapper?.config?.['user.attribute'] === 'probeAttr' ||
+          (rep?.attributes != null &&
+            Object.prototype.hasOwnProperty.call(
+              rep.attributes,
+              'consent.screen.text',
+            ));
         const carriesFullRep =
           carriesProtocol && carriesMapper && carriesAttrs;
         evidence.probeCrCarriesProtocol = carriesProtocol;
