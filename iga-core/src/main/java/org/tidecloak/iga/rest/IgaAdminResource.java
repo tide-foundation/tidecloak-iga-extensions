@@ -42,6 +42,9 @@ import org.tidecloak.iga.attestors.IgaAttestor;
 import org.tidecloak.iga.attestors.IgaAttestors;
 import org.tidecloak.iga.attestors.IgaScopeResolver;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.representations.idm.ClientRepresentation;
 import java.util.LinkedHashMap;
 
 import jakarta.persistence.EntityManager;
@@ -56,6 +59,12 @@ import java.util.stream.Collectors;
 @Path("iga")
 @Vetoed
 public class IgaAdminResource {
+
+    // Same ObjectMapper contract the model-layer capture seam
+    // (IgaClientAdapter#updateClient) and IgaReplayDispatcher use for REP_JSON:
+    // a vanilla new ObjectMapper(). Keep these in lock-step so the rep written
+    // here round-trips through replayCreateClient's MAPPER.readValue unchanged.
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final KeycloakSession session;
     private final RealmModel realm;
@@ -308,6 +317,103 @@ public class IgaAdminResource {
         IgaChangeRequestService service = getService();
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
         return Response.ok(toRepresentation(updated, service)).build();
+    }
+
+    // -------------------------------------------------------------------------
+    // POST /iga/capture/clients
+    //
+    // endpoint-redesign Phase 1: accept a full ClientRepresentation, record it
+    // as a CREATE_CLIENT change request, and return 202 — WITHOUT any model
+    // mutation, scratch entity, transaction veto, or IgaPendingApprovalException.
+    //
+    // This writes the SAME rowsJson row contract the model-layer F1 capture
+    // seam (IgaClientAdapter#updateClient) produces, so IgaReplayDispatcher
+    // .replayCreateClient consumes it byte-for-byte identically on commit. The
+    // F1 model interceptor stays untouched as the backstop for direct-API
+    // callers that hit KC's native POST {realm}/clients. Because this endpoint
+    // never calls realm.addClient(...), the F1 interceptor
+    // (IgaRealmProvider#addClient) does NOT fire for endpoint-routed creates,
+    // so there is no double-capture; direct-API callers still go through F1.
+    //
+    // The CR is persisted in the NORMAL request transaction (getService() uses
+    // the request EntityManager; IgaChangeRequestService.create does
+    // em.persist+em.flush, no runJobInTransaction) — there is no model mutation
+    // on this path so the request tx commits the CR normally.
+    // -------------------------------------------------------------------------
+
+    @POST
+    @Path("capture/clients")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response captureCreateClient(ClientRepresentation rep) {
+        // NOTE (auth parity): every IGA endpoint gates on manage-realm. KC's
+        // native client-create gates on manage-clients. We deliberately keep
+        // the IGA manage-realm convention here — an accepted parity choice.
+        auth.realm().requireManageRealm();
+
+        if (rep == null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Missing request body"))
+                    .build();
+        }
+
+        // Identity allocation mirrors KC/IgaRealmProvider#addClient: when no id
+        // is supplied a fresh UUID is generated. ID == CLIENT_UUID for a client
+        // create (the own PK doubles as the referenced-client alias so replay's
+        // resolver works uniformly), exactly as the model seam records it.
+        String id = rep.getId();
+        if (id == null || id.isBlank()) {
+            id = KeycloakModelUtils.generateId();
+            rep.setId(id);
+        }
+        String clientUuid = id;
+
+        String repJson;
+        try {
+            repJson = MAPPER.writeValueAsString(rep);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error",
+                            "Failed to serialize ClientRepresentation: " + e.getMessage()))
+                    .build();
+        }
+
+        // rowsJson contract — MUST match IgaReplayDispatcher.replayCreateClient
+        // (reads ID, CLIENT_ID, REP_JSON via str()) and the model-layer F1 seam
+        // IgaClientAdapter#updateClient (writes ID, CLIENT_UUID, CLIENT_ID,
+        // REALM_ID, REP_JSON). Same keys, same order.
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("ID", clientUuid);
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", rep.getClientId());
+        row.put("REALM_ID", realm.getId());
+        row.put("REP_JSON", repJson);
+
+        // Persist the CR in the NORMAL request transaction. Same
+        // entityType/actionType/entityId constants the model path uses for
+        // CREATE_CLIENT ("CLIENT" / "CREATE_CLIENT" / clientUuid). No
+        // runJobInTransaction, no rollback, no exception — there is no model
+        // mutation on this path. Approver scope/threshold is NOT resolved here;
+        // it is resolved at commit (POST /iga/change-requests/{id}/commit),
+        // identical to the model path.
+        IgaChangeRequestService service = getService();
+        IgaChangeRequestEntity cr = service.create(
+                realm, "CLIENT", clientUuid, "CREATE_CLIENT", List.of(row), currentUserId());
+
+        // 202 envelope — IDENTICAL keys/values to the model-path 202 produced by
+        // IgaPendingApprovalExceptionMapper.toResponse (status/changeRequestId/
+        // entityType/actionType/message), so the admin-UI SDK parser already
+        // handles it verbatim.
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("status", "PENDING");
+        body.put("changeRequestId", cr.getId());
+        body.put("entityType", "CLIENT");
+        body.put("actionType", "CREATE_CLIENT");
+        body.put("message", "Change request created — awaiting approval");
+        return Response.status(Response.Status.ACCEPTED)
+                .entity(body)
+                .type(MediaType.APPLICATION_JSON)
+                .build();
     }
 
     // -------------------------------------------------------------------------
