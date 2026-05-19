@@ -203,10 +203,10 @@ change request can be committed. It is resolved at commit time by
 
 **Procedure**
 
-1. Admin console: go to **Realm settings**, open the section that exposes the
-   realm attribute map (in current Keycloak this is the **Realm settings →
-   (realm) → Attributes** area; in older builds it may appear under a generic
-   attributes/JSON editor). Add a key `iga.threshold` with the value `2`.
+1. Admin console: go to **Realm settings → General** and locate the
+   **"Identity Governance and Administration (IGA)"** section. Set the
+   **"IGA approval threshold"** numeric field to `2` and save. This persists
+   the `iga.threshold` realm attribute.
 2. Admin REST equivalent: update the realm representation `attributes` map via
    `PUT /admin/realms/{realm}`, including:
 
@@ -349,8 +349,10 @@ attribute.
 
 **Procedure**
 
-1. Admin console: **Realm settings**, attributes area, add key
-   `iga.scopeMode` with value `all` (or remove it / leave unset for `any`).
+1. Admin console: **Realm settings → General**, in the **"Identity Governance
+   and Administration (IGA)"** section set the **"IGA scope mode"** select to
+   `all` (or leave it at `any` for the default). This persists the
+   `iga.scopeMode` realm attribute.
 2. Admin REST: include `"iga.scopeMode": "all"` in the realm representation
    `attributes` map via `PUT /admin/realms/{realm}`.
 
@@ -404,7 +406,11 @@ attribute.
 > change requests once IGA is on. If you raise the threshold or add approver
 > roles only *after* enabling, those very governance changes are blocked
 > behind the (possibly weak or empty) policy that was in force at enable time,
-> and you may need several approvals just to tighten the policy.
+> and you may need several approvals just to tighten the policy. Concretely,
+> saving the IGA section in **Realm settings → General** while IGA is enabled
+> will create a `SET_REALM_ATTRIBUTE` change request, surfaced as a "change
+> request created" notification (the underlying 202 is no longer silently
+> swallowed) rather than an applied change.
 >
 > If a realm's governance becomes self-locked, the only escape hatch is the
 > permanently exempt `master` realm — IGA is never enforced there
