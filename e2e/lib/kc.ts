@@ -473,6 +473,65 @@ export interface UserSpec {
   federatedIdentities?: FederatedIdentitySpec[];
 }
 
+/**
+ * Declare a custom user attribute in the realm's user-profile config so KC
+ * actually applies it on user create.
+ *
+ * KC's DeclarativeUserProfileProvider DROPS any user attribute that is NOT
+ * declared in the realm's user-profile config (stock KC behaviour, totally
+ * independent of IGA). A POST /users carrying `attributes:{foo:[...]}` for an
+ * undeclared `foo` silently never reaches the model — so the IGA capture (which
+ * faithfully mirrors the model-layer setAttribute calls) correctly sees zero
+ * custom attributes. The fix is on the TEST side: declare the attribute first.
+ *
+ * GET the current user-profile config, append an attribute entry (idempotent —
+ * skipped if already present) with admin-view/admin-edit permissions and no
+ * required constraint, then PUT it back. Must be called AFTER the realm exists
+ * and BEFORE the (governed or ungoverned) user create that sends the attribute.
+ */
+export async function declareUserProfileAttribute(
+  request: APIRequestContext,
+  realm: string,
+  attrName: string,
+): Promise<void> {
+  const getRes = await kcFetch(
+    request,
+    `/admin/realms/${realm}/users/profile`,
+  );
+  if (getRes.status() !== 200) {
+    throw new Error(
+      `declareUserProfileAttribute(${realm}, ${attrName}) GET profile ` +
+        `expected 200, got HTTP ${getRes.status()}: ${await getRes.text()}`,
+    );
+  }
+  const profile = (await safeJson(getRes)) || {};
+  const attributes: any[] = Array.isArray(profile.attributes)
+    ? profile.attributes
+    : [];
+  if (attributes.some((a) => a?.name === attrName)) {
+    return; // already declared — idempotent
+  }
+  attributes.push({
+    name: attrName,
+    displayName: attrName,
+    // No `required` block: the attribute is optional.
+    permissions: { view: ['admin'], edit: ['admin'] },
+    multivalued: true,
+  });
+  profile.attributes = attributes;
+  const putRes = await kcFetch(
+    request,
+    `/admin/realms/${realm}/users/profile`,
+    { method: 'PUT', json: profile },
+  );
+  if (putRes.status() !== 200) {
+    throw new Error(
+      `declareUserProfileAttribute(${realm}, ${attrName}) PUT profile ` +
+        `expected 200, got HTTP ${putRes.status()}: ${await putRes.text()}`,
+    );
+  }
+}
+
 /** Create a user via POST {realm}/users. Returns the raw response. */
 export function createUser(
   request: APIRequestContext,

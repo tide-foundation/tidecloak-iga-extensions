@@ -7,6 +7,7 @@ import {
   createRole,
   createGroup,
   createUser,
+  declareUserProfileAttribute,
   getUserByUsername,
   getUserGroups,
   getUserRealmRoleMappings,
@@ -80,6 +81,13 @@ const ANY_PW = 'Phase3-Any-Pw!';
 // it is DROPPED from the governed CR (federated identities are not governed).
 const FED_IDP = 'phantom-idp';
 
+// Custom user attribute the governed create sends. KC's
+// DeclarativeUserProfileProvider DROPS any user attribute NOT declared in the
+// realm's user-profile config (stock KC behaviour, independent of IGA), so this
+// MUST be registered via declareUserProfileAttribute() BEFORE the create or it
+// never reaches the model (and the capture would correctly see attrs=0).
+const P3_CUSTOM_ATTR = 'p3CustomAttr';
+
 const userSpec = (): UserSpec => ({
   username: 'p3-user',
   enabled: true,
@@ -87,7 +95,7 @@ const userSpec = (): UserSpec => ({
   emailVerified: true,
   firstName: 'Phase',
   lastName: 'Three',
-  attributes: { p3CustomAttr: ['p3-attr-value'] },
+  attributes: { [P3_CUSTOM_ATTR]: ['p3-attr-value'] },
   // requiredActions + federatedIdentities are sent ONLY to prove they are
   // DROPPED — they are NOT token-affecting and must NOT reach the CR. No
   // `credentials` sent (passwords are not governed).
@@ -179,6 +187,12 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
         evidence.probeGroupCreate = gp.status();
         const rp = await createRole(request, PROBE_REALM, { name: 'prole1' });
         evidence.probeRoleCreate = rp.status();
+        // Declare the probe's custom attribute in the user-profile config
+        // (BEFORE enabling IGA, alongside the other bases) — KC drops
+        // undeclared attributes, so without this the probe's probeAttr would
+        // never reach the model and the capture would correctly see attrs=0.
+        await declareUserProfileAttribute(request, PROBE_REALM, 'probeAttr');
+        evidence.probeAttrDeclared = true;
         await enableIga(request, PROBE_REALM);
         evidence.igaEnabled = true;
 
@@ -365,6 +379,13 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
       rRes.status(),
       `base role role1 create expected 201, got ${rRes.status()}`,
     ).toBe(201);
+
+    // Declare the custom attribute in the realm's user-profile config (a base,
+    // IGA still OFF). KC's DeclarativeUserProfileProvider drops any user
+    // attribute not declared here, so without this the create's
+    // `attributes:{p3CustomAttr:[...]}` would silently never reach the model
+    // and the IGA capture would faithfully (but unhelpfully) record attrs=0.
+    await declareUserProfileAttribute(request, REALM, P3_CUSTOM_ATTR);
 
     // -----------------------------------------------------------------------
     // 2. Enable IGA + sanity-confirm active.
