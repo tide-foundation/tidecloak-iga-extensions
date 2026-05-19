@@ -47,14 +47,30 @@ import java.util.Set;
  *       the terminal seam.</li>
  * </ul>
  *
- * <h2>Govern ONLY token-affecting user fields (product decision)</h2>
- * User-create governance captures/replays ONLY the fields that affect the
- * user's issued token. The accumulator records exactly: {@code username},
- * {@code enabled}, {@code email}, {@code emailVerified}, {@code firstName},
- * {@code lastName}, {@code attributes}, {@code realmRoles},
- * {@code clientRoles}, {@code groups}. Everything else is deliberately NOT
- * captured, deferred or replayed:
+ * <h2>CREATE_USER governs ONLY the 8 KC-routed token fields (product
+ * decision)</h2>
+ * User-create governance captures/replays EXACTLY the 8 fields KC's
+ * {@code UsersResource.createUser} actually routes into the model:
+ * {@code username}, {@code enabled}, {@code email}, {@code emailVerified},
+ * {@code firstName}, {@code lastName}, {@code attributes}, {@code groups}.
+ * Everything else is deliberately NOT captured, deferred or replayed:
  * <ul>
+ *   <li><b>realmRoles / clientRoles</b> — roles are NOT capturable at
+ *       user-create by any model-layer mechanism. Stock KC's
+ *       {@code UsersResource.createUser} (keycloak-services 26.5.5
+ *       UsersResource.java:143-192) NEVER applies {@code realmRoles}/
+ *       {@code clientRoles} — only {@code updateUserFromRep} +
+ *       {@code createFederatedIdentities} + {@code createGroups} +
+ *       {@code createCredentials}; {@code createRoleMappings} runs only on the
+ *       import/replay path. So roles are discarded by stock KC too at
+ *       user-create; {@code grantRole} does not fire during the admin create.
+ *       Roles are assigned via the SEPARATE
+ *       {@code POST /users/{id}/role-mappings/*} →
+ *       {@code RoleMapperResource.addRealmRoleMappings} → {@code grantRole},
+ *       which IGA already governs as a standalone {@code GRANT_ROLES} change
+ *       request (the inline relationship-action path, UNCHANGED). The former
+ *       capture-mode {@code rep.realmRoles}/{@code rep.clientRoles}
+ *       accumulation was removed as a dead path.</li>
  *   <li><b>credentials</b> — a user's password is not governed; the user sets
  *       their own password post-approval (set-password email / self-service).
  *       The {@code credentialManager()} override + {@code CaptureCredentialManager}
@@ -71,12 +87,13 @@ import java.util.Set;
  *   <li><b>createdTimestamp</b> — metadata, not token content.</li>
  *   <li><b>federationLink</b> — user-storage link, not token claims.</li>
  * </ul>
- * All five are explicitly null'd on the {@link UserRepresentation} before
- * serialization at the terminal emit ({@code rep.setCredentials(null)},
- * {@code setRequiredActions(null)}, {@code setFederatedIdentities(null)},
- * {@code setCreatedTimestamp(null)}, {@code setFederationLink(null)}) so an
- * inbound value can never ride along by any path into a CR row. The scratch
- * user is rolled back at draft regardless.
+ * All seven non-governed fields are explicitly null'd on the
+ * {@link UserRepresentation} before serialization at the terminal emit
+ * ({@code rep.setRealmRoles(null)}, {@code setClientRoles(null)},
+ * {@code setCredentials(null)}, {@code setRequiredActions(null)},
+ * {@code setFederatedIdentities(null)}, {@code setCreatedTimestamp(null)},
+ * {@code setFederationLink(null)}) so an inbound value can never ride along by
+ * any path into a CR row. The scratch user is rolled back at draft regardless.
  *
  * <h2>KC 26.5.5 user-create model-call trace (verified, source on classpath)</h2>
  * {@code UsersResource.createUser} (keycloak-services
@@ -129,32 +146,41 @@ import java.util.Set;
  *
  * <h3>Snapshot-lossy fields</h3>
  * {@code ModelToRepresentation} for a user does NOT serialize group
- * memberships or role mappings, and there is NO single unconditional terminal
- * mutating model call (enabled is conditional, the attribute loop is by-key,
- * groups/roles are all conditional). So — exactly like client-scope — we
- * accumulate every intercepted call into a {@link UserRepresentation} and emit
+ * memberships, and there is NO single unconditional terminal mutating model
+ * call (enabled is conditional, the attribute loop is by-key, groups are
+ * conditional). So — exactly like client-scope — we accumulate every
+ * intercepted token-routed call into a {@link UserRepresentation} and emit
  * from the accumulator (never a live snapshot) at the post-build terminal
- * {@code getId()}. credentials, requiredActions, federatedIdentities,
- * createdTimestamp and federationLink are deliberately excluded from the
- * accumulator entirely (see "Govern ONLY token-affecting user fields").
+ * {@code getId()}. realmRoles, clientRoles, credentials, requiredActions,
+ * federatedIdentities, createdTimestamp and federationLink are deliberately
+ * excluded from the accumulator entirely (see "CREATE_USER governs ONLY the 8
+ * KC-routed token fields").
  *
- * <h3>Terminal seam: {@code getId()} at UsersResource.createUser:175 (then 177),
- * gated on {@link #usernameObserved}</h3>
+ * <h3>Deterministic terminal seam: {@code getId()} invoked DIRECTLY from
+ * {@code UsersResource.createUser} (StackWalker resource boundary)</h3>
  * {@code user.getId()} is invoked early and unpredictably on the scratch
- * adapter via {@code UserAdapter.equals()} (UserAdapter.java:588-594) and
- * {@code hashCode()} (596-599) during the JPA persistence context / user events
- * — BEFORE any field is applied (the user analogue of client-scope's
- * equals/hashCode/toString→getId() hazard). {@code DefaultUserProfile.create}
- * always applies the {@code username} writable attribute first
- * (UserAdapter.setAttribute → {@link #setUsername(String)}), strictly AFTER the
- * scratch user is persisted and BEFORE KC's terminal {@code getId()} at
- * createUser:175. So {@link #usernameObserved} cleanly partitions the early
- * racy {@code getId()} calls (no setter seen → fall through to
- * {@code super.getId()}) from the resource-level terminal {@code getId()} (every
- * field the rep carries already accumulated → emit). Because the rep is rebuilt
- * from the ACCUMULATOR, even a {@code getId()} that lands mid-build still
- * carries every field observed so far; the fire-once guard latches the final
- * emit and the second {@code getId()} at :177 falls through.
+ * adapter via {@code UserAdapter.equals()} (UserAdapter.java:587-594) and
+ * {@code hashCode()} (596-599) during the JPA persistence context / user
+ * events, and again from {@code DefaultUserProfile} /
+ * {@code RepresentationToModel.*} mid-build. The fragile "first {@code getId()}
+ * after a username was observed" trigger is replaced by a deterministic
+ * StackWalker predicate ({@link #calledDirectlyFromCreateUserResource()})
+ * proven by the trace: the ONLY {@code getId()} calls whose IMMEDIATE caller
+ * (the nearest stack frame that is not this adapter's own {@code getId()} nor
+ * the inherited {@code UserAdapter.equals/hashCode} that delegate straight
+ * back into {@code getId()}) is {@code UsersResource.createUser} (or its
+ * Quarkus {@code *quarkusrestinvoker*createUser*} wrapper) are the two
+ * resource-terminal calls — UsersResource.java:175 ({@code adminEvent
+ * ...resourcePath(uri, user.getId())}) and :177
+ * ({@code Response.created(...user.getId()...)}), both AFTER the full model is
+ * built. Every mid-build {@code getId()} has an intermediate non-resource
+ * frame (UserAdapter.equals/hashCode, JPA proxy/persistence,
+ * DefaultUserProfile, RepresentationToModel.createGroups/createCredentials/
+ * createFederatedIdentities, group-event listeners) as its immediate caller →
+ * NOT a terminal → falls straight through to {@code super.getId()} WITHOUT
+ * emitting. {@link #usernameObserved} is retained as a defensive SECONDARY
+ * gate. The fire-once guard latches the :175 emit; the second {@code getId()}
+ * at :177 falls through.
  *
  * <h3>REP_JSON faithfulness vs. replay (byte-faithful, replay UNCHANGED)</h3>
  * {@code IgaReplayDispatcher.replayCreateUser} deserializes {@code REP_JSON} to
@@ -169,14 +195,20 @@ import java.util.Set;
  * credentials→createCredentials (1002), federatedIdentities (1003),
  * realmRoles/clientRoles→createRoleMappings (1004), clientConsents (1005),
  * notBefore (1012), serviceAccountClientId (1016), groups (1024). The
- * accumulator below populates ONLY the token-affecting subset (username,
- * enabled, email, emailVerified, firstName, lastName, attributes, realmRoles,
- * clientRoles, groups) with the precise shapes
- * {@code createRoleMappings}/{@code createGroups} consume (realmRoles = role
- * NAMES; clientRoles = {humanClientId → [role name]}; groups = group PATHS).
- * The non-token fields are absent from REP_JSON and KC's import path is
- * null-safe for each absent one (verified, KC 26.5.5):
+ * accumulator below populates ONLY the 8 KC-routed token fields (username,
+ * enabled, email, emailVerified, firstName, lastName, attributes, groups);
+ * {@code groups} are group PATHS — the exact shape {@code createGroups}
+ * (RepresentationToModel.java:762-773) consumes via {@code findGroupByPath}.
+ * The other 7 fields are absent from REP_JSON and KC's import path is
+ * null-safe for each absent one (verified, KC 26.5.5 sources on classpath):
  * <ul>
+ *   <li>{@code createRoleMappings} guards
+ *       {@code if (userRep.getRealmRoles() != null)}
+ *       (RepresentationToModel.java:824) AND
+ *       {@code if (userRep.getClientRoles() != null)}
+ *       (RepresentationToModel.java:833) → both loops skipped, user gets NO
+ *       role mappings from the CREATE_USER replay (roles are governed
+ *       separately via the GRANT_ROLES role-mapping CR).</li>
  *   <li>{@code createCredentials} guards
  *       {@code if (userRep.getCredentials() != null)}
  *       (RepresentationToModel.java:786) → loop skipped, user has NO password
@@ -213,16 +245,34 @@ public class IgaUserAdapter extends UserAdapter {
      */
     private final boolean captureMode;
 
+    /**
+     * The KC 26.5.5 admin user-create resource method whose <em>direct</em>
+     * presence as the immediate caller of {@code getId()} is the deterministic
+     * terminal-emit signal. {@code UsersResource.createUser}
+     * (keycloak-services 26.5.5 UsersResource.java:143-192) is the ONLY method
+     * that invokes {@code user.getId()} with NO intermediate non-adapter frame
+     * (lines :175 adminEvent resourcePath, :177 Response.created — both AFTER
+     * the full model is built by profile.create/updateUserFromRep/
+     * createFederatedIdentities/createGroups/createCredentials). Every
+     * mid-build {@code getId()} (UserAdapter.equals/hashCode, JPA persistence,
+     * DefaultUserProfile, RepresentationToModel.*, group-event listeners) has
+     * an intermediate non-resource frame and is therefore NOT a terminal.
+     */
+    private static final String KC_USERS_RESOURCE =
+            "org.keycloak.services.resources.admin.UsersResource";
+    private static final String KC_CREATE_USER = "createUser";
+
     // ---- accumulator (capture mode only) ----------------------------------
     private final UserRepresentation capturedRep = new UserRepresentation();
     private final Map<String, List<String>> capturedAttributes = new LinkedHashMap<>();
     private final Set<String> capturedGroupPaths = new LinkedHashSet<>();
-    private final Set<String> capturedRealmRoles = new LinkedHashSet<>();
-    private final Map<String, List<String>> capturedClientRoles = new LinkedHashMap<>();
-    // NOTE: only token-affecting fields are accumulated. credentials,
-    // requiredActions, federatedIdentities, createdTimestamp and
-    // federationLink are deliberately NOT governed — see the
-    // "Govern ONLY token-affecting user fields" section in the class javadoc.
+    // NOTE: only the 8 KC-routed token fields are accumulated
+    // (username, enabled, email, emailVerified, firstName, lastName,
+    // attributes, groups). realmRoles/clientRoles are NOT part of CREATE_USER
+    // (governed separately via the existing GRANT_ROLES role-mapping change
+    // request — see the "Govern ONLY token-affecting user fields" section in
+    // the class javadoc); credentials/requiredActions/federatedIdentities/
+    // createdTimestamp/federationLink are likewise NOT governed.
     private final StringBuilder observedTrace = new StringBuilder();
 
     /**
@@ -237,6 +287,17 @@ public class IgaUserAdapter extends UserAdapter {
 
     /** Fire-once guard: only the first post-build getId() emits. */
     private boolean captureEmitted = false;
+
+    /**
+     * One-shot diagnostic breadcrumb: record (once) that a mid-build
+     * {@code getId()} was correctly skipped because the resource frame was
+     * absent. Proves the StackWalker predicate suppressed the early/racy
+     * equals/hashCode/JPA-driven {@code getId()} rather than emitting a lossy
+     * rep. Not recorded on every skip (getId() is invoked very frequently) —
+     * just the first, so the observed-order trace shows
+     * {@code …,getId(skip:no-resource-frame),…} interleaved with setters.
+     */
+    private boolean skipTraced = false;
 
     public IgaUserAdapter(KeycloakSession session, RealmModel realm, EntityManager em, UserEntity user) {
         this(session, realm, em, user, false);
@@ -278,21 +339,116 @@ public class IgaUserAdapter extends UserAdapter {
         observedTrace.append(ev);
     }
 
+    private static String yn(boolean b) {
+        return b ? "Y" : "N";
+    }
+
     // -------------------------------------------------------------------------
-    // Terminal seam for CREATE_USER (capture mode only): user.getId(), GATED
-    // on usernameObserved. See class javadoc for the early-getId() hazard and
-    // why username cleanly partitions the early racy calls from the terminal.
+    // Deterministic terminal seam for CREATE_USER (capture mode only):
+    // user.getId() invoked DIRECTLY by UsersResource.createUser.
+    //
+    // The fragile "first getId() after usernameObserved" trigger is replaced by
+    // a StackWalker resource-boundary predicate proven by the KC 26.5.5 trace:
+    // the ONLY user.getId() calls whose IMMEDIATE caller (the nearest stack
+    // frame that is neither this adapter's getId() override nor the inherited
+    // UserAdapter.equals/hashCode that delegate straight back into getId()) is
+    // UsersResource.createUser are the two resource-terminal calls
+    // (UsersResource.java:175 adminEvent resourcePath, :177 Response.created).
+    // Every mid-build getId() (UserAdapter.equals/hashCode, JPA proxy /
+    // persistence, DefaultUserProfile, RepresentationToModel.createGroups/
+    // createCredentials/createFederatedIdentities, group-event listeners) has
+    // an intermediate non-resource frame as its immediate caller, so it is NOT
+    // a terminal and falls straight through to super.getId() WITHOUT emitting.
+    //
+    // Quarkus invoker robustness: KC runs the resource method behind a
+    // generated *quarkusrestinvoker*$createUser_* wrapper. The predicate
+    // accepts EITHER the real UsersResource#createUser frame OR a Quarkus
+    // invoker frame for it (class name containing "quarkusrestinvoker" AND a
+    // method/class reference to createUser). usernameObserved is kept as a
+    // defensive SECONDARY gate (the resource frame is the primary deterministic
+    // gate). The StackWalker runs only on getId() in capture mode for an
+    // IGA-governed user create — a rare path — and short-circuits on the first
+    // matching frame.
     // -------------------------------------------------------------------------
+
+    /**
+     * True iff {@code getId()} is being invoked DIRECTLY from
+     * {@code UsersResource.createUser} (or its Quarkus invoker wrapper) — i.e.
+     * the nearest stack frame that is not this adapter's own {@code getId()} or
+     * the inherited {@code UserAdapter.equals/hashCode} (which delegate
+     * straight back into {@code getId()}) is the resource terminal. Returns
+     * {@code false} for every mid-build {@code getId()} whose immediate caller
+     * is {@code DefaultUserProfile}, JPA persistence, a JPA/Hibernate proxy,
+     * {@code RepresentationToModel.*}, a group-event listener, etc.
+     */
+    private boolean calledDirectlyFromCreateUserResource() {
+        return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
+                .walk(frames -> {
+                    var it = frames.iterator();
+                    while (it.hasNext()) {
+                        StackWalker.StackFrame f = it.next();
+                        Class<?> c = f.getDeclaringClass();
+                        String cn = c.getName();
+                        String mn = f.getMethodName();
+
+                        // Skip this adapter's own getId() override and the
+                        // inherited UserAdapter.equals()/hashCode() that call
+                        // getId() — they are NOT the logical "caller" of the
+                        // terminal; we want the frame that drove the lookup.
+                        if (IgaUserAdapter.class.getName().equals(cn)
+                                && "getId".equals(mn)) {
+                            continue;
+                        }
+                        if (UserAdapter.class.getName().equals(cn)
+                                && ("equals".equals(mn) || "hashCode".equals(mn)
+                                    || "getId".equals(mn))) {
+                            continue;
+                        }
+
+                        // First "real" caller frame. Terminal IFF it is the
+                        // KC admin createUser resource (or its Quarkus invoker
+                        // for that exact method).
+                        boolean realResource =
+                                KC_USERS_RESOURCE.equals(cn)
+                                        && mn != null
+                                        && mn.contains(KC_CREATE_USER);
+                        boolean quarkusInvoker =
+                                cn != null
+                                        && cn.contains("quarkusrestinvoker")
+                                        && ((mn != null && mn.contains(KC_CREATE_USER))
+                                            || cn.contains(KC_CREATE_USER));
+                        return realResource || quarkusInvoker;
+                    }
+                    return false;
+                });
+    }
+
     @Override
     public String getId() {
-        if (!captureMode || captureEmitted || !usernameObserved) {
+        // Primary deterministic gate: the resource-boundary StackWalker.
+        // Secondary defensive gate: usernameObserved (KC's
+        // DefaultUserProfile.create always applies the username writable
+        // attribute strictly before createUser:175). Either gate failing →
+        // fall straight through to super.getId() WITHOUT emitting.
+        if (!captureMode || captureEmitted || !usernameObserved
+                || !calledDirectlyFromCreateUserResource()) {
+            // One-shot breadcrumb: a mid-build getId() was correctly skipped
+            // (resource frame absent) AFTER a username was observed — proves
+            // the StackWalker predicate suppressed the early/racy
+            // equals/hashCode/JPA-driven getId() instead of emitting a lossy
+            // rep. Recorded once so it interleaves visibly in the trace.
+            if (captureMode && !captureEmitted && usernameObserved
+                    && !skipTraced) {
+                skipTraced = true;
+                trace("getId(skip:no-resource-frame)");
+            }
             return super.getId();
         }
         // Arm the fire-once guard BEFORE any further model/service call so the
         // emit path cannot re-enter this seam and the second getId() at
         // UsersResource.createUser:177 falls through.
         captureEmitted = true;
-        trace("getId#emit");
+        trace("getId#EMIT(resource-frame)");
 
         String userId = super.getId();
         String username = capturedRep.getUsername() != null
@@ -320,24 +476,28 @@ public class IgaUserAdapter extends UserAdapter {
         if (!capturedGroupPaths.isEmpty()) {
             rep.setGroups(new ArrayList<>(capturedGroupPaths));
         }
-        if (!capturedRealmRoles.isEmpty()) {
-            rep.setRealmRoles(new ArrayList<>(capturedRealmRoles));
-        }
-        if (!capturedClientRoles.isEmpty()) {
-            Map<String, List<String>> cr = new LinkedHashMap<>();
-            for (Map.Entry<String, List<String>> e : capturedClientRoles.entrySet()) {
-                cr.put(e.getKey(), new ArrayList<>(e.getValue()));
-            }
-            rep.setClientRoles(cr);
-        }
-        // Belt-and-braces: govern ONLY token-affecting user fields. Explicitly
-        // null/empty every non-token field so an inbound value in the create
-        // request can NEVER ride along into the CR through any path (none are
-        // accumulated; this proves the serialized rep carries no `credentials`,
+        // Belt-and-braces: CREATE_USER governs ONLY the 8 KC-routed token
+        // fields (username, enabled, email, emailVerified, firstName, lastName,
+        // attributes, groups). Explicitly null every non-governed field so an
+        // inbound value in the create request can NEVER ride along into the CR
+        // through any path (none are accumulated; this proves the serialized
+        // rep carries no `realmRoles`, `clientRoles`, `credentials`,
         // `requiredActions`, `federatedIdentities`, `createdTimestamp` or
-        // `federationLink`). The user sets their own password after approval;
-        // required actions / IdP links / metadata are not part of the issued
-        // token and are intentionally out of scope.
+        // `federationLink`).
+        //
+        // realmRoles/clientRoles in particular: roles are NOT capturable at
+        // user-create — stock KC's UsersResource.createUser
+        // (keycloak-services 26.5.5 UsersResource.java:143-192) NEVER applies
+        // realmRoles/clientRoles (only updateUserFromRep +
+        // createFederatedIdentities + createGroups + createCredentials;
+        // createRoleMappings runs only on the import/replay path). Roles are
+        // assigned via the separate POST /users/{id}/role-mappings/* →
+        // grantRole, which IGA already governs as a standalone GRANT_ROLES
+        // change request (untouched). The user sets their own password after
+        // approval; required actions / IdP links / metadata are not part of
+        // the issued token and are intentionally out of scope.
+        rep.setRealmRoles(null);
+        rep.setClientRoles(null);
         rep.setCredentials(null);
         rep.setRequiredActions(null);
         rep.setFederatedIdentities(null);
@@ -355,21 +515,32 @@ public class IgaUserAdapter extends UserAdapter {
 
         int attrs = rep.getAttributes() == null ? 0 : rep.getAttributes().size();
         int groups = rep.getGroups() == null ? 0 : rep.getGroups().size();
-        int realmRoles = rep.getRealmRoles() == null ? 0 : rep.getRealmRoles().size();
-        int clientRoles = rep.getClientRoles() == null ? 0
-                : rep.getClientRoles().values().stream().mapToInt(List::size).sum();
-        log.infof("IGA capture CREATE_USER: accumulated-rep path for user=%s (uuid=%s, "
-                + "enabled=%s, attributes=%d, groups=%d, realmRoles=%d, clientRoles=%d, "
-                + "%d chars; ONLY token-affecting fields governed — credentials/"
-                + "requiredActions/federatedIdentities/createdTimestamp/federationLink "
-                + "NOT governed) captured at the post-build terminal seam "
-                + "(UsersResource.createUser#getId, gated on username-observed); observed "
-                + "order=[%s]; CR written in a separate tx, request tx marked rollback-only "
-                + "so the scratch user + memberships + role mappings are discarded (zero "
-                + "rows persisted at draft); the token-affecting config (no password) will "
+        // Compact running observed-order + emit field-presence trace so any
+        // future early/lossy emit is immediately diagnosable from the log, e.g.
+        //   IGA user-capture: setUsername … getId(skip:no-resource-frame) …
+        //   setEmail … setAttribute:foo … joinGroup …
+        //   getId#EMIT(resource-frame) username=Y enabled=Y email=Y first=Y
+        //   last=Y emailVerified=Y attrs=2 groups=1
+        log.infof("IGA user-capture: %s | getId#EMIT(resource-frame) "
+                + "username=%s enabled=%s email=%s first=%s last=%s "
+                + "emailVerified=%s attrs=%d groups=%d | CREATE_USER governs "
+                + "ONLY the 8 token fields — realmRoles/clientRoles "
+                + "(GRANT_ROLES role-mapping CR)/credentials/requiredActions/"
+                + "federatedIdentities/createdTimestamp/federationLink NOT "
+                + "governed at create; user=%s uuid=%s %d chars; CR written in "
+                + "a separate tx, request tx marked rollback-only so the "
+                + "scratch user + memberships are discarded (zero rows "
+                + "persisted at draft); the 8 token fields (no password) "
                 + "replay on commit",
-                username, userId, rep.isEnabled(), attrs, groups, realmRoles,
-                clientRoles, repJson.length(), observedTrace);
+                observedTrace,
+                yn(username != null),
+                rep.isEnabled() == null ? "-" : (rep.isEnabled() ? "Y" : "N"),
+                yn(rep.getEmail() != null),
+                yn(rep.getFirstName() != null),
+                yn(rep.getLastName() != null),
+                rep.isEmailVerified() == null ? "-"
+                        : (rep.isEmailVerified() ? "Y" : "N"),
+                attrs, groups, username, userId, repJson.length());
 
         // rowsJson contract (must match IgaReplayDispatcher.replayCreateUser):
         // ID = user UUID, USERNAME = lowercased username, REALM_ID = realm UUID,
@@ -505,41 +676,35 @@ public class IgaUserAdapter extends UserAdapter {
     // -------------------------------------------------------------------------
     // Role mappings.
     //
-    // capture: pass through + accumulate into rep.realmRoles (realm role
-    // NAMES) / rep.clientRoles ({human clientId → [role name]}) — EXACTLY the
-    // shape RepresentationToModel.createRoleMappings (RepresentationToModel.java
-    // :823-857, invoked from DefaultExportImportManager.createUser:1004)
-    // consumes on replay. inline: targeted GRANT_ROLES / REVOKE_ROLES CR
-    // (unchanged).
+    // CREATE_USER does NOT govern roles. Roles are NOT capturable at
+    // user-create by any model-layer mechanism: stock KC's
+    // UsersResource.createUser (keycloak-services 26.5.5
+    // UsersResource.java:143-192) NEVER applies realmRoles/clientRoles — it
+    // runs only updateUserFromRep + createFederatedIdentities + createGroups +
+    // createCredentials; createRoleMappings runs only on the import/replay
+    // path. So grantRole/deleteRoleMapping do NOT fire during an admin user
+    // create at all, and there is intentionally NO capture-mode accumulation
+    // here (the former rep.realmRoles/rep.clientRoles capture path was removed
+    // as dead — getId() also explicitly nulls rep.realmRoles/rep.clientRoles,
+    // belt-and-braces). In capture mode these simply pass straight through to
+    // the inherited UserAdapter (the scratch user is rolled back at draft
+    // anyway).
+    //
+    // Roles are assigned via the SEPARATE POST /users/{id}/role-mappings/* →
+    // RoleMapperResource.addRealmRoleMappings → grantRole, which IGA already
+    // governs as a standalone GRANT_ROLES / REVOKE_ROLES change request on the
+    // INLINE path below. That inline relationship-action governance is
+    // UNCHANGED.
     // -------------------------------------------------------------------------
 
     @Override
     public void grantRole(RoleModel role) {
         if (captureMode) {
+            // Roles are not part of CREATE_USER and (per the KC trace) do not
+            // fire during admin user-create anyway — plain pass-through, no
+            // accumulation. The standalone GRANT_ROLES governance is the
+            // inline path below (untouched).
             super.grantRole(role);
-            if (role != null) {
-                if (role.isClientRole()) {
-                    String clientId = null;
-                    try {
-                        org.keycloak.models.ClientModel owning =
-                                realm.getClientById(role.getContainerId());
-                        if (owning != null) clientId = owning.getClientId();
-                    } catch (RuntimeException ignored) {
-                        // cannot resolve owning client → skip from rep (the
-                        // real link is still on the scratch model via super,
-                        // discarded with the rollback; no worse than bare).
-                    }
-                    if (clientId != null) {
-                        capturedClientRoles
-                                .computeIfAbsent(clientId, k -> new ArrayList<>())
-                                .add(role.getName());
-                        trace("grantRole:client:" + clientId + "/" + role.getName());
-                    }
-                } else {
-                    capturedRealmRoles.add(role.getName());
-                    trace("grantRole:realm:" + role.getName());
-                }
-            }
             return;
         }
         if (!isIgaActive()) {
@@ -559,27 +724,6 @@ public class IgaUserAdapter extends UserAdapter {
     public void deleteRoleMapping(RoleModel role) {
         if (captureMode) {
             super.deleteRoleMapping(role);
-            if (role != null) {
-                if (role.isClientRole()) {
-                    try {
-                        org.keycloak.models.ClientModel owning =
-                                realm.getClientById(role.getContainerId());
-                        if (owning != null) {
-                            List<String> names = capturedClientRoles.get(owning.getClientId());
-                            if (names != null) {
-                                names.remove(role.getName());
-                                if (names.isEmpty()) {
-                                    capturedClientRoles.remove(owning.getClientId());
-                                }
-                            }
-                        }
-                    } catch (RuntimeException ignored) {
-                    }
-                } else {
-                    capturedRealmRoles.remove(role.getName());
-                }
-                trace("deleteRoleMapping:" + role.getName());
-            }
             return;
         }
         if (!isIgaActive()) {

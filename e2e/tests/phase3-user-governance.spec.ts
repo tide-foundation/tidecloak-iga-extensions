@@ -25,20 +25,25 @@ import {
  * ModelToRepresentation and there is no single unconditional terminal model
  * call).
  *
- * Govern ONLY token-affecting user fields (product decision): user-create
- * governance captures/replays ONLY the fields that affect the user's issued
- * token — username, enabled, email, emailVerified, firstName, lastName,
- * attributes, realmRoles, clientRoles, groups. Everything else is deliberately
- * NOT captured, deferred or replayed:
+ * CREATE_USER governs ONLY the 8 KC-routed token fields (product decision):
+ * username, enabled, email, emailVerified, firstName, lastName, attributes,
+ * groups. Everything else is deliberately NOT captured, deferred or replayed
+ * at user-create:
+ *  - `realmRoles` / `clientRoles` — roles are NOT capturable at user-create:
+ *    stock KC's UsersResource.createUser NEVER applies them. Roles are
+ *    governed SEPARATELY via the POST /users/{id}/role-mappings/* →
+ *    grantRole path as a standalone GRANT_ROLES change request (proven by the
+ *    second test below);
  *  - `credentials` — the user sets their own password post-approval;
  *  - `requiredActions` — login-flow gating, not token content;
  *  - `federatedIdentities` — IdP brokering, not token claims;
  *  - `createdTimestamp` — metadata;
  *  - `federationLink` — user-storage link, not token claims.
- * The governed-create REQUEST below deliberately STILL sends a password-less
- * `requiredActions:['UPDATE_PASSWORD']` AND a `federatedIdentities` entry to
- * PROVE they are correctly DROPPED: the captured CR must NOT carry any of the
- * five non-token fields, and post-commit the user must have no UPDATE_PASSWORD
+ * The governed-create REQUEST below deliberately STILL sends
+ * `realmRoles:['role1']`, a password-less `requiredActions:['UPDATE_PASSWORD']`
+ * AND a `federatedIdentities` entry to PROVE they are correctly DROPPED: the
+ * captured CR must NOT carry any of the seven non-CREATE_USER fields, and
+ * post-commit the user must have NO role1 from the create, no UPDATE_PASSWORD
  * required action, no federated-identity link and no usable password.
  *
  * Pure API E2E (no browser). It drives the exact production path: the IGA
@@ -56,9 +61,10 @@ import {
  *    (double-escaping yields false negatives);
  *  - distinguish "jar loaded but capture is a CODE BUG" (do NOT tell the user
  *    to restart) from "jar genuinely not loaded" (restart then re-run);
- *  - assert the captured rep carries the token-affecting subset AND that all
- *    five non-token fields (credentials, requiredActions, federatedIdentities,
- *    createdTimestamp, federationLink) are absent/empty.
+ *  - assert the captured rep carries the 8 token fields AND that all seven
+ *    non-CREATE_USER fields (realmRoles, clientRoles, credentials,
+ *    requiredActions, federatedIdentities, createdTimestamp, federationLink)
+ *    are absent/empty.
  */
 
 const REALM = 'iga-phase3-e2e';
@@ -129,12 +135,18 @@ function fieldAbsent(rep: any, field: string): boolean {
   return false;
 }
 
-/** All five non-token fields must be absent/empty on the captured rep. */
+/**
+ * All seven non-CREATE_USER fields must be absent/empty on the captured rep.
+ * realmRoles/clientRoles are NOT part of CREATE_USER (roles are governed
+ * separately via the GRANT_ROLES role-mapping change request).
+ */
 function nonTokenFieldsDropped(rep: any): {
   ok: boolean;
   detail: Record<string, boolean>;
 } {
   const detail = {
+    realmRoles: fieldAbsent(rep, 'realmRoles'),
+    clientRoles: fieldAbsent(rep, 'clientRoles'),
     credentials: fieldAbsent(rep, 'credentials'),
     requiredActions: fieldAbsent(rep, 'requiredActions'),
     federatedIdentities: fieldAbsent(rep, 'federatedIdentities'),
@@ -249,23 +261,21 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
           rep.attributes.probeAttr.includes('probe-val');
         const carriesGroup =
           Array.isArray(rep?.groups) && rep.groups.includes('/pg1');
-        const carriesRealmRole =
-          Array.isArray(rep?.realmRoles) && rep.realmRoles.includes('prole1');
+        // realmRoles MUST be dropped — roles are NOT part of CREATE_USER even
+        // though the probe request sent realmRoles:['prole1'].
         const dropped = nonTokenFieldsDropped(rep);
         const carriesFullRep =
           carriesUsername &&
           carriesEmail &&
           carriesAttr &&
           carriesGroup &&
-          carriesRealmRole &&
           dropped.ok;
         const captured = {
           username: carriesUsername,
           email: carriesEmail,
           attributes: carriesAttr,
           groups: carriesGroup,
-          realmRoles: carriesRealmRole,
-          nonTokenFieldsDropped: dropped.detail,
+          nonCreateUserFieldsDropped: dropped.detail,
         };
         evidence.probeCaptured = captured;
         if (!carriesFullRep) {
@@ -278,11 +288,12 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
             loaded: true as const,
             detail:
               'Phase 3 loaded but user capture is producing a lossy ' +
-              'token-affecting rep, or is still carrying a non-token field ' +
-              '(credentials/requiredActions/federatedIdentities/' +
-              'createdTimestamp/federationLink must NOT be governed) — this ' +
-              'is a CODE BUG in IgaUserAdapter capture, NOT a restart issue ' +
-              '(the governed create DID 202 with a CREATE_USER CR). ' +
+              '8-token-field rep, or is still carrying a non-CREATE_USER ' +
+              'field (realmRoles/clientRoles/credentials/requiredActions/' +
+              'federatedIdentities/createdTimestamp/federationLink must NOT ' +
+              'be governed at create) — this is a CODE BUG in IgaUserAdapter ' +
+              'capture, NOT a restart issue (the governed create DID 202 ' +
+              'with a CREATE_USER CR). ' +
               `captured=${JSON.stringify(captured)} ` +
               `rep=${rowsJson.slice(0, 700)}`,
             evidence,
@@ -320,9 +331,11 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
       if (loaded) {
         throw new Error(
           `PRECONDITION: Phase 3 loaded but user capture is producing a ` +
-            `lossy rep or still carrying a non-token field — this is a code ` +
-            `bug in IgaUserAdapter, NOT a restart issue. Do NOT restart; fix ` +
-            `the capture. Detail: ${pre.detail}`,
+            `lossy 8-token-field rep or still carrying a non-CREATE_USER ` +
+            `field (realmRoles/clientRoles/credentials/requiredActions/` +
+            `federatedIdentities/createdTimestamp/federationLink) — this is ` +
+            `a code bug in IgaUserAdapter, NOT a restart issue. Do NOT ` +
+            `restart; fix the capture. Detail: ${pre.detail}`,
         );
       }
       throw new Error(
@@ -422,16 +435,28 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
       Array.isArray(rep?.groups) && rep.groups.includes('/g1'),
       `captured rep must carry group path /g1 (got ${JSON.stringify(rep?.groups)})`,
     ).toBeTruthy();
-    expect(
-      Array.isArray(rep?.realmRoles) && rep.realmRoles.includes('role1'),
-      `captured rep must carry realmRole role1 (got ${JSON.stringify(
-        rep?.realmRoles,
-      )})`,
-    ).toBeTruthy();
+    expect(rep?.emailVerified, 'captured rep must carry emailVerified').toBe(
+      true,
+    );
+    expect(rep?.enabled, 'captured rep must carry enabled').toBe(true);
 
-    // Every non-token field must be DROPPED from the captured REP_JSON even
-    // though requiredActions + federatedIdentities WERE sent in the request.
+    // The 7 non-CREATE_USER fields must be DROPPED from the captured REP_JSON
+    // even though realmRoles + requiredActions + federatedIdentities WERE all
+    // sent in the request. realmRoles/clientRoles are NOT part of CREATE_USER
+    // (roles are governed separately via the GRANT_ROLES role-mapping CR —
+    // proven by the second test).
     const dropped = nonTokenFieldsDropped(rep);
+    expect(
+      dropped.detail.realmRoles,
+      `captured REP_JSON must NOT carry realmRoles (roles are NOT part of ` +
+        `CREATE_USER; governed separately via the GRANT_ROLES role-mapping ` +
+        `CR) — got ${JSON.stringify(rep?.realmRoles)}`,
+    ).toBeTruthy();
+    expect(
+      dropped.detail.clientRoles,
+      `captured REP_JSON must NOT carry clientRoles (roles are NOT part of ` +
+        `CREATE_USER) — got ${JSON.stringify(rep?.clientRoles)}`,
+    ).toBeTruthy();
     expect(
       dropped.detail.credentials,
       `captured REP_JSON must NOT carry credentials (passwords not governed) ` +
@@ -485,9 +510,11 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
     ).toBe(200);
 
     // -----------------------------------------------------------------------
-    // 5. Post-commit fidelity: the user exists with email/names/attribute, is
-    //    in g1, has role1 — and has NO UPDATE_PASSWORD required action, NO
-    //    federated-identity link and NO usable password (none were governed).
+    // 5. Post-commit fidelity: the user exists with email/names/attribute and
+    //    is in g1 — and has NO role1 from the create (roles are NOT part of
+    //    CREATE_USER), NO UPDATE_PASSWORD required action, NO federated-
+    //    identity link and NO usable password (none of these were governed by
+    //    the CREATE_USER change request).
     // -----------------------------------------------------------------------
     const found = await getUserByUsername(request, REALM, spec.username);
     expect(found.body, `user ${spec.username} must exist after commit`).toBeTruthy();
@@ -525,14 +552,19 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
       )})`,
     ).toBeTruthy();
 
+    // realmRoles was NOT governed by CREATE_USER: the committed user must NOT
+    // have role1 from the create even though realmRoles:['role1'] was sent in
+    // the create request. (Roles ARE fully governed — just separately, via the
+    // GRANT_ROLES role-mapping change request proven by the second test.)
     const rm = await getUserRealmRoleMappings(request, REALM, userId);
     expect(rm.http, 'user realm role-mappings http').toBe(200);
     expect(
       rm.body.some((r: any) => r?.name === 'role1'),
-      `user must have realm role role1 after commit (got ${JSON.stringify(
-        rm.body.map((r: any) => r?.name),
-      )})`,
-    ).toBeTruthy();
+      `user must NOT have realm role role1 from the CREATE_USER replay ` +
+        `(roles are not part of CREATE_USER and were dropped from the CR; ` +
+        `they are governed separately via the GRANT_ROLES role-mapping CR) ` +
+        `— got ${JSON.stringify(rm.body.map((r: any) => r?.name))}`,
+    ).toBeFalsy();
 
     // federatedIdentities was NOT governed: the committed user must have NO
     // federated-identity link even though one was sent in the request.

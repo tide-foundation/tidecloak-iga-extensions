@@ -535,6 +535,28 @@ export async function getUserRealmRoleMappings(
   return { http: res.status(), body: Array.isArray(body) ? body : [] };
 }
 
+/**
+ * Assign one or more realm roles to a user via
+ * {@code POST /admin/realms/{realm}/users/{id}/role-mappings/realm}. KC's
+ * RoleMapperResource.addRealmRoleMappings consumes a list of full
+ * RoleRepresentations and calls {@code roleMapper.grantRole(role)} per entry —
+ * the exact production seam IGA's inline GRANT_ROLES governance intercepts.
+ * Returns the raw response so callers can assert the (KC-default) status of
+ * the void endpoint.
+ */
+export function assignRealmRoleMapping(
+  request: APIRequestContext,
+  realm: string,
+  userId: string,
+  roles: any[],
+): Promise<APIResponse> {
+  return kcFetch(
+    request,
+    `/admin/realms/${realm}/users/${userId}/role-mappings/realm`,
+    { method: 'POST', json: roles },
+  );
+}
+
 /** Federated identity links of a user (by user UUID). Array of FI reps. */
 export async function getUserFederatedIdentities(
   request: APIRequestContext,
