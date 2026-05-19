@@ -6,7 +6,6 @@ import {
   igaStatus,
   createRole,
   createGroup,
-  getGroupByName,
   createUser,
   getUserByUsername,
   getUserGroups,
@@ -21,15 +20,21 @@ import {
 
 /**
  * Phase 3 — model-layer full capture for user creates (the hardest type:
- * credentials, group memberships, realm-role mappings, required actions and
- * federated identities are NOT serialized by ModelToRepresentation and there
- * is no single unconditional terminal model call).
+ * group memberships, realm-role mappings, required actions and federated
+ * identities are NOT serialized by ModelToRepresentation and there is no
+ * single unconditional terminal model call).
+ *
+ * Credentials are NOT governed (product decision): a user's password is never
+ * captured, deferred or replayed. The created user sets their own password
+ * themselves (an `UPDATE_PASSWORD` required action / set-password email /
+ * self-service) AFTER the governed create is approved. So the governed-create
+ * payload deliberately sends NO password, the captured CR must NOT carry a
+ * `credentials` field, and post-commit the user must have NO usable password.
  *
  * Pure API E2E (no browser). It drives the exact production path: the IGA
  * capture is enforced at the model layer (IgaUserAdapter#getId terminal seam
- * during UsersResource.createUser, plus the credential-manager wrapper and
- * IgaUserProvider.addFederatedIdentity), so raw Admin REST exercises the same
- * seam any caller hits.
+ * during UsersResource.createUser, plus IgaUserProvider.addFederatedIdentity),
+ * so raw Admin REST exercises the same seam any caller hits.
  *
  * Order of operations follows the documented "configure bases BEFORE enabling
  * IGA" rule: the group `g1` and realm role `role1` the governed user will join
@@ -40,7 +45,9 @@ import {
  *    against the *parsed* rep — never a substring search on a stringified CR
  *    (double-escaping yields false negatives);
  *  - distinguish "jar loaded but capture is a CODE BUG" (do NOT tell the user
- *    to restart) from "jar genuinely not loaded" (restart then re-run).
+ *    to restart) from "jar genuinely not loaded" (restart then re-run);
+ *  - assert the captured rep carries identity/attribute/required-action/group/
+ *    realm-role AND that `credentials` is absent or empty.
  */
 
 const REALM = 'iga-phase3-e2e';
@@ -48,7 +55,9 @@ const PROBE_REALM = 'iga-phase3-precond-probe';
 const RERUN =
   'cd /home/sasha/project/tidecloak-iga-extensions/e2e && npx playwright test';
 
-const PW = 'Phase3-Pw-Str0ng!';
+// Any password value; it MUST NOT yield a token (the password is not governed,
+// so the user never gets one through the governed-create path).
+const ANY_PW = 'Phase3-Any-Pw!';
 
 const userSpec = (): UserSpec => ({
   username: 'p3-user',
@@ -58,10 +67,11 @@ const userSpec = (): UserSpec => ({
   firstName: 'Phase',
   lastName: 'Three',
   attributes: { p3CustomAttr: ['p3-attr-value'] },
-  requiredActions: ['VERIFY_EMAIL'],
+  // UPDATE_PASSWORD is a REQUIRED ACTION (the real model: the approved user
+  // must set their own password) — NOT a credential. No `credentials` sent.
+  requiredActions: ['UPDATE_PASSWORD'],
   groups: ['/g1'],
   realmRoles: ['role1'],
-  credentials: [{ type: 'password', value: PW, temporary: false }],
 });
 
 /**
@@ -91,18 +101,25 @@ function parseCapturedUserRep(crBody: any): any | undefined {
   return undefined;
 }
 
+/** True iff the parsed rep carries no usable `credentials` (absent or empty). */
+function credentialsAbsent(rep: any): boolean {
+  const c = rep?.credentials;
+  return c == null || (Array.isArray(c) && c.length === 0);
+}
+
 test.describe('IGA Phase 3: user governed create/replay', () => {
   test.afterAll(async ({ request }) => {
     await deleteRealm(request, REALM).catch(() => {});
     await deleteRealm(request, PROBE_REALM).catch(() => {});
   });
 
-  test('Phase 3 governed user create → CR → authorize+commit → full fidelity + password works', async ({
+  test('Phase 3 governed user create → CR → authorize+commit → full identity/roles/groups/required-actions fidelity, NO credentials, password not set', async ({
     request,
   }) => {
     // -----------------------------------------------------------------------
-    // PRECONDITION GATE — a governed user create must 202 + carry the full rep
-    // (credentials + groups + realmRoles + requiredActions) in the CR.
+    // PRECONDITION GATE — a governed user create must 202 + carry the full
+    // identity rep (groups + realmRoles + requiredActions, NO credentials) in
+    // the CR.
     // -----------------------------------------------------------------------
     const pre = await (async () => {
       const evidence: Record<string, unknown> = {};
@@ -124,12 +141,10 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
           firstName: 'Probe',
           lastName: 'User',
           attributes: { probeAttr: ['probe-val'] },
-          requiredActions: ['VERIFY_EMAIL'],
+          requiredActions: ['UPDATE_PASSWORD'],
           groups: ['/pg1'],
           realmRoles: ['prole1'],
-          credentials: [
-            { type: 'password', value: 'Probe-Pw-1!', temporary: false },
-          ],
+          // Deliberately NO credentials — passwords are not governed.
         });
         const status = res.status();
         const loc = locationHeader(res);
@@ -181,9 +196,6 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
         }
         const rep = parseCapturedUserRep(cr.body);
         const rowsJson = JSON.stringify(cr.body?.rows ?? cr.body ?? {});
-        const creds: any[] = Array.isArray(rep?.credentials)
-          ? rep.credentials
-          : [];
         const carriesUsername =
           (rep?.username || '').toLowerCase() === 'probe-user';
         const carriesEmail = rep?.email === 'probe-user@example.test';
@@ -192,20 +204,12 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
           rep.attributes.probeAttr.includes('probe-val');
         const carriesReqAction =
           Array.isArray(rep?.requiredActions) &&
-          rep.requiredActions.includes('VERIFY_EMAIL');
+          rep.requiredActions.includes('UPDATE_PASSWORD');
         const carriesGroup =
           Array.isArray(rep?.groups) && rep.groups.includes('/pg1');
         const carriesRealmRole =
           Array.isArray(rep?.realmRoles) && rep.realmRoles.includes('prole1');
-        const carriesCred =
-          creds.length >= 1 &&
-          creds.some(
-            (c: any) =>
-              c?.type === 'password' &&
-              (c?.value === 'Probe-Pw-1!' ||
-                !!c?.secretData ||
-                !!c?.credentialData),
-          );
+        const noCreds = credentialsAbsent(rep);
         const carriesFullRep =
           carriesUsername &&
           carriesEmail &&
@@ -213,7 +217,7 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
           carriesReqAction &&
           carriesGroup &&
           carriesRealmRole &&
-          carriesCred;
+          noCreds;
         const captured = {
           username: carriesUsername,
           email: carriesEmail,
@@ -221,21 +225,23 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
           requiredActions: carriesReqAction,
           groups: carriesGroup,
           realmRoles: carriesRealmRole,
-          credentials: carriesCred,
+          credentialsAbsent: noCreds,
         };
         evidence.probeCaptured = captured;
         if (!carriesFullRep) {
           // 202 + Location + CR exists + actionType === CREATE_USER ⇒ the
-          // Phase 3 jar IS loaded and capture IS intercepting — an empty/lossy
-          // rep is a CODE BUG in IgaUserAdapter, NOT a restart situation.
+          // Phase 3 jar IS loaded and capture IS intercepting — a lossy rep
+          // (or a rep that still carries credentials) is a CODE BUG in
+          // IgaUserAdapter, NOT a restart situation.
           return {
             ok: false as const,
             loaded: true as const,
             detail:
-              'Phase 3 loaded but user capture is producing an EMPTY/lossy ' +
-              'rep — this is a CODE BUG in IgaUserAdapter capture, NOT a ' +
-              'restart issue (the governed create DID 202 with a CREATE_USER ' +
-              `CR). captured=${JSON.stringify(captured)} ` +
+              'Phase 3 loaded but user capture is producing a lossy rep, or ' +
+              'is still carrying `credentials` (passwords must NOT be ' +
+              'governed) — this is a CODE BUG in IgaUserAdapter capture, NOT ' +
+              'a restart issue (the governed create DID 202 with a ' +
+              `CREATE_USER CR). captured=${JSON.stringify(captured)} ` +
               `rep=${rowsJson.slice(0, 700)}`,
             evidence,
           };
@@ -271,9 +277,10 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
       const loaded = (pre as { loaded?: boolean }).loaded === true;
       if (loaded) {
         throw new Error(
-          `PRECONDITION: Phase 3 loaded but user capture is producing an ` +
-            `EMPTY rep — this is a code bug in IgaUserAdapter, NOT a restart ` +
-            `issue. Do NOT restart; fix the capture. Detail: ${pre.detail}`,
+          `PRECONDITION: Phase 3 loaded but user capture is producing a ` +
+            `lossy rep or still carrying credentials — this is a code bug in ` +
+            `IgaUserAdapter, NOT a restart issue. Do NOT restart; fix the ` +
+            `capture. Detail: ${pre.detail}`,
         );
       }
       throw new Error(
@@ -313,8 +320,9 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
     expect(st1.enabled, 'IGA must be enabled').toBe(true);
 
     // -----------------------------------------------------------------------
-    // 3. Governed user create: email, names, custom attribute, a required
-    //    action, membership of g1, realm role role1, AND a password.
+    // 3. Governed user create: email, names, custom attribute, the
+    //    UPDATE_PASSWORD required action, membership of g1, realm role role1.
+    //    NO password is sent (passwords are not governed).
     // -----------------------------------------------------------------------
     const spec = userSpec();
     const create = await createUser(request, REALM, spec);
@@ -346,25 +354,26 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
     ).toBe('PENDING');
 
     // Capture fidelity at the CR (parsed REP_JSON — the replay source of
-    // truth) BEFORE commit: credentials>=1 etc.
+    // truth) BEFORE commit: identity/attribute/required-action/group/role
+    // present AND `credentials` absent/empty.
     const rep = parseCapturedUserRep(cr.body);
-    const creds: any[] = Array.isArray(rep?.credentials)
-      ? rep.credentials
-      : [];
     expect(
-      creds.length,
-      `captured REP_JSON must carry >=1 credential (got ${JSON.stringify(
-        rep?.credentials,
+      (rep?.username || '').toLowerCase(),
+      `captured rep must carry username p3-user (got ${JSON.stringify(
+        rep?.username,
       )})`,
-    ).toBeGreaterThanOrEqual(1);
+    ).toBe('p3-user');
+    expect(rep?.email, 'captured rep must carry email').toBe(
+      'p3-user@example.test',
+    );
+    expect(rep?.firstName, 'captured rep must carry firstName').toBe('Phase');
+    expect(rep?.lastName, 'captured rep must carry lastName').toBe('Three');
     expect(
-      creds.some(
-        (c: any) =>
-          c?.type === 'password' &&
-          (c?.value === PW || !!c?.secretData || !!c?.credentialData),
-      ),
-      `captured password credential must carry the value or hashed data ` +
-        `(got ${JSON.stringify(creds)})`,
+      Array.isArray(rep?.attributes?.p3CustomAttr) &&
+        rep.attributes.p3CustomAttr.includes('p3-attr-value'),
+      `captured rep must carry custom attribute (got ${JSON.stringify(
+        rep?.attributes,
+      )})`,
     ).toBeTruthy();
     expect(
       Array.isArray(rep?.groups) && rep.groups.includes('/g1'),
@@ -378,10 +387,16 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
     ).toBeTruthy();
     expect(
       Array.isArray(rep?.requiredActions) &&
-        rep.requiredActions.includes('VERIFY_EMAIL'),
-      `captured rep must carry requiredAction VERIFY_EMAIL (got ${JSON.stringify(
+        rep.requiredActions.includes('UPDATE_PASSWORD'),
+      `captured rep must carry requiredAction UPDATE_PASSWORD (got ${JSON.stringify(
         rep?.requiredActions,
       )})`,
+    ).toBeTruthy();
+    // Credentials must NOT ride along: the password is not governed.
+    expect(
+      credentialsAbsent(rep),
+      `captured REP_JSON must NOT carry a credentials field (passwords are ` +
+        `not governed) — got ${JSON.stringify(rep?.credentials)}`,
     ).toBeTruthy();
 
     // Not persisted at draft: user must 404 (absent) before commit.
@@ -392,17 +407,6 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
         draft.body,
       )})`,
     ).toBeFalsy();
-    // And the password must NOT work before commit.
-    const preTok = await directGrantToken(
-      request,
-      REALM,
-      spec.username,
-      PW,
-    );
-    expect(
-      preTok.http,
-      `direct-grant before commit must fail (got ${preTok.http})`,
-    ).not.toBe(200);
 
     // -----------------------------------------------------------------------
     // 4. Authorize + commit (threshold 1, no approver roles → self).
@@ -422,9 +426,9 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
     ).toBe(200);
 
     // -----------------------------------------------------------------------
-    // 5. Post-commit fidelity: the user exists with email/names/attribute/
-    //    required-action, is in g1, has role1, AND the password actually
-    //    works (decisive credential proof via a direct-grant token request).
+    // 5. Post-commit fidelity: the user exists with email/names/attribute,
+    //    has the UPDATE_PASSWORD required action, is in g1, has role1 — and
+    //    has NO usable password (passwords are not governed).
     // -----------------------------------------------------------------------
     const found = await getUserByUsername(request, REALM, spec.username);
     expect(found.body, `user ${spec.username} must exist after commit`).toBeTruthy();
@@ -444,10 +448,10 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
     ).toBe('p3-attr-value');
     expect(
       Array.isArray(found.body.requiredActions) &&
-        found.body.requiredActions.includes('VERIFY_EMAIL'),
-      `user requiredAction fidelity (got ${JSON.stringify(
+        found.body.requiredActions.includes('UPDATE_PASSWORD'),
+      `user UPDATE_PASSWORD required-action fidelity (got ${JSON.stringify(
         found.body.requiredActions,
-      )})`,
+      )}) — the approved user must be told to set their own password`,
     ).toBeTruthy();
 
     const grp = await getUserGroups(request, REALM, userId);
@@ -468,20 +472,21 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
       )})`,
     ).toBeTruthy();
 
-    // The decisive credential proof: a direct-grant token request for
-    // username+password against the realm succeeds → the password credential
-    // was captured & replayed faithfully (the password actually works).
-    const tok = await directGrantToken(request, REALM, spec.username, PW);
+    // The decisive negative proof: the password was NOT governed, captured or
+    // replayed, so a direct-grant token request for username + ANY password
+    // MUST NOT succeed (the user has no usable password until they set one
+    // themselves via UPDATE_PASSWORD). Expect a non-200 (typically 401).
+    const tok = await directGrantToken(request, REALM, spec.username, ANY_PW);
     expect(
       tok.http,
-      `direct-grant token for ${spec.username} must succeed post-commit ` +
-        `(got HTTP ${tok.http} ${JSON.stringify(tok.body)}) — this is the ` +
-        `decisive proof the password credential round-tripped`,
-    ).toBe(200);
+      `direct-grant token for ${spec.username} must NOT succeed post-commit ` +
+        `(got HTTP ${tok.http} ${JSON.stringify(tok.body)}) — proves the ` +
+        `password was correctly NOT set/replayed (credentials not governed)`,
+    ).not.toBe(200);
     expect(
       tok.body?.access_token,
-      'direct-grant must return an access_token',
-    ).toBeTruthy();
+      'direct-grant must NOT return an access_token (no usable password)',
+    ).toBeFalsy();
 
     // -----------------------------------------------------------------------
     // 6. Cleanup (afterAll also deletes; do it here too and confirm).

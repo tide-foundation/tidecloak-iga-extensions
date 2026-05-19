@@ -530,10 +530,12 @@ export async function getUserRealmRoleMappings(
 
 /**
  * Direct-grant (Resource Owner Password Credentials) token request for
- * username+password against the realm's admin-cli client. Proves the password
- * credential was captured & replayed faithfully (the password actually works).
- * admin-cli is a public client with direct access grants enabled by default in
- * every realm, so no extra client setup is needed.
+ * username+password against the realm's admin-cli client. Used by Phase 3 to
+ * prove the NEGATIVE: a governed-created user has NO usable password (the
+ * password is not governed — the user sets it themselves post-approval), so
+ * this MUST NOT return 200 for any password. admin-cli is a public client with
+ * direct access grants enabled by default in every realm, so no extra client
+ * setup is needed.
  */
 export async function directGrantToken(
   request: APIRequestContext,

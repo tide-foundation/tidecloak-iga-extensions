@@ -2,18 +2,13 @@ package org.tidecloak.iga.providers;
 
 import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
-import org.keycloak.credential.CredentialInput;
-import org.keycloak.credential.CredentialModel;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
-import org.keycloak.models.SubjectCredentialManager;
-import org.keycloak.models.credential.PasswordCredentialModel;
 import org.keycloak.models.jpa.UserAdapter;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
-import org.keycloak.representations.idm.CredentialRepresentation;
 import org.keycloak.representations.idm.UserRepresentation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -43,14 +38,30 @@ import java.util.Set;
  *       {@code IgaUserProvider.addUser} just persisted via the 5-arg
  *       local-storage {@code super.addUser(realm,id,username,false,false)} (NO
  *       default roles / required actions, so the captured rep carries ONLY what
- *       the admin sent). Every setter / relationship / credential call still
- *       passes through to the real {@link UserAdapter} so KC's
+ *       the admin sent). Every setter / relationship call still passes through
+ *       to the real {@link UserAdapter} so KC's
  *       {@code UsersResource.createUser} flow builds the complete real model
  *       (lifecycle proof identical to client-scope), but each is ALSO
  *       <b>accumulated</b> into an in-memory {@link UserRepresentation}. The
  *       accumulated rep is emitted as the {@code CREATE_USER} change request at
  *       the terminal seam.</li>
  * </ul>
+ *
+ * <h2>Credentials are NOT governed (product decision)</h2>
+ * A user's password is deliberately NOT captured, deferred or replayed. The
+ * {@code credentialManager()} override and {@code CaptureCredentialManager}
+ * wrapper that earlier captured/replayed the password were removed: the user
+ * sets their own password themselves (an {@code UPDATE_PASSWORD} required
+ * action / set-password email / self-service) AFTER the governed create is
+ * approved. This keeps plaintext passwords out of CR rows and removes the
+ * riskiest novel seam. The captured {@link UserRepresentation} is therefore
+ * <b>guaranteed never to carry a {@code credentials} field</b> (it is
+ * explicitly null'd before serialization at the terminal emit). KC's create
+ * flow may still invoke the real (super) credential manager — credentials
+ * simply aren't intercepted, captured or persisted (the scratch user is rolled
+ * back at draft regardless). {@code UPDATE_PASSWORD} is a <em>required
+ * action</em>, NOT a credential, and IS captured (so the approved user can be
+ * told to set a password).
  *
  * <h2>KC 26.5.5 user-create model-call trace (verified, source on classpath)</h2>
  * {@code UsersResource.createUser} (keycloak-services
@@ -87,23 +98,26 @@ import java.util.Set;
  * 172  RepresentationToModel.createGroups(session,rep,realm,user)
  *        RepresentationToModel.java:762-773: per path user.joinGroup(group)
  * 174  RepresentationToModel.createCredentials(rep,session,realm,user,true)
- *        RepresentationToModel.java:784-808: per credential
- *          791-795 value non-empty → user.credentialManager()
- *                   .updateCredential(UserCredentialModel.password(value,false))
- *          804     else            → user.credentialManager()
- *                   .createCredentialThroughProvider(toModel(cred))
+ *        RepresentationToModel.java:784-808: NOT intercepted — the
+ *        credentialManager() override was removed; any inbound password is
+ *        applied (if at all) to the throw-away scratch user via the real
+ *        (super) credential manager and dies with the request-tx rollback. It
+ *        is NEVER accumulated into the captured rep (see "Credentials are NOT
+ *        governed").
  * 175  adminEvent...resourcePath(uri, user.getId())...   // user.getId() #1
  * 177  Response.created(...user.getId()...)              // user.getId() #2
  * </pre>
  *
  * <h3>Snapshot-lossy fields</h3>
- * {@code ModelToRepresentation} for a user does NOT serialize credentials,
- * group memberships, role mappings, required actions or federated identities,
- * and there is NO single unconditional terminal mutating model call (enabled is
- * conditional, the attribute loop is by-key, credentials/groups/roles/fed are
- * all conditional). So — exactly like client-scope — we accumulate every
+ * {@code ModelToRepresentation} for a user does NOT serialize group
+ * memberships, role mappings, required actions or federated identities, and
+ * there is NO single unconditional terminal mutating model call (enabled is
+ * conditional, the attribute loop is by-key, groups/roles/fed are all
+ * conditional). So — exactly like client-scope — we accumulate every
  * intercepted call into a {@link UserRepresentation} and emit from the
  * accumulator (never a live snapshot) at the post-build terminal {@code getId()}.
+ * Credentials are deliberately excluded from the accumulator entirely (see
+ * "Credentials are NOT governed").
  *
  * <h3>Terminal seam: {@code getId()} at UsersResource.createUser:175 (then 177),
  * gated on {@link #usernameObserved}</h3>
@@ -136,11 +150,15 @@ import java.util.Set;
  * credentials→createCredentials (1002), federatedIdentities (1003),
  * realmRoles/clientRoles→createRoleMappings (1004), clientConsents (1005),
  * notBefore (1012), serviceAccountClientId (1016), groups (1024). The
- * accumulator below populates precisely those fields with the precise shapes
- * {@code createCredentials}/{@code createRoleMappings}/{@code createGroups}
- * consume (plaintext password → {@code {type:"password",value,temporary}};
- * pre-hashed → {@code secretData}/{@code credentialData}; realmRoles = role
- * NAMES; clientRoles = {humanClientId → [role name]}; groups = group PATHS).
+ * accumulator below populates precisely those fields (EXCEPT credentials —
+ * never accumulated; see "Credentials are NOT governed") with the precise
+ * shapes {@code createRoleMappings}/{@code createGroups} consume (realmRoles =
+ * role NAMES; clientRoles = {humanClientId → [role name]}; groups = group
+ * PATHS). On replay {@code RepresentationToModel.createCredentials}
+ * (RepresentationToModel.java:786) is guarded by
+ * {@code if (userRep.getCredentials() != null)} — with no {@code credentials}
+ * in REP_JSON the loop is skipped and the user is created with NO password
+ * (no NPE), exactly the intended behaviour.
  */
 public class IgaUserAdapter extends UserAdapter {
 
@@ -165,7 +183,9 @@ public class IgaUserAdapter extends UserAdapter {
     private final Set<String> capturedGroupPaths = new LinkedHashSet<>();
     private final Set<String> capturedRealmRoles = new LinkedHashSet<>();
     private final Map<String, List<String>> capturedClientRoles = new LinkedHashMap<>();
-    private final List<CredentialRepresentation> capturedCredentials = new ArrayList<>();
+    // NOTE: credentials are deliberately NOT accumulated — a user's password is
+    // not governed (the user sets it themselves post-approval). See the
+    // "Credentials are NOT governed" section in the class javadoc.
     private final List<org.keycloak.representations.idm.FederatedIdentityRepresentation>
             capturedFederatedIdentities = new ArrayList<>();
     private final StringBuilder observedTrace = new StringBuilder();
@@ -279,22 +299,12 @@ public class IgaUserAdapter extends UserAdapter {
             }
             rep.setClientRoles(cr);
         }
-        if (!capturedCredentials.isEmpty()) {
-            List<CredentialRepresentation> creds = new ArrayList<>();
-            for (CredentialRepresentation c : capturedCredentials) {
-                CredentialRepresentation cc = new CredentialRepresentation();
-                cc.setId(c.getId());
-                cc.setType(c.getType());
-                cc.setUserLabel(c.getUserLabel());
-                cc.setCreatedDate(c.getCreatedDate());
-                cc.setSecretData(c.getSecretData());
-                cc.setCredentialData(c.getCredentialData());
-                cc.setValue(c.getValue());
-                cc.setTemporary(c.isTemporary());
-                creds.add(cc);
-            }
-            rep.setCredentials(creds);
-        }
+        // Credentials are NOT governed: explicitly null the credentials field
+        // so an inbound password in the create request can NEVER ride along
+        // into the CR through any path (the accumulator never records one;
+        // this is belt-and-braces — the serialized rep provably carries no
+        // `credentials`). The user sets their own password after approval.
+        rep.setCredentials(null);
         if (!capturedFederatedIdentities.isEmpty()) {
             List<org.keycloak.representations.idm.FederatedIdentityRepresentation> fis =
                     new ArrayList<>();
@@ -325,18 +335,17 @@ public class IgaUserAdapter extends UserAdapter {
         int realmRoles = rep.getRealmRoles() == null ? 0 : rep.getRealmRoles().size();
         int clientRoles = rep.getClientRoles() == null ? 0
                 : rep.getClientRoles().values().stream().mapToInt(List::size).sum();
-        int creds = rep.getCredentials() == null ? 0 : rep.getCredentials().size();
         int fed = rep.getFederatedIdentities() == null ? 0 : rep.getFederatedIdentities().size();
         log.infof("IGA capture CREATE_USER: accumulated-rep path for user=%s (uuid=%s, "
                 + "enabled=%s, attributes=%d, requiredActions=%d, groups=%d, realmRoles=%d, "
-                + "clientRoles=%d, credentials=%d, fedIdentities=%d, %d chars) captured at the "
-                + "post-build terminal seam (UsersResource.createUser#getId, gated on "
+                + "clientRoles=%d, fedIdentities=%d, %d chars; credentials NOT governed) captured "
+                + "at the post-build terminal seam (UsersResource.createUser#getId, gated on "
                 + "username-observed); observed order=[%s]; CR written in a separate tx, request "
-                + "tx marked rollback-only so the scratch user + creds + memberships + role "
-                + "mappings + fed identities are discarded (zero rows persisted at draft); full "
-                + "config will replay on commit",
+                + "tx marked rollback-only so the scratch user + memberships + role mappings + "
+                + "fed identities are discarded (zero rows persisted at draft); full config "
+                + "(no password) will replay on commit",
                 username, userId, rep.isEnabled(), attrs, reqActions, groups, realmRoles,
-                clientRoles, creds, fed, repJson.length(), observedTrace);
+                clientRoles, fed, repJson.length(), observedTrace);
 
         // rowsJson contract (must match IgaReplayDispatcher.replayCreateUser):
         // ID = user UUID, USERNAME = lowercased username, REALM_ID = realm UUID,
@@ -368,189 +377,22 @@ public class IgaUserAdapter extends UserAdapter {
     }
 
     // -------------------------------------------------------------------------
-    // Capture-mode credential manager wrapper.
+    // Credentials are NOT governed.
     //
-    // KC's createUser flow (UsersResource.createUser:174 →
-    // RepresentationToModel.createCredentials, RepresentationToModel.java:
-    // 784-808) calls user.credentialManager().updateCredential(
-    // UserCredentialModel.password(value,false)) for a plaintext password and
-    // user.credentialManager().createCredentialThroughProvider(toModel(cred))
-    // for a pre-hashed one. UserAdapter.credentialManager()
-    // (UserAdapter.java:583-585) is session.users().getUserCredentialManager
-    // (this) — we override credentialManager() here to return a delegating
-    // SubjectCredentialManager that, in capture mode, records the credential
-    // into capturedCredentials as a CredentialRepresentation faithful to what
-    // IgaReplayDispatcher.replayCreateUser → createCredentials expects, and
-    // does NOT persist it on the scratch user (it would be discarded by the
-    // request-tx rollback anyway, and persisting a real password hash on a
-    // throw-away row is needless work / a transient secret on disk). Under
-    // replay (IGA_REPLAY_ACTIVE) capture mode is never entered for this adapter
-    // (IgaUserProvider returns a plain UserAdapter on the replay path), so the
-    // wrapper is inert during replay.
+    // The credentialManager() override and the CaptureCredentialManager
+    // delegate that earlier captured/replayed the user's password were REMOVED
+    // (product decision). credentialManager() is no longer overridden, so the
+    // real (super) UserAdapter credential manager is used unchanged — KC's
+    // createUser flow (UsersResource.createUser:174 →
+    // RepresentationToModel.createCredentials) is simply NOT intercepted; any
+    // inbound password is applied (if at all) to the throw-away scratch user
+    // and dies with the request-tx rollback. It is NEVER accumulated into the
+    // captured rep, and getId() explicitly nulls rep.credentials before
+    // serialization, so the CR provably carries no plaintext password. The
+    // approved user sets their own password (UPDATE_PASSWORD required action /
+    // set-password email / self-service). UPDATE_PASSWORD is a required action,
+    // NOT a credential, and is still captured (see addRequiredAction below).
     // -------------------------------------------------------------------------
-    @Override
-    public SubjectCredentialManager credentialManager() {
-        SubjectCredentialManager delegate = super.credentialManager();
-        if (!captureMode) {
-            return delegate;
-        }
-        return new CaptureCredentialManager(delegate);
-    }
-
-    /**
-     * Full {@link SubjectCredentialManager} delegate that, in capture mode,
-     * records the credential KC's create flow applies (instead of persisting
-     * it on the throw-away scratch user) and otherwise forwards every call to
-     * the real manager. Implemented by explicit delegation (KC 26.5.5 has no
-     * delegating base; {@code EmptyCredentialManager} is the only non-impl).
-     */
-    private final class CaptureCredentialManager implements SubjectCredentialManager {
-        private final SubjectCredentialManager delegate;
-
-        CaptureCredentialManager(SubjectCredentialManager delegate) {
-            this.delegate = delegate;
-        }
-
-        @Override
-        public boolean updateCredential(CredentialInput input) {
-            // Plaintext path: RepresentationToModel.createCredentials:795
-            // user.credentialManager().updateCredential(
-            //   UserCredentialModel.password(cred.getValue(), false)).
-            // UserCredentialModel implements CredentialInput; getType() ==
-            // PasswordCredentialModel.TYPE ("password"), getChallengeResponse()
-            // == the plaintext value (UserCredentialModel.getValue() ==
-            // getChallengeResponse()). Replay's createCredentials re-applies it
-            // via the SAME updateCredential(password(value,false)) call when
-            // CredentialRepresentation.value is non-empty.
-            CredentialRepresentation cr = new CredentialRepresentation();
-            String type = input != null ? input.getType() : null;
-            cr.setType(type != null ? type : CredentialRepresentation.PASSWORD);
-            if (input != null) {
-                cr.setValue(input.getChallengeResponse());
-            }
-            cr.setTemporary(Boolean.FALSE);
-            capturedCredentials.add(cr);
-            trace("credential:updateCredential:" + cr.getType());
-            // Do NOT persist on the scratch user (discarded by rollback anyway).
-            return true;
-        }
-
-        @Override
-        public CredentialModel createCredentialThroughProvider(CredentialModel model) {
-            // Pre-hashed path: RepresentationToModel.createCredentials:804
-            // user.credentialManager().createCredentialThroughProvider(
-            //   toModel(cred)) where toModel copies createdDate, type,
-            // userLabel, secretData, credentialData, id
-            // (RepresentationToModel.java:810-819). Mirror that shape exactly so
-            // replay's createCredentials (which rebuilds toModel(cred) →
-            // createCredentialThroughProvider) is byte-faithful.
-            CredentialRepresentation cr = new CredentialRepresentation();
-            if (model != null) {
-                cr.setId(model.getId());
-                cr.setType(model.getType());
-                cr.setUserLabel(model.getUserLabel());
-                cr.setCreatedDate(model.getCreatedDate());
-                cr.setSecretData(model.getSecretData());
-                cr.setCredentialData(model.getCredentialData());
-            }
-            capturedCredentials.add(cr);
-            trace("credential:createThroughProvider:" + cr.getType());
-            return model;
-        }
-
-        @Override
-        public CredentialModel createStoredCredential(CredentialModel cred) {
-            // Defensive: some import paths use createStoredCredential. Capture
-            // the same pre-hashed shape; replay still consumes it via the
-            // value==null → createCredentialThroughProvider branch.
-            CredentialRepresentation cr = new CredentialRepresentation();
-            if (cred != null) {
-                cr.setId(cred.getId());
-                cr.setType(cred.getType());
-                cr.setUserLabel(cred.getUserLabel());
-                cr.setCreatedDate(cred.getCreatedDate());
-                cr.setSecretData(cred.getSecretData());
-                cr.setCredentialData(cred.getCredentialData());
-            }
-            capturedCredentials.add(cr);
-            trace("credential:createStored:" + cr.getType());
-            return cred;
-        }
-
-        // ---- pure delegation (read/validate ops are inert on a scratch
-        // user that carries no committed credentials yet) ------------------
-        @Override
-        public boolean isValid(List<CredentialInput> inputs) {
-            return delegate.isValid(inputs);
-        }
-
-        @Override
-        public void updateStoredCredential(CredentialModel cred) {
-            delegate.updateStoredCredential(cred);
-        }
-
-        @Override
-        public boolean removeStoredCredentialById(String id) {
-            return delegate.removeStoredCredentialById(id);
-        }
-
-        @Override
-        public CredentialModel getStoredCredentialById(String id) {
-            return delegate.getStoredCredentialById(id);
-        }
-
-        @Override
-        public java.util.stream.Stream<CredentialModel> getStoredCredentialsStream() {
-            return delegate.getStoredCredentialsStream();
-        }
-
-        @Override
-        public java.util.stream.Stream<CredentialModel> getStoredCredentialsByTypeStream(String type) {
-            return delegate.getStoredCredentialsByTypeStream(type);
-        }
-
-        @Override
-        public CredentialModel getStoredCredentialByNameAndType(String name, String type) {
-            return delegate.getStoredCredentialByNameAndType(name, type);
-        }
-
-        @Override
-        public boolean moveStoredCredentialTo(String id, String newPreviousCredentialId) {
-            return delegate.moveStoredCredentialTo(id, newPreviousCredentialId);
-        }
-
-        @Override
-        public void updateCredentialLabel(String credentialId, String credentialLabel) {
-            delegate.updateCredentialLabel(credentialId, credentialLabel);
-        }
-
-        @Override
-        public void disableCredentialType(String credentialType) {
-            delegate.disableCredentialType(credentialType);
-        }
-
-        @Override
-        public java.util.stream.Stream<String> getDisableableCredentialTypesStream() {
-            return delegate.getDisableableCredentialTypesStream();
-        }
-
-        @Override
-        public boolean isConfiguredFor(String type) {
-            return delegate.isConfiguredFor(type);
-        }
-
-        @Override
-        @SuppressWarnings("deprecation")
-        public boolean isConfiguredLocally(String type) {
-            return delegate.isConfiguredLocally(type);
-        }
-
-        @Override
-        @SuppressWarnings("deprecation")
-        public java.util.stream.Stream<String> getConfiguredUserStorageCredentialTypesStream() {
-            return delegate.getConfiguredUserStorageCredentialTypesStream();
-        }
-    }
 
     /** Capture a federated identity (invoked from IgaUserProvider). */
     void captureFederatedIdentity(org.keycloak.models.FederatedIdentityModel identity) {
