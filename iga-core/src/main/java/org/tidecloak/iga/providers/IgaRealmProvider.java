@@ -160,23 +160,40 @@ public class IgaRealmProvider extends JpaRealmProvider {
     @Override
     public RoleModel addRealmRole(RealmModel realm, String id, String name) {
         if (isIgaActive(realm)) {
-            String roleId = (id != null) ? id : KeycloakModelUtils.generateId();
-            Map<String, Object> row = new java.util.LinkedHashMap<>();
-            row.put("ID", roleId);
-            row.put("NAME", name);
-            row.put("REALM_ID", realm.getId());
-            row.put("CLIENT_ROLE", false);
-            // Full-representation capture: the JAX-RS filter stashes the POST
-            // {realm}/roles RoleRepresentation so replay can rebuild
-            // description/attributes/composites, not just the bare id+name.
-            String repJson = org.tidecloak.iga.rest.IgaRepresentationCaptureFilter
-                    .pendingRepJson(igaSession,
-                            org.tidecloak.iga.rest.IgaRepresentationCaptureFilter.TYPE_ROLE);
-            if (repJson != null) {
-                row.put("REP_JSON", repJson);
-            }
-            recordAndThrow(realm, "ROLE", roleId, "CREATE_ROLE", List.of(row));
-            return null; // unreachable
+            // Model-layer accumulate-then-veto, same proven mechanism as
+            // addClient/createGroup. Create the REAL (scratch) RoleEntity via
+            // super so Keycloak's RoleContainerResource.createRole can apply the
+            // COMPLETE incoming RoleRepresentation (description, attributes AND
+            // composites) to a genuine RoleAdapter. The IgaRoleAdapter is
+            // returned in capture mode: setDescription/setAttribute fall through
+            // to the real adapter, addCompositeRole falls through AND records
+            // each composite child's identity (because
+            // ModelToRepresentation.toRepresentation(RoleModel) does NOT
+            // serialize composites — KC 26.5.5
+            // ModelToRepresentation:424-434), and the LAST unconditional model
+            // call KC makes in createRole — role.getName() at
+            // RoleContainerResource.createRole line 225, AFTER setDescription
+            // (168), the setAttribute loop (170-175) and the conditional
+            // addCompositeRole loop (186-222) — is the terminal seam where the
+            // now-complete model is snapshotted into a RoleRepresentation
+            // (base via ModelToRepresentation.toRepresentation PLUS
+            // setComposite(true)+setComposites(...) reconstructed from the
+            // recorded addCompositeRole calls), the CREATE_ROLE change request
+            // (with full REP_JSON) is written in a separate transaction, the
+            // REQUEST tx is marked rollback-only and IgaPendingApprovalException
+            // is thrown (→ HTTP 202 + Location). The scratch role + composite
+            // links are discarded by the request-tx rollback exactly as in
+            // IgaClientAdapter. See IgaRoleAdapter capture-mode javadoc.
+            RoleModel base = super.addRealmRole(realm, id, name);
+            if (base == null) return null;
+            RoleEntity entity = em.find(RoleEntity.class, base.getId());
+            if (entity == null) return base;
+            log.debugf("IGA capture CREATE_ROLE: scratch realm-role entity created for name=%s "
+                    + "(uuid=%s) — accumulating full representation until the model-layer "
+                    + "terminal seam (RoleContainerResource.createRole#getName)",
+                    name, base.getId());
+            return new IgaRoleAdapter(igaSession, realm, em, entity, /*captureMode=*/ true,
+                    /*clientUuid=*/ null, /*clientId=*/ null);
         }
         RoleModel base = super.addRealmRole(realm, id, name);
         if (base == null) return null;
@@ -194,26 +211,23 @@ public class IgaRealmProvider extends JpaRealmProvider {
     public RoleModel addClientRole(ClientModel client, String id, String name) {
         RealmModel realm = client.getRealm();
         if (isIgaActive(realm)) {
-            String roleId = (id != null) ? id : KeycloakModelUtils.generateId();
-            Map<String, Object> row = new java.util.LinkedHashMap<>();
-            row.put("ID", roleId);
-            row.put("NAME", name);
-            row.put("REALM_ID", realm.getId());
-            // rowsJson contract: CLIENT_UUID = client UUID,
-            // CLIENT_ID = human clientId (never a UUID).
-            row.put("CLIENT_UUID", client.getId());
-            row.put("CLIENT_ID", client.getClientId());
-            row.put("CLIENT_REALM_CONSTRAINT", realm.getId());
-            row.put("CLIENT_ROLE", true);
-            // Full-representation capture: POST {realm}/clients/{id}/roles.
-            String repJson = org.tidecloak.iga.rest.IgaRepresentationCaptureFilter
-                    .pendingRepJson(igaSession,
-                            org.tidecloak.iga.rest.IgaRepresentationCaptureFilter.TYPE_ROLE);
-            if (repJson != null) {
-                row.put("REP_JSON", repJson);
-            }
-            recordAndThrow(realm, "ROLE", roleId, "CREATE_ROLE", List.of(row));
-            return null; // unreachable
+            // Same model-layer accumulate-then-veto as addRealmRole; the only
+            // difference is the rowsJson client linkage so replay's
+            // resolveClient + replayCreateRole(clientRole=true) path can find
+            // the owning client. rowsJson contract (must match
+            // IgaReplayDispatcher.resolveClient/replayCreateRole):
+            // CLIENT_UUID = client UUID (resolveClient prefers it),
+            // CLIENT_ID = human clientId (never a UUID), CLIENT_ROLE = true.
+            RoleModel base = super.addClientRole(client, id, name);
+            if (base == null) return null;
+            RoleEntity entity = em.find(RoleEntity.class, base.getId());
+            if (entity == null) return base;
+            log.debugf("IGA capture CREATE_ROLE: scratch client-role entity created for name=%s "
+                    + "(uuid=%s, clientUuid=%s, clientId=%s) — accumulating full representation "
+                    + "until the model-layer terminal seam (RoleContainerResource.createRole#getName)",
+                    name, base.getId(), client.getId(), client.getClientId());
+            return new IgaRoleAdapter(igaSession, realm, em, entity, /*captureMode=*/ true,
+                    /*clientUuid=*/ client.getId(), /*clientId=*/ client.getClientId());
         }
         RoleModel base = super.addClientRole(client, id, name);
         if (base == null) return null;

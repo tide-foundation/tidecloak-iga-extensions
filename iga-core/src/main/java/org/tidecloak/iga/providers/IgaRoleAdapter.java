@@ -1,28 +1,158 @@
 package org.tidecloak.iga.providers;
 
+import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.jpa.RoleAdapter;
 import org.keycloak.models.jpa.entities.RoleEntity;
+import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.models.utils.ModelToRepresentation;
+import org.keycloak.representations.idm.RoleRepresentation;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import jakarta.persistence.EntityManager;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
- * Wraps RoleAdapter and intercepts composite role operations for IGA.
+ * Wraps RoleAdapter and intercepts composite role / attribute operations for IGA.
+ *
+ * <h2>Two modes (same design as {@link IgaClientAdapter} / {@link IgaGroupAdapter})</h2>
+ * <ul>
+ *   <li><b>Inline mode</b> ({@code captureMode == false}, default): wraps an
+ *       already-approved, already-persisted role returned by
+ *       {@code IgaRealmProvider.getRoleById}. Mutating calls
+ *       (addCompositeRole/removeCompositeRole/setAttribute/…) record targeted
+ *       delta change requests — the original inline interception behaviour,
+ *       unchanged.</li>
+ *   <li><b>Capture mode</b> ({@code captureMode == true}): wraps a
+ *       <em>scratch</em> {@link RoleEntity} that
+ *       {@code IgaRealmProvider.addRealmRole}/{@code addClientRole} just
+ *       persisted. Per-setter interception is bypassed so Keycloak's
+ *       {@code RoleContainerResource.createRole} can apply the COMPLETE incoming
+ *       {@link RoleRepresentation} (description, attributes AND composites) to
+ *       the real model.
+ *
+ *       <h3>Why there is no clean single terminal seam (and why
+ *       enlist-synchronization is unsound here)</h3>
+ *       KC 26.5.5 {@code RoleContainerResource.createRole} (verified, lines
+ *       159-227):
+ *       <pre>
+ *       167  RoleModel role = roleContainer.addRole(rep.getName());   // → IgaRealmProvider.add{Realm,Client}Role
+ *       168  role.setDescription(rep.getDescription());               // UNCONDITIONAL, but NOT last
+ *       170-175  for (...) role.setAttribute(k, v);                   // conditional (attributes != null)
+ *       177  rep.setId(role.getId());
+ *       186-222  if (rep.isComposite() &amp;&amp; rep.getComposites()!=null) // conditional
+ *                  ... role.addCompositeRole(child) ...               // conditional, last WHEN present
+ *       225  adminEvent...resourcePath(uriInfo, role.getName())...    // role.getName() — UNCONDITIONAL, LAST
+ *       227  return Response.created(... role.getName() ...)          // role.getName() again
+ *       </pre>
+ *       Unlike {@code RepresentationToModel.createClient} (terminal
+ *       {@code updateClient()}) or {@code GroupResource.updateGroup} (terminal
+ *       {@code setDescription()}), <b>there is NO unconditional last
+ *       <i>mutating</i> model call for role</b>: {@code setDescription} fires
+ *       first, the attribute loop and composite loop are both optional, and the
+ *       composite loop (last when present) is conditional. A request-completion
+ *       enlist-synchronization was considered (the design doc's
+ *       {@code DefaultKeycloakTransactionManager#enlistAfterCompletion} idea)
+ *       but is UNSOUND in KC 26.5.5: {@code DefaultKeycloakTransactionManager
+ *       #commit()} (verified, lines 114-167) commits the main {@code
+ *       transactions} list (which holds the request {@code JpaKeycloakTransaction}
+ *       enlisted by {@code DefaultJpaConnectionProviderFactory:108}) FIRST and
+ *       only then iterates {@code afterCompletion} — so an afterCompletion hook
+ *       cannot veto the already-committed scratch role, and it also runs at
+ *       session-close, far too late to turn the response into a 202.
+ *
+ *       <h3>Terminal seam chosen: {@code getName()} at createRole line 225</h3>
+ *       {@code role.getName()} (RoleContainerResource.createRole line 225, then
+ *       227) is the FIRST and only {@code getName()} call in {@code createRole}
+ *       and it is UNCONDITIONAL and strictly AFTER {@code setDescription} (168),
+ *       the attribute loop (170-175) and the composite loop (186-222) — i.e.
+ *       the model is fully built when it fires, for BOTH composite and
+ *       non-composite roles. It is therefore the exact role analogue of
+ *       client's {@code updateClient()} / group's {@code setDescription()}.
+ *       {@code RoleAdapter.setDescription/setAttribute/addCompositeRole}
+ *       (verified) never call {@code getName()} internally, so the seam cannot
+ *       fire prematurely; a once-guard additionally protects against any
+ *       defensive re-entrancy and against the second {@code getName()} at line
+ *       227.
+ *
+ *       <h3>What the seam does</h3>
+ *       {@link #getName()} (capture mode, first call): snapshots the
+ *       now-complete model into a {@link RoleRepresentation} via
+ *       {@link ModelToRepresentation#toRepresentation(RoleModel)} (name,
+ *       description, attributes, clientRole, containerId) and — because
+ *       {@code ModelToRepresentation.toRepresentation(RoleModel)} sets only the
+ *       {@code composite} boolean and NEVER {@code setComposites(...)}
+ *       (verified, KC 26.5.5 ModelToRepresentation:424-434) — ALSO sets
+ *       {@code setComposite(true)} + {@code setComposites(Composites{realm,
+ *       client})} reconstructed from the {@link #addCompositeRole} calls this
+ *       adapter intercepted. The {@code CREATE_ROLE} change request (with full
+ *       {@code REP_JSON}) is written in a SEPARATE transaction
+ *       ({@code runJobInTransaction}, survives the rollback), the REQUEST tx is
+ *       marked rollback-only and {@link IgaPendingApprovalException} is thrown
+ *       (→ HTTP 202 + Location). The scratch role and its composite links die
+ *       with the rolled-back request transaction — identical lifecycle proof to
+ *       {@link IgaClientAdapter#updateClient} (DefaultKeycloakSession#close →
+ *       closeTransactionManager → {@code getRollbackOnly()? rollback():
+ *       commit()}). {@code IgaReplayDispatcher.replayCreateRole} deserializes
+ *       exactly this {@code RoleRepresentation} and rebuilds
+ *       description+attributes+composites under {@code IGA_REPLAY_ACTIVE}, so
+ *       the round-trip is faithful and replay is UNCHANGED.</li>
+ * </ul>
  */
 public class IgaRoleAdapter extends RoleAdapter {
 
+    private static final Logger log = Logger.getLogger(IgaRoleAdapter.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private final KeycloakSession session;
 
+    /**
+     * When true this adapter wraps a scratch entity mid-{@code createRole} and
+     * the only special behaviour is {@link #getName()} (the terminal
+     * snapshot-and-throw seam) plus recording composites on
+     * {@link #addCompositeRole}; all other per-setter interception is bypassed
+     * so Keycloak's builder applies the full representation to the real model.
+     */
+    private final boolean captureMode;
+
+    /** For a captured client role: owning client UUID / human clientId (replay rowsJson contract). Null for realm roles. */
+    private final String captureClientUuid;
+    private final String captureClientId;
+
+    /**
+     * Composites observed via {@link #addCompositeRole} during capture, in
+     * insertion order, reconstructed into {@code RoleRepresentation.Composites}
+     * at the terminal seam exactly as {@code IgaReplayDispatcher.replayCreateRole}
+     * expects to consume them.
+     */
+    private final Set<String> capturedRealmComposites = new LinkedHashSet<>();
+    private final Map<String, List<String>> capturedClientComposites = new LinkedHashMap<>();
+
+    /** Fire-once guard: only the first getName() at createRole:225 emits. */
+    private boolean captureEmitted = false;
+
     public IgaRoleAdapter(KeycloakSession session, RealmModel realm, EntityManager em, RoleEntity role) {
+        this(session, realm, em, role, false, null, null);
+    }
+
+    public IgaRoleAdapter(KeycloakSession session, RealmModel realm, EntityManager em, RoleEntity role,
+                          boolean captureMode, String captureClientUuid, String captureClientId) {
         super(session, realm, em, role);
         this.session = session;
+        this.captureMode = captureMode;
+        this.captureClientUuid = captureClientUuid;
+        this.captureClientId = captureClientId;
     }
 
     private IgaChangeRequestService getService() {
@@ -31,14 +161,172 @@ public class IgaRoleAdapter extends RoleAdapter {
     }
 
     private boolean isIgaActive() {
+        // In capture mode every per-setter override falls straight through to
+        // the real RoleAdapter so RoleContainerResource.createRole builds the
+        // complete model; interception is concentrated at the single terminal
+        // seam getName() (plus composite RECORDING in addCompositeRole) instead.
+        if (captureMode) return false;
         IgaChangeRequestService service = getService();
         if (!service.isIgaEnabled(realm)) return false;
         Object replay = session.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }
 
+    // -------------------------------------------------------------------------
+    // Terminal seam for CREATE_ROLE (capture mode only): role.getName().
+    //
+    // RoleContainerResource.createRole calls role.getName() at line 225
+    // (adminEvent.resourcePath) and 227 (Response.created) — the FIRST and only
+    // getName() in the method, UNCONDITIONAL and strictly AFTER setDescription
+    // (168), the attribute loop (170-175) and the composite loop (186-222). So
+    // when this fires the model is fully built for BOTH composite and
+    // non-composite roles. We snapshot it, fold the recorded composites in, and
+    // emit the CREATE_ROLE CR + rollback-only + throw exactly as
+    // IgaClientAdapter#updateClient.
+    // -------------------------------------------------------------------------
+    @Override
+    public String getName() {
+        if (!captureMode || captureEmitted) {
+            return super.getName();
+        }
+        // Arm the fire-once guard BEFORE any further model/service call so the
+        // emit path (which may itself read the model) cannot re-enter this seam.
+        captureEmitted = true;
+
+        String roleId = super.getId();
+        String roleName = super.getName();
+        boolean clientRole = super.isClientRole();
+
+        // Base snapshot via Keycloak's own serializer: name, description,
+        // attributes, clientRole, containerId. NOTE: this sets only the
+        // `composite` boolean (role.isComposite()) and NEVER setComposites(...)
+        // (KC 26.5.5 ModelToRepresentation:424-434) — so we MUST reconstruct
+        // the composites from the addCompositeRole calls we intercepted.
+        RoleRepresentation rep = ModelToRepresentation.toRepresentation(this);
+        // Pin identity so replay recreates the role with the SAME UUID the
+        // admin's create flow allocated (replayCreateRole also re-pins from the
+        // row ID, but a self-consistent rep avoids ambiguity).
+        rep.setId(roleId);
+        rep.setName(roleName);
+        rep.setClientRole(clientRole);
+
+        boolean composite = !capturedRealmComposites.isEmpty() || !capturedClientComposites.isEmpty();
+        if (composite) {
+            // Exactly the structure IgaReplayDispatcher.replayCreateRole
+            // consumes: it guards on `rep.isComposite() && rep.getComposites()
+            // != null`, reads composites.getRealm() (Set<String> of REALM ROLE
+            // NAMES, resolved via realm.getRole(name)) and
+            // composites.getClient() (Map<HUMAN clientId, List<role name>>,
+            // resolved via realm.getClientByClientId(clientId).getRole(name)).
+            rep.setComposite(true);
+            RoleRepresentation.Composites composites = new RoleRepresentation.Composites();
+            if (!capturedRealmComposites.isEmpty()) {
+                composites.setRealm(new LinkedHashSet<>(capturedRealmComposites));
+            }
+            if (!capturedClientComposites.isEmpty()) {
+                Map<String, List<String>> clientMap = new LinkedHashMap<>();
+                for (Map.Entry<String, List<String>> e : capturedClientComposites.entrySet()) {
+                    clientMap.put(e.getKey(), new ArrayList<>(e.getValue()));
+                }
+                composites.setClient(clientMap);
+            }
+            rep.setComposites(composites);
+        }
+
+        String repJson;
+        try {
+            repJson = MAPPER.writeValueAsString(rep);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new RuntimeException(
+                    "IGA capture CREATE_ROLE: failed to serialize captured RoleRepresentation "
+                    + "for role=" + roleName, e);
+        }
+
+        int attrs = rep.getAttributes() == null ? 0 : rep.getAttributes().size();
+        int realmComp = capturedRealmComposites.size();
+        int clientComp = capturedClientComposites.values().stream().mapToInt(List::size).sum();
+        log.infof("IGA capture CREATE_ROLE: full-rep path for role=%s (uuid=%s, clientRole=%s, "
+                + "attributes=%d, realmComposites=%d, clientComposites=%d, %d chars) captured at "
+                + "the model-layer terminal seam (RoleContainerResource.createRole#getName); CR "
+                + "written in a separate tx, request tx marked rollback-only so the scratch role "
+                + "and its composite links are discarded (zero rows persisted at draft); full "
+                + "config will replay on commit",
+                roleName, roleId, clientRole, attrs, realmComp, clientComp, repJson.length());
+
+        // rowsJson contract (must match IgaReplayDispatcher.replayCreateRole +
+        // resolveClient): ID = role UUID, NAME = role name, REALM_ID = realm
+        // UUID, CLIENT_ROLE = boolean (replay branches on it). For client roles
+        // CLIENT_UUID = owning client UUID (resolveClient prefers it), CLIENT_ID
+        // = human clientId. REP_JSON = the full RoleRepresentation JSON.
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("ID", roleId);
+        row.put("NAME", roleName);
+        row.put("REALM_ID", realm.getId());
+        row.put("CLIENT_ROLE", clientRole);
+        if (clientRole) {
+            if (captureClientUuid != null) row.put("CLIENT_UUID", captureClientUuid);
+            if (captureClientId != null) row.put("CLIENT_ID", captureClientId);
+            row.put("CLIENT_REALM_CONSTRAINT", realm.getId());
+        }
+        row.put("REP_JSON", repJson);
+
+        String[] crIdHolder = new String[1];
+        KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(), newSession -> {
+            RealmModel newRealm = newSession.realms().getRealm(realm.getId());
+            EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
+            IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
+            crIdHolder[0] = newService.create(newRealm, "ROLE", roleId,
+                    "CREATE_ROLE", List.of(row), null).getId();
+        });
+
+        // Mark the REQUEST KeycloakTransaction rollback-only so
+        // DefaultKeycloakSession#close() rolls back (not commits) and the
+        // scratch role + composite links are discarded. The CR survives because
+        // it was written on a separate session/tx by runJobInTransaction. Same
+        // idiom and lifecycle proof as IgaClientAdapter#updateClient
+        // (KeycloakErrorHandler#getResponse uses the very same setRollbackOnly
+        // -then-return-a-response idiom).
+        session.getTransactionManager().setRollbackOnly();
+
+        throw new IgaPendingApprovalException(crIdHolder[0], "ROLE", "CREATE_ROLE");
+    }
+
     @Override
     public void addCompositeRole(RoleModel role) {
+        if (captureMode) {
+            // Record the composite child's identity EXACTLY as
+            // IgaReplayDispatcher.replayCreateRole resolves it: realm composites
+            // by realm-role NAME (realm.getRole(name)); client composites keyed
+            // by the owning client's HUMAN clientId →
+            // realm.getClientByClientId(clientId).getRole(name). RoleModel
+            // exposes isClientRole(), getName(), and getContainerId() (clientId
+            // UUID for client roles); we resolve the human clientId from it.
+            if (role != null) {
+                if (role.isClientRole()) {
+                    String childClientId = null;
+                    try {
+                        ClientModel owning = realm.getClientById(role.getContainerId());
+                        if (owning != null) childClientId = owning.getClientId();
+                    } catch (RuntimeException ignored) {
+                        // fall through: cannot resolve owning client; skip this
+                        // composite from REP_JSON (the real link is still
+                        // applied on the scratch model via super, so behaviour
+                        // is no worse than a bare create for this one link).
+                    }
+                    if (childClientId != null) {
+                        capturedClientComposites
+                                .computeIfAbsent(childClientId, k -> new ArrayList<>())
+                                .add(role.getName());
+                    }
+                } else {
+                    capturedRealmComposites.add(role.getName());
+                }
+            }
+            // Pass through so the real scratch model gets the composite link
+            // (kept consistent with the snapshot; discarded with the rollback).
+            super.addCompositeRole(role);
+            return;
+        }
         if (!isIgaActive()) {
             super.addCompositeRole(role);
             return;
@@ -52,6 +340,31 @@ public class IgaRoleAdapter extends RoleAdapter {
 
     @Override
     public void removeCompositeRole(RoleModel role) {
+        if (captureMode) {
+            // createRole only ADDs composites; if KC ever removes one mid-create
+            // keep the recorded set consistent, then pass through.
+            if (role != null) {
+                if (role.isClientRole()) {
+                    try {
+                        ClientModel owning = realm.getClientById(role.getContainerId());
+                        if (owning != null) {
+                            List<String> names = capturedClientComposites.get(owning.getClientId());
+                            if (names != null) {
+                                names.remove(role.getName());
+                                if (names.isEmpty()) {
+                                    capturedClientComposites.remove(owning.getClientId());
+                                }
+                            }
+                        }
+                    } catch (RuntimeException ignored) {
+                    }
+                } else {
+                    capturedRealmComposites.remove(role.getName());
+                }
+            }
+            super.removeCompositeRole(role);
+            return;
+        }
         if (!isIgaActive()) {
             super.removeCompositeRole(role);
             return;
@@ -66,8 +379,12 @@ public class IgaRoleAdapter extends RoleAdapter {
     // -------------------------------------------------------------------------
     // Attribute interception (ROLE_ATTRIBUTE).
     //
-    // One-pending-CR-per-entity rule applies; concurrent attribute writes on
-    // the same role while a CR is pending throw IgaConflictException (409).
+    // In capture mode these fall straight through to the real RoleAdapter so
+    // RoleContainerResource.createRole's attribute loop builds the complete
+    // model (the snapshot at getName() then serializes them faithfully). In
+    // inline mode the one-pending-CR-per-entity rule applies; concurrent
+    // attribute writes on the same role while a CR is pending throw
+    // IgaConflictException (409).
     // -------------------------------------------------------------------------
 
     @Override
