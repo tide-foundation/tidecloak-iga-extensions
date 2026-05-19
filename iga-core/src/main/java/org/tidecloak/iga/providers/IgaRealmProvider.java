@@ -325,23 +325,47 @@ public class IgaRealmProvider extends JpaRealmProvider {
     @Override
     public ClientScopeModel addClientScope(RealmModel realm, String id, String name) {
         if (isIgaActive(realm)) {
+            // Model-layer accumulate-then-veto — the SAME proven mechanism as
+            // addRealmRole/addClientRole/addClient/createGroup (replaces the
+            // dead JAX-RS IgaRepresentationCaptureFilter.pendingRepJson early
+            // throw; provider-jar @Provider request filters are never
+            // discovered by Keycloak's RESTEasy runtime, see the addClient
+            // comment / Phase 1 report). Create the REAL (scratch)
+            // ClientScopeEntity via super so Keycloak's
+            // RepresentationToModel.createClientScope (KC 26.5.5
+            // RepresentationToModel.java:715-740, invoked by
+            // ClientScopesResource.createClientScope:131) can apply the
+            // COMPLETE incoming ClientScopeRepresentation (name, description,
+            // protocol, protocol mappers WITH full config, attributes) to a
+            // genuine ClientScopeAdapter. The IgaClientScopeAdapter is returned
+            // in capture mode: every per-setter/mapper override falls straight
+            // through to the real adapter, and the FIRST unconditional model
+            // call KC makes AFTER the conditional-only createClientScope body —
+            // clientScope.getId() at ClientScopesResource.createClientScope
+            // line 133 (adminEvent.resourcePath), again at 135
+            // (Response.created) — is the terminal seam where the now-complete
+            // model is snapshotted to a ClientScopeRepresentation via
+            // ModelToRepresentation.toRepresentation(ClientScopeModel) (which —
+            // unlike role's composites — DOES serialize name, description,
+            // protocol, protocolMappers WITH full config, AND attributes:
+            // KC 26.5.5 ModelToRepresentation.java:821-835, so NO field
+            // accumulation is needed), the CREATE_CLIENT_SCOPE change request
+            // (with full REP_JSON) is written in a separate transaction, the
+            // REQUEST transaction is marked rollback-only and
+            // IgaPendingApprovalException is thrown (→ HTTP 202 + Location).
+            // The scratch scope + its protocol mappers + attributes are
+            // discarded by the request-tx rollback exactly as in
+            // IgaClientAdapter. See IgaClientScopeAdapter capture-mode javadoc.
             String resolvedId = (id != null) ? id : KeycloakModelUtils.generateId();
-            Map<String, Object> row = new java.util.LinkedHashMap<>();
-            row.put("ID", resolvedId);
-            row.put("NAME", name);
-            row.put("REALM_ID", realm.getId());
-            row.put("PROTOCOL", "openid-connect");
-            // Full-representation capture: POST {realm}/client-scopes. Replay
-            // rebuilds protocol/description/attributes AND protocol mappers
-            // (incl. their full config) from the rep.
-            String repJson = org.tidecloak.iga.rest.IgaRepresentationCaptureFilter
-                    .pendingRepJson(igaSession,
-                            org.tidecloak.iga.rest.IgaRepresentationCaptureFilter.TYPE_CLIENT_SCOPE);
-            if (repJson != null) {
-                row.put("REP_JSON", repJson);
-            }
-            recordAndThrow(realm, "CLIENT_SCOPE", resolvedId, "CREATE_CLIENT_SCOPE", List.of(row));
-            return null; // unreachable
+            ClientScopeModel base = super.addClientScope(realm, resolvedId, name);
+            if (base == null) return null;
+            ClientScopeEntity entity = em.find(ClientScopeEntity.class, base.getId());
+            if (entity == null) return base;
+            log.debugf("IGA capture CREATE_CLIENT_SCOPE: scratch client-scope entity created for "
+                    + "name=%s (uuid=%s) — accumulating full representation until the model-layer "
+                    + "terminal seam (ClientScopesResource.createClientScope#getId)",
+                    name, base.getId());
+            return new IgaClientScopeAdapter(realm, em, igaSession, entity, /*captureMode=*/ true);
         }
         ClientScopeModel base = super.addClientScope(realm, id, name);
         if (base == null) return null;

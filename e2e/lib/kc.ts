@@ -333,6 +333,82 @@ export async function clientUuid(
 }
 
 // ---------------------------------------------------------------------------
+// Client scopes
+// ---------------------------------------------------------------------------
+
+export interface ProtocolMapperSpec {
+  name: string;
+  protocol: string;
+  protocolMapper: string;
+  config: Record<string, string>;
+}
+
+export interface ClientScopeSpec {
+  name: string;
+  description?: string;
+  protocol?: string;
+  attributes?: Record<string, string>;
+  protocolMappers?: ProtocolMapperSpec[];
+}
+
+/** Create a client scope. Returns the raw response (caller asserts status). */
+export function createClientScope(
+  request: APIRequestContext,
+  realm: string,
+  scope: ClientScopeSpec,
+): Promise<APIResponse> {
+  return kcFetch(request, `/admin/realms/${realm}/client-scopes`, {
+    method: 'POST',
+    json: scope,
+  });
+}
+
+/**
+ * Find a client scope by name. KC has no get-by-name endpoint for scopes, so
+ * we list and match. Returns {http, body} where body is the scope rep or
+ * undefined if not present (http reflects the list call).
+ */
+export async function getClientScopeByName(
+  request: APIRequestContext,
+  realm: string,
+  name: string,
+): Promise<{ http: number; body: any }> {
+  const res = await kcFetch(request, `/admin/realms/${realm}/client-scopes`);
+  const list = await safeJson(res);
+  const match = Array.isArray(list)
+    ? list.find((s: any) => s?.name === name)
+    : undefined;
+  return { http: res.status(), body: match };
+}
+
+/** GET a client scope by its UUID. {http, body}. */
+export async function getClientScopeById(
+  request: APIRequestContext,
+  realm: string,
+  scopeId: string,
+): Promise<{ http: number; body: any }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/client-scopes/${scopeId}`,
+  );
+  return { http: res.status(), body: await safeJson(res) };
+}
+
+/** Protocol mappers of a client scope (by scope UUID). Array of mapper reps. */
+export async function getClientScopeProtocolMappers(
+  request: APIRequestContext,
+  realm: string,
+  scopeId: string,
+): Promise<{ http: number; body: any[] }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/client-scopes/${scopeId}/protocol-mappers/models`,
+  );
+  const body = await safeJson(res);
+  return { http: res.status(), body: Array.isArray(body) ? body : [] };
+}
+
+// ---------------------------------------------------------------------------
 // IGA change requests
 // ---------------------------------------------------------------------------
 
