@@ -117,28 +117,26 @@ public class IgaOrganizationProvider extends JpaOrganizationProvider {
     @Override
     public OrganizationModel create(String name, String alias, String redirectUrl) {
         if (isIgaActive()) {
-            RealmModel realm = realm();
-            // The org id is generated inside JpaOrganizationProvider.create and
-            // cannot be pinned through the SPI (mirrors role/group: no
-            // id-bearing create). The CR is keyed by org NAME; replay records
-            // the generated id. Full OrganizationRepresentation captured by the
-            // JAX-RS filter is folded in as REP_JSON so replay rebuilds
-            // enabled/description/redirectUrl/attributes/domains via Keycloak's
-            // own RepresentationToModel.toModel — the exact builder
-            // OrganizationsResource.create uses.
-            Map<String, Object> row = new java.util.LinkedHashMap<>();
-            row.put("ORG_NAME", name);
-            if (alias != null) row.put("ORG_ALIAS", alias);
-            if (redirectUrl != null) row.put("ORG_REDIRECT_URL", redirectUrl);
-            row.put("REALM_ID", realm.getId());
-            String repJson = org.tidecloak.iga.rest.IgaRepresentationCaptureFilter
-                    .pendingRepJson(igaSession,
-                            org.tidecloak.iga.rest.IgaRepresentationCaptureFilter.TYPE_ORGANIZATION);
-            if (repJson != null) {
-                row.put("REP_JSON", repJson);
-            }
-            recordAndThrow(realm, "ORGANIZATION", name, "CREATE_ORGANIZATION", List.of(row));
-            return null; // unreachable
+            // Model-layer accumulate-then-veto, identical mechanism to
+            // IgaRealmProvider.addClient/createGroup. Create the REAL (scratch)
+            // org via super so Keycloak's OrganizationsResource.create can apply
+            // the COMPLETE incoming OrganizationRepresentation via
+            // RepresentationToModel.toModel(rep, model) to a genuine
+            // OrganizationAdapter. The IgaOrganizationModel is returned in
+            // create-capture mode: every per-setter call falls through to the
+            // real model, and the LAST setter KC's toModel makes —
+            // OrganizationModel.setDomains() (RepresentationToModel.toModel line
+            // 1736, KC 26.5.5) — is the terminal seam where the now-complete
+            // model is snapshotted to an OrganizationRepresentation, the
+            // CREATE_ORGANIZATION change request (with full REP_JSON) is written
+            // in a separate transaction, the REQUEST transaction is marked
+            // rollback-only and IgaPendingApprovalException is thrown (→ 202).
+            // The scratch org is discarded by the request-tx rollback. See
+            // IgaOrganizationModel#setDomains and the IgaClientAdapter
+            // lifecycle proof.
+            OrganizationModel base = super.create(name, alias, redirectUrl);
+            if (base == null) return null;
+            return new IgaOrganizationModel(igaSession, base, this, /*captureCreate=*/ true);
         }
         return super.create(name, alias, redirectUrl);
     }
@@ -159,12 +157,6 @@ public class IgaOrganizationProvider extends JpaOrganizationProvider {
         OrganizationModel base = super.getByDomainName(domain);
         if (base == null) return null;
         return new IgaOrganizationModel(igaSession, base, this);
-    }
-
-    /** Used by {@link IgaOrganizationModel} to record an UPDATE_ORGANIZATION CR. */
-    void recordOrgUpdate(String orgId, List<Map<String, Object>> rows) {
-        RealmModel realm = realm();
-        recordAndThrow(realm, "ORGANIZATION", orgId, "UPDATE_ORGANIZATION", rows);
     }
 
     boolean igaActive() {

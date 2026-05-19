@@ -1,5 +1,6 @@
 package org.tidecloak.iga.providers;
 
+import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
@@ -7,23 +8,81 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.jpa.GroupAdapter;
 import org.keycloak.models.jpa.entities.GroupEntity;
+import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.models.utils.ModelToRepresentation;
+import org.keycloak.representations.idm.GroupRepresentation;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import jakarta.persistence.EntityManager;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Wraps GroupAdapter and intercepts role mapping operations for IGA.
+ *
+ * <h2>Two modes (same design as {@link IgaClientAdapter})</h2>
+ * <ul>
+ *   <li><b>Inline mode</b> ({@code captureMode == false}, default): wraps an
+ *       already-approved, already-persisted group. Mutating calls record
+ *       targeted delta change requests / inline-throw — unchanged behaviour.</li>
+ *   <li><b>Capture mode</b> ({@code captureMode == true}): wraps a
+ *       <em>scratch</em> {@link GroupEntity} that
+ *       {@code IgaRealmProvider.createGroup} just persisted. Per-setter
+ *       interception is bypassed so Keycloak's
+ *       {@code GroupResource.updateGroup(rep, model, realm, session)} can apply
+ *       the COMPLETE incoming {@link GroupRepresentation} (name, attributes,
+ *       description) to the real model. The LAST mutation that path makes,
+ *       {@code GroupModel.setDescription(rep.getDescription())}
+ *       (KC 26.5.5 {@code GroupResource.updateGroup}, line 300 — called
+ *       unconditionally for BOTH the top-level
+ *       {@code GroupsResource.addTopLevelGroup} (line 221) and child
+ *       {@code GroupResource.addChild} (line 251) create paths, strictly AFTER
+ *       the optional {@code setName} (line 280) and the attribute
+ *       set/remove loop (lines 288-298)), is the <b>terminal seam</b>:
+ *       {@link #setDescription(String)} snapshots the now-complete model into a
+ *       {@link GroupRepresentation} via
+ *       {@link ModelToRepresentation#toRepresentation(GroupModel, boolean)},
+ *       writes the {@code CREATE_GROUP} change request (with full
+ *       {@code REP_JSON}) in a SEPARATE transaction, marks the REQUEST tx
+ *       rollback-only and throws {@link IgaPendingApprovalException} → HTTP 202.
+ *       The scratch entity is discarded by the request-tx rollback exactly as in
+ *       {@link IgaClientAdapter}. {@code IgaReplayDispatcher.replayCreateGroup}
+ *       deserializes this same {@code GroupRepresentation} and applies
+ *       {@code rep.getAttributes()} + {@code rep.getDescription()} under
+ *       {@code IGA_REPLAY_ACTIVE}, so the round-trip is faithful (replay does
+ *       NOT recurse into subGroups — each sub-group is its own child-create
+ *       request / CR — matching {@code ModelToRepresentation.toRepresentation}
+ *       which only emits this group's own fields).</li>
+ * </ul>
  */
 public class IgaGroupAdapter extends GroupAdapter {
 
+    private static final Logger log = Logger.getLogger(IgaGroupAdapter.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private final KeycloakSession session;
 
+    /**
+     * When true this adapter wraps a scratch entity mid-{@code createGroup} and
+     * the only special behaviour is {@link #setDescription(String)} (the
+     * terminal snapshot-and-throw seam); all per-setter interception is
+     * bypassed so Keycloak's builder applies the full representation.
+     */
+    private final boolean captureMode;
+
     public IgaGroupAdapter(KeycloakSession session, RealmModel realm, EntityManager em, GroupEntity group) {
+        this(session, realm, em, group, false);
+    }
+
+    public IgaGroupAdapter(KeycloakSession session, RealmModel realm, EntityManager em,
+                           GroupEntity group, boolean captureMode) {
         super(session, realm, em, group);
         this.session = session;
+        this.captureMode = captureMode;
     }
 
     private IgaChangeRequestService getService() {
@@ -32,10 +91,106 @@ public class IgaGroupAdapter extends GroupAdapter {
     }
 
     private boolean isIgaActive(RealmModel realm) {
+        // In capture mode every per-setter override falls straight through to
+        // the real GroupAdapter so GroupResource.updateGroup builds the
+        // complete model; interception is concentrated at the single terminal
+        // seam setDescription() instead.
+        if (captureMode) return false;
         IgaChangeRequestService service = getService();
         if (!service.isIgaEnabled(realm)) return false;
         Object replay = session.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
+    }
+
+    /**
+     * Terminal seam for CREATE_GROUP (capture mode only).
+     *
+     * <p>{@code GroupResource.updateGroup} (KC 26.5.5,
+     * {@code org.keycloak.services.resources.admin.GroupResource:300}) calls
+     * {@code model.setDescription(rep.getDescription())} as its FINAL model
+     * mutation, AFTER the optional {@code setName} (line 280) and the attribute
+     * set/remove loop (lines 288-298). Both create entrypoints route here:
+     * {@code GroupsResource.addTopLevelGroup} calls {@code realm.createGroup(name)}
+     * then {@code GroupResource.updateGroup(rep, child, ...)} (line 221), and
+     * {@code GroupResource.addChild} calls {@code realm.createGroup(name, parent)}
+     * then {@code updateGroup(rep, child, ...)} (line 251). So when this fires
+     * every admin-supplied group field is on the live model. We snapshot it to a
+     * {@link GroupRepresentation} with Keycloak's own
+     * {@link ModelToRepresentation#toRepresentation(GroupModel, boolean)}, fold
+     * it into the {@code CREATE_GROUP} CR as {@code REP_JSON} (persisted in a
+     * separate transaction so it survives the request-tx rollback) and throw
+     * {@link IgaPendingApprovalException}. We deliberately do NOT call
+     * {@code super.setDescription()} — nothing here is committed; after the CR
+     * is written we mark the REQUEST transaction rollback-only so the scratch
+     * group dies with it, exactly as documented in {@link IgaClientAdapter}.</p>
+     */
+    @Override
+    public void setDescription(String description) {
+        if (!captureMode) {
+            super.setDescription(description);
+            return;
+        }
+
+        GroupRepresentation rep = ModelToRepresentation.toRepresentation(this, true);
+        // Pin identity so replay recreates the group with the SAME UUID the
+        // admin's create flow allocated (replay also re-pins from the row ID,
+        // but a self-consistent rep avoids ambiguity).
+        String groupId = getId();
+        rep.setId(groupId);
+        // The terminal seam fires BEFORE super.setDescription, so the model's
+        // description has NOT been written yet. Reflect the admin-supplied
+        // value (the argument) into the snapshot so REP_JSON carries it — this
+        // is exactly what replayCreateGroup applies via setDescription.
+        rep.setDescription(description);
+
+        String repJson;
+        try {
+            repJson = MAPPER.writeValueAsString(rep);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new RuntimeException(
+                    "IGA capture CREATE_GROUP: failed to serialize captured GroupRepresentation "
+                    + "for group=" + getName(), e);
+        }
+
+        String parentId = getParentId();
+        int attrs = rep.getAttributes() == null ? 0 : rep.getAttributes().size();
+        log.infof("IGA capture CREATE_GROUP: full-rep path for group=%s (uuid=%s, parent=%s, "
+                + "attributes=%d, %d chars) captured at the model-layer terminal seam "
+                + "(GroupResource.updateGroup#setDescription); CR written in a separate tx, "
+                + "request tx marked rollback-only so the scratch group is discarded "
+                + "(zero rows persisted at draft); full config will replay on commit",
+                getName(), groupId, parentId, attrs, repJson.length());
+
+        // rowsJson contract (must match IgaReplayDispatcher.replayCreateGroup):
+        // ID = group UUID, NAME = group name, REALM_ID = realm UUID,
+        // PARENT_GROUP = parent UUID (only for child groups),
+        // REP_JSON = the full GroupRepresentation JSON.
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("ID", groupId);
+        row.put("NAME", getName());
+        row.put("REALM_ID", realm.getId());
+        if (parentId != null) {
+            row.put("PARENT_GROUP", parentId);
+        }
+        row.put("REP_JSON", repJson);
+
+        String[] crIdHolder = new String[1];
+        KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(), newSession -> {
+            RealmModel newRealm = newSession.realms().getRealm(realm.getId());
+            EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
+            IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
+            crIdHolder[0] = newService.create(newRealm, "GROUP", groupId,
+                    "CREATE_GROUP", List.of(row), null).getId();
+        });
+
+        // Mark the REQUEST KeycloakTransaction rollback-only so
+        // DefaultKeycloakSession#close() rolls back (not commits) and the
+        // scratch group entity is discarded. The CR survives because it was
+        // written on a separate session/tx by runJobInTransaction. Same idiom
+        // and lifecycle proof as IgaClientAdapter#updateClient.
+        session.getTransactionManager().setRollbackOnly();
+
+        throw new IgaPendingApprovalException(crIdHolder[0], "GROUP", "CREATE_GROUP");
     }
 
     @Override

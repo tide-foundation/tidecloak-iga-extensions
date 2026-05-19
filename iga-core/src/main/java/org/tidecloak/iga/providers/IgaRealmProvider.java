@@ -107,28 +107,30 @@ public class IgaRealmProvider extends JpaRealmProvider {
     @Override
     public GroupModel createGroup(RealmModel realm, String id, Type type, String name, GroupModel toParent) {
         if (isIgaActive(realm)) {
-            String groupId = (id != null) ? id : KeycloakModelUtils.generateId();
-            String parentId = (toParent != null) ? toParent.getId() : null;
-            Map<String, Object> row = new java.util.LinkedHashMap<>();
-            row.put("ID", groupId);
-            row.put("NAME", name);
-            row.put("REALM_ID", realm.getId());
-            if (parentId != null) {
-                row.put("PARENT_GROUP", parentId);
-            }
-            // Full-representation capture: POST {realm}/groups (top-level) or
-            // POST {realm}/groups/{id}/children (child). Replay applies
-            // description + attributes from the rep (Keycloak does NOT recurse
-            // into subGroups on a single create call — sub-groups arrive via
-            // their own child-create requests).
-            String repJson = org.tidecloak.iga.rest.IgaRepresentationCaptureFilter
-                    .pendingRepJson(igaSession,
-                            org.tidecloak.iga.rest.IgaRepresentationCaptureFilter.TYPE_GROUP);
-            if (repJson != null) {
-                row.put("REP_JSON", repJson);
-            }
-            recordAndThrow(realm, "GROUP", groupId, "CREATE_GROUP", List.of(row));
-            return null; // unreachable
+            // Model-layer accumulate-then-veto, identical mechanism to
+            // addClient. Create the REAL (scratch) GroupEntity via super so
+            // Keycloak's GroupResource.updateGroup(rep, model, realm, session)
+            // can apply the COMPLETE incoming GroupRepresentation (name,
+            // attributes, description) to a genuine GroupAdapter. The
+            // IgaGroupAdapter is returned in capture mode: every per-setter
+            // override falls through to the real adapter, and the LAST mutation
+            // KC makes in that path — GroupModel.setDescription()
+            // (GroupResource.updateGroup line 300, KC 26.5.5) — is the terminal
+            // seam where the now-complete model is snapshotted to a
+            // GroupRepresentation, the CREATE_GROUP change request (with full
+            // REP_JSON) is written in a separate transaction, the REQUEST
+            // transaction is marked rollback-only and IgaPendingApprovalException
+            // is thrown (→ HTTP 202). See IgaGroupAdapter#setDescription and the
+            // IgaClientAdapter#updateClient lifecycle proof.
+            GroupModel base = super.createGroup(realm, id, type, name, toParent);
+            if (base == null) return null;
+            GroupEntity entity = em.find(GroupEntity.class, base.getId());
+            if (entity == null) return base;
+            log.debugf("IGA capture CREATE_GROUP: scratch group entity created for name=%s "
+                    + "(uuid=%s, parent=%s) — accumulating full representation until the "
+                    + "model-layer terminal seam (GroupResource.updateGroup#setDescription)",
+                    name, base.getId(), (toParent != null ? toParent.getId() : null));
+            return new IgaGroupAdapter(igaSession, realm, em, entity, /*captureMode=*/ true);
         }
         GroupModel base = super.createGroup(realm, id, type, name, toParent);
         if (base == null) return null;
