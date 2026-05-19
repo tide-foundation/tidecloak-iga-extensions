@@ -409,6 +409,154 @@ export async function getClientScopeProtocolMappers(
 }
 
 // ---------------------------------------------------------------------------
+// Groups
+// ---------------------------------------------------------------------------
+
+/** Create a top-level group. Returns the raw response. */
+export function createGroup(
+  request: APIRequestContext,
+  realm: string,
+  name: string,
+): Promise<APIResponse> {
+  return kcFetch(request, `/admin/realms/${realm}/groups`, {
+    method: 'POST',
+    json: { name },
+  });
+}
+
+/** Find a top-level group by name. {http, body} (body undefined if absent). */
+export async function getGroupByName(
+  request: APIRequestContext,
+  realm: string,
+  name: string,
+): Promise<{ http: number; body: any }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/groups?search=${encodeURIComponent(name)}`,
+  );
+  const list = await safeJson(res);
+  const match = Array.isArray(list)
+    ? list.find((g: any) => g?.name === name)
+    : undefined;
+  return { http: res.status(), body: match };
+}
+
+// ---------------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------------
+
+export interface CredentialSpec {
+  type: string;
+  value: string;
+  temporary?: boolean;
+}
+
+export interface UserSpec {
+  username: string;
+  enabled?: boolean;
+  email?: string;
+  emailVerified?: boolean;
+  firstName?: string;
+  lastName?: string;
+  attributes?: Record<string, string[]>;
+  requiredActions?: string[];
+  groups?: string[];
+  realmRoles?: string[];
+  clientRoles?: Record<string, string[]>;
+  credentials?: CredentialSpec[];
+}
+
+/** Create a user via POST {realm}/users. Returns the raw response. */
+export function createUser(
+  request: APIRequestContext,
+  realm: string,
+  user: UserSpec,
+): Promise<APIResponse> {
+  return kcFetch(request, `/admin/realms/${realm}/users`, {
+    method: 'POST',
+    json: user,
+  });
+}
+
+/** Find a user by exact username. {http, body} (body undefined if absent). */
+export async function getUserByUsername(
+  request: APIRequestContext,
+  realm: string,
+  username: string,
+): Promise<{ http: number; body: any }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/users?username=${encodeURIComponent(
+      username,
+    )}&exact=true`,
+  );
+  const list = await safeJson(res);
+  const match = Array.isArray(list)
+    ? list.find(
+        (u: any) =>
+          (u?.username || '').toLowerCase() === username.toLowerCase(),
+      )
+    : undefined;
+  return { http: res.status(), body: match };
+}
+
+/** Groups a user belongs to (by user UUID). Array of group reps. */
+export async function getUserGroups(
+  request: APIRequestContext,
+  realm: string,
+  userId: string,
+): Promise<{ http: number; body: any[] }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/users/${userId}/groups`,
+  );
+  const body = await safeJson(res);
+  return { http: res.status(), body: Array.isArray(body) ? body : [] };
+}
+
+/** Realm-role mappings of a user (by user UUID). Array of role reps. */
+export async function getUserRealmRoleMappings(
+  request: APIRequestContext,
+  realm: string,
+  userId: string,
+): Promise<{ http: number; body: any[] }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/users/${userId}/role-mappings/realm`,
+  );
+  const body = await safeJson(res);
+  return { http: res.status(), body: Array.isArray(body) ? body : [] };
+}
+
+/**
+ * Direct-grant (Resource Owner Password Credentials) token request for
+ * username+password against the realm's admin-cli client. Proves the password
+ * credential was captured & replayed faithfully (the password actually works).
+ * admin-cli is a public client with direct access grants enabled by default in
+ * every realm, so no extra client setup is needed.
+ */
+export async function directGrantToken(
+  request: APIRequestContext,
+  realm: string,
+  username: string,
+  password: string,
+): Promise<{ http: number; body: any }> {
+  const { baseUrl } = kcEnv();
+  const res = await request.post(
+    `${baseUrl}/realms/${realm}/protocol/openid-connect/token`,
+    {
+      form: {
+        grant_type: 'password',
+        client_id: 'admin-cli',
+        username,
+        password,
+      },
+    },
+  );
+  return { http: res.status(), body: await safeJson(res) };
+}
+
+// ---------------------------------------------------------------------------
 // IGA change requests
 // ---------------------------------------------------------------------------
 
