@@ -745,3 +745,42 @@ export function locationHeader(res: APIResponse): string | undefined {
   const h = res.headers();
   return h['location'] || h['Location'];
 }
+
+// ---------------------------------------------------------------------------
+// Partial import (Phase 4)
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /admin/realms/{realm}/partialImport with a
+ * PartialImportRepresentation. Returns the raw response so the caller can
+ * assert status (202 batch when IGA governs it) AND headers (Location).
+ */
+export function partialImport(
+  request: APIRequestContext,
+  realm: string,
+  rep: unknown,
+): Promise<APIResponse> {
+  return kcFetch(request, `/admin/realms/${realm}/partialImport`, {
+    method: 'POST',
+    json: rep,
+  });
+}
+
+/**
+ * List change requests (default PENDING). Always returns an array (empty if
+ * the endpoint yields a non-array).
+ */
+export async function listChangeRequests(
+  request: APIRequestContext,
+  realm: string,
+  status = 'PENDING',
+): Promise<ChangeRequest[]> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/iga/change-requests?status=${encodeURIComponent(
+      status,
+    )}`,
+  );
+  const list = await safeJson(res);
+  return Array.isArray(list) ? list : [];
+}

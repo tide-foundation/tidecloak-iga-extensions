@@ -174,6 +174,15 @@ public class IgaGroupAdapter extends GroupAdapter {
         }
         row.put("REP_JSON", repJson);
 
+        // Phase 4 — partialImport batch governance: accumulate + return
+        // normally (NO per-entity CR/setRollbackOnly/throw). Sole behavioural
+        // change vs Phases 1–3; the single-entity branch below is unchanged.
+        if (IgaImportMode.isImportMode(session, realm)) {
+            IgaImportMode.accumulate(session, realm, "GROUP", groupId,
+                    "CREATE_GROUP", List.of(row), null);
+            return;
+        }
+
         String[] crIdHolder = new String[1];
         KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(), newSession -> {
             RealmModel newRealm = newSession.realms().getRealm(realm.getId());

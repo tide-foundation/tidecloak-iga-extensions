@@ -287,6 +287,15 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         if (rep.getDescription() != null) row.put("DESCRIPTION", rep.getDescription());
         row.put("REP_JSON", repJson);
 
+        // Phase 4 — partialImport batch governance: accumulate + return the
+        // real scope id (NO per-entity CR/setRollbackOnly/throw). Sole
+        // behavioural change vs Phases 1–3; single-entity branch unchanged.
+        if (IgaImportMode.isImportMode(igaSession, realm)) {
+            IgaImportMode.accumulate(igaSession, realm, "CLIENT_SCOPE", scopeId,
+                    "CREATE_CLIENT_SCOPE", List.of(row), null);
+            return scopeId;
+        }
+
         String[] crIdHolder = new String[1];
         KeycloakModelUtils.runJobInTransaction(igaSession.getKeycloakSessionFactory(), newSession -> {
             RealmModel newRealm = newSession.realms().getRealm(realm.getId());

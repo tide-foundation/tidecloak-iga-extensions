@@ -119,6 +119,72 @@ public class IgaUserProvider extends JpaUserProvider {
         return base;
     }
 
+    /**
+     * Phase 4 — close the partialImport user bypass.
+     *
+     * <p>{@code PartialImportManager}'s {@code UsersPartialImport} routes users
+     * through {@code DefaultExportImportManager.createUser}
+     * (DefaultExportImportManager.java:979) which calls THIS 5-arg
+     * local-storage {@code addUser(realm,id,username,false,false)} — NOT the
+     * 1-arg seam above. Before Phase 4 this fell straight through to
+     * {@code JpaUserProvider}, so partialImport users were created
+     * UNGOVERNED (the live bypass).
+     *
+     * <p>Gating (provably does NOT regress single-entity user replay, which
+     * uses this exact 5-arg path):
+     * <ul>
+     *   <li><b>partialImport + IGA on + NOT replay</b> → return a
+     *       capture-mode {@link IgaUserAdapter} and register it with
+     *       {@link IgaImportMode}. KC's
+     *       {@code DefaultExportImportManager.createUser} then applies every
+     *       setter/{@code joinGroup} to that capture adapter (accumulated, the
+     *       scratch user is built then discarded by the batch rollback). The
+     *       row is harvested at batch-emit time.</li>
+     *   <li><b>{@code IGA_REPLAY_ACTIVE=true}</b> (commit-time replay —
+     *       {@code IgaReplayDispatcher.replayCreateUser} sets this then calls
+     *       {@code DefaultExportImportManager.createUser} → this 5-arg path):
+     *       {@link IgaImportMode#isImportMode} returns false (replay
+     *       short-circuit), so we take the SAME plain {@code super} path the
+     *       1-arg seam's replay branch takes — a non-capture
+     *       {@link IgaUserAdapter}. Single-entity replay is byte-unchanged.</li>
+     *   <li><b>IGA off / master / no partialImport frame</b> →
+     *       {@code isImportMode} false → plain {@code super} (inert wrapper,
+     *       exactly the pre-Phase-4 behaviour).</li>
+     * </ul>
+     */
+    @Override
+    public UserModel addUser(RealmModel realm, String id, String username,
+                             boolean addDefaultRoles, boolean addDefaultRequiredActions) {
+        if (IgaImportMode.isImportMode(igaSession, realm)) {
+            UserModel base = super.addUser(realm, id, username,
+                    addDefaultRoles, addDefaultRequiredActions);
+            if (base == null) return null;
+            if (base instanceof org.keycloak.models.jpa.UserAdapter ua) {
+                UserEntity entity = ua.getEntity();
+                log.infof("IGA multi-entity: capture CREATE_USER via 5-arg "
+                        + "local-storage addUser (partialImport path) for "
+                        + "username=%s (uuid=%s) — capture-mode adapter "
+                        + "registered with the batch (bypass closed)",
+                        username, id);
+                IgaUserAdapter adapter = new IgaUserAdapter(
+                        igaSession, realm, em, entity, /*captureMode=*/ true);
+                IgaImportMode.registerImportUser(igaSession, realm, adapter);
+                return adapter;
+            }
+            return base;
+        }
+        // Replay / IGA-off / master / non-import: unchanged pass-through
+        // (single-entity replay uses this exact path — must NOT regress).
+        UserModel base = super.addUser(realm, id, username,
+                addDefaultRoles, addDefaultRequiredActions);
+        if (base == null) return null;
+        if (base instanceof org.keycloak.models.jpa.UserAdapter ua) {
+            UserEntity entity = ua.getEntity();
+            return new IgaUserAdapter(igaSession, realm, em, entity);
+        }
+        return base;
+    }
+
     // addFederatedIdentity is NOT overridden — federated identities are IdP
     // brokering, not token claims, and are NOT governed. KC's
     // UsersResource.createUser:171 → RepresentationToModel.createFederatedIdentities

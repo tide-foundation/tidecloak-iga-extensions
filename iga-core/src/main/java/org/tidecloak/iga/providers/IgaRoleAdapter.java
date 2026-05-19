@@ -270,6 +270,19 @@ public class IgaRoleAdapter extends RoleAdapter {
         }
         row.put("REP_JSON", repJson);
 
+        // Phase 4 — partialImport batch governance. If a partialImport frame is
+        // on the stack (and IGA on, not replay) accumulate this fully-built CR
+        // and RETURN NORMALLY (getName() yields the real name): NO per-entity
+        // CR write, NO setRollbackOnly, NO throw. The batch-emit prepare-tx
+        // writes all accumulated CRs at once and rolls the scratch import back.
+        // This is the ONLY behavioural change vs Phases 1–3 — the
+        // single-entity branch below is byte-unchanged.
+        if (IgaImportMode.isImportMode(session, realm)) {
+            IgaImportMode.accumulate(session, realm, "ROLE", roleId,
+                    "CREATE_ROLE", List.of(row), null);
+            return roleName;
+        }
+
         String[] crIdHolder = new String[1];
         KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(), newSession -> {
             RealmModel newRealm = newSession.realms().getRealm(realm.getId());

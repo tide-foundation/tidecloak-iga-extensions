@@ -506,6 +506,18 @@ public class IgaUserAdapter extends UserAdapter {
 
     @Override
     public String getId() {
+        // Phase 4 hard guard: in a partialImport this capture adapter's row is
+        // harvested by the batch-emit tx (buildImportUserPendingCr), NOT the
+        // single-entity terminal seam. The StackWalker gate below already
+        // never matches in import (the caller is
+        // DefaultExportImportManager.createUser, not
+        // UsersResource#createUser), so this is belt-and-braces: it can NEVER
+        // single-entity-emit/throw inside an import. Phases 1–3 (no
+        // partialImport frame) skip this and are byte-unchanged.
+        if (captureMode && !captureEmitted
+                && IgaImportMode.inPartialImport()) {
+            return super.getId();
+        }
         // Primary deterministic gate: the resource-boundary StackWalker
         // (immediate caller == UsersResource#createUser). Secondary defensive
         // gate: usernameObserved (KC's DefaultUserProfile.create always applies
@@ -553,6 +565,42 @@ public class IgaUserAdapter extends UserAdapter {
         captureEmitted = true;
         trace("getId#EMIT(UsersResource#createUser)");
 
+        String userId = super.getId();
+        String username = capturedRep.getUsername() != null
+                ? capturedRep.getUsername() : super.getUsername();
+
+        Map<String, Object> row = buildCapturedUserRow();
+
+        String requestedBy = getCurrentUserId();
+        String[] crIdHolder = new String[1];
+        KeycloakModelUtils.runJobInTransaction(igaSession.getKeycloakSessionFactory(), newSession -> {
+            RealmModel newRealm = newSession.realms().getRealm(realm.getId());
+            EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
+            IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
+            crIdHolder[0] = newService.create(newRealm, "USER", userId,
+                    "CREATE_USER", List.of(row), requestedBy).getId();
+        });
+
+        // Mark the REQUEST tx rollback-only so DefaultKeycloakSession#close()
+        // rolls back and the scratch user + everything attached dies. The CR
+        // survives because runJobInTransaction wrote it on a separate session.
+        // Same idiom + lifecycle proof as IgaClientScopeAdapter#getId /
+        // IgaRoleAdapter#getName.
+        igaSession.getTransactionManager().setRollbackOnly();
+
+        throw new IgaPendingApprovalException(crIdHolder[0], "USER", "CREATE_USER");
+    }
+
+    /**
+     * Build the {@code CREATE_USER} CR row from the accumulator — the SINGLE
+     * source of truth shared by the single-entity terminal seam
+     * ({@link #getId()}) and the Phase 4 partialImport batch path
+     * ({@link #buildImportUserPendingCr()}). Identical rep/row contract in
+     * both cases (so {@code IgaReplayDispatcher.replayCreateUser} is
+     * byte-unchanged). NO side effects (no CR write, no throw, no
+     * rollback-only).
+     */
+    private Map<String, Object> buildCapturedUserRow() {
         String userId = super.getId();
         String username = capturedRep.getUsername() != null
                 ? capturedRep.getUsername() : super.getUsername();
@@ -646,25 +694,33 @@ public class IgaUserAdapter extends UserAdapter {
         row.put("USERNAME", username == null ? null : username.toLowerCase());
         row.put("REALM_ID", realm.getId());
         row.put("REP_JSON", repJson);
+        return row;
+    }
 
+    /**
+     * Phase 4 — partialImport batch path. Build this user's
+     * {@code CREATE_USER} {@link IgaImportMode.PendingCr} from the
+     * accumulator. Called by {@link IgaImportMode.BatchEmitTransaction#commit}
+     * AFTER {@code DefaultExportImportManager.createUser} has applied every
+     * setter / {@code joinGroup} to the scratch user (so the accumulator is
+     * complete) and BEFORE the scratch JPA tx commits. Uses the SAME
+     * {@link #buildCapturedUserRow()} contract as the single-entity seam, so
+     * replay is identical and {@code IgaReplayDispatcher} is byte-unchanged.
+     * NO throw, NO rollback-only here — the batch-emit tx owns that.
+     */
+    IgaImportMode.PendingCr buildImportUserPendingCr() {
+        if (!captureMode) {
+            return null;
+        }
+        String userId = super.getId();
+        Map<String, Object> row = buildCapturedUserRow();
         String requestedBy = getCurrentUserId();
-        String[] crIdHolder = new String[1];
-        KeycloakModelUtils.runJobInTransaction(igaSession.getKeycloakSessionFactory(), newSession -> {
-            RealmModel newRealm = newSession.realms().getRealm(realm.getId());
-            EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
-            IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
-            crIdHolder[0] = newService.create(newRealm, "USER", userId,
-                    "CREATE_USER", List.of(row), requestedBy).getId();
-        });
-
-        // Mark the REQUEST tx rollback-only so DefaultKeycloakSession#close()
-        // rolls back and the scratch user + everything attached dies. The CR
-        // survives because runJobInTransaction wrote it on a separate session.
-        // Same idiom + lifecycle proof as IgaClientScopeAdapter#getId /
-        // IgaRoleAdapter#getName.
-        igaSession.getTransactionManager().setRollbackOnly();
-
-        throw new IgaPendingApprovalException(crIdHolder[0], "USER", "CREATE_USER");
+        log.infof("IGA multi-entity ACCUM: CREATE_USER %s (uuid=%s) — row "
+                + "harvested at batch emit from the 5-arg local-storage "
+                + "addUser import path (the bypass is closed)",
+                row.get("USERNAME"), userId);
+        return new IgaImportMode.PendingCr("USER", userId, "CREATE_USER",
+                List.of(row), requestedBy);
     }
 
     // -------------------------------------------------------------------------
