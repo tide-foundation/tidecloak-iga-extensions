@@ -626,7 +626,8 @@ other top-level creates (`IgaScopeResolver.java:165-170`,
 
 ## Internals
 
-(For developers.)
+(For developers.) To add a new captured entity type or action, see the
+contributor guide: [Extending IGA](EXTENDING-IGA.md).
 
 - **`IgaRealmProvider`** (`providers/`) — `JpaRealmProvider` subclass; wraps
   the realm in `IgaRealmAdapter` and overrides `add*`
