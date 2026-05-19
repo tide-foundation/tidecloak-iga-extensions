@@ -289,6 +289,23 @@ public class IgaUserAdapter extends UserAdapter {
     private boolean captureEmitted = false;
 
     /**
+     * TEMPORARY DIAGNOSTIC build counter: sequential index of every
+     * capture-mode {@code getId()} call (#1, #2, …) so the IGA-USERDIAG log
+     * lines can be correlated in execution order. NOT used by any production
+     * decision; this whole capture-mode getId() diagnostic path neither emits,
+     * throws nor rolls back.
+     */
+    private int diagGetIdSeq = 0;
+
+    /**
+     * TEMPORARY DIAGNOSTIC max stack frames captured per getId() log line
+     * (after JDK/reflection filtering). Capping keeps each line readable; the
+     * KC/Quarkus/RESTEasy/Tidecloak frames we need are at the top so 30 is
+     * comfortably enough to reach the resource boundary.
+     */
+    private static final int DIAG_MAX_FRAMES = 30;
+
+    /**
      * One-shot diagnostic breadcrumb: record (once) that a mid-build
      * {@code getId()} was correctly skipped because the resource frame was
      * absent. Proves the StackWalker predicate suppressed the early/racy
@@ -315,6 +332,14 @@ public class IgaUserAdapter extends UserAdapter {
             capturedRep.setId(super.getId());
             capturedRep.setUsername(super.getUsername());
             if (super.getUsername() != null) usernameObserved = true;
+            // TEMPORARY DIAGNOSTIC: one-time addUser capture-entry marker. No
+            // end marker is possible (this build never emits/throws — the
+            // resource returns 201); the deliverable is the IGA-USERDIAG log
+            // from this START to the end of the createUser flow.
+            log.infof("IGA-USERDIAG === capture-mode addUser START "
+                    + "username=%s realm=%s ===",
+                    super.getUsername(),
+                    realm == null ? null : realm.getName());
         }
     }
 
@@ -423,152 +448,108 @@ public class IgaUserAdapter extends UserAdapter {
                 });
     }
 
+    /**
+     * TEMPORARY DIAGNOSTIC build of {@code getId()}.
+     *
+     * <p><b>Non-capture / inline path is byte-equivalent in behaviour</b>: it
+     * still just returns {@code super.getId()} (inline mode never emitted from
+     * getId()). <b>Capture path: NO emit / NO throw / NO setRollbackOnly.</b>
+     * On EVERY capture-mode getId() call we log a single INFO line with the
+     * sequential index, the would-be accumulator state, and the real filtered
+     * runtime stack, then fall straight through to {@code super.getId()} so the
+     * ENTIRE {@code UsersResource.createUser} flow runs to completion (the e2e
+     * probe uses a throwaway scratch realm — an ungoverned create there is
+     * harmless and is the intended diagnostic). The whole point is to OBSERVE
+     * every getId() call's actual stack so the true terminal frame can be
+     * identified from data; emitting/throwing would abort the flow and hide
+     * later frames. The accumulation logic in the setters is intact, so
+     * {@code acc=[...]} faithfully reflects what WOULD have been captured.
+     * {@link #calledDirectlyFromCreateUserResource()},
+     * {@link #captureEmitted}, {@link #skipTraced} are unused in this build but
+     * retained byte-unchanged for an easy revert.</p>
+     */
     @Override
     public String getId() {
-        // Primary deterministic gate: the resource-boundary StackWalker.
-        // Secondary defensive gate: usernameObserved (KC's
-        // DefaultUserProfile.create always applies the username writable
-        // attribute strictly before createUser:175). Either gate failing →
-        // fall straight through to super.getId() WITHOUT emitting.
-        if (!captureMode || captureEmitted || !usernameObserved
-                || !calledDirectlyFromCreateUserResource()) {
-            // One-shot breadcrumb: a mid-build getId() was correctly skipped
-            // (resource frame absent) AFTER a username was observed — proves
-            // the StackWalker predicate suppressed the early/racy
-            // equals/hashCode/JPA-driven getId() instead of emitting a lossy
-            // rep. Recorded once so it interleaves visibly in the trace.
-            if (captureMode && !captureEmitted && usernameObserved
-                    && !skipTraced) {
-                skipTraced = true;
-                trace("getId(skip:no-resource-frame)");
-            }
+        if (captureMode) {
+            int n = ++diagGetIdSeq;
+            int attrCount = capturedAttributes.size();
+            int groupCount = capturedGroupPaths.size();
+            log.infof("IGA-USERDIAG getId#%d acc=[username=%s,enabled=%s,"
+                    + "email=%s,first=%s,last=%s,emailVerified=%s,attrs=%d,"
+                    + "groups=%d] stack=%s",
+                    n,
+                    yn(capturedRep.getUsername() != null),
+                    yn(capturedRep.isEnabled() != null),
+                    yn(capturedRep.getEmail() != null),
+                    yn(capturedRep.getFirstName() != null),
+                    yn(capturedRep.getLastName() != null),
+                    yn(capturedRep.isEmailVerified() != null),
+                    attrCount, groupCount,
+                    diagFilteredStack());
             return super.getId();
         }
-        // Arm the fire-once guard BEFORE any further model/service call so the
-        // emit path cannot re-enter this seam and the second getId() at
-        // UsersResource.createUser:177 falls through.
-        captureEmitted = true;
-        trace("getId#EMIT(resource-frame)");
+        return super.getId();
+    }
 
-        String userId = super.getId();
-        String username = capturedRep.getUsername() != null
-                ? capturedRep.getUsername() : super.getUsername();
+    /**
+     * TEMPORARY DIAGNOSTIC stack formatter. Walks the live stack with
+     * {@code RETAIN_CLASS_REFERENCE}, drops pure JDK ({@code java.*}/
+     * {@code javax.*}/{@code jdk.*}/{@code sun.*}) and reflection frames AND
+     * this method's own + {@code IgaUserAdapter.getId} frames, KEEPS every
+     * {@code org.keycloak.*}, {@code io.quarkus.*},
+     * {@code org.jboss.resteasy.*}/{@code org.jboss.resteasy.reactive.*} and
+     * {@code org.tidecloak.*} frame (exactly the frames that pinpoint the
+     * terminal), and renders each surviving frame as
+     * {@code <declaring-class-FQN>#<method>}. Capped at
+     * {@link #DIAG_MAX_FRAMES} surviving frames so each log line stays
+     * readable; the resource boundary is well within that cap.
+     */
+    private String diagFilteredStack() {
+        return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
+                .walk(frames -> {
+                    StringBuilder sb = new StringBuilder();
+                    int kept = 0;
+                    var it = frames.iterator();
+                    while (it.hasNext()) {
+                        StackWalker.StackFrame f = it.next();
+                        Class<?> c = f.getDeclaringClass();
+                        String cn = c.getName();
+                        String mn = f.getMethodName();
 
-        // Build the CR rep entirely from the accumulator (authoritative — the
-        // live model never serializes groups/roles, and getId() can fire early
-        // via equals/hashCode; see class javadoc). ONLY token-affecting fields
-        // are populated.
-        UserRepresentation rep = new UserRepresentation();
-        rep.setId(userId);
-        rep.setUsername(username);
-        if (capturedRep.isEnabled() != null) rep.setEnabled(capturedRep.isEnabled());
-        if (capturedRep.getEmail() != null) rep.setEmail(capturedRep.getEmail());
-        if (capturedRep.isEmailVerified() != null) rep.setEmailVerified(capturedRep.isEmailVerified());
-        if (capturedRep.getFirstName() != null) rep.setFirstName(capturedRep.getFirstName());
-        if (capturedRep.getLastName() != null) rep.setLastName(capturedRep.getLastName());
-        if (!capturedAttributes.isEmpty()) {
-            Map<String, List<String>> attrs = new LinkedHashMap<>();
-            for (Map.Entry<String, List<String>> e : capturedAttributes.entrySet()) {
-                attrs.put(e.getKey(), new ArrayList<>(e.getValue()));
-            }
-            rep.setAttributes(attrs);
-        }
-        if (!capturedGroupPaths.isEmpty()) {
-            rep.setGroups(new ArrayList<>(capturedGroupPaths));
-        }
-        // Belt-and-braces: CREATE_USER governs ONLY the 8 KC-routed token
-        // fields (username, enabled, email, emailVerified, firstName, lastName,
-        // attributes, groups). Explicitly null every non-governed field so an
-        // inbound value in the create request can NEVER ride along into the CR
-        // through any path (none are accumulated; this proves the serialized
-        // rep carries no `realmRoles`, `clientRoles`, `credentials`,
-        // `requiredActions`, `federatedIdentities`, `createdTimestamp` or
-        // `federationLink`).
-        //
-        // realmRoles/clientRoles in particular: roles are NOT capturable at
-        // user-create — stock KC's UsersResource.createUser
-        // (keycloak-services 26.5.5 UsersResource.java:143-192) NEVER applies
-        // realmRoles/clientRoles (only updateUserFromRep +
-        // createFederatedIdentities + createGroups + createCredentials;
-        // createRoleMappings runs only on the import/replay path). Roles are
-        // assigned via the separate POST /users/{id}/role-mappings/* →
-        // grantRole, which IGA already governs as a standalone GRANT_ROLES
-        // change request (untouched). The user sets their own password after
-        // approval; required actions / IdP links / metadata are not part of
-        // the issued token and are intentionally out of scope.
-        rep.setRealmRoles(null);
-        rep.setClientRoles(null);
-        rep.setCredentials(null);
-        rep.setRequiredActions(null);
-        rep.setFederatedIdentities(null);
-        rep.setCreatedTimestamp(null);
-        rep.setFederationLink(null);
-
-        String repJson;
-        try {
-            repJson = MAPPER.writeValueAsString(rep);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new RuntimeException(
-                    "IGA capture CREATE_USER: failed to serialize captured "
-                    + "UserRepresentation for user=" + username, e);
-        }
-
-        int attrs = rep.getAttributes() == null ? 0 : rep.getAttributes().size();
-        int groups = rep.getGroups() == null ? 0 : rep.getGroups().size();
-        // Compact running observed-order + emit field-presence trace so any
-        // future early/lossy emit is immediately diagnosable from the log, e.g.
-        //   IGA user-capture: setUsername … getId(skip:no-resource-frame) …
-        //   setEmail … setAttribute:foo … joinGroup …
-        //   getId#EMIT(resource-frame) username=Y enabled=Y email=Y first=Y
-        //   last=Y emailVerified=Y attrs=2 groups=1
-        log.infof("IGA user-capture: %s | getId#EMIT(resource-frame) "
-                + "username=%s enabled=%s email=%s first=%s last=%s "
-                + "emailVerified=%s attrs=%d groups=%d | CREATE_USER governs "
-                + "ONLY the 8 token fields — realmRoles/clientRoles "
-                + "(GRANT_ROLES role-mapping CR)/credentials/requiredActions/"
-                + "federatedIdentities/createdTimestamp/federationLink NOT "
-                + "governed at create; user=%s uuid=%s %d chars; CR written in "
-                + "a separate tx, request tx marked rollback-only so the "
-                + "scratch user + memberships are discarded (zero rows "
-                + "persisted at draft); the 8 token fields (no password) "
-                + "replay on commit",
-                observedTrace,
-                yn(username != null),
-                rep.isEnabled() == null ? "-" : (rep.isEnabled() ? "Y" : "N"),
-                yn(rep.getEmail() != null),
-                yn(rep.getFirstName() != null),
-                yn(rep.getLastName() != null),
-                rep.isEmailVerified() == null ? "-"
-                        : (rep.isEmailVerified() ? "Y" : "N"),
-                attrs, groups, username, userId, repJson.length());
-
-        // rowsJson contract (must match IgaReplayDispatcher.replayCreateUser):
-        // ID = user UUID, USERNAME = lowercased username, REALM_ID = realm UUID,
-        // REP_JSON = the full UserRepresentation JSON.
-        Map<String, Object> row = new LinkedHashMap<>();
-        row.put("ID", userId);
-        row.put("USERNAME", username == null ? null : username.toLowerCase());
-        row.put("REALM_ID", realm.getId());
-        row.put("REP_JSON", repJson);
-
-        String requestedBy = getCurrentUserId();
-        String[] crIdHolder = new String[1];
-        KeycloakModelUtils.runJobInTransaction(igaSession.getKeycloakSessionFactory(), newSession -> {
-            RealmModel newRealm = newSession.realms().getRealm(realm.getId());
-            EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
-            IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
-            crIdHolder[0] = newService.create(newRealm, "USER", userId,
-                    "CREATE_USER", List.of(row), requestedBy).getId();
-        });
-
-        // Mark the REQUEST tx rollback-only so DefaultKeycloakSession#close()
-        // rolls back and the scratch user + everything attached dies. The CR
-        // survives because runJobInTransaction wrote it on a separate session.
-        // Same idiom + lifecycle proof as IgaClientScopeAdapter#getId /
-        // IgaRoleAdapter#getName.
-        igaSession.getTransactionManager().setRollbackOnly();
-
-        throw new IgaPendingApprovalException(crIdHolder[0], "USER", "CREATE_USER");
+                        // Drop this diagnostic's own frames + getId override.
+                        if (IgaUserAdapter.class.getName().equals(cn)
+                                && ("diagFilteredStack".equals(mn)
+                                    || "getId".equals(mn))) {
+                            continue;
+                        }
+                        // Drop pure JDK / reflection noise but KEEP every
+                        // keycloak / quarkus / resteasy / tidecloak frame.
+                        boolean keepAlways =
+                                cn.startsWith("org.keycloak.")
+                                || cn.startsWith("io.quarkus.")
+                                || cn.startsWith("org.jboss.resteasy.")
+                                || cn.startsWith("org.tidecloak.");
+                        if (!keepAlways) {
+                            if (cn.startsWith("java.")
+                                    || cn.startsWith("javax.")
+                                    || cn.startsWith("jakarta.")
+                                    || cn.startsWith("jdk.")
+                                    || cn.startsWith("sun.")
+                                    || cn.contains(".reflect.")) {
+                                continue;
+                            }
+                        }
+                        if (kept >= DIAG_MAX_FRAMES) {
+                            sb.append(" >|cap@").append(DIAG_MAX_FRAMES);
+                            break;
+                        }
+                        if (kept > 0) sb.append(" > ");
+                        sb.append(cn).append('#').append(mn);
+                        kept++;
+                    }
+                    if (kept == 0) sb.append("<none>");
+                    return sb.toString();
+                });
     }
 
     // -------------------------------------------------------------------------
@@ -610,6 +591,7 @@ public class IgaUserAdapter extends UserAdapter {
             capturedRep.setUsername(super.getUsername());
             usernameObserved = true;
             trace("setUsername");
+            log.infof("IGA-USERDIAG set:username=%s", super.getUsername());
         }
     }
 
@@ -619,6 +601,7 @@ public class IgaUserAdapter extends UserAdapter {
         if (captureMode) {
             capturedRep.setEnabled(enabled);
             trace("setEnabled:" + enabled);
+            log.infof("IGA-USERDIAG set:enabled=%s", enabled);
         }
     }
 
@@ -628,6 +611,7 @@ public class IgaUserAdapter extends UserAdapter {
         if (captureMode) {
             capturedRep.setEmail(super.getEmail());
             trace("setEmail");
+            log.infof("IGA-USERDIAG set:email=%s", super.getEmail());
         }
     }
 
@@ -637,6 +621,7 @@ public class IgaUserAdapter extends UserAdapter {
         if (captureMode) {
             capturedRep.setEmailVerified(verified);
             trace("setEmailVerified:" + verified);
+            log.infof("IGA-USERDIAG set:emailVerified=%s", verified);
         }
     }
 
@@ -646,6 +631,7 @@ public class IgaUserAdapter extends UserAdapter {
         if (captureMode) {
             capturedRep.setFirstName(firstName);
             trace("setFirstName");
+            log.infof("IGA-USERDIAG set:firstName=%s", firstName);
         }
     }
 
@@ -655,6 +641,7 @@ public class IgaUserAdapter extends UserAdapter {
         if (captureMode) {
             capturedRep.setLastName(lastName);
             trace("setLastName");
+            log.infof("IGA-USERDIAG set:lastName=%s", lastName);
         }
     }
 
@@ -755,6 +742,8 @@ public class IgaUserAdapter extends UserAdapter {
             if (group != null) {
                 capturedGroupPaths.add(KeycloakModelUtils.buildGroupPath(group));
                 trace("joinGroup:" + group.getName());
+                log.infof("IGA-USERDIAG set:joinGroup=%s",
+                        KeycloakModelUtils.buildGroupPath(group));
             }
             return;
         }
@@ -778,6 +767,8 @@ public class IgaUserAdapter extends UserAdapter {
             if (group != null) {
                 capturedGroupPaths.add(KeycloakModelUtils.buildGroupPath(group));
                 trace("joinGroup:" + group.getName());
+                log.infof("IGA-USERDIAG set:joinGroup=%s",
+                        KeycloakModelUtils.buildGroupPath(group));
             }
             return;
         }
@@ -801,6 +792,8 @@ public class IgaUserAdapter extends UserAdapter {
             if (group != null) {
                 capturedGroupPaths.remove(KeycloakModelUtils.buildGroupPath(group));
                 trace("leaveGroup:" + group.getName());
+                log.infof("IGA-USERDIAG set:leaveGroup=%s",
+                        KeycloakModelUtils.buildGroupPath(group));
             }
             return;
         }
@@ -841,6 +834,7 @@ public class IgaUserAdapter extends UserAdapter {
             super.setSingleAttribute(name, value);
             accumulateAttribute(name, value == null ? null : List.of(value));
             trace("setSingleAttribute:" + name);
+            log.infof("IGA-USERDIAG set:singleAttribute=%s=%s", name, value);
             return;
         }
         if (!isIgaActive()) {
@@ -864,6 +858,7 @@ public class IgaUserAdapter extends UserAdapter {
             super.setAttribute(name, values);
             accumulateAttribute(name, values);
             trace("setAttribute:" + name);
+            log.infof("IGA-USERDIAG set:attribute=%s=%s", name, values);
             return;
         }
         if (!isIgaActive()) {
@@ -910,6 +905,7 @@ public class IgaUserAdapter extends UserAdapter {
                 capturedAttributes.remove(name);
             }
             trace("removeAttribute:" + name);
+            log.infof("IGA-USERDIAG set:removeAttribute=%s", name);
             return;
         }
         if (!isIgaActive()) {
