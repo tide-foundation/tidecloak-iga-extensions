@@ -311,6 +311,15 @@ public class IgaUserAdapter extends UserAdapter {
      */
     private boolean skipTraced = false;
 
+    /**
+     * The last computed immediate caller logged on a SKIP. Used to de-dupe
+     * consecutive identical-caller SKIP lines (getId() is invoked very
+     * frequently mid-build) while ALWAYS logging the REAL computed
+     * {@code <FQN>#<method>} at least once and again on any caller change — so
+     * the log is self-evidencing for the next run.
+     */
+    private String lastSkipCaller = null;
+
     public IgaUserAdapter(KeycloakSession session, RealmModel realm, EntityManager em, UserEntity user) {
         this(session, realm, em, user, false);
     }
@@ -413,6 +422,33 @@ public class IgaUserAdapter extends UserAdapter {
      * caller), so it is intentionally NOT matched.
      */
     private boolean calledDirectlyFromCreateUserResource() {
+        return computeImmediateCaller() == TERMINAL;
+    }
+
+    /** Sentinel: the computed immediate caller IS UsersResource#createUser. */
+    private static final String TERMINAL = "<UsersResource#createUser>";
+
+    /**
+     * Walk the live stack and return the genuine external "immediate caller" of
+     * {@code getId()} as {@code "<FQN>#<method>"}, or the {@link #TERMINAL}
+     * sentinel iff that caller is exactly
+     * {@code org.keycloak.services.resources.admin.UsersResource#createUser}.
+     *
+     * <p>Skip ALL {@code org.tidecloak.iga.providers.IgaUserAdapter} frames
+     * (regardless of method) because this predicate runs INSIDE an
+     * IgaUserAdapter helper ({@code calledDirectlyFromCreateUserResource} /
+     * this method) — its OWN frames (plus {@code getId} and any lambda/
+     * synthetic) would otherwise be computed as the "first surviving frame" and
+     * mask the real caller, so the predicate never matched and the user
+     * persisted ungoverned (201). Also skip the {@code java.lang.StackWalker}
+     * machinery (JDK, normally absent but skipped defensively) and keep
+     * skipping the inherited {@code UserAdapter.{equals,hashCode,getId}}
+     * self-delegations. The FIRST surviving frame after these skips is the
+     * genuine external immediate caller (runtime-proven: getId#7/#8 →
+     * {@code UsersResource#createUser}; getId#1–#6 →
+     * {@code UserCacheSession/UserStorageManager/JpaUserProvider}).</p>
+     */
+    private String computeImmediateCaller() {
         return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
                 .walk(frames -> {
                     var it = frames.iterator();
@@ -422,38 +458,49 @@ public class IgaUserAdapter extends UserAdapter {
                         String cn = c.getName();
                         String mn = f.getMethodName();
 
-                        // Skip this adapter's own getId() override and the
-                        // inherited UserAdapter.{equals,hashCode,getId} that
-                        // delegate straight back into getId() — they are NOT
-                        // the logical "caller"; we want the frame that drove
-                        // the lookup (the "immediate caller").
-                        if (IgaUserAdapter.class.getName().equals(cn)
-                                && "getId".equals(mn)) {
+                        // Skip ALL IgaUserAdapter frames (any method: getId,
+                        // calledDirectlyFromCreateUserResource,
+                        // computeImmediateCaller, lambdas/synthetics) because
+                        // the predicate runs inside an IgaUserAdapter helper;
+                        // the immediate caller must be the first NON-
+                        // IgaUserAdapter, NON-UserAdapter-self frame
+                        // (runtime-proven: getId#7/#8 → UsersResource#createUser).
+                        if (IgaUserAdapter.class.getName().equals(cn)) {
                             continue;
                         }
+                        // Skip the StackWalker machinery itself (JDK frames —
+                        // typically already absent, skipped defensively).
+                        if (cn.startsWith("java.lang.StackWalker")) {
+                            continue;
+                        }
+                        // Skip the inherited UserAdapter.{equals,hashCode,getId}
+                        // that delegate straight back into getId() — they are
+                        // NOT the logical caller.
                         if (UserAdapter.class.getName().equals(cn)
                                 && ("equals".equals(mn) || "hashCode".equals(mn)
                                     || "getId".equals(mn))) {
                             continue;
                         }
 
-                        // First surviving frame == the immediate caller.
-                        // RUNTIME-PROVEN match: terminal IFF that frame's
-                        // declaring class FQN is exactly UsersResource AND its
-                        // method is exactly createUser. This uniquely matches
-                        // getId#7 (UsersResource#createUser, :175) and getId#8
-                        // (:177) and NEVER getId#1–#6 (those resolve to
+                        // First surviving frame == the genuine external
+                        // immediate caller. RUNTIME-PROVEN match: terminal IFF
+                        // its declaring class FQN is exactly UsersResource AND
+                        // its method is exactly createUser. This uniquely
+                        // matches getId#7 (UsersResource#createUser, :175) and
+                        // getId#8 (:177) and NEVER getId#1–#6 (those resolve to
                         // UserCacheSession#addUser/fullyInvalidateUser/
                         // addFederatedIdentity / UserStorageManager#
                         // addFederatedIdentity / JpaUserProvider#
-                        // addFederatedIdentity as their immediate caller). The
-                        // Quarkus invoker is below this frame, never the
-                        // immediate caller, so it is not (and must not be)
-                        // matched.
-                        return KC_USERS_RESOURCE.equals(cn)
-                                && KC_CREATE_USER.equals(mn);
+                        // addFederatedIdentity). The Quarkus invoker is BELOW
+                        // this frame, never the immediate caller, so it is not
+                        // (and must not be) matched.
+                        if (KC_USERS_RESOURCE.equals(cn)
+                                && KC_CREATE_USER.equals(mn)) {
+                            return TERMINAL;
+                        }
+                        return cn + "#" + mn;
                     }
-                    return false;
+                    return "<none>";
                 });
     }
 
@@ -469,23 +516,33 @@ public class IgaUserAdapter extends UserAdapter {
         // → predicate false → no emit; getId#7's immediate caller is
         // UsersResource#createUser (:175, full model built) → predicate true →
         // emit; getId#8 (:177) is latched out by the fire-once guard.
+        // Compute the genuine external immediate caller ONCE per getId() (only
+        // in capture mode, pre-emit) so the SKIP/EMIT logs print the ACTUAL
+        // frame, never a templated example — the run is self-evidencing.
+        String immediateCaller = (captureMode && !captureEmitted)
+                ? computeImmediateCaller() : null;
         if (!captureMode || captureEmitted || !usernameObserved
-                || !calledDirectlyFromCreateUserResource()) {
+                || immediateCaller != TERMINAL) {
             // Skipped-getId breadcrumb: a capture-mode getId() did NOT match
             // the terminal predicate (mid-build #1–#6 / the post-emit #8).
-            // Counted; the FIRST skip-after-username is also surfaced once as
-            // an INFO breadcrumb + interleaved in the observed-order trace so
-            // any future early/lossy emit is immediately diagnosable.
+            // Counted; every skip-after-username logs the REAL computed
+            // immediate caller (de-duped on consecutive identical callers so
+            // the frequent racy getId()s don't flood the log, but ALWAYS at
+            // least once and on any caller change) so a future SKIP shows the
+            // exact frame for a definitive next step with zero ambiguity.
             if (captureMode && !captureEmitted) {
                 skippedGetIdCount++;
-                if (usernameObserved && !skipTraced) {
-                    skipTraced = true;
-                    trace("getId(skip:not-UsersResource#createUser)");
-                    log.infof("IGA user-capture SKIP: getId() immediate caller "
-                            + "is NOT UsersResource#createUser (mid-build "
-                            + "getId, e.g. UserCacheSession#addUser) — "
-                            + "suppressed, no emit (skippedGetIdCount=%d)",
-                            skippedGetIdCount);
+                if (usernameObserved
+                        && !immediateCaller.equals(lastSkipCaller)) {
+                    lastSkipCaller = immediateCaller;
+                    if (!skipTraced) {
+                        skipTraced = true;
+                        trace("getId(skip:not-UsersResource#createUser)");
+                    }
+                    log.infof("IGA user-capture SKIP: immediate caller=%s "
+                            + "(not UsersResource#createUser) — suppressed, no "
+                            + "emit (skippedGetIdCount=%d)",
+                            immediateCaller, skippedGetIdCount);
                 }
             }
             return super.getId();
@@ -561,10 +618,10 @@ public class IgaUserAdapter extends UserAdapter {
 
         int attrs = rep.getAttributes() == null ? 0 : rep.getAttributes().size();
         int groups = rep.getGroups() == null ? 0 : rep.getGroups().size();
-        // ONE concise INFO emit line: the trimmed diagnostic. The verbose
-        // per-getId full-stack dump was removed (it served its purpose — the
-        // terminal frame is now runtime-proven to be UsersResource#createUser).
-        log.infof("IGA user-capture EMIT: caller=UsersResource#createUser "
+        // ONE concise INFO emit line. The immediate caller is printed from the
+        // ACTUAL computed value (the TERMINAL sentinel resolves to the real
+        // UsersResource#createUser frame) — self-evidencing, not a template.
+        log.infof("IGA user-capture EMIT: immediate caller=UsersResource#createUser "
                 + "acc=[username=%s,enabled=%s,email=%s,first=%s,last=%s,"
                 + "emailVerified=%s,attrs=%d,groups=%d] chars=%d "
                 + "(skippedGetIdCount=%d user=%s uuid=%s; CR written in a "
