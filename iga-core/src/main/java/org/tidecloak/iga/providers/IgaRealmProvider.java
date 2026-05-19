@@ -106,6 +106,49 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public GroupModel createGroup(RealmModel realm, String id, Type type, String name, GroupModel toParent) {
+        // Phase 4 — partialImport batch governance for GROUP. This branch MUST
+        // come BEFORE the single-entity isIgaActive() capture return.
+        //
+        // Bug it fixes: under POST /partialImport, KC's
+        // GroupsPartialImport.create → RepresentationToModel.importGroup calls
+        // realm.createGroup(...) (→ here) then applies setDescription /
+        // setAttribute / grantRole only CONDITIONALLY, and
+        // AbstractPartialImport.doImport immediately calls
+        // GroupsPartialImport.getModelId → KeycloakModelUtils.findGroupByPath
+        // (...).getId(). Returning a single-entity capture adapter meant the
+        // IgaGroupAdapter#setDescription terminal seam either never fired
+        // (no description → ungoverned) or fired per-entity mid-import (the
+        // first entity aborted the whole import), and the scratch group on the
+        // veto path made findGroupByPath(...) return null → NPE at
+        // GroupsPartialImport:53 → KC-SERVICES0037 → HTTP 500.
+        //
+        // Fix (identical mechanism to the 5-arg addUser deferred-harvest /
+        // IgaUserProvider.addUser import branch): create the REAL scratch group
+        // via super and return a CAPTURE-mode IgaGroupAdapter so per-setter
+        // interception is bypassed and KC's importGroup builds the COMPLETE
+        // real model (so findGroupByPath/getModelId resolves a real id).
+        // markImportDeferred() makes the setDescription seam inert; the
+        // CREATE_GROUP row is harvested ONCE for the batch by the Phase 4
+        // BatchEmitTransaction (registerImportGroup), which vetoes/replays it
+        // with the rest of the import. No per-entity throw.
+        if (IgaImportMode.isImportMode(igaSession, realm)) {
+            GroupModel base = super.createGroup(realm, id, type, name, toParent);
+            if (base == null) return null;
+            GroupEntity entity = em.find(GroupEntity.class, base.getId());
+            if (entity == null) return base;
+            log.infof("IGA multi-entity: capture CREATE_GROUP via partialImport "
+                    + "RepresentationToModel.importGroup for name=%s (uuid=%s, "
+                    + "parent=%s) — capture-mode adapter registered with the "
+                    + "batch (deferred-harvest; group create proceeds so "
+                    + "GroupsPartialImport.getModelId resolves a real id)",
+                    name, base.getId(),
+                    (toParent != null ? toParent.getId() : null));
+            IgaGroupAdapter adapter = new IgaGroupAdapter(
+                    igaSession, realm, em, entity, /*captureMode=*/ true);
+            IgaImportMode.registerImportGroup(igaSession, realm, adapter);
+            adapter.markImportDeferred();
+            return adapter;
+        }
         if (isIgaActive(realm)) {
             // Model-layer accumulate-then-veto, identical mechanism to
             // addClient. Create the REAL (scratch) GroupEntity via super so
@@ -159,6 +202,40 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public RoleModel addRealmRole(RealmModel realm, String id, String name) {
+        // Phase 4 — partialImport batch governance for REALM ROLE. Same gap
+        // class as createGroup: under POST /partialImport, KC's
+        // RolesPartialImport.doImport → RepresentationToModel.importRoles →
+        // createRole calls realm.addRole(...) (→ here) then applies
+        // setDescription/setAttribute CONDITIONALLY and the composites only on
+        // a SECOND pass via addComposites; createRole/importRoles NEVER calls
+        // role.getName() on the returned adapter, so the single-entity
+        // IgaRoleAdapter#getName terminal seam is never reached on the import
+        // path (role ungoverned + capture-mode scratch role on the veto path).
+        // Fix: identical deferred-harvest mechanism as createGroup / the 5-arg
+        // addUser import branch — real scratch role via super, capture-mode
+        // adapter (per-setter + composites still pass through to the real
+        // model so RealmRolesPartialImport.getModelId resolves a real id),
+        // markImportDeferred() makes getName() a pure pass-through, and the
+        // CREATE_ROLE row is harvested ONCE for the batch by the Phase 4
+        // BatchEmitTransaction (registerImportRole). No per-entity throw.
+        if (IgaImportMode.isImportMode(igaSession, realm)) {
+            RoleModel base = super.addRealmRole(realm, id, name);
+            if (base == null) return null;
+            RoleEntity entity = em.find(RoleEntity.class, base.getId());
+            if (entity == null) return base;
+            log.infof("IGA multi-entity: capture CREATE_ROLE (realm) via "
+                    + "partialImport RepresentationToModel.importRoles for "
+                    + "name=%s (uuid=%s) — capture-mode adapter registered "
+                    + "with the batch (deferred-harvest; role create proceeds "
+                    + "so RealmRolesPartialImport.getModelId resolves)",
+                    name, base.getId());
+            IgaRoleAdapter adapter = new IgaRoleAdapter(igaSession, realm, em,
+                    entity, /*captureMode=*/ true, /*clientUuid=*/ null,
+                    /*clientId=*/ null);
+            IgaImportMode.registerImportRole(igaSession, realm, adapter);
+            adapter.markImportDeferred();
+            return adapter;
+        }
         if (isIgaActive(realm)) {
             // Model-layer accumulate-then-veto, same proven mechanism as
             // addClient/createGroup. Create the REAL (scratch) RoleEntity via
@@ -210,6 +287,36 @@ public class IgaRealmProvider extends JpaRealmProvider {
     @Override
     public RoleModel addClientRole(ClientModel client, String id, String name) {
         RealmModel realm = client.getRealm();
+        // Phase 4 — partialImport batch governance for CLIENT ROLE. Same gap
+        // class as addRealmRole: under POST /partialImport, KC's
+        // RolesPartialImport.doImport → RepresentationToModel.importRoles
+        // (client-roles branch, RepresentationToModel:167-174) calls
+        // client.addRole(...) (→ here) then conditional setDescription/
+        // setAttribute and second-pass addComposites; getName() is never
+        // called on the returned adapter. Fix mirrors addRealmRole, with the
+        // owning-client linkage carried in the row exactly as the
+        // single-entity client-role capture does (CLIENT_UUID/CLIENT_ID) so
+        // IgaReplayDispatcher.resolveClient/replayCreateRole is byte-unchanged.
+        if (IgaImportMode.isImportMode(igaSession, realm)) {
+            RoleModel base = super.addClientRole(client, id, name);
+            if (base == null) return null;
+            RoleEntity entity = em.find(RoleEntity.class, base.getId());
+            if (entity == null) return base;
+            log.infof("IGA multi-entity: capture CREATE_ROLE (client) via "
+                    + "partialImport RepresentationToModel.importRoles for "
+                    + "name=%s (uuid=%s, clientUuid=%s, clientId=%s) — "
+                    + "capture-mode adapter registered with the batch "
+                    + "(deferred-harvest; role create proceeds so "
+                    + "ClientRolesPartialImport.getModelId resolves)",
+                    name, base.getId(), client.getId(), client.getClientId());
+            IgaRoleAdapter adapter = new IgaRoleAdapter(igaSession, realm, em,
+                    entity, /*captureMode=*/ true,
+                    /*clientUuid=*/ client.getId(),
+                    /*clientId=*/ client.getClientId());
+            IgaImportMode.registerImportRole(igaSession, realm, adapter);
+            adapter.markImportDeferred();
+            return adapter;
+        }
         if (isIgaActive(realm)) {
             // Same model-layer accumulate-then-veto as addRealmRole; the only
             // difference is the rowsJson client linkage so replay's

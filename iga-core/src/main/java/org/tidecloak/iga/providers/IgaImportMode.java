@@ -156,6 +156,19 @@ public final class IgaImportMode {
         // model read), so their row is harvested at batch-emit time AFTER
         // every setter/joinGroup has been applied.
         final List<IgaUserAdapter> pendingUsers = new ArrayList<>();
+        // Capture-mode group/role adapters created on the partialImport path.
+        // Their single-entity terminal seams (IgaGroupAdapter#setDescription,
+        // IgaRoleAdapter#getName) are NOT reliably reached by
+        // RepresentationToModel.importGroup / createRole+importRoles under
+        // partialImport (setDescription is conditional on a non-null
+        // description; createRole/importRoles never call role.getName() on the
+        // returned adapter — composites are applied later via addComposites).
+        // So, exactly like pendingUsers, their row is harvested at batch-emit
+        // time AFTER RepresentationToModel has applied every
+        // setter/attribute/composite to the (capture-mode, pass-through) real
+        // scratch model.
+        final List<IgaGroupAdapter> pendingGroups = new ArrayList<>();
+        final List<IgaRoleAdapter> pendingRoles = new ArrayList<>();
         boolean prepareEnlisted = false;
 
         Accumulator(String realmId) {
@@ -267,6 +280,52 @@ public final class IgaImportMode {
                 + "— row built at batch emit (no per-entity throw)");
     }
 
+    /**
+     * Register a capture-mode group adapter built on the partialImport
+     * {@code RepresentationToModel.importGroup} path. Mirrors
+     * {@link #registerImportUser}: its {@code CREATE_GROUP} row is harvested at
+     * batch-emit time (after {@code importGroup} has applied the conditional
+     * {@code setDescription}/{@code setAttribute}/{@code grantRole} calls to
+     * the pass-through scratch model), so governance does not depend on the
+     * single-entity {@code IgaGroupAdapter#setDescription} terminal seam
+     * firing (it is conditional under {@code importGroup} and would also
+     * mis-fire one CR per entity instead of joining the batch).
+     */
+    public static void registerImportGroup(KeycloakSession session, RealmModel realm,
+                                            IgaGroupAdapter group) {
+        Accumulator acc = accumulator(session, realm);
+        enlistPrepareOnce(session, realm, acc);
+        acc.pendingGroups.add(group);
+        log.infof("IGA multi-entity ACCUM: CREATE_GROUP (deferred-harvest) "
+                + "registered for the partialImport RepresentationToModel."
+                + "importGroup path — row built at batch emit (no per-entity "
+                + "throw; the single-entity setDescription seam is bypassed "
+                + "for this import)");
+    }
+
+    /**
+     * Register a capture-mode role adapter built on the partialImport
+     * {@code RepresentationToModel.importRoles}/{@code createRole} path.
+     * Mirrors {@link #registerImportUser}: its {@code CREATE_ROLE} row is
+     * harvested at batch-emit time (after {@code importRoles} has applied
+     * description/attributes and the second-pass {@code addComposites}), so
+     * governance does not depend on the single-entity
+     * {@code IgaRoleAdapter#getName} terminal seam — which
+     * {@code RepresentationToModel.createRole}/{@code importRoles} never
+     * invokes on the returned adapter at all.
+     */
+    public static void registerImportRole(KeycloakSession session, RealmModel realm,
+                                           IgaRoleAdapter role) {
+        Accumulator acc = accumulator(session, realm);
+        enlistPrepareOnce(session, realm, acc);
+        acc.pendingRoles.add(role);
+        log.infof("IGA multi-entity ACCUM: CREATE_ROLE (deferred-harvest) "
+                + "registered for the partialImport RepresentationToModel."
+                + "importRoles/createRole path — row built at batch emit (no "
+                + "per-entity throw; the single-entity getName seam is never "
+                + "reached on the import path)");
+    }
+
     private static String shortName(List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) {
             return "?";
@@ -331,6 +390,32 @@ public final class IgaImportMode {
             // DefaultExportImportManager.createUser setter/joinGroup has run).
             for (IgaUserAdapter u : acc.pendingUsers) {
                 PendingCr cr = u.buildImportUserPendingCr();
+                if (cr != null) {
+                    acc.pending.add(cr);
+                }
+            }
+
+            // Harvest the deferred-harvest group rows now (every
+            // RepresentationToModel.importGroup conditional setDescription /
+            // setAttribute / grantRole has run on the pass-through scratch
+            // model). Same contract/row shape as the single-entity
+            // IgaGroupAdapter#setDescription seam, so IgaReplayDispatcher is
+            // byte-unchanged.
+            for (IgaGroupAdapter g : acc.pendingGroups) {
+                PendingCr cr = g.buildImportGroupPendingCr();
+                if (cr != null) {
+                    acc.pending.add(cr);
+                }
+            }
+
+            // Harvest the deferred-harvest role rows now (every
+            // RepresentationToModel.importRoles description/attribute set and
+            // the second-pass addComposites has run on the pass-through
+            // scratch model). Same contract/row shape as the single-entity
+            // IgaRoleAdapter#getName seam, so IgaReplayDispatcher is
+            // byte-unchanged.
+            for (IgaRoleAdapter r : acc.pendingRoles) {
+                PendingCr cr = r.buildImportRolePendingCr();
                 if (cr != null) {
                     acc.pending.add(cr);
                 }

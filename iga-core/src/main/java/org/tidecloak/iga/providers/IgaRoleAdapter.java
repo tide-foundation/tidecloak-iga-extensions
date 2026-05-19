@@ -142,6 +142,21 @@ public class IgaRoleAdapter extends RoleAdapter {
     /** Fire-once guard: only the first getName() at createRole:225 emits. */
     private boolean captureEmitted = false;
 
+    /**
+     * Phase 4 — true when this capture-mode adapter was created on the
+     * {@code partialImport} {@code RepresentationToModel.importRoles}/
+     * {@code createRole} path ({@code IgaRealmProvider.add{Realm,Client}Role}
+     * registered it with {@link IgaImportMode#registerImportRole}). The
+     * {@code CREATE_ROLE} row is then harvested ONCE at batch-emit time by
+     * {@link #buildImportRolePendingCr()} (after {@code importRoles} has
+     * applied description/attributes and the second-pass {@code addComposites}),
+     * so {@link #getName()} is a pure pass-through for this role (no per-entity
+     * accumulate/throw — and {@code createRole}/{@code importRoles} never calls
+     * {@code getName()} on the returned adapter anyway). Defaults false → the
+     * single-entity admin-create path is byte-unchanged.
+     */
+    private boolean importDeferred = false;
+
     public IgaRoleAdapter(KeycloakSession session, RealmModel realm, EntityManager em, RoleEntity role) {
         this(session, realm, em, role, false, null, null);
     }
@@ -153,6 +168,15 @@ public class IgaRoleAdapter extends RoleAdapter {
         this.captureMode = captureMode;
         this.captureClientUuid = captureClientUuid;
         this.captureClientId = captureClientId;
+    }
+
+    /**
+     * Mark this capture-mode adapter for partialImport deferred-harvest. Called
+     * once by {@code IgaRealmProvider.add{Realm,Client}Role} immediately after
+     * {@link IgaImportMode#registerImportRole}.
+     */
+    void markImportDeferred() {
+        this.importDeferred = true;
     }
 
     private IgaChangeRequestService getService() {
@@ -189,10 +213,73 @@ public class IgaRoleAdapter extends RoleAdapter {
         if (!captureMode || captureEmitted) {
             return super.getName();
         }
+        // Phase 4 — partialImport deferred-harvest. When this capture-mode
+        // adapter was created on the RepresentationToModel.importRoles/
+        // createRole path (IgaRealmProvider.add{Realm,Client}Role registered it
+        // with IgaImportMode), the CREATE_ROLE row is harvested ONCE at
+        // batch-emit time by buildImportRolePendingCr() AFTER importRoles has
+        // applied description/attributes and the second-pass addComposites.
+        // RepresentationToModel.createRole/importRoles never calls getName() on
+        // the returned adapter anyway, so this guard is belt-and-braces: keep
+        // getName() a pure pass-through for an import-registered role (no
+        // accumulate, no throw — the batch-emit prepare-tx owns the veto). The
+        // single-entity admin-create branch below is byte-unchanged.
+        if (importDeferred) {
+            return super.getName();
+        }
         // Arm the fire-once guard BEFORE any further model/service call so the
         // emit path (which may itself read the model) cannot re-enter this seam.
         captureEmitted = true;
 
+        Map<String, Object> row = buildCapturedRoleRow();
+        String roleId = (String) row.get("ID");
+        String roleName = (String) row.get("NAME");
+
+        // Phase 4 — partialImport batch governance. If a partialImport frame is
+        // on the stack (and IGA on, not replay) accumulate this fully-built CR
+        // and RETURN NORMALLY (getName() yields the real name): NO per-entity
+        // CR write, NO setRollbackOnly, NO throw. The batch-emit prepare-tx
+        // writes all accumulated CRs at once and rolls the scratch import back.
+        // This is the ONLY behavioural change vs Phases 1–3 — the
+        // single-entity branch below is byte-unchanged.
+        if (IgaImportMode.isImportMode(session, realm)) {
+            IgaImportMode.accumulate(session, realm, "ROLE", roleId,
+                    "CREATE_ROLE", List.of(row), null);
+            return roleName;
+        }
+
+        String[] crIdHolder = new String[1];
+        KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(), newSession -> {
+            RealmModel newRealm = newSession.realms().getRealm(realm.getId());
+            EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
+            IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
+            crIdHolder[0] = newService.create(newRealm, "ROLE", roleId,
+                    "CREATE_ROLE", List.of(row), null).getId();
+        });
+
+        // Mark the REQUEST KeycloakTransaction rollback-only so
+        // DefaultKeycloakSession#close() rolls back (not commits) and the
+        // scratch role + composite links are discarded. The CR survives because
+        // it was written on a separate session/tx by runJobInTransaction. Same
+        // idiom and lifecycle proof as IgaClientAdapter#updateClient
+        // (KeycloakErrorHandler#getResponse uses the very same setRollbackOnly
+        // -then-return-a-response idiom).
+        session.getTransactionManager().setRollbackOnly();
+
+        throw new IgaPendingApprovalException(crIdHolder[0], "ROLE", "CREATE_ROLE");
+    }
+
+    /**
+     * Build the {@code CREATE_ROLE} CR row — the SINGLE source of truth shared
+     * by the single-entity terminal seam ({@link #getName()}) and the Phase 4
+     * partialImport deferred-harvest path
+     * ({@link #buildImportRolePendingCr()}). Identical rep/row contract in both
+     * cases, so {@code IgaReplayDispatcher.replayCreateRole} is byte-unchanged.
+     * NO side effects (no CR write, no throw, no rollback-only). Reads the live
+     * (pass-through) scratch model + the composites recorded via
+     * {@link #addCompositeRole}.
+     */
+    private Map<String, Object> buildCapturedRoleRow() {
         String roleId = super.getId();
         String roleName = super.getName();
         boolean clientRole = super.isClientRole();
@@ -204,8 +291,8 @@ public class IgaRoleAdapter extends RoleAdapter {
         // the composites from the addCompositeRole calls we intercepted.
         RoleRepresentation rep = ModelToRepresentation.toRepresentation(this);
         // Pin identity so replay recreates the role with the SAME UUID the
-        // admin's create flow allocated (replayCreateRole also re-pins from the
-        // row ID, but a self-consistent rep avoids ambiguity).
+        // create flow allocated (replayCreateRole also re-pins from the row ID,
+        // but a self-consistent rep avoids ambiguity).
         rep.setId(roleId);
         rep.setName(roleName);
         rep.setClientRole(clientRole);
@@ -247,10 +334,8 @@ public class IgaRoleAdapter extends RoleAdapter {
         int clientComp = capturedClientComposites.values().stream().mapToInt(List::size).sum();
         log.infof("IGA capture CREATE_ROLE: full-rep path for role=%s (uuid=%s, clientRole=%s, "
                 + "attributes=%d, realmComposites=%d, clientComposites=%d, %d chars) captured at "
-                + "the model-layer terminal seam (RoleContainerResource.createRole#getName); CR "
-                + "written in a separate tx, request tx marked rollback-only so the scratch role "
-                + "and its composite links are discarded (zero rows persisted at draft); full "
-                + "config will replay on commit",
+                + "the model-layer terminal seam (RoleContainerResource.createRole#getName / "
+                + "partialImport deferred-harvest); full config will replay on commit",
                 roleName, roleId, clientRole, attrs, realmComp, clientComp, repJson.length());
 
         // rowsJson contract (must match IgaReplayDispatcher.replayCreateRole +
@@ -269,39 +354,34 @@ public class IgaRoleAdapter extends RoleAdapter {
             row.put("CLIENT_REALM_CONSTRAINT", realm.getId());
         }
         row.put("REP_JSON", repJson);
+        return row;
+    }
 
-        // Phase 4 — partialImport batch governance. If a partialImport frame is
-        // on the stack (and IGA on, not replay) accumulate this fully-built CR
-        // and RETURN NORMALLY (getName() yields the real name): NO per-entity
-        // CR write, NO setRollbackOnly, NO throw. The batch-emit prepare-tx
-        // writes all accumulated CRs at once and rolls the scratch import back.
-        // This is the ONLY behavioural change vs Phases 1–3 — the
-        // single-entity branch below is byte-unchanged.
-        if (IgaImportMode.isImportMode(session, realm)) {
-            IgaImportMode.accumulate(session, realm, "ROLE", roleId,
-                    "CREATE_ROLE", List.of(row), null);
-            return roleName;
+    /**
+     * Phase 4 — partialImport batch path. Build this role's
+     * {@code CREATE_ROLE} {@link IgaImportMode.PendingCr} from the live
+     * (pass-through) scratch model + recorded composites. Called by
+     * {@link IgaImportMode.BatchEmitTransaction#commit} AFTER
+     * {@code RepresentationToModel.importRoles} has applied
+     * description/attributes and the second-pass {@code addComposites} (so the
+     * model + recorded composites are complete) and BEFORE the scratch JPA tx
+     * commits. Uses the SAME {@link #buildCapturedRoleRow()} contract as the
+     * single-entity seam — replay is identical, {@code IgaReplayDispatcher}
+     * byte-unchanged. NO throw, NO rollback-only here — the batch-emit tx owns
+     * that.
+     */
+    IgaImportMode.PendingCr buildImportRolePendingCr() {
+        if (!captureMode || !importDeferred) {
+            return null;
         }
-
-        String[] crIdHolder = new String[1];
-        KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(), newSession -> {
-            RealmModel newRealm = newSession.realms().getRealm(realm.getId());
-            EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
-            IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
-            crIdHolder[0] = newService.create(newRealm, "ROLE", roleId,
-                    "CREATE_ROLE", List.of(row), null).getId();
-        });
-
-        // Mark the REQUEST KeycloakTransaction rollback-only so
-        // DefaultKeycloakSession#close() rolls back (not commits) and the
-        // scratch role + composite links are discarded. The CR survives because
-        // it was written on a separate session/tx by runJobInTransaction. Same
-        // idiom and lifecycle proof as IgaClientAdapter#updateClient
-        // (KeycloakErrorHandler#getResponse uses the very same setRollbackOnly
-        // -then-return-a-response idiom).
-        session.getTransactionManager().setRollbackOnly();
-
-        throw new IgaPendingApprovalException(crIdHolder[0], "ROLE", "CREATE_ROLE");
+        Map<String, Object> row = buildCapturedRoleRow();
+        String roleId = (String) row.get("ID");
+        log.infof("IGA multi-entity ACCUM: CREATE_ROLE %s (uuid=%s, clientRole=%s) "
+                + "— row harvested at batch emit from the partialImport "
+                + "RepresentationToModel.importRoles/createRole path",
+                row.get("NAME"), roleId, row.get("CLIENT_ROLE"));
+        return new IgaImportMode.PendingCr("ROLE", roleId, "CREATE_ROLE",
+                List.of(row), null);
     }
 
     @Override
