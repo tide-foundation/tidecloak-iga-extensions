@@ -10,6 +10,7 @@ import {
   getUserByUsername,
   getUserGroups,
   getUserRealmRoleMappings,
+  getUserFederatedIdentities,
   directGrantToken,
   getChangeRequest,
   authorizeAndCommit,
@@ -19,22 +20,31 @@ import {
 } from '../lib/kc';
 
 /**
- * Phase 3 — model-layer full capture for user creates (the hardest type:
- * group memberships, realm-role mappings, required actions and federated
- * identities are NOT serialized by ModelToRepresentation and there is no
- * single unconditional terminal model call).
+ * Phase 3 — model-layer capture for user creates (the hardest type: group
+ * memberships and realm-role mappings are NOT serialized by
+ * ModelToRepresentation and there is no single unconditional terminal model
+ * call).
  *
- * Credentials are NOT governed (product decision): a user's password is never
- * captured, deferred or replayed. The created user sets their own password
- * themselves (an `UPDATE_PASSWORD` required action / set-password email /
- * self-service) AFTER the governed create is approved. So the governed-create
- * payload deliberately sends NO password, the captured CR must NOT carry a
- * `credentials` field, and post-commit the user must have NO usable password.
+ * Govern ONLY token-affecting user fields (product decision): user-create
+ * governance captures/replays ONLY the fields that affect the user's issued
+ * token — username, enabled, email, emailVerified, firstName, lastName,
+ * attributes, realmRoles, clientRoles, groups. Everything else is deliberately
+ * NOT captured, deferred or replayed:
+ *  - `credentials` — the user sets their own password post-approval;
+ *  - `requiredActions` — login-flow gating, not token content;
+ *  - `federatedIdentities` — IdP brokering, not token claims;
+ *  - `createdTimestamp` — metadata;
+ *  - `federationLink` — user-storage link, not token claims.
+ * The governed-create REQUEST below deliberately STILL sends a password-less
+ * `requiredActions:['UPDATE_PASSWORD']` AND a `federatedIdentities` entry to
+ * PROVE they are correctly DROPPED: the captured CR must NOT carry any of the
+ * five non-token fields, and post-commit the user must have no UPDATE_PASSWORD
+ * required action, no federated-identity link and no usable password.
  *
  * Pure API E2E (no browser). It drives the exact production path: the IGA
  * capture is enforced at the model layer (IgaUserAdapter#getId terminal seam
- * during UsersResource.createUser, plus IgaUserProvider.addFederatedIdentity),
- * so raw Admin REST exercises the same seam any caller hits.
+ * during UsersResource.createUser), so raw Admin REST exercises the same seam
+ * any caller hits.
  *
  * Order of operations follows the documented "configure bases BEFORE enabling
  * IGA" rule: the group `g1` and realm role `role1` the governed user will join
@@ -46,8 +56,9 @@ import {
  *    (double-escaping yields false negatives);
  *  - distinguish "jar loaded but capture is a CODE BUG" (do NOT tell the user
  *    to restart) from "jar genuinely not loaded" (restart then re-run);
- *  - assert the captured rep carries identity/attribute/required-action/group/
- *    realm-role AND that `credentials` is absent or empty.
+ *  - assert the captured rep carries the token-affecting subset AND that all
+ *    five non-token fields (credentials, requiredActions, federatedIdentities,
+ *    createdTimestamp, federationLink) are absent/empty.
  */
 
 const REALM = 'iga-phase3-e2e';
@@ -59,6 +70,10 @@ const RERUN =
 // so the user never gets one through the governed-create path).
 const ANY_PW = 'Phase3-Any-Pw!';
 
+// A federated-identity entry deliberately sent in the create REQUEST to prove
+// it is DROPPED from the governed CR (federated identities are not governed).
+const FED_IDP = 'phantom-idp';
+
 const userSpec = (): UserSpec => ({
   username: 'p3-user',
   enabled: true,
@@ -67,9 +82,13 @@ const userSpec = (): UserSpec => ({
   firstName: 'Phase',
   lastName: 'Three',
   attributes: { p3CustomAttr: ['p3-attr-value'] },
-  // UPDATE_PASSWORD is a REQUIRED ACTION (the real model: the approved user
-  // must set their own password) — NOT a credential. No `credentials` sent.
+  // requiredActions + federatedIdentities are sent ONLY to prove they are
+  // DROPPED — they are NOT token-affecting and must NOT reach the CR. No
+  // `credentials` sent (passwords are not governed).
   requiredActions: ['UPDATE_PASSWORD'],
+  federatedIdentities: [
+    { identityProvider: FED_IDP, userId: 'p3-ext-id', userName: 'p3-ext' },
+  ],
   groups: ['/g1'],
   realmRoles: ['role1'],
 });
@@ -101,10 +120,28 @@ function parseCapturedUserRep(crBody: any): any | undefined {
   return undefined;
 }
 
-/** True iff the parsed rep carries no usable `credentials` (absent or empty). */
-function credentialsAbsent(rep: any): boolean {
-  const c = rep?.credentials;
-  return c == null || (Array.isArray(c) && c.length === 0);
+/** True iff the parsed rep has no usable value for `field` (absent/empty). */
+function fieldAbsent(rep: any, field: string): boolean {
+  const v = rep?.[field];
+  if (v == null) return true;
+  if (Array.isArray(v)) return v.length === 0;
+  if (typeof v === 'object') return Object.keys(v).length === 0;
+  return false;
+}
+
+/** All five non-token fields must be absent/empty on the captured rep. */
+function nonTokenFieldsDropped(rep: any): {
+  ok: boolean;
+  detail: Record<string, boolean>;
+} {
+  const detail = {
+    credentials: fieldAbsent(rep, 'credentials'),
+    requiredActions: fieldAbsent(rep, 'requiredActions'),
+    federatedIdentities: fieldAbsent(rep, 'federatedIdentities'),
+    createdTimestamp: fieldAbsent(rep, 'createdTimestamp'),
+    federationLink: fieldAbsent(rep, 'federationLink'),
+  };
+  return { ok: Object.values(detail).every(Boolean), detail };
 }
 
 test.describe('IGA Phase 3: user governed create/replay', () => {
@@ -113,13 +150,13 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
     await deleteRealm(request, PROBE_REALM).catch(() => {});
   });
 
-  test('Phase 3 governed user create → CR → authorize+commit → full identity/roles/groups/required-actions fidelity, NO credentials, password not set', async ({
+  test('Phase 3 governed user create → CR → authorize+commit → token-affecting fidelity; requiredActions/federatedIdentities/createdTimestamp/federationLink/credentials all DROPPED; password not set', async ({
     request,
   }) => {
     // -----------------------------------------------------------------------
-    // PRECONDITION GATE — a governed user create must 202 + carry the full
-    // identity rep (groups + realmRoles + requiredActions, NO credentials) in
-    // the CR.
+    // PRECONDITION GATE — a governed user create must 202 + carry ONLY the
+    // token-affecting rep (groups + realmRoles + identity/attrs) in the CR,
+    // with all five non-token fields dropped.
     // -----------------------------------------------------------------------
     const pre = await (async () => {
       const evidence: Record<string, unknown> = {};
@@ -141,7 +178,15 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
           firstName: 'Probe',
           lastName: 'User',
           attributes: { probeAttr: ['probe-val'] },
+          // Sent to prove they are dropped — NOT governed.
           requiredActions: ['UPDATE_PASSWORD'],
+          federatedIdentities: [
+            {
+              identityProvider: FED_IDP,
+              userId: 'probe-ext-id',
+              userName: 'probe-ext',
+            },
+          ],
           groups: ['/pg1'],
           realmRoles: ['prole1'],
           // Deliberately NO credentials — passwords are not governed.
@@ -202,46 +247,43 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
         const carriesAttr =
           Array.isArray(rep?.attributes?.probeAttr) &&
           rep.attributes.probeAttr.includes('probe-val');
-        const carriesReqAction =
-          Array.isArray(rep?.requiredActions) &&
-          rep.requiredActions.includes('UPDATE_PASSWORD');
         const carriesGroup =
           Array.isArray(rep?.groups) && rep.groups.includes('/pg1');
         const carriesRealmRole =
           Array.isArray(rep?.realmRoles) && rep.realmRoles.includes('prole1');
-        const noCreds = credentialsAbsent(rep);
+        const dropped = nonTokenFieldsDropped(rep);
         const carriesFullRep =
           carriesUsername &&
           carriesEmail &&
           carriesAttr &&
-          carriesReqAction &&
           carriesGroup &&
           carriesRealmRole &&
-          noCreds;
+          dropped.ok;
         const captured = {
           username: carriesUsername,
           email: carriesEmail,
           attributes: carriesAttr,
-          requiredActions: carriesReqAction,
           groups: carriesGroup,
           realmRoles: carriesRealmRole,
-          credentialsAbsent: noCreds,
+          nonTokenFieldsDropped: dropped.detail,
         };
         evidence.probeCaptured = captured;
         if (!carriesFullRep) {
           // 202 + Location + CR exists + actionType === CREATE_USER ⇒ the
           // Phase 3 jar IS loaded and capture IS intercepting — a lossy rep
-          // (or a rep that still carries credentials) is a CODE BUG in
-          // IgaUserAdapter, NOT a restart situation.
+          // (or a rep that still carries any non-token field) is a CODE BUG
+          // in IgaUserAdapter, NOT a restart situation.
           return {
             ok: false as const,
             loaded: true as const,
             detail:
-              'Phase 3 loaded but user capture is producing a lossy rep, or ' +
-              'is still carrying `credentials` (passwords must NOT be ' +
-              'governed) — this is a CODE BUG in IgaUserAdapter capture, NOT ' +
-              'a restart issue (the governed create DID 202 with a ' +
-              `CREATE_USER CR). captured=${JSON.stringify(captured)} ` +
+              'Phase 3 loaded but user capture is producing a lossy ' +
+              'token-affecting rep, or is still carrying a non-token field ' +
+              '(credentials/requiredActions/federatedIdentities/' +
+              'createdTimestamp/federationLink must NOT be governed) — this ' +
+              'is a CODE BUG in IgaUserAdapter capture, NOT a restart issue ' +
+              '(the governed create DID 202 with a CREATE_USER CR). ' +
+              `captured=${JSON.stringify(captured)} ` +
               `rep=${rowsJson.slice(0, 700)}`,
             evidence,
           };
@@ -278,9 +320,9 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
       if (loaded) {
         throw new Error(
           `PRECONDITION: Phase 3 loaded but user capture is producing a ` +
-            `lossy rep or still carrying credentials — this is a code bug in ` +
-            `IgaUserAdapter, NOT a restart issue. Do NOT restart; fix the ` +
-            `capture. Detail: ${pre.detail}`,
+            `lossy rep or still carrying a non-token field — this is a code ` +
+            `bug in IgaUserAdapter, NOT a restart issue. Do NOT restart; fix ` +
+            `the capture. Detail: ${pre.detail}`,
         );
       }
       throw new Error(
@@ -320,9 +362,10 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
     expect(st1.enabled, 'IGA must be enabled').toBe(true);
 
     // -----------------------------------------------------------------------
-    // 3. Governed user create: email, names, custom attribute, the
-    //    UPDATE_PASSWORD required action, membership of g1, realm role role1.
-    //    NO password is sent (passwords are not governed).
+    // 3. Governed user create: email, names, custom attribute, membership of
+    //    g1, realm role role1 — PLUS a (to-be-dropped) UPDATE_PASSWORD
+    //    required action and a (to-be-dropped) federated identity. NO password
+    //    is sent (passwords are not governed).
     // -----------------------------------------------------------------------
     const spec = userSpec();
     const create = await createUser(request, REALM, spec);
@@ -354,8 +397,8 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
     ).toBe('PENDING');
 
     // Capture fidelity at the CR (parsed REP_JSON — the replay source of
-    // truth) BEFORE commit: identity/attribute/required-action/group/role
-    // present AND `credentials` absent/empty.
+    // truth) BEFORE commit: the token-affecting subset is present AND every
+    // non-token field is absent/empty.
     const rep = parseCapturedUserRep(cr.body);
     expect(
       (rep?.username || '').toLowerCase(),
@@ -385,18 +428,34 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
         rep?.realmRoles,
       )})`,
     ).toBeTruthy();
+
+    // Every non-token field must be DROPPED from the captured REP_JSON even
+    // though requiredActions + federatedIdentities WERE sent in the request.
+    const dropped = nonTokenFieldsDropped(rep);
     expect(
-      Array.isArray(rep?.requiredActions) &&
-        rep.requiredActions.includes('UPDATE_PASSWORD'),
-      `captured rep must carry requiredAction UPDATE_PASSWORD (got ${JSON.stringify(
-        rep?.requiredActions,
-      )})`,
+      dropped.detail.credentials,
+      `captured REP_JSON must NOT carry credentials (passwords not governed) ` +
+        `— got ${JSON.stringify(rep?.credentials)}`,
     ).toBeTruthy();
-    // Credentials must NOT ride along: the password is not governed.
     expect(
-      credentialsAbsent(rep),
-      `captured REP_JSON must NOT carry a credentials field (passwords are ` +
-        `not governed) — got ${JSON.stringify(rep?.credentials)}`,
+      dropped.detail.requiredActions,
+      `captured REP_JSON must NOT carry requiredActions (login-flow gating, ` +
+        `not token content) — got ${JSON.stringify(rep?.requiredActions)}`,
+    ).toBeTruthy();
+    expect(
+      dropped.detail.federatedIdentities,
+      `captured REP_JSON must NOT carry federatedIdentities (IdP brokering, ` +
+        `not token claims) — got ${JSON.stringify(rep?.federatedIdentities)}`,
+    ).toBeTruthy();
+    expect(
+      dropped.detail.createdTimestamp,
+      `captured REP_JSON must NOT carry createdTimestamp (metadata) — got ` +
+        `${JSON.stringify(rep?.createdTimestamp)}`,
+    ).toBeTruthy();
+    expect(
+      dropped.detail.federationLink,
+      `captured REP_JSON must NOT carry federationLink (user-storage link, ` +
+        `not token claims) — got ${JSON.stringify(rep?.federationLink)}`,
     ).toBeTruthy();
 
     // Not persisted at draft: user must 404 (absent) before commit.
@@ -426,9 +485,9 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
     ).toBe(200);
 
     // -----------------------------------------------------------------------
-    // 5. Post-commit fidelity: the user exists with email/names/attribute,
-    //    has the UPDATE_PASSWORD required action, is in g1, has role1 — and
-    //    has NO usable password (passwords are not governed).
+    // 5. Post-commit fidelity: the user exists with email/names/attribute, is
+    //    in g1, has role1 — and has NO UPDATE_PASSWORD required action, NO
+    //    federated-identity link and NO usable password (none were governed).
     // -----------------------------------------------------------------------
     const found = await getUserByUsername(request, REALM, spec.username);
     expect(found.body, `user ${spec.username} must exist after commit`).toBeTruthy();
@@ -446,13 +505,16 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
         found.body.attributes,
       )})`,
     ).toBe('p3-attr-value');
+    // requiredActions was NOT governed: the committed user must NOT carry
+    // UPDATE_PASSWORD (it was dropped from the CR, never replayed).
     expect(
       Array.isArray(found.body.requiredActions) &&
         found.body.requiredActions.includes('UPDATE_PASSWORD'),
-      `user UPDATE_PASSWORD required-action fidelity (got ${JSON.stringify(
-        found.body.requiredActions,
-      )}) — the approved user must be told to set their own password`,
-    ).toBeTruthy();
+      `user must NOT have UPDATE_PASSWORD required action (requiredActions ` +
+        `is not governed and was dropped from the CR) — got ${JSON.stringify(
+          found.body.requiredActions,
+        )}`,
+    ).toBeFalsy();
 
     const grp = await getUserGroups(request, REALM, userId);
     expect(grp.http, 'user groups http').toBe(200);
@@ -472,10 +534,21 @@ test.describe('IGA Phase 3: user governed create/replay', () => {
       )})`,
     ).toBeTruthy();
 
+    // federatedIdentities was NOT governed: the committed user must have NO
+    // federated-identity link even though one was sent in the request.
+    const fed = await getUserFederatedIdentities(request, REALM, userId);
+    expect(fed.http, 'user federated-identity http').toBe(200);
+    expect(
+      fed.body.some((f: any) => f?.identityProvider === FED_IDP),
+      `user must have NO ${FED_IDP} federated-identity link (federated ` +
+        `identities are not governed and were dropped from the CR) — got ` +
+        `${JSON.stringify(fed.body)}`,
+    ).toBeFalsy();
+
     // The decisive negative proof: the password was NOT governed, captured or
     // replayed, so a direct-grant token request for username + ANY password
     // MUST NOT succeed (the user has no usable password until they set one
-    // themselves via UPDATE_PASSWORD). Expect a non-200 (typically 401).
+    // themselves). Expect a non-200 (typically 401).
     const tok = await directGrantToken(request, REALM, spec.username, ANY_PW);
     expect(
       tok.http,

@@ -1,7 +1,6 @@
 package org.tidecloak.iga.providers;
 
 import org.jboss.logging.Logger;
-import org.keycloak.models.FederatedIdentityModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -30,11 +29,15 @@ import jakarta.persistence.EntityManager;
  *       so the accumulated rep carries ONLY what the admin sent — and returns a
  *       capture-mode {@link IgaUserAdapter}.</li>
  *   <li>KC's {@code UsersResource.createUser} flow then applies the COMPLETE
- *       incoming representation to that genuine adapter (attributes, enabled,
- *       email/names, requiredActions, federated identities, groups, role
- *       mappings, credentials). Every call passes through to the real
- *       {@link UserEntity} (lifecycle proof identical to client-scope) AND is
- *       accumulated into an in-memory {@code UserRepresentation}.</li>
+ *       incoming representation to that genuine adapter. Every call passes
+ *       through to the real {@link UserEntity} (lifecycle proof identical to
+ *       client-scope) but only the TOKEN-AFFECTING subset (username, enabled,
+ *       email, emailVerified, firstName, lastName, attributes, realmRoles,
+ *       clientRoles, groups) is accumulated into an in-memory
+ *       {@code UserRepresentation}. credentials, requiredActions,
+ *       federatedIdentities, createdTimestamp and federationLink are NOT
+ *       governed (see {@code IgaUserAdapter} javadoc) — they pass straight
+ *       through to the scratch user and die with the rollback.</li>
  *   <li>At the post-build terminal seam {@code IgaUserAdapter#getId}
  *       (UsersResource.createUser:175, gated on username-observed) the
  *       accumulated rep is written as a {@code CREATE_USER} change request in a
@@ -43,12 +46,11 @@ import jakarta.persistence.EntityManager;
  *       The scratch user + credentials + memberships + role mappings + fed
  *       identities die with the request-tx rollback (zero rows at draft).</li>
  * </ol>
- * Federated identities are added by the provider (not the adapter):
- * {@code RepresentationToModel.createFederatedIdentities} calls
- * {@code session.users().addFederatedIdentity}, intercepted in
- * {@link #addFederatedIdentity(RealmModel, UserModel, FederatedIdentityModel)}
- * — in capture mode it records into the capture-mode adapter and does NOT
- * persist (discarded by the rollback anyway).
+ * Federated identities are NOT governed: {@code addFederatedIdentity} is no
+ * longer overridden, so {@code RepresentationToModel.createFederatedIdentities}'
+ * {@code session.users().addFederatedIdentity} call on the scratch user passes
+ * straight through to {@code JpaUserProvider} and is discarded by the
+ * request-tx rollback (never accumulated, never replayed).
  *
  * <h2>Replay / master / IGA-off</h2>
  * Under {@code IGA_REPLAY_ACTIVE} (set by {@code IgaReplayDispatcher.replay})
@@ -117,19 +119,13 @@ public class IgaUserProvider extends JpaUserProvider {
         return base;
     }
 
-    @Override
-    public void addFederatedIdentity(RealmModel realm, UserModel user, FederatedIdentityModel identity) {
-        // KC's UsersResource.createUser:171 →
-        // RepresentationToModel.createFederatedIdentities calls this with the
-        // capture-mode adapter as `user`. Record into the accumulator and DON'T
-        // persist (discarded by the request-tx rollback anyway). Outside
-        // capture (inline / replay / IGA-off) behave exactly as super.
-        if (user instanceof IgaUserAdapter iua && iua.isCaptureMode()) {
-            iua.captureFederatedIdentity(identity);
-            return;
-        }
-        super.addFederatedIdentity(realm, user, identity);
-    }
+    // addFederatedIdentity is NOT overridden — federated identities are IdP
+    // brokering, not token claims, and are NOT governed. KC's
+    // UsersResource.createUser:171 → RepresentationToModel.createFederatedIdentities
+    // may call session.users().addFederatedIdentity on the capture-mode scratch
+    // user; it passes straight through to the inherited JpaUserProvider and
+    // dies with the request-tx rollback (never accumulated, never replayed;
+    // IgaUserAdapter#getId also explicitly nulls rep.federatedIdentities).
 
     @Override
     public UserModel getUserById(RealmModel realm, String id) {

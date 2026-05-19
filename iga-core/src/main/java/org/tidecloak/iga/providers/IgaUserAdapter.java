@@ -47,21 +47,36 @@ import java.util.Set;
  *       the terminal seam.</li>
  * </ul>
  *
- * <h2>Credentials are NOT governed (product decision)</h2>
- * A user's password is deliberately NOT captured, deferred or replayed. The
- * {@code credentialManager()} override and {@code CaptureCredentialManager}
- * wrapper that earlier captured/replayed the password were removed: the user
- * sets their own password themselves (an {@code UPDATE_PASSWORD} required
- * action / set-password email / self-service) AFTER the governed create is
- * approved. This keeps plaintext passwords out of CR rows and removes the
- * riskiest novel seam. The captured {@link UserRepresentation} is therefore
- * <b>guaranteed never to carry a {@code credentials} field</b> (it is
- * explicitly null'd before serialization at the terminal emit). KC's create
- * flow may still invoke the real (super) credential manager — credentials
- * simply aren't intercepted, captured or persisted (the scratch user is rolled
- * back at draft regardless). {@code UPDATE_PASSWORD} is a <em>required
- * action</em>, NOT a credential, and IS captured (so the approved user can be
- * told to set a password).
+ * <h2>Govern ONLY token-affecting user fields (product decision)</h2>
+ * User-create governance captures/replays ONLY the fields that affect the
+ * user's issued token. The accumulator records exactly: {@code username},
+ * {@code enabled}, {@code email}, {@code emailVerified}, {@code firstName},
+ * {@code lastName}, {@code attributes}, {@code realmRoles},
+ * {@code clientRoles}, {@code groups}. Everything else is deliberately NOT
+ * captured, deferred or replayed:
+ * <ul>
+ *   <li><b>credentials</b> — a user's password is not governed; the user sets
+ *       their own password post-approval (set-password email / self-service).
+ *       The {@code credentialManager()} override + {@code CaptureCredentialManager}
+ *       wrapper that earlier captured/replayed it were removed; KC's create
+ *       flow may still invoke the real (super) credential manager but it is
+ *       never accumulated.</li>
+ *   <li><b>requiredActions</b> — login-flow gating, not token content.
+ *       {@code addRequiredAction}/{@code removeRequiredAction} are no longer
+ *       capture-intercepted (they pass straight through to {@code super}; the
+ *       scratch user is rolled back at draft anyway).</li>
+ *   <li><b>federatedIdentities</b> — IdP brokering, not token claims. The
+ *       {@code IgaUserProvider.addFederatedIdentity} capture hook was reverted
+ *       to plain delegation.</li>
+ *   <li><b>createdTimestamp</b> — metadata, not token content.</li>
+ *   <li><b>federationLink</b> — user-storage link, not token claims.</li>
+ * </ul>
+ * All five are explicitly null'd on the {@link UserRepresentation} before
+ * serialization at the terminal emit ({@code rep.setCredentials(null)},
+ * {@code setRequiredActions(null)}, {@code setFederatedIdentities(null)},
+ * {@code setCreatedTimestamp(null)}, {@code setFederationLink(null)}) so an
+ * inbound value can never ride along by any path into a CR row. The scratch
+ * user is rolled back at draft regardless.
  *
  * <h2>KC 26.5.5 user-create model-call trace (verified, source on classpath)</h2>
  * {@code UsersResource.createUser} (keycloak-services
@@ -86,15 +101,19 @@ import java.util.Set;
  *          299  if rep.isEnabled()!=null      user.setEnabled(..)
  *          300  if rep.isEmailVerified()!=null user.setEmailVerified(..)
  *          301  if createdTimestamp!=null     user.setCreatedTimestamp(..)
+ *                  — NOT governed; passes through to super, never accumulated.
  *          303  if federationLink!=null       user.setFederationLink(..)
+ *                  — NOT governed; passes through to super, never accumulated.
  *          307-320 reqActions!=null: per provider id user.addRequiredAction /
- *                  removeRequiredAction
+ *                  removeRequiredAction — NOT governed; passes straight through
+ *                  to super (no capture interception), never accumulated.
  *          322-330 if a password credential isTemporary →
- *                  user.addRequiredAction(UPDATE_PASSWORD)
+ *                  user.addRequiredAction(UPDATE_PASSWORD) — same: pass-through.
  * 171  RepresentationToModel.createFederatedIdentities(rep,session,realm,user)
  *        RepresentationToModel.java:775-782: per identity
  *        session.users().addFederatedIdentity(realm,user,model)
- *        → IgaUserProvider.addFederatedIdentity (intercepted there)
+ *        → IgaUserProvider.addFederatedIdentity — NOT governed; reverted to
+ *        plain super delegation, never accumulated.
  * 172  RepresentationToModel.createGroups(session,rep,realm,user)
  *        RepresentationToModel.java:762-773: per path user.joinGroup(group)
  * 174  RepresentationToModel.createCredentials(rep,session,realm,user,true)
@@ -102,22 +121,22 @@ import java.util.Set;
  *        credentialManager() override was removed; any inbound password is
  *        applied (if at all) to the throw-away scratch user via the real
  *        (super) credential manager and dies with the request-tx rollback. It
- *        is NEVER accumulated into the captured rep (see "Credentials are NOT
- *        governed").
+ *        is NEVER accumulated into the captured rep (see "Govern ONLY
+ *        token-affecting user fields").
  * 175  adminEvent...resourcePath(uri, user.getId())...   // user.getId() #1
  * 177  Response.created(...user.getId()...)              // user.getId() #2
  * </pre>
  *
  * <h3>Snapshot-lossy fields</h3>
  * {@code ModelToRepresentation} for a user does NOT serialize group
- * memberships, role mappings, required actions or federated identities, and
- * there is NO single unconditional terminal mutating model call (enabled is
- * conditional, the attribute loop is by-key, groups/roles/fed are all
- * conditional). So — exactly like client-scope — we accumulate every
- * intercepted call into a {@link UserRepresentation} and emit from the
- * accumulator (never a live snapshot) at the post-build terminal {@code getId()}.
- * Credentials are deliberately excluded from the accumulator entirely (see
- * "Credentials are NOT governed").
+ * memberships or role mappings, and there is NO single unconditional terminal
+ * mutating model call (enabled is conditional, the attribute loop is by-key,
+ * groups/roles are all conditional). So — exactly like client-scope — we
+ * accumulate every intercepted call into a {@link UserRepresentation} and emit
+ * from the accumulator (never a live snapshot) at the post-build terminal
+ * {@code getId()}. credentials, requiredActions, federatedIdentities,
+ * createdTimestamp and federationLink are deliberately excluded from the
+ * accumulator entirely (see "Govern ONLY token-affecting user fields").
  *
  * <h3>Terminal seam: {@code getId()} at UsersResource.createUser:175 (then 177),
  * gated on {@link #usernameObserved}</h3>
@@ -150,15 +169,33 @@ import java.util.Set;
  * credentials→createCredentials (1002), federatedIdentities (1003),
  * realmRoles/clientRoles→createRoleMappings (1004), clientConsents (1005),
  * notBefore (1012), serviceAccountClientId (1016), groups (1024). The
- * accumulator below populates precisely those fields (EXCEPT credentials —
- * never accumulated; see "Credentials are NOT governed") with the precise
- * shapes {@code createRoleMappings}/{@code createGroups} consume (realmRoles =
- * role NAMES; clientRoles = {humanClientId → [role name]}; groups = group
- * PATHS). On replay {@code RepresentationToModel.createCredentials}
- * (RepresentationToModel.java:786) is guarded by
- * {@code if (userRep.getCredentials() != null)} — with no {@code credentials}
- * in REP_JSON the loop is skipped and the user is created with NO password
- * (no NPE), exactly the intended behaviour.
+ * accumulator below populates ONLY the token-affecting subset (username,
+ * enabled, email, emailVerified, firstName, lastName, attributes, realmRoles,
+ * clientRoles, groups) with the precise shapes
+ * {@code createRoleMappings}/{@code createGroups} consume (realmRoles = role
+ * NAMES; clientRoles = {humanClientId → [role name]}; groups = group PATHS).
+ * The non-token fields are absent from REP_JSON and KC's import path is
+ * null-safe for each absent one (verified, KC 26.5.5):
+ * <ul>
+ *   <li>{@code createCredentials} guards
+ *       {@code if (userRep.getCredentials() != null)}
+ *       (RepresentationToModel.java:786) → loop skipped, user has NO password
+ *       (no NPE).</li>
+ *   <li>{@code requiredActions} guarded
+ *       {@code if (userRep.getRequiredActions() != null)}
+ *       (DefaultExportImportManager.java:997) → loop skipped.</li>
+ *   <li>{@code createFederatedIdentities} guards
+ *       {@code if (userRep.getFederatedIdentities() != null)}
+ *       (RepresentationToModel.java:776) → loop skipped, no IdP link.</li>
+ *   <li>{@code createdTimestamp} guarded
+ *       {@code if (userRep.getCreatedTimestamp() != null)}
+ *       (DefaultExportImportManager.java:981) → KC assigns its own create
+ *       timestamp.</li>
+ *   <li>{@code federationLink}: {@code user.setFederationLink(
+ *       userRep.getFederationLink())} (DefaultExportImportManager.java:988) is
+ *       unconditional but null-safe — passing null leaves the column at its
+ *       default (no federation link), no NPE.</li>
+ * </ul>
  */
 public class IgaUserAdapter extends UserAdapter {
 
@@ -179,15 +216,13 @@ public class IgaUserAdapter extends UserAdapter {
     // ---- accumulator (capture mode only) ----------------------------------
     private final UserRepresentation capturedRep = new UserRepresentation();
     private final Map<String, List<String>> capturedAttributes = new LinkedHashMap<>();
-    private final Set<String> capturedRequiredActions = new LinkedHashSet<>();
     private final Set<String> capturedGroupPaths = new LinkedHashSet<>();
     private final Set<String> capturedRealmRoles = new LinkedHashSet<>();
     private final Map<String, List<String>> capturedClientRoles = new LinkedHashMap<>();
-    // NOTE: credentials are deliberately NOT accumulated — a user's password is
-    // not governed (the user sets it themselves post-approval). See the
-    // "Credentials are NOT governed" section in the class javadoc.
-    private final List<org.keycloak.representations.idm.FederatedIdentityRepresentation>
-            capturedFederatedIdentities = new ArrayList<>();
+    // NOTE: only token-affecting fields are accumulated. credentials,
+    // requiredActions, federatedIdentities, createdTimestamp and
+    // federationLink are deliberately NOT governed — see the
+    // "Govern ONLY token-affecting user fields" section in the class javadoc.
     private final StringBuilder observedTrace = new StringBuilder();
 
     /**
@@ -264,8 +299,9 @@ public class IgaUserAdapter extends UserAdapter {
                 ? capturedRep.getUsername() : super.getUsername();
 
         // Build the CR rep entirely from the accumulator (authoritative — the
-        // live model never serializes creds/groups/roles/reqActions/fed, and
-        // getId() can fire early via equals/hashCode; see class javadoc).
+        // live model never serializes groups/roles, and getId() can fire early
+        // via equals/hashCode; see class javadoc). ONLY token-affecting fields
+        // are populated.
         UserRepresentation rep = new UserRepresentation();
         rep.setId(userId);
         rep.setUsername(username);
@@ -274,17 +310,12 @@ public class IgaUserAdapter extends UserAdapter {
         if (capturedRep.isEmailVerified() != null) rep.setEmailVerified(capturedRep.isEmailVerified());
         if (capturedRep.getFirstName() != null) rep.setFirstName(capturedRep.getFirstName());
         if (capturedRep.getLastName() != null) rep.setLastName(capturedRep.getLastName());
-        if (capturedRep.getFederationLink() != null) rep.setFederationLink(capturedRep.getFederationLink());
-        if (capturedRep.getCreatedTimestamp() != null) rep.setCreatedTimestamp(capturedRep.getCreatedTimestamp());
         if (!capturedAttributes.isEmpty()) {
             Map<String, List<String>> attrs = new LinkedHashMap<>();
             for (Map.Entry<String, List<String>> e : capturedAttributes.entrySet()) {
                 attrs.put(e.getKey(), new ArrayList<>(e.getValue()));
             }
             rep.setAttributes(attrs);
-        }
-        if (!capturedRequiredActions.isEmpty()) {
-            rep.setRequiredActions(new ArrayList<>(capturedRequiredActions));
         }
         if (!capturedGroupPaths.isEmpty()) {
             rep.setGroups(new ArrayList<>(capturedGroupPaths));
@@ -299,26 +330,19 @@ public class IgaUserAdapter extends UserAdapter {
             }
             rep.setClientRoles(cr);
         }
-        // Credentials are NOT governed: explicitly null the credentials field
-        // so an inbound password in the create request can NEVER ride along
-        // into the CR through any path (the accumulator never records one;
-        // this is belt-and-braces — the serialized rep provably carries no
-        // `credentials`). The user sets their own password after approval.
+        // Belt-and-braces: govern ONLY token-affecting user fields. Explicitly
+        // null/empty every non-token field so an inbound value in the create
+        // request can NEVER ride along into the CR through any path (none are
+        // accumulated; this proves the serialized rep carries no `credentials`,
+        // `requiredActions`, `federatedIdentities`, `createdTimestamp` or
+        // `federationLink`). The user sets their own password after approval;
+        // required actions / IdP links / metadata are not part of the issued
+        // token and are intentionally out of scope.
         rep.setCredentials(null);
-        if (!capturedFederatedIdentities.isEmpty()) {
-            List<org.keycloak.representations.idm.FederatedIdentityRepresentation> fis =
-                    new ArrayList<>();
-            for (org.keycloak.representations.idm.FederatedIdentityRepresentation f
-                    : capturedFederatedIdentities) {
-                org.keycloak.representations.idm.FederatedIdentityRepresentation ff =
-                        new org.keycloak.representations.idm.FederatedIdentityRepresentation();
-                ff.setIdentityProvider(f.getIdentityProvider());
-                ff.setUserId(f.getUserId());
-                ff.setUserName(f.getUserName());
-                fis.add(ff);
-            }
-            rep.setFederatedIdentities(fis);
-        }
+        rep.setRequiredActions(null);
+        rep.setFederatedIdentities(null);
+        rep.setCreatedTimestamp(null);
+        rep.setFederationLink(null);
 
         String repJson;
         try {
@@ -330,22 +354,22 @@ public class IgaUserAdapter extends UserAdapter {
         }
 
         int attrs = rep.getAttributes() == null ? 0 : rep.getAttributes().size();
-        int reqActions = rep.getRequiredActions() == null ? 0 : rep.getRequiredActions().size();
         int groups = rep.getGroups() == null ? 0 : rep.getGroups().size();
         int realmRoles = rep.getRealmRoles() == null ? 0 : rep.getRealmRoles().size();
         int clientRoles = rep.getClientRoles() == null ? 0
                 : rep.getClientRoles().values().stream().mapToInt(List::size).sum();
-        int fed = rep.getFederatedIdentities() == null ? 0 : rep.getFederatedIdentities().size();
         log.infof("IGA capture CREATE_USER: accumulated-rep path for user=%s (uuid=%s, "
-                + "enabled=%s, attributes=%d, requiredActions=%d, groups=%d, realmRoles=%d, "
-                + "clientRoles=%d, fedIdentities=%d, %d chars; credentials NOT governed) captured "
-                + "at the post-build terminal seam (UsersResource.createUser#getId, gated on "
-                + "username-observed); observed order=[%s]; CR written in a separate tx, request "
-                + "tx marked rollback-only so the scratch user + memberships + role mappings + "
-                + "fed identities are discarded (zero rows persisted at draft); full config "
-                + "(no password) will replay on commit",
-                username, userId, rep.isEnabled(), attrs, reqActions, groups, realmRoles,
-                clientRoles, fed, repJson.length(), observedTrace);
+                + "enabled=%s, attributes=%d, groups=%d, realmRoles=%d, clientRoles=%d, "
+                + "%d chars; ONLY token-affecting fields governed — credentials/"
+                + "requiredActions/federatedIdentities/createdTimestamp/federationLink "
+                + "NOT governed) captured at the post-build terminal seam "
+                + "(UsersResource.createUser#getId, gated on username-observed); observed "
+                + "order=[%s]; CR written in a separate tx, request tx marked rollback-only "
+                + "so the scratch user + memberships + role mappings are discarded (zero "
+                + "rows persisted at draft); the token-affecting config (no password) will "
+                + "replay on commit",
+                username, userId, rep.isEnabled(), attrs, groups, realmRoles,
+                clientRoles, repJson.length(), observedTrace);
 
         // rowsJson contract (must match IgaReplayDispatcher.replayCreateUser):
         // ID = user UUID, USERNAME = lowercased username, REALM_ID = realm UUID,
@@ -377,34 +401,27 @@ public class IgaUserAdapter extends UserAdapter {
     }
 
     // -------------------------------------------------------------------------
-    // Credentials are NOT governed.
+    // Non-token fields are NOT governed.
     //
-    // The credentialManager() override and the CaptureCredentialManager
-    // delegate that earlier captured/replayed the user's password were REMOVED
-    // (product decision). credentialManager() is no longer overridden, so the
+    // credentials: the credentialManager() override and CaptureCredentialManager
+    // delegate were REMOVED. credentialManager() is no longer overridden, so the
     // real (super) UserAdapter credential manager is used unchanged — KC's
     // createUser flow (UsersResource.createUser:174 →
     // RepresentationToModel.createCredentials) is simply NOT intercepted; any
     // inbound password is applied (if at all) to the throw-away scratch user
-    // and dies with the request-tx rollback. It is NEVER accumulated into the
-    // captured rep, and getId() explicitly nulls rep.credentials before
-    // serialization, so the CR provably carries no plaintext password. The
-    // approved user sets their own password (UPDATE_PASSWORD required action /
-    // set-password email / self-service). UPDATE_PASSWORD is a required action,
-    // NOT a credential, and is still captured (see addRequiredAction below).
+    // and dies with the request-tx rollback. It is NEVER accumulated, and
+    // getId() explicitly nulls rep.credentials before serialization.
+    //
+    // requiredActions / federatedIdentities / createdTimestamp /
+    // federationLink: also NOT governed (not part of the issued token).
+    // addRequiredAction/removeRequiredAction are no longer capture-intercepted
+    // (plain super pass-through, see below); the
+    // IgaUserProvider.addFederatedIdentity capture hook was reverted to plain
+    // super delegation; createdTimestamp/federationLink are not accumulated.
+    // All four are explicitly null'd on the rep before serialization in
+    // getId(). The approved user sets their own password (set-password email /
+    // self-service) post-approval.
     // -------------------------------------------------------------------------
-
-    /** Capture a federated identity (invoked from IgaUserProvider). */
-    void captureFederatedIdentity(org.keycloak.models.FederatedIdentityModel identity) {
-        if (!captureMode || identity == null) return;
-        org.keycloak.representations.idm.FederatedIdentityRepresentation fi =
-                new org.keycloak.representations.idm.FederatedIdentityRepresentation();
-        fi.setIdentityProvider(identity.getIdentityProvider());
-        fi.setUserId(identity.getUserId());
-        fi.setUserName(identity.getUserName());
-        capturedFederatedIdentities.add(fi);
-        trace("federatedIdentity:" + identity.getIdentityProvider());
-    }
 
     boolean isCaptureMode() {
         return captureMode;
@@ -470,50 +487,20 @@ public class IgaUserAdapter extends UserAdapter {
         }
     }
 
-    @Override
-    public void setFederationLink(String link) {
-        super.setFederationLink(link);
-        if (captureMode) {
-            capturedRep.setFederationLink(link);
-            trace("setFederationLink");
-        }
-    }
+    // setFederationLink / setCreatedTimestamp are NOT overridden — these fields
+    // are not governed (not part of the issued token). KC's createUser may call
+    // them on the scratch user; they pass straight through to the inherited
+    // UserAdapter and die with the request-tx rollback. Never accumulated.
 
-    @Override
-    public void setCreatedTimestamp(Long timestamp) {
-        super.setCreatedTimestamp(timestamp);
-        if (captureMode) {
-            capturedRep.setCreatedTimestamp(timestamp);
-            trace("setCreatedTimestamp");
-        }
-    }
-
-    @Override
-    public void addRequiredAction(String actionName) {
-        super.addRequiredAction(actionName);
-        if (captureMode) {
-            capturedRequiredActions.add(actionName);
-            trace("addRequiredAction:" + actionName);
-        }
-    }
-
-    // NOTE: the RequiredAction-enum overloads are intentionally NOT overridden.
-    // UserModel.addRequiredAction(RequiredAction)/removeRequiredAction
-    // (RequiredAction) are interface DEFAULT methods that delegate to the
-    // String overload (UserModel.java:130-140). UserAdapter does not override
-    // them, so KC's UserResource.updateUserFromRep:327
-    // user.addRequiredAction(RequiredAction.UPDATE_PASSWORD) routes through the
-    // inherited default into THIS String override exactly once — overriding the
-    // enum overload too would double-capture.
-
-    @Override
-    public void removeRequiredAction(String actionName) {
-        super.removeRequiredAction(actionName);
-        if (captureMode) {
-            capturedRequiredActions.remove(actionName);
-            trace("removeRequiredAction:" + actionName);
-        }
-    }
+    // addRequiredAction / removeRequiredAction are NOT overridden at all —
+    // required actions are login-flow gating, not token content, and are not
+    // governed. KC's createUser flow (UserResource.updateUserFromRep:307-330)
+    // may call them on the scratch user; they pass straight through to the
+    // inherited UserAdapter (no capture interception, no inline CR — required
+    // actions were never inline-governed) and die with the request-tx
+    // rollback. An inbound UPDATE_PASSWORD on the create request therefore
+    // never reaches the CR (getId() also explicitly nulls
+    // rep.requiredActions, belt-and-braces).
 
     // -------------------------------------------------------------------------
     // Role mappings.

@@ -451,6 +451,12 @@ export interface CredentialSpec {
   temporary?: boolean;
 }
 
+export interface FederatedIdentitySpec {
+  identityProvider: string;
+  userId: string;
+  userName: string;
+}
+
 export interface UserSpec {
   username: string;
   enabled?: boolean;
@@ -464,6 +470,7 @@ export interface UserSpec {
   realmRoles?: string[];
   clientRoles?: Record<string, string[]>;
   credentials?: CredentialSpec[];
+  federatedIdentities?: FederatedIdentitySpec[];
 }
 
 /** Create a user via POST {realm}/users. Returns the raw response. */
@@ -523,6 +530,20 @@ export async function getUserRealmRoleMappings(
   const res = await kcFetch(
     request,
     `/admin/realms/${realm}/users/${userId}/role-mappings/realm`,
+  );
+  const body = await safeJson(res);
+  return { http: res.status(), body: Array.isArray(body) ? body : [] };
+}
+
+/** Federated identity links of a user (by user UUID). Array of FI reps. */
+export async function getUserFederatedIdentities(
+  request: APIRequestContext,
+  realm: string,
+  userId: string,
+): Promise<{ http: number; body: any[] }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/users/${userId}/federated-identity`,
   );
   const body = await safeJson(res);
   return { http: res.status(), body: Array.isArray(body) ? body : [] };
