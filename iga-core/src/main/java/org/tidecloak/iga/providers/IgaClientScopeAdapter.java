@@ -9,19 +9,20 @@ import org.keycloak.models.RoleModel;
 import org.keycloak.models.jpa.ClientScopeAdapter;
 import org.keycloak.models.jpa.entities.ClientScopeEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
-import org.keycloak.models.utils.ModelToRepresentation;
 import org.keycloak.representations.idm.ClientScopeRepresentation;
+import org.keycloak.representations.idm.ProtocolMapperRepresentation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import jakarta.persistence.EntityManager;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Wraps ClientScopeAdapter and intercepts scope mapping operations for IGA.
+ * Wraps ClientScopeAdapter and intercepts scope operations for IGA.
  *
  * <h2>Two modes (same design as {@link IgaRoleAdapter} / {@link IgaClientAdapter}
  * / {@link IgaGroupAdapter})</h2>
@@ -35,80 +36,90 @@ import java.util.Map;
  *   <li><b>Capture mode</b> ({@code captureMode == true}): wraps a
  *       <em>scratch</em> {@link ClientScopeEntity} that
  *       {@code IgaRealmProvider.addClientScope} just persisted. Per-setter /
- *       per-mapper interception is bypassed so Keycloak's
- *       {@code RepresentationToModel.createClientScope} can apply the COMPLETE
- *       incoming {@link ClientScopeRepresentation} (name, description, protocol,
- *       protocol mappers WITH full config AND attributes) to the real model.
+ *       per-mapper calls still pass through to the real
+ *       {@link ClientScopeAdapter} so {@code RepresentationToModel
+ *       .createClientScope} builds the complete real model, but each one is
+ *       ALSO <b>accumulated</b> into an in-memory
+ *       {@link ClientScopeRepresentation} builder (same idea as
+ *       {@link IgaRoleAdapter}'s composite accumulation). The accumulated rep
+ *       is emitted as the {@code CREATE_CLIENT_SCOPE} change request at the
+ *       terminal seam.
  *
- *       <h3>KC 26.5.5 client-scope create path (verified)</h3>
- *       {@code ClientScopesResource.createClientScope} (verified, lines
- *       121-139) →
- *       {@code RepresentationToModel.createClientScope(realm, rep)} (verified,
- *       lines 715-740):
- *       <pre>
- *       718  ClientScopeModel cs = realm.addClientScope(id, name);  // → IgaRealmProvider.addClientScope (scratch + this adapter)
- *       719  if (rep.getName()!=null)        cs.setName(...)         // conditional
- *       720  if (rep.getDescription()!=null) cs.setDescription(...)  // conditional
- *       721  if (rep.getProtocol()!=null)    cs.setProtocol(...)     // conditional
- *       722-730 if (rep.getProtocolMappers()!=null) {                // conditional
- *                 cs.removeProtocolMapper(...) loop;                  // conditional
- *                 for (..) cs.addProtocolMapper(toModel(mapper));     // conditional, mappers precede attrs
- *               }
- *       732-736 if (rep.getAttributes()!=null)                       // conditional, LAST in createClientScope
- *                 for (..) cs.setAttribute(k, v);
- *       739  return clientScope;                                     // NO unconditional terminal MUTATOR
- *       ----- back in ClientScopesResource.createClientScope -----
- *       133  adminEvent...resourcePath(uri, clientScope.getId())     // clientScope.getId() — UNCONDITIONAL, FIRST model call after build
- *       135  Response.created(... path(clientScope.getId()) ...)     // clientScope.getId() again
- *       </pre>
- *       Exactly like {@code RoleContainerResource.createRole}, there is NO
- *       unconditional last <i>mutating</i> model call inside
- *       {@code createClientScope}: setName/setDescription/setProtocol are each
- *       conditional, the protocol-mapper loop is conditional, and the attribute
- *       loop (last) is conditional too.
+ *       <h3>Why a live-model snapshot at a single {@code getId()} seam was
+ *       wrong (runtime-proven)</h3>
+ *       The previous design snapshotted the live model at the FIRST
+ *       {@code getId()} call, assuming (statically) that the only
+ *       {@code getId()} on the scope adapter was
+ *       {@code ClientScopesResource.createClientScope#getId} (KC 26.5.5
+ *       ClientScopesResource.java:133, after {@code RepresentationToModel
+ *       .createClientScope} returns). Runtime contradicted this: the snapshot
+ *       fired with {@code protocol=null, protocolMappers=0, attributes=0} —
+ *       i.e. BEFORE {@code RepresentationToModel.createClientScope}
+ *       (RepresentationToModel.java:715-740) applied
+ *       setName(719)/setDescription(720)/setProtocol(721)/addProtocolMapper
+ *       loop(722-730)/setAttribute loop(732-736).
  *
- *       <h3>Terminal seam chosen: {@code getId()} at
- *       ClientScopesResource.createClientScope line 133</h3>
- *       {@code clientScope.getId()} (ClientScopesResource.createClientScope
- *       line 133, then 135) is the FIRST {@code getId()} call the resource
- *       makes after {@code createClientScope} returns and it is UNCONDITIONAL
- *       and strictly AFTER every conditional mutation in the create path — i.e.
- *       the model is fully built when it fires, whether the scope has mappers /
- *       attributes or not. It is therefore the exact client-scope analogue of
- *       role's {@code getName()} / client's {@code updateClient()} / group's
- *       {@code setDescription()}. {@code ClientScopeAdapter.getId()}
- *       (verified, KC 26.5.5 ClientScopeAdapter.java:66-68) returns
- *       {@code entity.getId()} directly and
- *       {@code setName/setDescription/setProtocol/addProtocolMapper/
- *       removeProtocolMapper/setAttribute} plus the
- *       {@code ModelToRepresentation.toRepresentation} getters
- *       ({@code getName/getDescription/getProtocol/getProtocolMappersStream/
- *       getAttributes}, verified ClientScopeAdapter.java:76-300) NEVER call the
- *       overridable {@code getId()} internally, so the seam cannot fire
- *       prematurely; a fire-once guard additionally protects against the second
- *       {@code getId()} at line 135 and any defensive re-entrancy.
+ *       The reason is structural and unavoidable for client scope:
+ *       {@code ClientScopeAdapter.equals()} (KC 26.5.5
+ *       ClientScopeAdapter.java:303-310), {@code hashCode()} (313-315) and
+ *       {@code toString()} (317-320) ALL call the overridable
+ *       {@code getId()}. The scratch adapter is created by
+ *       {@code IgaRealmProvider.addClientScope} and returned into
+ *       {@code RepresentationToModel.createClientScope} line 718
+ *       ({@code realm.addClientScope(rep.getName())}); between line 718 and the
+ *       first config setter at line 719 the adapter takes part in the JPA
+ *       persistence context, the {@code ClientScopeModel.ClientScopeCreatedEvent}
+ *       publication ({@code JpaRealmProvider.addClientScope},
+ *       JpaRealmProvider.java:1179) and debug logging — any of which invokes
+ *       {@code equals/hashCode/toString} → {@code getId()} <i>before any field
+ *       is set</i>. A fire-once-on-FIRST-getId guard then latched that empty
+ *       snapshot. Unlike role (whose terminal seam {@code getName()} is a
+ *       distinct method the resource calls only AFTER full build, and which
+ *       {@code RoleAdapter} never calls internally), client scope's resource
+ *       terminal call is {@code getId()} <i>itself</i> — the very method that
+ *       fires early — so there is NO single late-only model method to seam on.
  *
- *       <h3>Lossiness verdict — NO accumulation needed (unlike role)</h3>
- *       {@code ModelToRepresentation.toRepresentation(ClientScopeModel)}
- *       (verified, KC 26.5.5 ModelToRepresentation.java:821-835) serializes
- *       EVERYTHING {@code IgaReplayDispatcher.replayCreateClientScope} consumes:
- *       {@code setId}(823), {@code setName}(824), {@code setDescription}(825),
- *       {@code setProtocol}(826), {@code setProtocolMappers}(827-830 — via
- *       {@code toRepresentation(ProtocolMapperModel)} which copies the FULL
- *       config map, ModelToRepresentation.java:985-992) and
- *       {@code setAttributes}(832). Replay does
- *       {@code RepresentationToModel.createClientScope(realm, rep)} which reads
- *       exactly name(719)/description(720)/protocol(721)/protocolMappers+config
- *       (722-728)/attributes(732-734) — a faithful round-trip with the snapshot
- *       alone, so (in contrast to role's dropped composites) there is nothing
- *       to intercept-and-merge. The {@code CREATE_CLIENT_SCOPE} change request
- *       (with full {@code REP_JSON}) is written in a SEPARATE transaction
- *       ({@code runJobInTransaction}, survives the rollback), the REQUEST tx is
- *       marked rollback-only and {@link IgaPendingApprovalException} is thrown
- *       (→ HTTP 202 + Location). The scratch scope, its protocol mappers and
- *       its attributes die with the rolled-back request transaction —
- *       identical lifecycle proof to {@link IgaClientAdapter#updateClient}.
- *       Replay is UNCHANGED.</li>
+ *       <h3>Mechanism: accumulate, emit at the post-build {@code getId()}</h3>
+ *       Every {@code setName/setDescription/setProtocol/addProtocolMapper/
+ *       setAttribute} call (capture mode) is recorded into a builder
+ *       (mappers WITH their full {@code config} map). Emission happens at
+ *       {@code getId()} but is GATED on {@code nameObserved} — the builder has
+ *       seen {@code setName}. {@code RepresentationToModel.createClientScope}
+ *       calls {@code setName} at line 719 (always, the resource validates a
+ *       non-null name at ClientScopesResource.java:123) as the FIRST config
+ *       call, strictly AFTER {@code realm.addClientScope} (718) and strictly
+ *       BEFORE every early {@code equals/hashCode/toString}-driven
+ *       {@code getId()} (which all happen during the 718→719 persistence-context
+ *       window, before any setter). So {@code nameObserved} cleanly partitions
+ *       the early racy {@code getId()} calls (no setter seen yet → fall
+ *       through to {@code super.getId()}) from the resource-level terminal
+ *       {@code getId()} at ClientScopesResource.createClientScope:133 (every
+ *       setter the rep carries already applied → emit). Because the rep is
+ *       rebuilt from the ACCUMULATOR (not a live snapshot), even a {@code
+ *       getId()} that lands inside the 719→736 window still carries every
+ *       field observed up to that point, and the fire-once guard then latches
+ *       the final emit; in practice the create path runs synchronously to
+ *       completion (RepresentationToModel:739 {@code return clientScope}) and
+ *       the next model touch is the resource's terminal {@code getId()} at
+ *       :133 with the accumulator fully populated.
+ *
+ *       <h3>REP_JSON faithfulness vs. replay</h3>
+ *       {@code IgaReplayDispatcher.replayCreateClientScope} (full-config path)
+ *       deserializes {@code REP_JSON} into a {@code ClientScopeRepresentation},
+ *       {@code rep.setId(id)}, {@code rep.setName(name)} then
+ *       {@code RepresentationToModel.createClientScope(realm, rep)} — which
+ *       reads exactly name(719)/description(720)/protocol(721)/protocolMappers
+ *       +config(722-728)/attributes(732-734). The accumulated rep carries
+ *       precisely those fields (protocol mappers retain their full {@code
+ *       config} map), so the round-trip is byte-faithful. Replay is UNCHANGED.
+ *
+ *       The {@code CREATE_CLIENT_SCOPE} change request is written in a SEPARATE
+ *       transaction ({@code runJobInTransaction}, survives the rollback), the
+ *       REQUEST tx is marked rollback-only and {@link IgaPendingApprovalException}
+ *       is thrown (→ HTTP 202 + Location). The scratch scope, its protocol
+ *       mappers and its attributes die with the rolled-back request
+ *       transaction — identical lifecycle proof to
+ *       {@link IgaClientAdapter#updateClient}.</li>
  * </ul>
  */
 public class IgaClientScopeAdapter extends ClientScopeAdapter {
@@ -120,14 +131,36 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
 
     /**
      * When true this adapter wraps a scratch entity mid-{@code
-     * createClientScope}; the only special behaviour is {@link #getId()} (the
-     * terminal snapshot-and-throw seam). All other per-setter/per-mapper
-     * interception is bypassed so Keycloak's builder applies the full
-     * representation to the real model.
+     * createClientScope}; per-setter/per-mapper calls pass through to the real
+     * adapter AND are accumulated into {@link #capturedRep}; {@link #getId()}
+     * is the terminal snapshot-and-throw seam (gated on {@link #nameObserved}).
      */
     private final boolean captureMode;
 
-    /** Fire-once guard: only the first getId() at createClientScope:133 emits. */
+    /**
+     * The representation accumulated from the pass-through
+     * setName/setDescription/setProtocol/addProtocolMapper/setAttribute calls
+     * during {@code RepresentationToModel.createClientScope}. This is the
+     * authoritative capture (the live model can be read empty if {@code
+     * getId()} fires early via equals/hashCode/toString — see class javadoc).
+     */
+    private final ClientScopeRepresentation capturedRep = new ClientScopeRepresentation();
+    private final Map<String, String> capturedAttributes = new LinkedHashMap<>();
+    private final List<ProtocolMapperRepresentation> capturedMappers = new ArrayList<>();
+
+    /**
+     * True once {@code setName} has been observed via the capture path — i.e.
+     * {@code RepresentationToModel.createClientScope} has started applying the
+     * representation (line 719) and we are PAST the 718→719 persistence-context
+     * window in which early equals/hashCode/toString {@code getId()} calls
+     * fire. Until then {@code getId()} falls through to {@code super.getId()}.
+     */
+    private boolean nameObserved = false;
+
+    /** One-line trace of observed capture events (cheap; logged at emit). */
+    private final StringBuilder observedTrace = new StringBuilder();
+
+    /** Fire-once guard: only the first post-build getId() emits. */
     private boolean captureEmitted = false;
 
     public IgaClientScopeAdapter(RealmModel realm, EntityManager em, KeycloakSession session, ClientScopeEntity clientScopeEntity) {
@@ -147,10 +180,10 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
     }
 
     private boolean isIgaActive() {
-        // In capture mode every per-setter/per-mapper override falls straight
-        // through to the real ClientScopeAdapter so
-        // RepresentationToModel.createClientScope builds the complete model;
-        // interception is concentrated at the single terminal seam getId().
+        // In capture mode every per-setter/per-mapper override falls through to
+        // the real ClientScopeAdapter (so RepresentationToModel.createClientScope
+        // builds the complete model) AND accumulates into capturedRep;
+        // interception/emit is concentrated at the terminal seam getId().
         if (captureMode) return false;
         IgaChangeRequestService service = getService();
         if (!service.isIgaEnabled(realm)) return false;
@@ -158,45 +191,67 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         return !"true".equals(replay);
     }
 
+    private void trace(String ev) {
+        if (observedTrace.length() > 0) observedTrace.append(',');
+        observedTrace.append(ev);
+    }
+
     // -------------------------------------------------------------------------
     // Terminal seam for CREATE_CLIENT_SCOPE (capture mode only):
-    // clientScope.getId().
+    // clientScope.getId(), GATED on nameObserved.
     //
-    // ClientScopesResource.createClientScope calls clientScope.getId() at line
-    // 133 (adminEvent.resourcePath) and 135 (Response.created) — the FIRST and
-    // only getId() calls the resource makes after the conditional-only
-    // RepresentationToModel.createClientScope (lines 715-740) returns. So when
-    // this fires the model is fully built (name, description, protocol,
-    // protocol mappers WITH full config, attributes) for ALL scopes. We
-    // snapshot it via ModelToRepresentation.toRepresentation(ClientScopeModel)
-    // — which serializes ALL of those fields (no accumulation needed, unlike
-    // role's composites) — and emit the CREATE_CLIENT_SCOPE CR + rollback-only
-    // + throw exactly as IgaRoleAdapter#getName / IgaClientAdapter#updateClient.
+    // getId() is invoked early and unpredictably on the scratch adapter via
+    // ClientScopeAdapter.equals()/hashCode()/toString() (KC 26.5.5
+    // ClientScopeAdapter.java:303-320) during the JPA persistence context /
+    // ClientScopeCreatedEvent publish (JpaRealmProvider.java:1179) BEFORE
+    // RepresentationToModel.createClientScope (RepresentationToModel.java:
+    // 715-740) applies any field. Those early calls happen in the 718→719
+    // window — BEFORE setName(719) — so nameObserved is false for them and we
+    // fall straight through to super.getId(). The resource-level terminal
+    // getId() (ClientScopesResource.createClientScope:133, after createClientScope
+    // returns at RepresentationToModel:739) happens AFTER setName + every other
+    // setter the rep carries, so nameObserved is true and we emit from the
+    // ACCUMULATED rep (not a live snapshot).
     // -------------------------------------------------------------------------
     @Override
     public String getId() {
-        if (!captureMode || captureEmitted) {
+        if (!captureMode || captureEmitted || !nameObserved) {
             return super.getId();
         }
         // Arm the fire-once guard BEFORE any further model/service call so the
-        // emit path (which itself reads the model) cannot re-enter this seam,
-        // and the second getId() at createClientScope:135 falls through.
+        // emit path cannot re-enter this seam and the second getId() at
+        // ClientScopesResource.createClientScope:135 falls through.
         captureEmitted = true;
+        trace("getId#emit");
 
         String scopeId = super.getId();
-        String scopeName = super.getName();
+        String scopeName = capturedRep.getName();
 
-        // Base (and only) snapshot via Keycloak's own serializer: id, name,
-        // description, protocol, protocolMappers (WITH full config) AND
-        // attributes — KC 26.5.5 ModelToRepresentation:821-835. Unlike
-        // RoleModel (composites dropped) this is COMPLETE, so there is nothing
-        // to reconstruct from intercepted calls.
-        ClientScopeRepresentation rep = ModelToRepresentation.toRepresentation(this);
-        // Pin identity so replay recreates the scope with the SAME UUID the
-        // admin's create flow allocated (replayCreateClientScope also re-pins
-        // from the row ID, but a self-consistent rep avoids ambiguity).
+        // Build the CR rep entirely from the accumulator (authoritative — the
+        // live model can read empty if getId() fires early; see class javadoc).
+        ClientScopeRepresentation rep = new ClientScopeRepresentation();
         rep.setId(scopeId);
-        if (scopeName != null) rep.setName(scopeName);
+        rep.setName(scopeName);
+        if (capturedRep.getDescription() != null) rep.setDescription(capturedRep.getDescription());
+        if (capturedRep.getProtocol() != null) rep.setProtocol(capturedRep.getProtocol());
+        if (!capturedMappers.isEmpty()) {
+            // Deep-copy each mapper rep + its config so later mutation of the
+            // live model (impossible here, but defensive) cannot alias the CR.
+            List<ProtocolMapperRepresentation> mappers = new ArrayList<>();
+            for (ProtocolMapperRepresentation m : capturedMappers) {
+                ProtocolMapperRepresentation c = new ProtocolMapperRepresentation();
+                c.setId(m.getId());
+                c.setName(m.getName());
+                c.setProtocol(m.getProtocol());
+                c.setProtocolMapper(m.getProtocolMapper());
+                if (m.getConfig() != null) c.setConfig(new LinkedHashMap<>(m.getConfig()));
+                mappers.add(c);
+            }
+            rep.setProtocolMappers(mappers);
+        }
+        if (!capturedAttributes.isEmpty()) {
+            rep.setAttributes(new LinkedHashMap<>(capturedAttributes));
+        }
 
         String repJson;
         try {
@@ -209,13 +264,15 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
 
         int mappers = rep.getProtocolMappers() == null ? 0 : rep.getProtocolMappers().size();
         int attrs = rep.getAttributes() == null ? 0 : rep.getAttributes().size();
-        log.infof("IGA capture CREATE_CLIENT_SCOPE: full-rep path for scope=%s (uuid=%s, "
-                + "protocol=%s, protocolMappers=%d, attributes=%d, %d chars) captured at the "
-                + "model-layer terminal seam (ClientScopesResource.createClientScope#getId); CR "
-                + "written in a separate tx, request tx marked rollback-only so the scratch "
-                + "scope + its mappers + attributes are discarded (zero rows persisted at "
-                + "draft); full config will replay on commit",
-                scopeName, scopeId, rep.getProtocol(), mappers, attrs, repJson.length());
+        log.infof("IGA capture CREATE_CLIENT_SCOPE: accumulated-rep path for scope=%s (uuid=%s, "
+                + "protocol=%s, description=%s, protocolMappers=%d, attributes=%d, %d chars) "
+                + "captured at the post-build terminal seam "
+                + "(ClientScopesResource.createClientScope#getId, gated on setName-observed); "
+                + "observed order=[%s]; CR written in a separate tx, request tx marked "
+                + "rollback-only so the scratch scope + its mappers + attributes are discarded "
+                + "(zero rows persisted at draft); full config will replay on commit",
+                scopeName, scopeId, rep.getProtocol(), rep.getDescription() != null,
+                mappers, attrs, repJson.length(), observedTrace);
 
         // rowsJson contract (must match IgaReplayDispatcher.replayCreateClientScope:
         // ID = scope UUID, NAME = scope name, REALM_ID = realm UUID,
@@ -250,6 +307,42 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         throw new IgaPendingApprovalException(crIdHolder[0], "CLIENT_SCOPE", "CREATE_CLIENT_SCOPE");
     }
 
+    // -------------------------------------------------------------------------
+    // Capture-mode accumulators: pass through to the real adapter (so the model
+    // is built for the snapshot's lifecycle proof) AND record into capturedRep.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void setName(String name) {
+        super.setName(name);
+        if (captureMode) {
+            // entity.getName() reflects KeycloakModelUtils.convertClientScopeName
+            // — capture the canonical persisted name so REP_JSON matches what
+            // a committed scope (and replay's createClientScope) would carry.
+            capturedRep.setName(super.getName());
+            nameObserved = true;
+            trace("setName");
+        }
+    }
+
+    @Override
+    public void setDescription(String description) {
+        super.setDescription(description);
+        if (captureMode) {
+            capturedRep.setDescription(description);
+            trace("setDescription");
+        }
+    }
+
+    @Override
+    public void setProtocol(String protocol) {
+        super.setProtocol(protocol);
+        if (captureMode) {
+            capturedRep.setProtocol(protocol);
+            trace("setProtocol");
+        }
+    }
+
     @Override
     public void addScopeMapping(RoleModel role) {
         if (!isIgaActive()) {
@@ -279,10 +372,11 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
     // -------------------------------------------------------------------------
     // Attribute interception (CLIENT_SCOPE_ATTRIBUTES).
     //
-    // In capture mode these fall straight through to the real ClientScopeAdapter
-    // so RepresentationToModel.createClientScope's attribute loop builds the
-    // complete model (the snapshot at getId() then serializes them faithfully).
-    // In inline mode the one-pending-CR-per-entity rule applies.
+    // In capture mode these pass through to the real ClientScopeAdapter so
+    // RepresentationToModel.createClientScope's attribute loop builds the
+    // complete model, AND are accumulated into capturedAttributes (the
+    // authoritative source for REP_JSON). In inline mode the
+    // one-pending-CR-per-entity rule applies.
     //
     // Note: client scope CRs reuse the entityType "CLIENT_SCOPE" for the
     // pending-CR check so we do not collide with same-id-but-different-entity
@@ -291,6 +385,12 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
 
     @Override
     public void setAttribute(String name, String value) {
+        if (captureMode) {
+            super.setAttribute(name, value);
+            capturedAttributes.put(name, value);
+            trace("setAttribute:" + name);
+            return;
+        }
         if (!isIgaActive()) {
             super.setAttribute(name, value);
             return;
@@ -308,6 +408,12 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
 
     @Override
     public void removeAttribute(String name) {
+        if (captureMode) {
+            super.removeAttribute(name);
+            capturedAttributes.remove(name);
+            trace("removeAttribute:" + name);
+            return;
+        }
         if (!isIgaActive()) {
             super.removeAttribute(name);
             return;
@@ -332,17 +438,33 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
     // -------------------------------------------------------------------------
     // Protocol mappers on a CLIENT_SCOPE.
     //
-    // In capture mode these fall straight through to the real ClientScopeAdapter
-    // so RepresentationToModel.createClientScope's removeProtocolMapper /
-    // addProtocolMapper loop builds the complete model (the snapshot at getId()
-    // then serializes the mappers WITH full config faithfully). In inline mode
-    // they record targeted delta CRs; the parent entity_type is "CLIENT_SCOPE"
-    // so IgaScopeResolver can resolve scope rules against the parent scope
-    // attributes when one is configured.
+    // In capture mode addProtocolMapper passes through to the real adapter so
+    // RepresentationToModel.createClientScope's removeProtocolMapper /
+    // addProtocolMapper loop builds the complete model, AND records the mapper
+    // (name + protocol + protocolMapper + FULL config) into capturedMappers —
+    // the authoritative source for REP_JSON's protocolMappers (with config).
+    // removeProtocolMapper keeps the accumulator consistent (createClientScope
+    // removes built-in mappers before re-adding). In inline mode they record
+    // targeted delta CRs; the parent entity_type is "CLIENT_SCOPE" so
+    // IgaScopeResolver can resolve scope rules against the parent scope.
     // -------------------------------------------------------------------------
 
     @Override
     public ProtocolMapperModel addProtocolMapper(ProtocolMapperModel model) {
+        if (captureMode) {
+            ProtocolMapperModel added = super.addProtocolMapper(model);
+            ProtocolMapperRepresentation pm = new ProtocolMapperRepresentation();
+            pm.setId(added != null ? added.getId() : model.getId());
+            pm.setName(model.getName());
+            pm.setProtocol(model.getProtocol());
+            pm.setProtocolMapper(model.getProtocolMapper());
+            if (model.getConfig() != null) {
+                pm.setConfig(new LinkedHashMap<>(model.getConfig()));
+            }
+            capturedMappers.add(pm);
+            trace("addProtocolMapper:" + model.getName());
+            return added;
+        }
         if (!isIgaActive()) {
             return super.addProtocolMapper(model);
         }
@@ -370,6 +492,29 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
 
     @Override
     public void updateProtocolMapper(ProtocolMapperModel mapping) {
+        if (captureMode) {
+            super.updateProtocolMapper(mapping);
+            // Keep the accumulator consistent if createClientScope ever
+            // updates a mapper mid-build (it does not in KC 26.5.5, but be
+            // robust): replace by id, else append.
+            ProtocolMapperRepresentation pm = new ProtocolMapperRepresentation();
+            pm.setId(mapping.getId());
+            pm.setName(mapping.getName());
+            pm.setProtocol(mapping.getProtocol());
+            pm.setProtocolMapper(mapping.getProtocolMapper());
+            if (mapping.getConfig() != null) pm.setConfig(new LinkedHashMap<>(mapping.getConfig()));
+            boolean replaced = false;
+            for (int i = 0; i < capturedMappers.size(); i++) {
+                if (mapping.getId() != null && mapping.getId().equals(capturedMappers.get(i).getId())) {
+                    capturedMappers.set(i, pm);
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) capturedMappers.add(pm);
+            trace("updateProtocolMapper:" + mapping.getName());
+            return;
+        }
         if (!isIgaActive()) {
             super.updateProtocolMapper(mapping);
             return;
@@ -391,6 +536,18 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
 
     @Override
     public void removeProtocolMapper(ProtocolMapperModel mapping) {
+        if (captureMode) {
+            super.removeProtocolMapper(mapping);
+            // createClientScope removes all built-in/default mappers before
+            // re-adding the incoming ones (RepresentationToModel.java:724).
+            // Keep the accumulator consistent so REP_JSON carries exactly the
+            // surviving mappers.
+            if (mapping.getId() != null) {
+                capturedMappers.removeIf(m -> mapping.getId().equals(m.getId()));
+            }
+            trace("removeProtocolMapper:" + mapping.getName());
+            return;
+        }
         if (!isIgaActive()) {
             super.removeProtocolMapper(mapping);
             return;

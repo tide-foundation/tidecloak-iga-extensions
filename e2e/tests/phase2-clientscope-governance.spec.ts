@@ -126,11 +126,16 @@ test.describe('IGA Phase 2: client-scope governed create/replay', () => {
               : status === 201
                 ? 'governed scope create returned 201 (scope persisted immediately — IGA capture is NOT intercepting; Phase 2 capture path not active)'
                 : `governed scope create returned ${status} (expected 202 Accepted)`;
-          return { ok: false as const, detail: hint, evidence };
+          // No 202 at all (500/201/other): the Phase 2 capture path is NOT
+          // intercepting → genuinely not loaded → a restart is the fix.
+          return { ok: false as const, loaded: false as const, detail: hint, evidence };
         }
         if (!loc) {
+          // 202 but no Location → the Phase 0/2 (Location on 202) code is not
+          // loaded → genuinely not loaded → restart.
           return {
             ok: false as const,
+            loaded: false as const,
             detail:
               'governed scope create returned 202 but no Location header — Phase 0/2 (Location on 202) not loaded.',
             evidence,
@@ -145,8 +150,12 @@ test.describe('IGA Phase 2: client-scope governed create/replay', () => {
         evidence.probeCrActionType = cr.body?.actionType;
         evidence.probeCrStatus = cr.body?.status;
         if (cr.http !== 200 || cr.body?.actionType !== 'CREATE_CLIENT_SCOPE') {
+          // 202 returned but no retrievable CREATE_CLIENT_SCOPE CR — the
+          // capture path is not producing the expected CR at all → treat as
+          // genuinely not loaded → restart.
           return {
             ok: false as const,
+            loaded: false as const,
             detail:
               `202 returned but CR not retrievable as a CREATE_CLIENT_SCOPE ` +
               `(GET CR http=${cr.http}, actionType=${cr.body?.actionType}).`,
@@ -155,27 +164,59 @@ test.describe('IGA Phase 2: client-scope governed create/replay', () => {
         }
         const rowsJson = JSON.stringify(cr.body?.rows ?? cr.body ?? {});
         // The captured REP_JSON must carry the protocol mapper + its
-        // non-default config AND the custom attribute — this is exactly the
-        // pre-Phase-2 lossy behaviour we are guarding against.
-        const carriesFullRep =
+        // non-default config AND the custom attribute.
+        const carriesProtocol = rowsJson.includes('"protocol":"saml"');
+        const carriesMapper =
           rowsJson.includes('probe-mapper') &&
-          rowsJson.includes('probeAttr') &&
           rowsJson.includes('probe-attr-name');
+        const carriesAttrs =
+          rowsJson.includes('probeAttr') ||
+          rowsJson.includes('consent.screen.text');
+        const carriesFullRep =
+          carriesProtocol && carriesMapper && carriesAttrs;
+        evidence.probeCrCarriesProtocol = carriesProtocol;
+        evidence.probeCrCarriesMapper = carriesMapper;
+        evidence.probeCrCarriesAttrs = carriesAttrs;
         evidence.probeCrCarriesFullRep = carriesFullRep;
         if (!carriesFullRep) {
+          // We reached HERE only via: 202 + Location + CR exists +
+          // actionType === CREATE_CLIENT_SCOPE. So the Phase 2 jar IS loaded
+          // and the capture path IS intercepting — the failure is a CODE BUG
+          // in IgaClientScopeAdapter's capture (it produced an EMPTY/lossy
+          // rep), NOT a stale-container/restart situation. Do NOT tell the
+          // user to restart in this case (a restart will not fix a code bug).
+          const captured = {
+            protocol: carriesProtocol,
+            protocolMappers: carriesMapper,
+            attributes: carriesAttrs,
+          };
+          const expected = {
+            protocol: true,
+            protocolMappers: true,
+            attributes: true,
+          };
+          evidence.capturedVsExpected = { captured, expected };
           return {
             ok: false as const,
+            loaded: true as const,
             detail:
-              'CREATE_CLIENT_SCOPE CR captured but protocol-mapper config / ' +
-              'attributes dropped from REP_JSON — pre-Phase-2 behaviour; ' +
-              'Phase 2 full-rep capture not loaded.',
+              'Phase 2 loaded but client-scope capture is producing an ' +
+              'EMPTY/lossy rep — this is a CODE BUG in IgaClientScopeAdapter ' +
+              'capture, NOT a restart issue (the governed create DID 202 ' +
+              'with a CREATE_CLIENT_SCOPE CR, so the jar is loaded). ' +
+              `captured=${JSON.stringify(captured)} ` +
+              `expected=${JSON.stringify(expected)} ` +
+              `rep=${rowsJson.slice(0, 600)}`,
             evidence,
           };
         }
-        return { ok: true as const, detail: 'Phase 2 loaded.', evidence };
+        return { ok: true as const, loaded: true as const, detail: 'Phase 2 loaded.', evidence };
       } catch (e: any) {
+        // An exception while probing means we could not even establish whether
+        // the jar is loaded — treat conservatively as not-loaded (restart).
         return {
           ok: false as const,
+          loaded: false as const,
           detail: `Probe governed client-scope create raised: ${e?.message ?? e}`,
           evidence,
         };
@@ -185,13 +226,26 @@ test.describe('IGA Phase 2: client-scope governed create/replay', () => {
     })();
 
     console.log(
-      `\n[PRECONDITION phase2] ok=${pre.ok}\n  ${pre.detail}\n  evidence=${JSON.stringify(
+      `\n[PRECONDITION phase2] ok=${pre.ok} loaded=${
+        (pre as { loaded?: boolean }).loaded
+      }\n  ${pre.detail}\n  evidence=${JSON.stringify(
         pre.evidence,
         null,
         2,
       )}\n`,
     );
     if (!pre.ok) {
+      const loaded = (pre as { loaded?: boolean }).loaded === true;
+      if (loaded) {
+        // Jar IS loaded; the capture is a code bug. A restart will NOT fix
+        // this — fail with a code-bug message, not a restart instruction.
+        throw new Error(
+          `PRECONDITION: Phase 2 loaded but client-scope capture is producing ` +
+            `an EMPTY rep — this is a code bug in IgaClientScopeAdapter, NOT a ` +
+            `restart issue. Do NOT restart; fix the capture. Detail: ${pre.detail}`,
+        );
+      }
+      // Genuinely not loaded (no 202 / no Location / no CR) → restart.
       throw new Error(
         `PRECONDITION: Phase 2 jar not loaded in the running container ` +
           `(${pre.detail}) — restart the container, then re-run: ${RERUN}`,
