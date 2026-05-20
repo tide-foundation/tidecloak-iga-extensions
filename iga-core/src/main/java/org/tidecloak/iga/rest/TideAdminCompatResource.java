@@ -13,8 +13,10 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.cache.UserCache;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
+import org.keycloak.storage.UserStorageUtil;
 import org.tidecloak.iga.replay.SidecarCapExceededException;
 import org.tidecloak.iga.services.IgaAdoptCancel;
 import org.tidecloak.iga.services.IgaAdoptScan;
@@ -152,6 +154,25 @@ public class TideAdminCompatResource {
                 // dropped. The bulk method exists in KC 26.5.5
                 // (UserSessionProvider.java:190 — verified vs source).
                 long invalidated = invalidateRealmSessions(session, realm);
+                // Phase 6c regression fix (direct-grant miss): also evict the
+                // infinispan user-cache for this realm. KC's UserCacheSession
+                // (model/infinispan UserCacheSession.java:262-319) returns a
+                // CachedUser-backed UserAdapter whose isEnabled() reads the
+                // snapshot stored at cache-load time
+                // (model/infinispan UserAdapter.java:166-168) and does NOT
+                // delegate to the underlying IgaUserAdapter on each call. If a
+                // user was loaded BEFORE the OFF→ON toggle (e.g. a pre-IGA
+                // direct-grant seeded the cache with enabled=true), the cache
+                // entry keeps returning enabled=true after the toggle even
+                // though the IGA quarantine guards on IgaUserAdapter.isEnabled
+                // would have refused. Symmetric to removeUserSessions(realm)
+                // (login-session invalidation), evict the user-cache so the
+                // next session.users() lookup re-loads through
+                // IgaUserProvider → IgaUserAdapter and the quarantine override
+                // fires. The eviction is per-realm and best-effort: a failure
+                // must never abort the toggle (the attribute is already
+                // committed and the response is about to be sent).
+                evictRealmUserCache(session, realm);
                 body.put("scan", resultHolder[0]
                         .withSessionsInvalidated(invalidated).toMap());
                 String warning = buildAdminCoverageWarning(session, realm);
@@ -204,6 +225,16 @@ public class TideAdminCompatResource {
                 err.put("message", String.valueOf(offErrHolder[0].getMessage()));
                 body.put("scanOff", err);
             }
+            // Phase 6c regression fix (symmetric): evict the user-cache on
+            // ON→OFF too. While IGA was ON, a quarantined user's cached
+            // UserAdapter held enabled=false (snapshot of IgaUserAdapter
+            // returning false). After ON→OFF the IGA quarantine no longer
+            // applies (IgaQuarantineCache.isUserUnsignedWithRoles short-circuits
+            // when !isIgaActive), but the stale cache snapshot would still
+            // report enabled=false until the entry happened to expire. Evict
+            // so the next session.users() lookup re-loads through
+            // IgaUserProvider → IgaUserAdapter and reflects the IGA-off state.
+            evictRealmUserCache(session, realm);
         }
 
         return Response.ok(body).build();
@@ -330,6 +361,59 @@ public class TideAdminCompatResource {
                     realm.getName());
         }
         return count;
+    }
+
+    /**
+     * Phase 6c regression fix (direct-grant miss) — evict every cached user
+     * entry for the realm so subsequent {@code session.users().getUserBy*}
+     * lookups re-load through {@code IgaUserProvider} and the
+     * {@code IgaUserAdapter#isEnabled} quarantine override fires.
+     *
+     * <p>The infinispan user-cache ({@code model/infinispan UserCacheSession})
+     * returns a {@code CachedUser}-backed {@code UserAdapter} whose
+     * {@code isEnabled()} reads the snapshot recorded at cache-load time
+     * ({@code model/infinispan UserAdapter.java:166-168}) and does NOT delegate
+     * to the underlying {@code IgaUserAdapter} on each call. Without an
+     * eviction, the OFF→ON toggle does not affect users whose cache entry was
+     * seeded before the toggle (e.g. a pre-IGA direct-grant or admin REST read
+     * cached {@code enabled=true}); KC's quarantine override is then never
+     * consulted on the next direct-grant and an unsigned user incorrectly
+     * receives a token.</p>
+     *
+     * <p>The eviction primitive is {@link UserCache#evict(RealmModel)}
+     * ({@code UserCache.java:43} — bulk per-realm eviction). It is the right
+     * grain because the OFF→ON scan may have quarantined any number of users
+     * in the realm (no per-user information is plumbed back from the scan)
+     * and the toggle is a rare admin action — the re-warm cost is acceptable
+     * and bounded.</p>
+     *
+     * <p>Best-effort: if the cache provider isn't installed
+     * ({@code UserStorageUtil.userCache(session)} returns {@code null} when
+     * the deployment runs without infinispan) or the eviction throws, log
+     * and continue. The toggle attribute is already committed and the
+     * response is about to be sent — a cache-eviction failure must never
+     * abort the toggle.</p>
+     */
+    private static void evictRealmUserCache(KeycloakSession session, RealmModel realm) {
+        try {
+            UserCache cache = UserStorageUtil.userCache(session);
+            if (cache == null) {
+                logger.debugf("IGA toggle user-cache eviction: realm=%s — UserCache provider not installed (skipped)",
+                        realm.getName());
+                return;
+            }
+            cache.evict(realm);
+            logger.infof("IGA toggle user-cache eviction: realm=%s — evicted (next user lookup will re-load through IgaUserProvider so the quarantine override fires)",
+                    realm.getName());
+        } catch (RuntimeException ex) {
+            // Never let a cache-eviction failure abort the toggle — the
+            // realm attribute is already committed and the response is
+            // about to be sent. Subsequent reads may show stale isEnabled
+            // until the entry expires, but the toggle stays consistent.
+            logger.errorf(ex,
+                    "IGA toggle user-cache eviction FAILED for realm %s — quarantine reads may be stale until cache entries expire.",
+                    realm.getName());
+        }
     }
 
     /**
