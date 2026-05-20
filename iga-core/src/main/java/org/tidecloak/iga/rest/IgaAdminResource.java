@@ -12,6 +12,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
@@ -36,6 +37,7 @@ import org.tidecloak.iga.providers.IgaLicenseHistoryService;
 import org.tidecloak.iga.providers.IgaLicensingDraftService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
+import org.tidecloak.iga.replay.EntityVanishedException;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
 import org.tidecloak.iga.replay.IgaReplayExtension;
 import org.tidecloak.iga.attestors.IgaAttestor;
@@ -54,6 +56,8 @@ import java.util.stream.Collectors;
 @Path("iga")
 @Vetoed
 public class IgaAdminResource {
+
+    private static final Logger log = Logger.getLogger(IgaAdminResource.class);
 
     private final KeycloakSession session;
     private final RealmModel realm;
@@ -303,8 +307,30 @@ public class IgaAdminResource {
         // other action type falls through to the dispatcher (whose tail also
         // sets status=APPROVED + resolvedAt on the managed CR — same as the
         // extension does).
-        if (!IgaReplayExtension.tryReplay(session, cr, finalAttestation)) {
-            IgaReplayDispatcher.replay(session, cr, finalAttestation);
+        //
+        // EntityVanishedException is the typed signal raised by the ADOPT
+        // existence check when the underlying USER/ROLE/GROUP/CLIENT/
+        // CLIENT_SCOPE was deleted out-of-band between ADOPT-create and
+        // ADOPT-commit. We catch it here (BEFORE the CR-status flip ever
+        // happens in the extension's tail) and translate to a structured
+        // 404 ENTITY_VANISHED with one INFO log line — rather than letting it
+        // bubble through KC's generic uncaught-exception handler, which would
+        // emit a full stack at ERROR severity and a generic 500 unknown_error.
+        // The CR remains PENDING (the flip never executed; JPA tx rolls back).
+        try {
+            if (!IgaReplayExtension.tryReplay(session, cr, finalAttestation)) {
+                IgaReplayDispatcher.replay(session, cr, finalAttestation);
+            }
+        } catch (EntityVanishedException ev) {
+            log.infof("IGA ADOPT commit refused: entity %s/%s no longer exists in realm %s (CR %s) — returning 404 ENTITY_VANISHED",
+                    ev.getEntityType(), ev.getEntityId(), ev.getRealmId(), cr.getId());
+            return Response.status(Response.Status.NOT_FOUND)
+                    .entity(Map.of(
+                            "error", "ENTITY_VANISHED",
+                            "entityType", ev.getEntityType(),
+                            "entityId", ev.getEntityId(),
+                            "realmId", ev.getRealmId()))
+                    .build();
         }
         IgaChangeRequestService service = getService();
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);

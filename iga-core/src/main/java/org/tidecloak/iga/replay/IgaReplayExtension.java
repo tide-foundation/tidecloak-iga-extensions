@@ -22,8 +22,10 @@ import org.tidecloak.iga.services.IgaUnsignedEntityService;
  * <ol>
  *   <li>Verifies the underlying entity still exists. If it was deleted
  *       out-of-band between ADOPT create and ADOPT commit we throw
- *       {@link IllegalStateException} so the commit endpoint surfaces a real
- *       error rather than a misleading 204/200 on a vanished entity.</li>
+ *       {@link EntityVanishedException} so the commit endpoint can translate
+ *       it into a clean {@code 404 ENTITY_VANISHED} response rather than a
+ *       misleading 204/200 on a vanished entity (or, worse, a generic 500
+ *       with a full stack trace at ERROR severity).</li>
  *   <li>Performs no entity-model write — that is the whole point of ADOPT
  *       semantics.</li>
  *   <li>Stamps the final attestation onto the entity's {@code ATTESTATION}
@@ -149,10 +151,13 @@ public final class IgaReplayExtension {
 
     /**
      * Resolve the entity through KC's model APIs. Throws
-     * {@link IllegalStateException} when missing — the commit endpoint's
-     * standard error path turns this into a 5xx with a meaningful message, far
-     * preferable to a silent no-op that leaves a stale APPROVED CR pointing at
-     * a vanished entity.
+     * {@link EntityVanishedException} when missing — the commit endpoint
+     * catches it and returns a structured {@code 404 ENTITY_VANISHED}
+     * response with a single INFO log line, far preferable to either a silent
+     * no-op (leaving a stale APPROVED CR pointing at a vanished entity) or a
+     * generic 500 with a full stack trace at ERROR severity (which is what a
+     * raw {@code IllegalStateException} would produce via KC's catch-all
+     * uncaught-exception handler).
      */
     private static void assertEntityExists(KeycloakSession session, RealmModel realm,
                                             String entityType, String entityId, String actionType) {
@@ -187,9 +192,7 @@ public final class IgaReplayExtension {
                 throw new IllegalStateException("ADOPT replay: unknown action type " + actionType);
         }
         if (!exists) {
-            throw new IllegalStateException(
-                    "ADOPT replay: entity " + entityType + "/" + entityId
-                            + " no longer exists in realm " + realm.getId());
+            throw new EntityVanishedException(entityType, entityId, realm.getId());
         }
     }
 

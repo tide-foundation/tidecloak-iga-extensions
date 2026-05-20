@@ -338,9 +338,9 @@ test.describe('IGA Phase 6a: ADOPT_USER capture-then-veto roundtrip', () => {
     expect(negCr.body?.status).toBe('PENDING');
 
     // Attempt to commit. Authorize must still pass (it doesn't touch the
-    // entity); the COMMIT step must NOT 204/200 — it must produce a server
-    // error reflecting the missing entity (5xx, since the commit handler
-    // surfaces IllegalStateException via its standard error path).
+    // entity); the COMMIT step must NOT 204/200 — it must return the
+    // structured 404 ENTITY_VANISHED response the commit handler emits when
+    // the ADOPT replay's existence check raises EntityVanishedException.
     const authNeg = await kcFetch(
       request,
       `/admin/realms/${REALM_NEG}/iga/change-requests/${negCrId}/authorize`,
@@ -360,9 +360,22 @@ test.describe('IGA Phase 6a: ADOPT_USER capture-then-veto roundtrip', () => {
     const commitNegText = await commitNeg.text().catch(() => '');
     expect(
       commitNegStatus,
-      `commit on a vanished-entity ADOPT_USER must NOT succeed — ` +
-        `expected 4xx/5xx, got ${commitNegStatus} ${commitNegText}`,
-    ).toBeGreaterThanOrEqual(400);
+      `commit on a vanished-entity ADOPT_USER must return 404 ENTITY_VANISHED — ` +
+        `got ${commitNegStatus} ${commitNegText}`,
+    ).toBe(404);
+    let commitNegBody: Record<string, unknown> | null = null;
+    try {
+      commitNegBody = JSON.parse(commitNegText);
+    } catch {
+      commitNegBody = null;
+    }
+    expect(
+      commitNegBody?.error,
+      `expected structured body { error: "ENTITY_VANISHED", ... }, got ${commitNegText}`,
+    ).toBe('ENTITY_VANISHED');
+    expect(commitNegBody?.entityType, 'body.entityType').toBe('USER');
+    expect(commitNegBody?.entityId, 'body.entityId').toBe(vanishId);
+    expect(commitNegBody?.realmId, 'body.realmId must be the realm uuid').toBeTruthy();
 
     // CR status after the failed commit. Either still PENDING (failed before
     // status flip) OR (rarely) APPROVED if the JPQL stamp ran before
