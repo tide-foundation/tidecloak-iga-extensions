@@ -1107,6 +1107,24 @@ export async function createAdminWithRoles(
  * Bearer use, or throws on a non-200. Used to call /iga/.../authorize as a
  * specific test-realm admin (rather than the master admin {@link adminToken}
  * returns).
+ *
+ * TEST-HARNESS-ONLY self-heal: most Phase 5 specs pre-create their governance
+ * admins BEFORE the realm has IGA enabled, then flip IGA on and immediately
+ * call this helper to authorize CRs as those admins. The toggle-on path
+ * retro-emits an ADOPT_USER CR for every pre-existing realm user (the Phase
+ * 6b adopt-scan); until that ADOPT is committed, the user is unsigned and
+ * the Phase 6c quarantine hard-refuses their direct-grant with HTTP 400
+ * "Account disabled". The spec under test is about governance flow, not
+ * about who commits the retro-ADOPT, so we self-heal here: if IGA is enabled
+ * on the realm AND a PENDING ADOPT_USER exists for this user, the master
+ * admin authorizes+commits it (master-realm admin and system clients are
+ * exempt from the IGA quarantine + approver gate by the system-entity filter,
+ * so this is not a privilege escalation — see IgaScopeResolver). After the
+ * retro-ADOPT commits, the cache eviction in
+ * IgaReplayExtension.replayAdopt makes the next direct-grant return a token.
+ *
+ * If IGA is not enabled on the realm, this behaves exactly like the previous
+ * version (direct-grant straight away).
  */
 export async function userTokenFor(
   request: APIRequestContext,
@@ -1114,6 +1132,105 @@ export async function userTokenFor(
   username: string,
   password: string,
 ): Promise<string> {
+  // Step 1: is IGA enabled on this realm? If not, no self-heal is needed.
+  const status = await igaStatus(request, realm);
+  if (status.http === 200 && status.enabled === true) {
+    // Step 2: look up the user by username (using the master-admin token via
+    // the existing helper). If the user doesn't exist we just fall through
+    // to directGrantToken and let it produce the natural 401 — preserving
+    // the previous error path for "unknown user".
+    const userLookup = await getUserByUsername(request, realm, username);
+    const userId = userLookup.body?.id as string | undefined;
+    if (userId) {
+      // Step 3: build the set of ADOPT_* CRs that block this user's
+      // direct-grant. The quarantine refuses when EITHER the user itself
+      // OR any role the user effectively holds is still unsigned (role
+      // fan-out — see IgaQuarantineCache.isUserUnsignedWithRoles). So we
+      // must commit ADOPT_USER for the user AND every ADOPT_ROLE for a
+      // role currently mapped to them. Realm + client role mappings both
+      // count. Use the master-admin token (via kcFetch) — the master is
+      // exempt from quarantine via the system-entity filter, so these
+      // lookups never themselves stall.
+      const blocking: { id: string; actionType: string; entityId: string }[] = [];
+      const pending = await listChangeRequests(request, realm, 'PENDING');
+      const adoptUser = pending.find(
+        (cr) => cr.actionType === 'ADOPT_USER' && cr.entityId === userId,
+      );
+      if (adoptUser) {
+        blocking.push({
+          id: adoptUser.id,
+          actionType: adoptUser.actionType,
+          entityId: adoptUser.entityId,
+        });
+      }
+      // Collect role ids the user effectively holds (realm + per-client).
+      const roleIds = new Set<string>();
+      const realmRoles = await getUserRealmRoleMappings(request, realm, userId);
+      if (realmRoles.http === 200) {
+        for (const r of realmRoles.body) {
+          if (r?.id) roleIds.add(r.id as string);
+        }
+      }
+      // Per-client role mappings — read via /role-mappings (returns
+      // realmMappings + clientMappings). Same admin endpoint, no extra
+      // helper required.
+      const allMappings = await kcFetch(
+        request,
+        `/admin/realms/${realm}/users/${userId}/role-mappings`,
+      );
+      if (allMappings.status() === 200) {
+        const j = await safeJson(allMappings);
+        const clientMappings = j?.clientMappings || {};
+        for (const k of Object.keys(clientMappings)) {
+          const mp = clientMappings[k]?.mappings || [];
+          for (const r of mp) {
+            if (r?.id) roleIds.add(r.id as string);
+          }
+        }
+      }
+      for (const cr of pending) {
+        if (cr.actionType === 'ADOPT_ROLE' && roleIds.has(cr.entityId)) {
+          blocking.push({
+            id: cr.id,
+            actionType: cr.actionType,
+            entityId: cr.entityId,
+          });
+        }
+      }
+      // Step 4: master-admin authorize+commit each blocking ADOPT. Master is
+      // exempt from the quarantine + approver-role gate via the
+      // system-entity filter, so the authorize call is safe regardless of
+      // the realm's approver-role configuration. The commit gate still
+      // requires authCount >= threshold; when the realm sets
+      // iga.threshold>1 we can only contribute one signature (master) per
+      // CR. We tolerate a 412 here (no extra signers available from the
+      // harness) and let the subsequent direct-grant surface the resulting
+      // quarantine refusal naturally — the test setup is then responsible
+      // for arranging enough signers, or its expectations cover that the
+      // grant cannot succeed.
+      for (const b of blocking) {
+        const ac = await authorizeAndCommit(request, realm, b.id);
+        if (ac.authorize.http !== 200 && ac.authorize.http !== 409) {
+          // 409 = master already signed (idempotent re-run). Any other
+          // non-200 is a real failure worth surfacing — better than a
+          // misleading direct-grant 400 downstream.
+          throw new Error(
+            `userTokenFor(${realm}, ${username}) ${b.actionType}(${b.entityId}) authorize expected 200, got HTTP ${ac.authorize.http} ${JSON.stringify(ac.authorize.body)}`,
+          );
+        }
+        if (ac.commit.http !== 200 && ac.commit.http !== 412) {
+          // 412 = threshold > authCount; the master alone can't carry a
+          // multi-sig realm. Other statuses (404/409/...) are real errors.
+          throw new Error(
+            `userTokenFor(${realm}, ${username}) ${b.actionType}(${b.entityId}) commit expected 200 or 412, got HTTP ${ac.commit.http} ${JSON.stringify(ac.commit.body)}`,
+          );
+        }
+      }
+    }
+  }
+  // Step 5: direct-grant as the user. With the retro-ADOPT (if any) committed
+  // and the per-user cache evicted in IgaReplayExtension.replayAdopt, the
+  // quarantine override now returns enabled=true and the grant succeeds.
   const tok = await directGrantToken(request, realm, username, password);
   if (tok.http !== 200 || !tok.body?.access_token) {
     throw new Error(

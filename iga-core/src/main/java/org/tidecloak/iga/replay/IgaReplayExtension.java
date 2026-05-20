@@ -10,6 +10,9 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.cache.CacheRealmProvider;
+import org.keycloak.models.cache.UserCache;
+import org.keycloak.storage.UserStorageUtil;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.services.IgaUnsignedEntityService;
 
@@ -140,12 +143,214 @@ public final class IgaReplayExtension {
         // 4. Delete the sidecar row(s) for this CR.
         IgaUnsignedEntityService.clearByAdoptCr(em, cr.getId());
 
-        // 5. Mark APPROVED + resolvedAt on the managed CR — same tail as
+        // 5. Evict KC's cache entry for the just-attested entity so the next
+        // read goes through the IGA provider chain and sees the post-ADOPT
+        // state (attestation set, sidecar cleared, quarantine satisfied).
+        //
+        // Without this, a request that previously failed the quarantine check
+        // (e.g. a direct-grant against an unsigned user — Phase 6c case 1)
+        // leaves KC's UserCacheSession holding a snapshot with enabled=false.
+        // The post-toggle realm-wide UserCache eviction in
+        // TideAdminCompatResource only clears the cache once at toggle time;
+        // any read between toggle and ADOPT-commit can re-populate it with
+        // the stale "disabled" snapshot. We must evict per-entity here so
+        // that snapshot is replaced on the next lookup.
+        //
+        // Best-effort: per-entity API where one exists, RuntimeException
+        // swallowed and logged at WARN. The CR has been stamped + sidecar
+        // cleared by this point; a cache-eviction failure must not abort the
+        // replay (caches expire on their own and the post-condition will
+        // converge — we just lose a brief window of stale reads).
+        evictCacheForAdopt(session, realm, actionType, entityId);
+
+        // 6. Mark APPROVED + resolvedAt on the managed CR — same tail as
         // IgaReplayDispatcher.doReplay.
         IgaChangeRequestEntity managed = em.find(IgaChangeRequestEntity.class, cr.getId());
         if (managed != null) {
             managed.setStatus("APPROVED");
             managed.setResolvedAt(System.currentTimeMillis());
+        }
+    }
+
+    /**
+     * Best-effort per-entity cache eviction for the just-attested ADOPT
+     * target. Per-action mapping:
+     *
+     * <ul>
+     *   <li>{@code ADOPT_USER}: {@link UserCache#evict(RealmModel, UserModel)}
+     *       — {@code keycloak-model-storage} {@code UserCache.java:36}. The
+     *       per-user variant (not the realm-wide {@code evict(RealmModel)})
+     *       so a single ADOPT commit doesn't blow the entire realm's user
+     *       cache.</li>
+     *   <li>{@code ADOPT_CLIENT}: {@link CacheRealmProvider#registerClientInvalidation}
+     *       — {@code keycloak-model-storage-private} {@code CacheRealmProvider.java:36};
+     *       implementation in {@code RealmCacheSession.java:252} invalidates
+     *       the cached client adapter + sends a cluster invalidation event.</li>
+     *   <li>{@code ADOPT_GROUP}: {@link CacheRealmProvider#registerGroupInvalidation}
+     *       — {@code CacheRealmProvider.java:41}; {@code RealmCacheSession.java:334}.</li>
+     *   <li>{@code ADOPT_ROLE}: {@link CacheRealmProvider#registerRoleInvalidation}
+     *       — {@code CacheRealmProvider.java:39}; {@code RealmCacheSession.java:278}.
+     *       Requires the role name and container id, which we resolve via the
+     *       model API (same lookup the assertEntityExists path uses).</li>
+     *   <li>{@code ADOPT_CLIENT_SCOPE}:
+     *       {@link CacheRealmProvider#registerClientScopeInvalidation}
+     *       — {@code CacheRealmProvider.java:37}; {@code RealmCacheSession.java:265}.</li>
+     * </ul>
+     *
+     * <p>If either cache provider isn't installed (deployments without the
+     * infinispan model — {@code session.getProvider(...)} returns {@code null})
+     * we log a WARN and continue. The CR is still APPROVED; the cache will
+     * converge as entries expire on their own.</p>
+     *
+     * <p>Wraps the whole body in a try/catch on {@link RuntimeException}: the
+     * eviction is a post-commit convenience, not a correctness requirement
+     * for the attestation itself (the JPQL stamp + sidecar delete have
+     * already committed by this point on the same JPA transaction). A failure
+     * here must not abort the replay or leave the CR PENDING.</p>
+     */
+    private static void evictCacheForAdopt(KeycloakSession session, RealmModel realm,
+                                            String actionType, String entityId) {
+        try {
+            switch (actionType) {
+                case ACTION_ADOPT_USER: {
+                    UserCache userCache = UserStorageUtil.userCache(session);
+                    if (userCache == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=USER id=%s realm=%s — UserCache provider not installed (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    UserModel u = session.users().getUserById(realm, entityId);
+                    if (u == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=USER id=%s realm=%s — user vanished between stamp and evict (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    userCache.evict(realm, u);
+                    log.infof("IGA ADOPT cache eviction: type=USER id=%s realm=%s — evicted",
+                            entityId, realm.getId());
+                    return;
+                }
+                case ACTION_ADOPT_CLIENT: {
+                    CacheRealmProvider realmCache = session.getProvider(CacheRealmProvider.class);
+                    if (realmCache == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=CLIENT id=%s realm=%s — CacheRealmProvider not installed (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    ClientModel c = session.clients().getClientById(realm, entityId);
+                    String clientId = (c != null ? c.getClientId() : entityId);
+                    realmCache.registerClientInvalidation(entityId, clientId, realm.getId());
+                    log.infof("IGA ADOPT cache eviction: type=CLIENT id=%s realm=%s — evicted",
+                            entityId, realm.getId());
+                    return;
+                }
+                case ACTION_ADOPT_GROUP: {
+                    CacheRealmProvider realmCache = session.getProvider(CacheRealmProvider.class);
+                    if (realmCache == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=GROUP id=%s realm=%s — CacheRealmProvider not installed (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    realmCache.registerGroupInvalidation(entityId);
+                    // ADOPT_GROUP may unblock users currently quarantined via
+                    // group-membership fan-out (IgaUserAdapter.getGroupsStream
+                    // silent-strip). The user-cache snapshots each user's
+                    // group set + isEnabled() at load time, so realm-wide
+                    // user-cache eviction is required for the change to be
+                    // observable on the next direct-grant. No cheap per-user
+                    // evict exists (KC offers no group→user reverse index in
+                    // the cache APIs).
+                    evictRealmUserCacheFallback(session, realm, "ADOPT_GROUP", entityId);
+                    log.infof("IGA ADOPT cache eviction: type=GROUP id=%s realm=%s — evicted",
+                            entityId, realm.getId());
+                    return;
+                }
+                case ACTION_ADOPT_ROLE: {
+                    CacheRealmProvider realmCache = session.getProvider(CacheRealmProvider.class);
+                    if (realmCache == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=ROLE id=%s realm=%s — CacheRealmProvider not installed (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    RoleModel r = session.roles().getRoleById(realm, entityId);
+                    if (r == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=ROLE id=%s realm=%s — role vanished between stamp and evict (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    String roleName = r.getName();
+                    String containerId = (r.getContainerId() != null ? r.getContainerId() : realm.getId());
+                    realmCache.registerRoleInvalidation(entityId, roleName, containerId);
+                    // ADOPT_ROLE unblocks every user mapped to this role
+                    // (IgaQuarantineCache.isUserUnsignedWithRoles role
+                    // fan-out). UserCacheSession holds each user's isEnabled()
+                    // snapshot computed when the role was still unsigned; per-
+                    // user evict isn't feasible (no role→user reverse index
+                    // cheaper than walking all role members), so we fall back
+                    // to a realm-wide user-cache eviction — the same lever
+                    // the toggle-on path uses (TideAdminCompatResource
+                    // .evictRealmUserCache).
+                    evictRealmUserCacheFallback(session, realm, "ADOPT_ROLE", entityId);
+                    log.infof("IGA ADOPT cache eviction: type=ROLE id=%s realm=%s — evicted",
+                            entityId, realm.getId());
+                    return;
+                }
+                case ACTION_ADOPT_CLIENT_SCOPE: {
+                    CacheRealmProvider realmCache = session.getProvider(CacheRealmProvider.class);
+                    if (realmCache == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=CLIENT_SCOPE id=%s realm=%s — CacheRealmProvider not installed (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    realmCache.registerClientScopeInvalidation(entityId, realm.getId());
+                    log.infof("IGA ADOPT cache eviction: type=CLIENT_SCOPE id=%s realm=%s — evicted",
+                            entityId, realm.getId());
+                    return;
+                }
+                default:
+                    log.warnf("IGA ADOPT cache eviction: unknown action type %s — no eviction performed",
+                            actionType);
+            }
+        } catch (RuntimeException ex) {
+            // Best-effort. CR is already stamped + sidecar cleared on this
+            // transaction; the next admin write or natural TTL will refresh
+            // the cache. Log and move on — do not propagate.
+            log.warnf(ex, "IGA ADOPT cache eviction FAILED: action=%s id=%s realm=%s — stale read window until cache entry expires",
+                    actionType, entityId, realm.getId());
+        }
+    }
+
+    /**
+     * Realm-wide user-cache eviction lever shared by ADOPT_ROLE / ADOPT_GROUP.
+     * The user's quarantine verdict
+     * ({@link org.tidecloak.iga.providers.IgaUserAdapter#isEnabled}) depends
+     * on the signed status of every role/group the user holds (the role/group
+     * fan-out branch of {@link org.tidecloak.iga.services.IgaQuarantineCache
+     * #isUserUnsignedWithRoles}). When a role/group just transitioned from
+     * unsigned to signed, every user mapped to it has a stale
+     * {@code enabled=false} snapshot in KC's UserCacheSession. Per-user evict
+     * isn't reachable from here (KC offers no cheap role→user / group→user
+     * reverse index — walking all members would defeat the point of caching)
+     * so we evict the realm-wide user cache, the same lever
+     * {@link org.tidecloak.iga.rest.TideAdminCompatResource} uses on the
+     * OFF→ON toggle path. Best-effort: catches all RuntimeExceptions and
+     * logs at WARN — eviction failure must not abort the replay.
+     */
+    private static void evictRealmUserCacheFallback(KeycloakSession session, RealmModel realm,
+                                                     String actionType, String entityId) {
+        try {
+            UserCache userCache = UserStorageUtil.userCache(session);
+            if (userCache == null) {
+                log.warnf("IGA ADOPT realm-user-cache fallback: action=%s id=%s realm=%s — UserCache provider not installed (skipped)",
+                        actionType, entityId, realm.getId());
+                return;
+            }
+            userCache.evict(realm);
+            log.infof("IGA ADOPT realm-user-cache fallback: action=%s id=%s realm=%s — realm user cache evicted (role/group fan-out)",
+                    actionType, entityId, realm.getId());
+        } catch (RuntimeException ex) {
+            log.warnf(ex, "IGA ADOPT realm-user-cache fallback FAILED: action=%s id=%s realm=%s",
+                    actionType, entityId, realm.getId());
         }
     }
 
