@@ -20,13 +20,26 @@ import java.util.Set;
  *       the realm receives the composite automatically — pending-quarantining
  *       it would freeze every subsequent login/create.</li>
  *   <li><b>Soft skips</b> (default on, can be opted out of with
- *       {@code iga.adopt.includeSystem=true}) — KC's built-in per-realm admin
- *       clients ({@code realm-management}, {@code account},
- *       {@code account-console}, {@code security-admin-console},
- *       {@code broker}, {@code admin-cli}) AND their client-roles. These can
- *       be brought under governance by an operator that explicitly wants to,
- *       but the default avoids quarantining the very surface used to commit
- *       change requests.</li>
+ *       {@code iga.adopt.includeSystem=true}) — three sets:
+ *     <ul>
+ *       <li>KC's built-in per-realm admin clients
+ *           ({@code realm-management}, {@code account},
+ *           {@code account-console}, {@code security-admin-console},
+ *           {@code broker}, {@code admin-cli}) AND every client-role under
+ *           them. Avoids quarantining the very surface used to commit change
+ *           requests.</li>
+ *       <li>KC's default client-scopes
+ *           ({@link #DEFAULT_CLIENT_SCOPE_NAMES} — profile, email, roles,
+ *           role_list, …). Avoids quarantining the token-issuance plumbing
+ *           every fresh realm starts with.</li>
+ *       <li>KC's default realm roles
+ *           ({@link #DEFAULT_REALM_ROLE_NAMES} — offline_access,
+ *           uma_authorization). NOT the composite
+ *           default-roles-&lt;realm&gt; (that is hard-pinned above).</li>
+ *     </ul>
+ *     All three can be brought under governance by an operator that
+ *     explicitly wants to (set {@code iga.adopt.includeSystem=true}), but the
+ *     default keeps the realm's bootstrap surface ungoverned.</li>
  * </ol>
  *
  * <p>The {@code master} realm is filtered earlier — at the toggle handler —
@@ -52,6 +65,78 @@ public final class IgaSystemEntityFilter {
             "security-admin-console",
             "broker",
             "admin-cli"
+    );
+
+    /**
+     * KC's per-realm default client-scopes, created automatically on realm
+     * creation by the OIDC + SAML + (when enabled) ORGANIZATION protocol
+     * factories and {@code RealmManager.setupOfflineTokens}. None of these are
+     * admin-authored — bringing them under governance by default would
+     * quarantine the entire token-issuance surface of a fresh realm. They are
+     * soft-skipped (lifted by {@code iga.adopt.includeSystem=true}) so an
+     * operator can still opt them in if needed.
+     *
+     * <p>Sources (Keycloak 26.5.5):
+     * <ul>
+     *   <li>{@code org.keycloak.protocol.oidc.OIDCLoginProtocolFactory
+     *       #createDefaultClientScopesImpl}: profile, email, address, phone,
+     *       roles, web-origins, microprofile-jwt, basic, service_account
+     *       (always); acr (Profile.Feature.STEP_UP_AUTHENTICATION); organization
+     *       (Profile.Feature.ORGANIZATION).</li>
+     *   <li>{@code org.keycloak.services.managers.RealmManager
+     *       #setupOfflineTokens} → {@code DefaultClientScopes
+     *       .createOfflineAccessClientScope}: offline_access.</li>
+     *   <li>{@code org.keycloak.protocol.saml.SamlProtocolFactory
+     *       #createDefaultClientScopesImpl}: role_list (always);
+     *       saml_organization (Profile.Feature.ORGANIZATION).</li>
+     *   <li>{@code org.keycloak.protocol.oid4vc.OID4VCLoginProtocolFactory
+     *       #createDefaultClientScopesImpl}: oid4vc_natural_person
+     *       (when the OID4VC provider is enabled).</li>
+     * </ul>
+     * </p>
+     *
+     * <p>We list every name unconditionally (feature flags vary per
+     * deployment); a missing scope just means the realm never had it and the
+     * filter never sees a row to skip — no harm.</p>
+     */
+    public static final Set<String> DEFAULT_CLIENT_SCOPE_NAMES = Set.of(
+            "profile",
+            "email",
+            "address",
+            "phone",
+            "offline_access",
+            "roles",
+            "web-origins",
+            "microprofile-jwt",
+            "acr",
+            "basic",
+            "service_account",
+            "organization",
+            "role_list",
+            "saml_organization",
+            "oid4vc_natural_person"
+    );
+
+    /**
+     * KC's per-realm default realm roles, created automatically on realm
+     * creation. Constants from {@code org.keycloak.models.Constants}:
+     * <ul>
+     *   <li>{@code OFFLINE_ACCESS_ROLE} ({@code "offline_access"}) — added by
+     *       {@code KeycloakModelUtils.setupOfflineRole} from
+     *       {@code RealmManager.setupOfflineTokens}.</li>
+     *   <li>{@code AUTHZ_UMA_AUTHORIZATION} ({@code "uma_authorization"}) —
+     *       added by {@code KeycloakModelUtils.setupAuthorizationServices} as
+     *       part of {@code AUTHZ_DEFAULT_AUTHORIZATION_ROLES}.</li>
+     * </ul>
+     *
+     * <p>Neither is the realm-composite-default-role
+     * ({@code default-roles-&lt;realm&gt;}, hard-pinned above) — these two are
+     * regular realm roles that the composite references, and they are
+     * soft-skipped (lifted by {@code iga.adopt.includeSystem=true}).</p>
+     */
+    public static final Set<String> DEFAULT_REALM_ROLE_NAMES = Set.of(
+            "offline_access",
+            "uma_authorization"
     );
 
     private IgaSystemEntityFilter() {
@@ -120,9 +205,21 @@ public final class IgaSystemEntityFilter {
         }
         if (IgaReplayExtension.ENTITY_TYPE_ROLE.equals(entityType)) {
             // Client-roles whose parent client is built-in: skip them as a
-            // unit with their parent. Realm roles (parentClientId == null)
-            // are NOT soft-skipped here.
-            return parentClientId != null && BUILTIN_CLIENT_IDS.contains(parentClientId);
+            // unit with their parent.
+            if (parentClientId != null) {
+                return BUILTIN_CLIENT_IDS.contains(parentClientId);
+            }
+            // Realm roles auto-created by the realm bootstrap
+            // (offline_access, uma_authorization). The realm composite
+            // default-roles-<realm> is hard-pinned above and is not part of
+            // this soft set.
+            return entityName != null && DEFAULT_REALM_ROLE_NAMES.contains(entityName);
+        }
+        if (IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE.equals(entityType)) {
+            // Default client-scopes auto-created by OIDC/SAML/OID4VC protocol
+            // factories + RealmManager.setupOfflineTokens. Operator-authored
+            // scopes (e.g. the e2e p6b-scope) fall through and ARE quarantined.
+            return entityName != null && DEFAULT_CLIENT_SCOPE_NAMES.contains(entityName);
         }
         return false;
     }

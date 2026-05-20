@@ -221,28 +221,27 @@ test.describe('IGA Phase 6b: toggle-on ADOPT scan', () => {
       'number',
     );
     // Per-type CR counts: scratch realm has no built-ins beyond the KC
-    // auto-created ones, so happy-path tallies the entities we created.
-    // Realm bootstrap also leaves a number of CLIENT_SCOPEs (roles/email/
-    // profile/…). Those are unattested too and ARE counted by the scan
-    // because they're not in the BUILTIN_CLIENT_IDS list. So we assert
-    // lower bounds for CLIENT_SCOPE (>=1 — our own scope is included), and
-    // exact counts where we control the entire population (USER, GROUP).
+    // auto-created ones. The system filter (default-on) soft-skips:
+    //   - built-in admin clients + their roles
+    //   - KC's default client-scopes (profile/email/roles/…/role_list)
+    //   - KC's default realm roles (offline_access, uma_authorization)
+    //   - and hard-pins default-roles-<realm> role + bookkeeping client.
+    // So happy-path tallies are EXACTLY the entities we created.
     expect(scan.adoptCrsCreated?.USER, 'USER adopt CRs').toBe(3);
     expect(scan.adoptCrsCreated?.GROUP, 'GROUP adopt CRs').toBe(1);
     expect(
       scan.adoptCrsCreated?.CLIENT_SCOPE,
-      'CLIENT_SCOPE adopt CRs include p6b-scope',
-    ).toBeGreaterThanOrEqual(1);
-    // ROLE count: realm roles we created (2) plus any default realm roles
-    // that aren't hard-pinned. The realm composite default-roles-<realm> is
-    // hard-pinned and "offline_access"/"uma_authorization" are unattested
-    // default realm roles emitted on realm-create. So we assert >=2 but
-    // also that BOTH of our roles are present in the listing.
-    expect(scan.adoptCrsCreated?.ROLE).toBeGreaterThanOrEqual(2);
+      'CLIENT_SCOPE adopt CRs == p6b-scope only (defaults soft-skipped)',
+    ).toBe(1);
+    // ROLE count: realm roles we created (2). offline_access /
+    // uma_authorization are soft-skipped by the default-role filter, and the
+    // composite default-roles-<realm> is hard-pinned.
+    expect(scan.adoptCrsCreated?.ROLE, 'ROLE adopt CRs == 2 (defaults soft-skipped)').toBe(2);
     // CLIENT count: our p6b-app — built-in clients are soft-skipped by
     // default. Should be exactly 1 (just p6b-app).
     expect(scan.adoptCrsCreated?.CLIENT, 'CLIENT adopt CRs (built-ins skipped)').toBe(1);
-    // System filter must have fired (built-in clients exist in every realm).
+    // System filter must have fired (built-in clients + default client
+    // scopes + default realm roles exist in every realm).
     expect(scan.skipped?.systemFilter, 'systemFilter skip count').toBeGreaterThan(0);
     // No errors on a clean scratch realm.
     expect(scan.errors, 'errors').toBe(0);
@@ -352,6 +351,34 @@ test.describe('IGA Phase 6b: toggle-on ADOPT scan', () => {
         `no ADOPT_ROLE for realm-management roles (default)`,
       ).toBe(0);
     }
+
+    // KC default client-scopes (profile, email, roles, role_list, etc.) MUST
+    // be soft-skipped by default. None of their ADOPT CRs should exist in a
+    // freshly-toggled scratch realm. We assert NO ADOPT_CLIENT_SCOPE CRs
+    // exist at all here — SYSDEF has no operator-authored scopes, so the
+    // expected count is exactly 0.
+    const sysDefScopeAdopts = sysDefPending.filter(
+      (cr) => cr.actionType === 'ADOPT_CLIENT_SCOPE',
+    );
+    expect(
+      sysDefScopeAdopts.length,
+      `no ADOPT_CLIENT_SCOPE for KC defaults (got ${JSON.stringify(
+        sysDefScopeAdopts.map((c) => c.entityId),
+      )})`,
+    ).toBe(0);
+
+    // KC default realm roles (offline_access, uma_authorization) MUST be
+    // soft-skipped. SYSDEF has no operator-authored realm roles, so the
+    // expected ADOPT_ROLE count for THIS realm is exactly 0.
+    const sysDefRealmRoleAdopts = sysDefPending.filter(
+      (cr) => cr.actionType === 'ADOPT_ROLE',
+    );
+    expect(
+      sysDefRealmRoleAdopts.length,
+      `no ADOPT_ROLE for KC defaults (got ${JSON.stringify(
+        sysDefRealmRoleAdopts.map((c) => c.entityId),
+      )})`,
+    ).toBe(0);
 
     // -----------------------------------------------------------------------
     // CASE 3 — System filter override (iga.adopt.includeSystem=true):

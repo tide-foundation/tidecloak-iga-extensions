@@ -133,6 +133,17 @@ public final class IgaAdoptScan {
             throw new IllegalArgumentException("scan requires non-null session + realm");
         }
         long t0 = System.currentTimeMillis();
+        // Bind the realm onto the scan session's KeycloakContext so downstream
+        // model lookups (e.g. session.users().getUserById → org cache layer
+        // that calls session.getContext().getRealm()) don't throw "Session not
+        // bound to a realm". The fresh runJobInTransaction session has no
+        // realm bound by default; without this, every USER row in
+        // createAdoptCr → ModelToRepresentation.toRepresentation fails with
+        // IllegalArgumentException ("Session not bound to a realm") at the
+        // InfinispanOrganizationProvider#getRealm guard. Phase 6a's tests
+        // happened not to exercise this path because they never pre-create
+        // users with IGA off — Phase 6b's happy/race/already cases all do.
+        session.getContext().setRealm(realm);
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         IgaUnsignedRowScanner scanner = new IgaUnsignedRowScanner(em);
         IgaChangeRequestService crService = new IgaChangeRequestService(em, session);
