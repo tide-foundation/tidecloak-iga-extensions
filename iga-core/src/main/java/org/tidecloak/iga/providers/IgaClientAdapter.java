@@ -101,6 +101,17 @@ public class IgaClientAdapter extends ClientAdapter {
      */
     private boolean importDeferred = false;
 
+    /**
+     * Phase 4 (CME fix) — pre-built {@code CREATE_CLIENT} row cached at the
+     * eager-harvest seam ({@link #updateClient()} in {@code importDeferred}
+     * mode), so {@link IgaImportMode.BatchEmitTransaction#commit} can read it
+     * WITHOUT calling {@link ModelToRepresentation#toRepresentation
+     * (org.keycloak.models.ClientModel, KeycloakSession)} during the parent
+     * session's prepare-list iteration. See {@link #updateClient()} for the
+     * full root-cause analysis.
+     */
+    private Map<String, Object> cachedImportRow;
+
     public IgaClientAdapter(RealmModel realm, EntityManager em, KeycloakSession session, ClientEntity clientEntity) {
         this(realm, em, session, clientEntity, false);
     }
@@ -173,21 +184,66 @@ public class IgaClientAdapter extends ClientAdapter {
             return;
         }
 
-        // Phase 4 — partialImport deferred-harvest. When this capture-mode
-        // adapter was created on the ClientsPartialImport.create →
-        // RepresentationToModel.createClient path (IgaRealmProvider.addClient
-        // registered it with IgaImportMode), the CREATE_CLIENT row is
-        // harvested ONCE at batch-emit time by buildImportClientPendingCr()
-        // AFTER createClient has applied every updateClientProperties field /
-        // protocol-mapper / scope to the pass-through scratch model. This seam
-        // must then be inert (pass straight through to super.updateClient() so
-        // KC's createClient finishes normally and ClientsPartialImport
-        // .getModelId — realm.getClientByClientId(clientId).getId() — resolves
-        // on the real persisted client) — it MUST NOT accumulate (the batch
-        // harvest is the single source of truth) and MUST NOT throw (the
-        // batch-emit prepare-tx owns the veto). The single-entity admin-create
-        // branch below is byte-unchanged.
+        // Phase 4 (CME fix) — partialImport EAGER-HARVEST at the terminal
+        // create seam. When this capture-mode adapter was created on the
+        // ClientsPartialImport.create → RepresentationToModel.createClient
+        // path (IgaRealmProvider.addClient registered it with IgaImportMode),
+        // the CREATE_CLIENT row MUST be harvested HERE — inside KC's
+        // create-callable — not later in BatchEmitTransaction.commit().
+        //
+        // ROOT CAUSE (the bug we are fixing): the earlier deferred-harvest
+        // built the row inside BatchEmitTransaction.commit(), which runs
+        // INSIDE DefaultKeycloakTransactionManager.commit()'s prepare-list
+        // iteration (KC 26.5.5 DefaultKeycloakTransactionManager.java:124,
+        // `for (KeycloakTransaction tx : prepare)`). buildCapturedClientRow
+        // calls ModelToRepresentation.toRepresentation(this, igaSession). KC
+        // 26.5.5 ModelToRepresentation.java:901 does
+        // `session.getProvider(AuthorizationProvider.class)` and
+        // `authorization.getStoreFactory().findByClient(clientModel)` — the
+        // first call lazily constructs StoreFactoryCacheSession (tidecloak
+        // fork model/infinispan/.../authorization/StoreFactoryCacheSession
+        // .java:122) whose constructor calls
+        // `session.getTransactionManager().enlistPrepare(getPrepareTransaction())`
+        // on the parent session's TM — the SAME `prepare` LinkedList that
+        // is currently being iterated. The next `iterator.next()` then fails
+        // the modCount check (LinkedList$ListItr.checkForComodification:977
+        // → ConcurrentModificationException at TM.lambda$commit$0:124). The
+        // 5 CRs are already written successfully by runJobInTransaction
+        // before the throw, but the CME bypasses the
+        // IgaPendingApprovalException → 202 mapping and bubbles a 500.
+        //
+        // FIX (Option A — eager harvest at the terminal create-stack seam,
+        // per source-confirmed instructions): build the row HERE, while
+        // RepresentationToModel.createClient is still on the call stack and
+        // the parent TM is NOT yet iterating prepare. The
+        // StoreFactoryCacheSession's enlistPrepare therefore happens BEFORE
+        // TM.commit() begins iterating, so the prepare list is stable for the
+        // iteration. BatchEmitTransaction.commit() then just reads the
+        // pre-built `cachedImportRow` — zero model traversal, zero provider
+        // lookups, zero prepare-time mutation.
+        //
+        // updateClient() is the correct seam: KC 26.5.5
+        // RepresentationToModel.createClient (line 404) calls
+        // `client.updateClient()` as its FINAL unconditional model mutation
+        // — AFTER updateClientProperties (line 347), the protocol-mapper
+        // rebuild (line 391) and updateClientScopes (line 402). So every
+        // updateClientProperties field / protocol-mapper / scope link is on
+        // the live model when we serialize. The row is byte-faithful with
+        // the prior deferred-harvest path (identical buildCapturedClientRow,
+        // identical IgaReplayDispatcher consumption — byte-unchanged).
+        //
+        // The seam still calls super.updateClient() so KC's createClient
+        // finishes normally and ClientsPartialImport.getModelId — `realm
+        // .getClientByClientId(clientId).getId()` — resolves on the real
+        // persisted client. NO per-entity accumulate, NO throw, NO
+        // setRollbackOnly (the BatchEmit prepare-tx still owns the veto).
+        // The single-entity admin-create branch below is byte-unchanged.
         if (importDeferred) {
+            cachedImportRow = buildCapturedClientRow();
+            log.infof("IGA multi-entity HARVEST: REP_JSON built at "
+                    + "register-time for CREATE_CLIENT (size=%d chars) — "
+                    + "prepare-time traversal eliminated",
+                    ((String) cachedImportRow.get("REP_JSON")).length());
             super.updateClient();
             return;
         }
@@ -328,12 +384,37 @@ public class IgaClientAdapter extends ClientAdapter {
         if (!captureMode || !importDeferred) {
             return null;
         }
-        Map<String, Object> row = buildCapturedClientRow();
+        // Phase 4 (CME fix) — prefer the pre-built row that updateClient()
+        // captured at the terminal create seam (see updateClient() javadoc
+        // for the root-cause analysis: building the row HERE during the
+        // parent TM's prepare-list iteration causes
+        // StoreFactoryCacheSession.enlistPrepare to mutate the list under
+        // the iterator → ConcurrentModificationException at
+        // DefaultKeycloakTransactionManager.lambda$commit$0:124). The
+        // fallback to buildCapturedClientRow() only fires if updateClient()
+        // was never called on this client during the import — that should
+        // be impossible on the ClientsPartialImport.create path
+        // (RepresentationToModel.createClient:404 always calls it), but is
+        // retained as a defensive last resort that keeps the CR shape
+        // identical (and is logged so any drift is visible in production).
+        Map<String, Object> row = cachedImportRow;
+        if (row == null) {
+            log.warnf("IGA multi-entity HARVEST: pre-built row missing for "
+                    + "CREATE_CLIENT uuid=%s — falling back to batch-time "
+                    + "build (updateClient seam was never reached; this is "
+                    + "unexpected on the partialImport path and indicates a "
+                    + "control-flow regression — investigate)",
+                    super.getId());
+            row = buildCapturedClientRow();
+        }
         String clientUuid = (String) row.get("ID");
         log.infof("IGA multi-entity ACCUM: CREATE_CLIENT %s (uuid=%s) — row "
                 + "harvested at batch emit from the partialImport "
                 + "ClientsPartialImport.create → RepresentationToModel."
-                + "createClient path", row.get("CLIENT_ID"), clientUuid);
+                + "createClient path (source=%s)",
+                row.get("CLIENT_ID"), clientUuid,
+                cachedImportRow == row ? "pre-built (updateClient seam)"
+                                       : "batch-time fallback");
         return new IgaImportMode.PendingCr("CLIENT", clientUuid, "CREATE_CLIENT",
                 List.of(row), null);
     }
