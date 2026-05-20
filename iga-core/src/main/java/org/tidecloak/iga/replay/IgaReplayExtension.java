@@ -75,6 +75,29 @@ public final class IgaReplayExtension {
     }
 
     /**
+     * Single source of truth for "is this action type one of the five ADOPT_*
+     * variants owned by the Phase 6+ extension router". Used by the
+     * {@link org.tidecloak.iga.rest.IgaAdminResource} resume-from-CANCELLED
+     * lane and by {@link org.tidecloak.iga.attestors.IgaScopeResolver} to
+     * short-circuit the threshold + approver-role gates: ADOPT_* CRs are a
+     * system-bootstrap onramp (the entity already exists in production
+     * pre-IGA), so applying the realm's governance threshold + approver-role
+     * gate to them creates a chicken-and-egg deadlock where high-threshold
+     * realms with pre-IGA admins can't bootstrap. Any caller with
+     * {@code manage-realm} (already enforced by
+     * {@code IgaAdminResource.authorize}/{@code commit}) can authorize + commit
+     * an ADOPT_* in one signature.
+     */
+    public static boolean isAdoptAction(String actionType) {
+        if (actionType == null) return false;
+        return ACTION_ADOPT_USER.equals(actionType)
+                || ACTION_ADOPT_ROLE.equals(actionType)
+                || ACTION_ADOPT_GROUP.equals(actionType)
+                || ACTION_ADOPT_CLIENT.equals(actionType)
+                || ACTION_ADOPT_CLIENT_SCOPE.equals(actionType);
+    }
+
+    /**
      * Attempt to replay a CR via the Phase 6+ extension. Returns {@code true}
      * iff the extension fully handled the CR (caller skips the dispatcher).
      * Returns {@code false} for any action type the extension does not own.

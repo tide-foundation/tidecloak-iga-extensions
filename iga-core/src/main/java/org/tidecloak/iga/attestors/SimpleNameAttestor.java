@@ -49,7 +49,11 @@ public class SimpleNameAttestor implements IgaAttestor {
                                          String attestationPayload) {
         RealmModel realm = session.realms().getRealm(cr.getRealmId());
         IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
-        IgaScopeResolver.requireApprover(realm, admin, scope);
+        // ADOPT_* CRs (Phase 6+) bypass the approver-role gate inside
+        // requireApprover — they are a system-bootstrap onramp, not a
+        // governance decision. The action-type-aware overload handles that
+        // short-circuit; all other action types enforce the gate as before.
+        IgaScopeResolver.requireApprover(session, realm, admin, scope, cr);
 
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         IgaAuthorizationEntity auth = new IgaAuthorizationEntity();
@@ -87,7 +91,10 @@ public class SimpleNameAttestor implements IgaAttestor {
     @Override
     public int getThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr) {
         IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
-        return IgaScopeResolver.resolveThreshold(realm, scope);
+        // ADOPT_* CRs short-circuit to threshold=1 inside the resolver — see
+        // resolveThreshold's javadoc. All other action types use the regular
+        // realm/per-scope threshold resolution.
+        return IgaScopeResolver.resolveThreshold(session, realm, scope, cr);
     }
 
     @Override

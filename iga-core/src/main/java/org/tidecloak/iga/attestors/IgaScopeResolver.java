@@ -3,6 +3,7 @@ package org.tidecloak.iga.attestors;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.ws.rs.ForbiddenException;
+import org.jboss.logging.Logger;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
@@ -10,6 +11,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.replay.IgaReplayExtension;
 
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -37,6 +39,8 @@ import java.util.stream.Collectors;
  */
 public final class IgaScopeResolver {
 
+    private static final Logger log = Logger.getLogger(IgaScopeResolver.class);
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<List<Map<String, Object>>> ROWS_TYPE =
             new TypeReference<List<Map<String, Object>>>() {};
@@ -44,6 +48,14 @@ public final class IgaScopeResolver {
     public static final String ATTR_APPROVER_ROLE = "iga.approverRole";
     public static final String ATTR_THRESHOLD = "iga.threshold";
     public static final String ATTR_SCOPE_MODE = "iga.scopeMode";
+
+    /**
+     * Session-attribute key prefix used to dedupe the "ADOPT gate bypass" INFO
+     * log line so we emit it at most once per (request, CR, gate) instead of
+     * once per call. The same CR is typically inspected several times in one
+     * request (resolve-then-threshold, list-representation enrichment, etc.).
+     */
+    private static final String ADOPT_BYPASS_LOG_KEY_PREFIX = "iga.adoptBypass.logged.";
 
     private IgaScopeResolver() {
     }
@@ -178,8 +190,36 @@ public final class IgaScopeResolver {
      * caller's existing realm-admin check remains the only gate.
      *
      * @throws ForbiddenException if the admin lacks the required role(s)
+     * @deprecated Prefer
+     *     {@link #requireApprover(KeycloakSession, RealmModel, UserModel, ResolvedScope, IgaChangeRequestEntity)}
+     *     so the ADOPT_* system-bootstrap bypass can short-circuit the gate.
+     *     Retained for any caller that has no CR context.
      */
+    @Deprecated
     public static void requireApprover(RealmModel realm, UserModel admin, ResolvedScope scope) {
+        requireApproverInternal(realm, admin, scope);
+    }
+
+    /**
+     * Action-type-aware variant. ADOPT_* CRs are a system-bootstrap onramp
+     * (the entity already exists in production pre-IGA) — applying the realm's
+     * approver-role gate to them creates a chicken-and-egg deadlock where
+     * high-threshold realms with pre-IGA admins can't bootstrap. For ADOPT_*
+     * action types this method is a no-op; all other action types fall through
+     * to the same enforcement path as before. The caller's {@code manage-realm}
+     * check (see {@code IgaAdminResource.authorize}/{@code commit}) remains
+     * the only gate for ADOPT.
+     */
+    public static void requireApprover(KeycloakSession session, RealmModel realm, UserModel admin,
+                                       ResolvedScope scope, IgaChangeRequestEntity cr) {
+        if (cr != null && IgaReplayExtension.isAdoptAction(cr.getActionType())) {
+            logAdoptBypassOnce(session, cr, "requireApprover");
+            return;
+        }
+        requireApproverInternal(realm, admin, scope);
+    }
+
+    private static void requireApproverInternal(RealmModel realm, UserModel admin, ResolvedScope scope) {
         if (scope == null || scope.requiredApproverRoles.isEmpty()) return;
 
         boolean strict = "all".equalsIgnoreCase(realm.getAttribute(ATTR_SCOPE_MODE));
@@ -207,8 +247,36 @@ public final class IgaScopeResolver {
      * because {@code authCount < threshold} would never trip and the commit
      * gate could be silently disabled. A defensive final clamp guarantees this
      * method can never return a value {@code < 1} regardless of the source.</p>
+     *
+     * @deprecated Prefer
+     *     {@link #resolveThreshold(KeycloakSession, RealmModel, ResolvedScope, IgaChangeRequestEntity)}
+     *     so the ADOPT_* system-bootstrap bypass (threshold=1) can short-circuit
+     *     the gate. Retained for any caller that has no CR context.
      */
+    @Deprecated
     public static int resolveThreshold(RealmModel realm, ResolvedScope scope) {
+        return resolveThresholdInternal(realm, scope);
+    }
+
+    /**
+     * Action-type-aware variant. ADOPT_* CRs are a system-bootstrap onramp
+     * (the entity already exists in production pre-IGA) — applying the realm's
+     * governance threshold to them creates a chicken-and-egg deadlock where
+     * high-threshold realms with pre-IGA admins can't bootstrap. For ADOPT_*
+     * action types this method returns {@code 1} unconditionally, regardless
+     * of realm-level or per-scope {@code iga.threshold}. All other action
+     * types fall through to the same threshold-resolution path as before.
+     */
+    public static int resolveThreshold(KeycloakSession session, RealmModel realm,
+                                       ResolvedScope scope, IgaChangeRequestEntity cr) {
+        if (cr != null && IgaReplayExtension.isAdoptAction(cr.getActionType())) {
+            logAdoptBypassOnce(session, cr, "resolveThreshold");
+            return 1;
+        }
+        return resolveThresholdInternal(realm, scope);
+    }
+
+    private static int resolveThresholdInternal(RealmModel realm, ResolvedScope scope) {
         int resolved = 1;
         if (scope != null && !scope.thresholds.isEmpty()) {
             resolved = scope.thresholds.stream().mapToInt(Integer::intValue).max().orElse(1);
@@ -227,6 +295,23 @@ public final class IgaScopeResolver {
         // Defence-in-depth: never return a threshold that could disable the
         // commit gate, irrespective of how `resolved` was computed.
         return Math.max(1, resolved);
+    }
+
+    /**
+     * Emit one INFO log line per (request, CR, gate) when the ADOPT_*
+     * system-bootstrap bypass fires. A single request can hit the threshold +
+     * approver-role paths several times (resolve-then-threshold during
+     * commit, list-representation enrichment, etc.); without dedup the log
+     * would balloon. We key on the {@link KeycloakSession} attribute map so
+     * the suppression is per-request (no JVM-wide map / no eviction concern).
+     */
+    private static void logAdoptBypassOnce(KeycloakSession session, IgaChangeRequestEntity cr, String gate) {
+        if (cr == null) return;
+        String key = ADOPT_BYPASS_LOG_KEY_PREFIX + gate + "." + cr.getId();
+        if (session != null && session.getAttribute(key) != null) return;
+        if (session != null) session.setAttribute(key, Boolean.TRUE);
+        log.infof("IGA ADOPT gate bypass: actionType=%s CR=%s — threshold=1, no approver-role check (system-bootstrap action) [gate=%s]",
+                cr.getActionType(), cr.getId(), gate);
     }
 
     // -------------------------------------------------------------------------

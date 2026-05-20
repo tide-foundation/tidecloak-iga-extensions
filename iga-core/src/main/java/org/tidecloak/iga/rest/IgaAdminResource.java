@@ -142,12 +142,9 @@ public class IgaAdminResource {
      * complete the adoption on a subsequent admin pass.
      */
     private static boolean isAdoptAction(String actionType) {
-        if (actionType == null) return false;
-        return IgaReplayExtension.ACTION_ADOPT_USER.equals(actionType)
-                || IgaReplayExtension.ACTION_ADOPT_ROLE.equals(actionType)
-                || IgaReplayExtension.ACTION_ADOPT_GROUP.equals(actionType)
-                || IgaReplayExtension.ACTION_ADOPT_CLIENT.equals(actionType)
-                || IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE.equals(actionType);
+        // Delegate to the canonical predicate in IgaReplayExtension so the
+        // five ADOPT_* strings live in exactly one place.
+        return IgaReplayExtension.isAdoptAction(actionType);
     }
 
     // -------------------------------------------------------------------------
@@ -332,8 +329,10 @@ public class IgaAdminResource {
         }
 
         // Same approver-role gate the authorize path uses (via SimpleNameAttestor.record).
+        // ADOPT_* CRs short-circuit inside requireApprover (system-bootstrap
+        // bypass) so a single manage-realm signature commits them.
         IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
-        IgaScopeResolver.requireApprover(realm, admin, scope);
+        IgaScopeResolver.requireApprover(session, realm, admin, scope, cr);
 
         IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
         List<IgaAuthorizationEntity> all = em.createNamedQuery(
@@ -1454,7 +1453,9 @@ public class IgaAdminResource {
         // the affected entities twice.
         try {
             IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
-            rep.setThreshold(IgaScopeResolver.resolveThreshold(realm, scope));
+            // ADOPT_* CRs report threshold=1 (system-bootstrap bypass) so the
+            // admin UI sees the same gate the server enforces at commit.
+            rep.setThreshold(IgaScopeResolver.resolveThreshold(session, realm, scope, cr));
             rep.setRequiredApproverRoles(new java.util.ArrayList<>(scope.requiredApproverRoles));
             // scopeMode is realm-level today (see IgaScopeResolver.requireApprover);
             // mirror that derivation exactly so the UI sees the same gate the
