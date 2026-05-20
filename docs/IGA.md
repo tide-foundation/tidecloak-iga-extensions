@@ -387,7 +387,8 @@ union of `iga.approverRole` values from the affected entities
   `IgaScopeResolver.java:312-321`).
 - **Realm-wide / top-level-create actions** (`CREATE_USER`,
   `CREATE_ROLE`, `CREATE_GROUP`, `CREATE_CLIENT`, `CREATE_CLIENT_SCOPE`,
-  `CREATE_ORGANIZATION`, `SET_REALM_*`, `BASELINE_APPROVAL`, license
+  `CREATE_ORGANIZATION`, `SET_REALM_*`, `ADOPT_*` (toggle-on adoption,
+  Phase 6), license
   and server-cert actions, and the `BATCH / PARTIAL_IMPORT` aggregate
   CR) yield an **empty scope** — no approver-role requirement is derived;
   only the baseline `manage-realm` gate applies.
@@ -1041,8 +1042,9 @@ contributor guide: [Extending IGA](EXTENDING-IGA.md).
   endpoints: `change-requests`
   (list/get/update/authorize/commit/deny/comments), `role-policies`,
   `authorizers`, `forseti-contracts`, `server-certs`, `licensing`,
-  `baseline-review`. Every endpoint requires `manage-realm` (deny /
-  comment-delete additionally allow the original author).
+  `adopt` (Phase 6 per-entity ADOPT seed). Every endpoint requires
+  `manage-realm` (deny / comment-delete additionally allow the
+  original author).
 - **`TideAdminCompatResource`** (`rest/`, `@Path("tide-admin")`) —
   backwards-compatible `toggle-iga` / `iga-status` endpoints driving
   the `isIGAEnabled` realm attribute.

@@ -116,6 +116,102 @@ public final class IgaUnsignedRowScanner {
     }
 
     // -------------------------------------------------------------------------
+    // Phase 6b — projection variants that surface the columns needed by
+    // {@link IgaSystemEntityFilter} to identify built-in clients (by clientId
+    // string) and client-roles whose parent is a built-in client. These are
+    // ADDITIVE: the existing id-only methods above remain byte-unchanged in
+    // their JPQL, so callers that don't need the system-filter projection are
+    // unaffected.
+    //
+    // Each row carries the entity's UUID plus the name(s) the filter needs.
+    // -------------------------------------------------------------------------
+
+    /**
+     * (entityId, entityName) for unattested USERs in the realm. Name is the
+     * KC USERNAME column — the filter does not currently key on it but it is
+     * surfaced for symmetry / future rules and for the audit log line.
+     */
+    public record InfoRow(String entityId, String entityName, String parentClientId) { }
+
+    public List<InfoRow> usersWithNames(String realmId) {
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = (List<Object[]>) em.createQuery(
+                "SELECT u.id, u.username FROM UserEntity u " +
+                        "WHERE u.realmId = ?1 AND u.attestation IS NULL")
+                .setParameter(1, realmId).getResultList();
+        List<InfoRow> out = new ArrayList<>(rows.size());
+        for (Object[] r : rows) out.add(new InfoRow(asStr(r, 0), asStr(r, 1), null));
+        log.debugf("scanner: USER (with-name) — %d unsigned row(s) in realm %s", out.size(), realmId);
+        return out;
+    }
+
+    /**
+     * (entityId, roleName, parentClientId) for unattested ROLEs.
+     *
+     * <p>{@code parentClientId} is the parent client's {@code clientId} STRING
+     * (e.g. "realm-management"), not its UUID — that's what the system-filter
+     * compares against. For realm roles the field is {@code null}. The JPQL
+     * left-joins the parent client to keep realm roles in the result set and
+     * avoid running a second query.</p>
+     */
+    public List<InfoRow> rolesWithNames(String realmId) {
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = (List<Object[]>) em.createQuery(
+                "SELECT r.id, r.name, parent.clientId FROM RoleEntity r " +
+                        "LEFT JOIN ClientEntity parent ON parent.id = r.clientId " +
+                        "WHERE r.realmId = ?1 AND r.attestation IS NULL")
+                .setParameter(1, realmId).getResultList();
+        List<InfoRow> out = new ArrayList<>(rows.size());
+        for (Object[] r : rows) out.add(new InfoRow(asStr(r, 0), asStr(r, 1), asStr(r, 2)));
+        log.debugf("scanner: ROLE (with-name) — %d unsigned row(s) in realm %s", out.size(), realmId);
+        return out;
+    }
+
+    public List<InfoRow> groupsWithNames(String realmId) {
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = (List<Object[]>) em.createQuery(
+                "SELECT g.id, g.name FROM GroupEntity g " +
+                        "WHERE g.realm = ?1 AND g.attestation IS NULL")
+                .setParameter(1, realmId).getResultList();
+        List<InfoRow> out = new ArrayList<>(rows.size());
+        for (Object[] r : rows) out.add(new InfoRow(asStr(r, 0), asStr(r, 1), null));
+        log.debugf("scanner: GROUP (with-name) — %d unsigned row(s) in realm %s", out.size(), realmId);
+        return out;
+    }
+
+    /**
+     * (entityId, clientId-string) for unattested CLIENTs. The string clientId
+     * is what {@link IgaSystemEntityFilter#BUILTIN_CLIENT_IDS} matches on.
+     */
+    public List<InfoRow> clientsWithNames(String realmId) {
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = (List<Object[]>) em.createQuery(
+                "SELECT c.id, c.clientId FROM ClientEntity c " +
+                        "WHERE c.realmId = ?1 AND c.attestation IS NULL")
+                .setParameter(1, realmId).getResultList();
+        List<InfoRow> out = new ArrayList<>(rows.size());
+        for (Object[] r : rows) out.add(new InfoRow(asStr(r, 0), asStr(r, 1), null));
+        log.debugf("scanner: CLIENT (with-name) — %d unsigned row(s) in realm %s", out.size(), realmId);
+        return out;
+    }
+
+    public List<InfoRow> clientScopesWithNames(String realmId) {
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = (List<Object[]>) em.createQuery(
+                "SELECT cs.id, cs.name FROM ClientScopeEntity cs " +
+                        "WHERE cs.realmId = ?1 AND cs.attestation IS NULL")
+                .setParameter(1, realmId).getResultList();
+        List<InfoRow> out = new ArrayList<>(rows.size());
+        for (Object[] r : rows) out.add(new InfoRow(asStr(r, 0), asStr(r, 1), null));
+        log.debugf("scanner: CLIENT_SCOPE (with-name) — %d unsigned row(s) in realm %s", out.size(), realmId);
+        return out;
+    }
+
+    private static String asStr(Object[] r, int i) {
+        return r.length > i && r[i] != null ? r[i].toString() : null;
+    }
+
+    // -------------------------------------------------------------------------
     // Protocol mappers (scoped to clients in the realm). Phase 6b/6c may treat
     // these alongside their parent client; surfaced separately so the caller
     // can decide.

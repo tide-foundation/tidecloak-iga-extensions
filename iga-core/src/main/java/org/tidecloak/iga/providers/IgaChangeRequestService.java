@@ -98,6 +98,14 @@ public class IgaChangeRequestService {
      * a Phase 6b toggle-on scan should never see this, but it protects an
      * unit/E2E driver from creating a dangling CR.</p>
      *
+     * <p>Phase 6b — throws {@link AlreadyAttestedException} when the target
+     * entity's {@code attestation} column is non-null. The toggle-on scan
+     * already filters to {@code attestation IS NULL} at the JPQL level so
+     * never triggers this; the manual {@code POST /iga/adopt} endpoint maps
+     * the exception to a 409 CONFLICT. The pre-check is a single SELECT per
+     * call and leaves the existing happy path byte-identical for unattested
+     * entities (lookup happens BEFORE any persist).</p>
+     *
      * @param realm        target realm (must be IGA-enabled — caller's check)
      * @param entityType   one of USER | ROLE | GROUP | CLIENT | CLIENT_SCOPE
      * @param entityId     the entity's UUID
@@ -109,6 +117,15 @@ public class IgaChangeRequestService {
         if (realm == null || entityType == null || entityId == null) {
             throw new IllegalArgumentException(
                     "createAdoptCr requires non-null realm + entityType + entityId");
+        }
+        // Phase 6b — refuse to enqueue an ADOPT CR for an already-attested
+        // entity. Single SELECT against the underlying info-table's
+        // attestation column; if the entity row is missing the existing
+        // model lookup below will surface the more specific
+        // "not found in realm" IllegalArgumentException so callers don't
+        // need to disambiguate "missing" from "already attested" here.
+        if (isAlreadyAttested(entityType, entityId)) {
+            throw new AlreadyAttestedException(entityType, entityId);
         }
         String actionType;
         Map<String, Object> repRow;
@@ -346,5 +363,72 @@ public class IgaChangeRequestService {
                 "IgaComment.findByChangeRequest", IgaCommentEntity.class);
         query.setParameter("crId", changeRequestId);
         return query.getResultList();
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 6b — already-attested guard. See createAdoptCr JavaDoc.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Thrown by {@link #createAdoptCr} when the target entity already has its
+     * {@code attestation} column populated. The manual {@code POST /iga/adopt}
+     * endpoint maps this to a 409 CONFLICT with body {@code {error:
+     * "ALREADY_ATTESTED", entityType, entityId}}. The Phase 6b toggle-on scan
+     * never triggers this (it filters {@code attestation IS NULL} at JPQL)
+     * but defensively catches it for visibility.
+     */
+    public static final class AlreadyAttestedException extends RuntimeException {
+        private final String entityType;
+        private final String entityId;
+
+        public AlreadyAttestedException(String entityType, String entityId) {
+            super("ADOPT refused: " + entityType + " " + entityId
+                    + " is already attested");
+            this.entityType = entityType;
+            this.entityId = entityId;
+        }
+
+        public String getEntityType() { return entityType; }
+        public String getEntityId() { return entityId; }
+    }
+
+    /**
+     * Single-SELECT probe of the entity's own {@code attestation} column.
+     * Returns {@code true} when the row exists AND its attestation is
+     * non-null. Returns {@code false} when the row is missing OR the
+     * attestation is null — the caller's downstream model lookup will surface
+     * the missing-row case with a more specific error message.
+     */
+    private boolean isAlreadyAttested(String entityType, String entityId) {
+        String jpql;
+        switch (entityType) {
+            case org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_USER:
+                jpql = "SELECT u.attestation FROM UserEntity u WHERE u.id = :id";
+                break;
+            case org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_ROLE:
+                jpql = "SELECT r.attestation FROM RoleEntity r WHERE r.id = :id";
+                break;
+            case org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_GROUP:
+                jpql = "SELECT g.attestation FROM GroupEntity g WHERE g.id = :id";
+                break;
+            case org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_CLIENT:
+                jpql = "SELECT c.attestation FROM ClientEntity c WHERE c.id = :id";
+                break;
+            case org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE:
+                jpql = "SELECT cs.attestation FROM ClientScopeEntity cs WHERE cs.id = :id";
+                break;
+            default:
+                // Unsupported types are rejected by the switch below; let the
+                // existing branch surface the more specific
+                // IllegalArgumentException.
+                return false;
+        }
+        List<?> results = em.createQuery(jpql)
+                .setParameter("id", entityId)
+                .setMaxResults(1)
+                .getResultList();
+        if (results.isEmpty()) return false;
+        Object attestation = results.get(0);
+        return attestation != null;
     }
 }

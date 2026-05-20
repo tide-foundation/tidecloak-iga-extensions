@@ -423,6 +423,16 @@ public class IgaAdminResource {
                             "entityType", entityType,
                             "entityId", entityId))
                     .build();
+        } catch (IgaChangeRequestService.AlreadyAttestedException aae) {
+            // Phase 6b — entity already carries an attestation (a prior ADOPT
+            // already committed). Refuse with 409 so a manual driver doesn't
+            // create a CR whose replay would be a JPQL no-op against
+            // attestation IS NULL.
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of("error", "ALREADY_ATTESTED",
+                            "entityType", aae.getEntityType(),
+                            "entityId", aae.getEntityId()))
+                    .build();
         } catch (IllegalArgumentException iae) {
             return Response.status(Response.Status.BAD_REQUEST)
                     .entity(Map.of("error", iae.getMessage()))
