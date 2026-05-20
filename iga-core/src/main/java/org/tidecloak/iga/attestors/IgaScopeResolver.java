@@ -57,7 +57,7 @@ public final class IgaScopeResolver {
      * Walk the affected entities for the given change request and collect
      * scope-marked approver roles + thresholds. Never returns {@code null};
      * actions whose semantics are realm-wide (e.g. create-user, license
-     * issuance, baseline approval) yield an empty {@link ResolvedScope}.
+     * issuance) yield an empty {@link ResolvedScope}.
      */
     public static ResolvedScope resolve(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr) {
         ResolvedScope scope = new ResolvedScope();
@@ -163,8 +163,8 @@ public final class IgaScopeResolver {
                 resolveOrganizationScopesFromRows(session, realm, cr, scope, "ORG_ID");
                 break;
             // CREATE_USER / CREATE_ROLE / CREATE_GROUP / CREATE_CLIENT /
-            // CREATE_ORGANIZATION and realm-wide action types
-            // (BASELINE_APPROVAL, REQUEST_SERVER_CERT, INSTALL_LICENSE,
+            // CREATE_ORGANIZATION, the Phase 6+ ADOPT_* family, and realm-wide
+            // action types (REQUEST_SERVER_CERT, INSTALL_LICENSE,
             // ROTATE_LICENSE) intentionally leave the scope empty.
             default:
                 break;
@@ -240,7 +240,7 @@ public final class IgaScopeResolver {
             List<Map<String, Object>> parsed = MAPPER.readValue(json, ROWS_TYPE);
             return parsed != null ? parsed : List.of();
         } catch (Exception e) {
-            // Non-array payloads (e.g. BASELINE_APPROVAL's {tables: ...}) get no scope info.
+            // Non-array payloads get no scope info.
             return List.of();
         }
     }

@@ -1,7 +1,6 @@
 package org.tidecloak.iga.replay;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
@@ -14,8 +13,6 @@ import org.keycloak.models.RoleModel;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 
 import jakarta.persistence.EntityManager;
-import jakarta.persistence.Query;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -135,19 +132,6 @@ public class IgaReplayDispatcher {
     private static void doReplay(KeycloakSession session, IgaChangeRequestEntity cr, String finalAttestation) {
         RealmModel realm = session.realms().getRealm(cr.getRealmId());
         EntityManager em = getEm(session);
-
-        // BASELINE_APPROVAL has a structured rows_json with a top-level
-        // "tables" object — it doesn't match the flat List shape used by
-        // every other action. Handle it before the generic parse.
-        if ("BASELINE_APPROVAL".equals(cr.getActionType())) {
-            replayBaselineApproval(em, cr, finalAttestation);
-            IgaChangeRequestEntity managedBaseline = em.find(IgaChangeRequestEntity.class, cr.getId());
-            if (managedBaseline != null) {
-                managedBaseline.setStatus("APPROVED");
-                managedBaseline.setResolvedAt(System.currentTimeMillis());
-            }
-            return;
-        }
 
         List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
 
@@ -1522,187 +1506,6 @@ public class IgaReplayDispatcher {
                 .setParameter("pid", parentId)
                 .setParameter("name", name)
                 .executeUpdate();
-    }
-
-    // -------------------------------------------------------------------------
-    // BASELINE_APPROVAL replay — sweep every snapshotted unsigned row and
-    // stamp the final attestation on it. Uses native SQL because the ATTESTATION
-    // column was added by a Liquibase changelog at the DB layer; the JPA
-    // entity classes don't (yet) expose `attestation` as a Hibernate field.
-    // -------------------------------------------------------------------------
-
-    private static void replayBaselineApproval(EntityManager em, IgaChangeRequestEntity cr, String finalAttestation) {
-        if (finalAttestation == null || finalAttestation.isEmpty()) {
-            log.warnf("BASELINE_APPROVAL %s has no final attestation; skipping attestation writes", cr.getId());
-            return;
-        }
-        JsonNode root;
-        try {
-            root = MAPPER.readTree(cr.getRowsJson());
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to parse BASELINE rows_json for CR " + cr.getId(), e);
-        }
-        JsonNode tables = root.get("tables");
-        if (tables == null || !tables.isObject()) {
-            log.warnf("BASELINE_APPROVAL %s has no tables payload", cr.getId());
-            return;
-        }
-
-        // Info tables — single id column
-        updateBatchById(em, tables, "user_entity",
-                "UPDATE UserEntity e SET e.attestation = :sig WHERE e.id IN :ids AND e.attestation IS NULL",
-                "id", finalAttestation);
-        updateBatchById(em, tables, "keycloak_role",
-                "UPDATE RoleEntity e SET e.attestation = :sig WHERE e.id IN :ids AND e.attestation IS NULL",
-                "id", finalAttestation);
-        updateBatchById(em, tables, "keycloak_group",
-                "UPDATE GroupEntity e SET e.attestation = :sig WHERE e.id IN :ids AND e.attestation IS NULL",
-                "id", finalAttestation);
-        updateBatchById(em, tables, "client",
-                "UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id IN :ids AND e.attestation IS NULL",
-                "id", finalAttestation);
-        updateBatchById(em, tables, "client_scope",
-                "UPDATE ClientScopeEntity e SET e.attestation = :sig WHERE e.id IN :ids AND e.attestation IS NULL",
-                "id", finalAttestation);
-        updateBatchById(em, tables, "protocol_mapper",
-                "UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.id IN :ids AND e.attestation IS NULL",
-                "id", finalAttestation);
-
-        // Relationship tables — composite key match, one update per row.
-        // JPQL navigates @ManyToOne relations via dotted paths (e.g. e.user.id);
-        // plain @Column scalars are referenced by their field name.
-        updatePairs(em, tables, "user_role_mapping",
-                "UPDATE UserRoleMappingEntity e SET e.attestation = :sig " +
-                        "WHERE e.user.id = :k1 AND e.roleId = :k2 AND e.attestation IS NULL",
-                "USER_ID", "ROLE_ID", finalAttestation);
-        updatePairs(em, tables, "user_group_membership",
-                "UPDATE UserGroupMembershipEntity e SET e.attestation = :sig " +
-                        "WHERE e.user.id = :k1 AND e.groupId = :k2 AND e.attestation IS NULL",
-                "USER", "GROUP", finalAttestation);
-        updatePairs(em, tables, "group_role_mapping",
-                "UPDATE GroupRoleMappingEntity e SET e.attestation = :sig " +
-                        "WHERE e.group.id = :k1 AND e.roleId = :k2 AND e.attestation IS NULL",
-                "GROUP", "ROLE", finalAttestation);
-        updatePairs(em, tables, "composite_role",
-                "UPDATE CompositeRoleEntity e SET e.attestation = :sig " +
-                        "WHERE e.parentRole.id = :k1 AND e.childRole.id = :k2 AND e.attestation IS NULL",
-                "COMPOSITE", "CHILD_ROLE", finalAttestation);
-        updatePairs(em, tables, "client_scope_client",
-                "UPDATE ClientScopeClientMappingEntity e SET e.attestation = :sig " +
-                        "WHERE e.clientId = :k1 AND e.clientScopeId = :k2 AND e.attestation IS NULL",
-                "CLIENT_ID", "SCOPE_ID", finalAttestation);
-        updatePairs(em, tables, "client_scope_role_mapping",
-                "UPDATE ClientScopeRoleMappingEntity e SET e.attestation = :sig " +
-                        "WHERE e.clientScope.id = :k1 AND e.role.id = :k2 AND e.attestation IS NULL",
-                "SCOPE_ID", "ROLE_ID", finalAttestation);
-
-        // ----- Attribute tables (1.8.0+) -----
-        // Each row in the snapshot carries (parent_id, name, value); the
-        // composite key for the row is (parent_id, name, value) because
-        // multi-value attributes share parent_id+name. We update by
-        // (parent_id, name) AND value = :val to pin a single row precisely
-        // (or "value IS NULL" when value is null).
-        updateAttributeRowsJpql(em, tables, "user_attribute",
-                "UPDATE UserAttributeEntity e SET e.attestation = :sig " +
-                        "WHERE e.user.id = :pid AND e.name = :name AND e.value %s",
-                "user_id", finalAttestation);
-        updateAttributeRowsJpql(em, tables, "client_attributes",
-                "UPDATE ClientAttributeEntity e SET e.attestation = :sig " +
-                        "WHERE e.client.id = :pid AND e.name = :name AND e.value %s",
-                "client_id", finalAttestation);
-        updateAttributeRowsJpql(em, tables, "client_scope_attributes",
-                "UPDATE ClientScopeAttributeEntity e SET e.attestation = :sig " +
-                        "WHERE e.clientScope.id = :pid AND e.name = :name AND e.value %s",
-                "scope_id", finalAttestation);
-        updateAttributeRowsJpql(em, tables, "group_attribute",
-                "UPDATE GroupAttributeEntity e SET e.attestation = :sig " +
-                        "WHERE e.group.id = :pid AND e.name = :name AND e.value %s",
-                "group_id", finalAttestation);
-        updateAttributeRowsJpql(em, tables, "role_attribute",
-                "UPDATE RoleAttributeEntity e SET e.attestation = :sig " +
-                        "WHERE e.role.id = :pid AND e.name = :name AND e.value %s",
-                "role_id", finalAttestation);
-        updateAttributeRowsJpql(em, tables, "realm_attribute",
-                "UPDATE RealmAttributeEntity e SET e.attestation = :sig " +
-                        "WHERE e.realm.id = :pid AND e.name = :name AND e.value %s",
-                "realm_id", finalAttestation);
-    }
-
-    /**
-     * Update each (parent_id, name, value) attribute row with the final
-     * attestation using JPQL. The {@code value} field may be NULL (single-value
-     * clear), so we pick {@code IS NULL} vs {@code = :val} dynamically — JPQL
-     * (like SQL) does not fold {@code col = NULL} to TRUE for NULL values.
-     */
-    private static void updateAttributeRowsJpql(EntityManager em, JsonNode tables, String tableName,
-                                                 String jpqlTemplate, String parentKey, String sig) {
-        JsonNode arr = tables.get(tableName);
-        if (arr == null || !arr.isArray() || arr.size() == 0) return;
-
-        int total = 0;
-        for (JsonNode row : arr) {
-            JsonNode pid = row.get(parentKey);
-            JsonNode name = row.get("name");
-            JsonNode value = row.get("value");
-            if (pid == null || pid.isNull() || name == null || name.isNull()) continue;
-
-            boolean valueNull = (value == null || value.isNull());
-            String jpql = String.format(jpqlTemplate, valueNull ? "IS NULL" : "= :val");
-            Query q = em.createQuery(jpql)
-                    .setParameter("sig", sig)
-                    .setParameter("pid", pid.asText())
-                    .setParameter("name", name.asText());
-            if (!valueNull) q.setParameter("val", value.asText());
-            total += q.executeUpdate();
-        }
-        log.debugf("BASELINE replay: updated %d rows in %s", total, tableName);
-    }
-
-    /**
-     * Batch-update rows by primary id using a single JPQL statement.
-     * The JPQL is expected to use named parameters {@code :sig} (final
-     * attestation) and {@code :ids} (collection of row ids).
-     */
-    private static void updateBatchById(EntityManager em, JsonNode tables, String tableName,
-                                         String jpql, String idKey, String sig) {
-        JsonNode arr = tables.get(tableName);
-        if (arr == null || !arr.isArray() || arr.size() == 0) return;
-
-        List<String> ids = new ArrayList<>(arr.size());
-        for (JsonNode row : arr) {
-            JsonNode v = row.get(idKey);
-            if (v != null && !v.isNull()) ids.add(v.asText());
-        }
-        if (ids.isEmpty()) return;
-
-        Query q = em.createQuery(jpql);
-        q.setParameter("sig", sig);
-        q.setParameter("ids", ids);
-        int updated = q.executeUpdate();
-        log.debugf("BASELINE replay: updated %d rows in %s", updated, tableName);
-    }
-
-    /**
-     * Run one UPDATE per row for relationship tables (composite primary key).
-     * JPQL with named parameters: :sig=attestation, :k1=key1, :k2=key2.
-     */
-    private static void updatePairs(EntityManager em, JsonNode tables, String tableName,
-                                     String jpql, String key1, String key2, String sig) {
-        JsonNode arr = tables.get(tableName);
-        if (arr == null || !arr.isArray() || arr.size() == 0) return;
-
-        int total = 0;
-        for (JsonNode row : arr) {
-            JsonNode v1 = row.get(key1);
-            JsonNode v2 = row.get(key2);
-            if (v1 == null || v1.isNull() || v2 == null || v2.isNull()) continue;
-            Query q = em.createQuery(jpql);
-            q.setParameter("sig", sig);
-            q.setParameter("k1", v1.asText());
-            q.setParameter("k2", v2.asText());
-            total += q.executeUpdate();
-        }
-        log.debugf("BASELINE replay: updated %d rows in %s", total, tableName);
     }
 
     // -------------------------------------------------------------------------

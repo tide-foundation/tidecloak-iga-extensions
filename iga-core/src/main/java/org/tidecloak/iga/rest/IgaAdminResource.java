@@ -37,12 +37,10 @@ import org.tidecloak.iga.providers.IgaLicensingDraftService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
-import org.tidecloak.iga.baseline.IgaBaselineService;
+import org.tidecloak.iga.replay.IgaReplayExtension;
 import org.tidecloak.iga.attestors.IgaAttestor;
 import org.tidecloak.iga.attestors.IgaAttestors;
 import org.tidecloak.iga.attestors.IgaScopeResolver;
-import com.fasterxml.jackson.databind.JsonNode;
-import java.util.LinkedHashMap;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
@@ -301,10 +299,13 @@ public class IgaAdminResource {
         }
 
         String finalAttestation = attestor.combineFinal(session, cr, all);
-        IgaReplayDispatcher.replay(session, cr, finalAttestation);
-
-        // IgaReplayDispatcher.replay sets status=APPROVED + resolvedAt on the
-        // managed entity for every action type already; nothing else to set.
+        // Phase 6+ ADOPT_* actions are handled by the extension router; every
+        // other action type falls through to the dispatcher (whose tail also
+        // sets status=APPROVED + resolvedAt on the managed CR — same as the
+        // extension does).
+        if (!IgaReplayExtension.tryReplay(session, cr, finalAttestation)) {
+            IgaReplayDispatcher.replay(session, cr, finalAttestation);
+        }
         IgaChangeRequestService service = getService();
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
         return Response.ok(toRepresentation(updated, service)).build();
@@ -386,125 +387,47 @@ public class IgaAdminResource {
     }
 
     // -------------------------------------------------------------------------
-    // Baseline approval — single CR that snapshots every unsigned row in the
-    // realm so one ceremony retroactively signs all pre-IGA data.
+    // POST /iga/adopt — Phase 6a: create an ADOPT_<type> change request for an
+    // entity that already exists in the realm but has not yet been attested.
+    //
+    // Phase 6b will drive this from the toggle-on scan; Phase 6a exposes it on
+    // the existing admin surface so the E2E can exercise the round-trip
+    // (CR create → sidecar row → authorize+commit → attestation stamped, row
+    // deleted) without shipping a separate test-only endpoint.
     // -------------------------------------------------------------------------
 
     @POST
-    @Path("baseline-review")
+    @Path("adopt")
+    @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
-    public Response createBaselineReview() {
+    public Response createAdopt(Map<String, Object> body) {
         auth.realm().requireManageRealm();
-
-        IgaBaselineService baselineService = new IgaBaselineService(getEm());
-
-        // Conflict check: a PENDING BASELINE_APPROVAL already exists for the realm.
-        IgaChangeRequestEntity existing = baselineService.findPending(realm.getId());
-        if (existing != null) {
-            return Response.status(Response.Status.CONFLICT)
-                    .entity(Map.of(
-                            "error", "A PENDING BASELINE_APPROVAL change request already exists for this realm",
-                            "changeRequestId", existing.getId()))
-                    .build();
-        }
-
-        IgaBaselineService.BaselineResult result = baselineService.buildAndPersist(realm, currentUserId());
-        if (result.cr == null) {
-            return Response.ok(Map.of(
-                    "message", "No unsigned rows to baseline",
-                    "row_count", 0))
-                    .build();
-        }
-
-        return Response.status(Response.Status.CREATED)
-                .entity(Map.of(
-                        "changeRequestId", result.cr.getId(),
-                        "summary", result.summary,
-                        "totalRows", result.totalRows))
-                .build();
-    }
-
-    // -------------------------------------------------------------------------
-    // GET /iga/change-requests/{id}/baseline-summary
-    // Paginated review without transferring the whole rows_json payload.
-    // -------------------------------------------------------------------------
-
-    @GET
-    @Path("change-requests/{id}/baseline-summary")
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response getBaselineSummary(@PathParam("id") String id,
-                                        @QueryParam("table") String table,
-                                        @QueryParam("page") Integer page,
-                                        @QueryParam("size") Integer size) {
-        auth.realm().requireManageRealm();
-
-        EntityManager em = getEm();
-        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
-        if (cr == null || !realm.getId().equals(cr.getRealmId())) {
-            return Response.status(Response.Status.NOT_FOUND).build();
-        }
-        if (!IgaBaselineService.ACTION_TYPE.equals(cr.getActionType())) {
+        if (body == null) {
             return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "Change request is not a BASELINE_APPROVAL"))
+                    .entity(Map.of("error", "Missing JSON body"))
                     .build();
         }
-
-        JsonNode rows = IgaBaselineService.parseRows(cr.getRowsJson());
-        JsonNode tables = rows.get("tables");
-
-        if (table == null || table.isBlank()) {
-            // Summary view: tableName -> count
-            Map<String, Integer> summary = new LinkedHashMap<>();
-            long total = 0;
-            if (tables != null && tables.isObject()) {
-                java.util.Iterator<String> it = tables.fieldNames();
-                while (it.hasNext()) {
-                    String name = it.next();
-                    JsonNode arr = tables.get(name);
-                    int count = (arr != null && arr.isArray()) ? arr.size() : 0;
-                    summary.put(name, count);
-                    total += count;
-                }
-            }
-            return Response.ok(Map.of(
-                    "summary", summary,
-                    "totalRows", total))
+        Object entityTypeObj = body.get("entityType");
+        Object entityIdObj = body.get("entityId");
+        String entityType = entityTypeObj != null ? entityTypeObj.toString() : null;
+        String entityId = entityIdObj != null ? entityIdObj.toString() : null;
+        if (entityType == null || entityId == null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Missing entityType or entityId"))
                     .build();
         }
-
-        // Sliced view for one table.
-        int p = (page != null) ? page : 0;
-        int s = (size != null) ? size : 50;
-        if (p < 0) p = 0;
-        if (s <= 0) s = 50;
-        if (s > 1000) s = 1000;
-
-        JsonNode arr = (tables != null) ? tables.get(table) : null;
-        if (arr == null || !arr.isArray()) {
-            return Response.ok(Map.of(
-                    "table", table,
-                    "page", p,
-                    "size", s,
-                    "total", 0,
-                    "rows", List.of()))
+        try {
+            String crId = getService().createAdoptCr(realm, entityType, entityId, currentUserId());
+            return Response.status(Response.Status.CREATED)
+                    .entity(Map.of("changeRequestId", crId,
+                            "entityType", entityType,
+                            "entityId", entityId))
+                    .build();
+        } catch (IllegalArgumentException iae) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", iae.getMessage()))
                     .build();
         }
-
-        int total = arr.size();
-        int from = Math.min(p * s, total);
-        int to = Math.min(from + s, total);
-
-        List<JsonNode> slice = new java.util.ArrayList<>(to - from);
-        for (int i = from; i < to; i++) {
-            slice.add(arr.get(i));
-        }
-        return Response.ok(Map.of(
-                "table", table,
-                "page", p,
-                "size", s,
-                "total", total,
-                "rows", slice))
-                .build();
     }
 
     // -------------------------------------------------------------------------

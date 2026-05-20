@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.1.0: Phase 6a — capture-then-veto ADOPT scaffolding.
+
+      Adds the IGA_UNSIGNED_ENTITY sidecar table: a flat per-entity register of
+      rows that exist in the underlying entity table (USER_ENTITY, KEYCLOAK_ROLE,
+      KEYCLOAK_GROUP, CLIENT, CLIENT_SCOPE) but have NOT yet been attested. A
+      sidecar row links back to the per-entity ADOPT change request that will,
+      once approved, stamp the entity's ATTESTATION column and delete the
+      sidecar row. (ADOPT_CR_ID may be transiently NULL during a toggle —
+      Phase 6d.)
+
+      Also adds IDX_IGA_CR_REALM_ACTION_STATUS — a different column ordering on
+      IGA_CHANGE_REQUEST than the existing IDX_IGA_CR_REALM_ENTITY_STATUS — to
+      support the idempotent-ADOPT lookup Phase 6b / 6d need:
+
+        SELECT cr.entityId
+          FROM IgaChangeRequestEntity cr
+         WHERE cr.realmId    = ?
+           AND cr.actionType = ?
+           AND cr.status     = ?
+
+      Author: tidecloak-iga
+    -->
+
+    <!-- 1: Create IGA_UNSIGNED_ENTITY sidecar table -->
+    <changeSet id="iga-2.1.0-1" author="tidecloak-iga">
+        <createTable tableName="IGA_UNSIGNED_ENTITY">
+            <column name="REALM_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ENTITY_TYPE" type="VARCHAR(32)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ENTITY_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ADOPT_CR_ID" type="VARCHAR(36)"/>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+
+    <!-- 2: Composite primary key on (REALM_ID, ENTITY_TYPE, ENTITY_ID) -->
+    <changeSet id="iga-2.1.0-2" author="tidecloak-iga">
+        <addPrimaryKey tableName="IGA_UNSIGNED_ENTITY"
+                       columnNames="REALM_ID, ENTITY_TYPE, ENTITY_ID"
+                       constraintName="PK_IGA_UNSIGNED_ENTITY"/>
+    </changeSet>
+
+    <!-- 3: Lookup index on ADOPT_CR_ID (used by clearByAdoptCr replay path) -->
+    <changeSet id="iga-2.1.0-3" author="tidecloak-iga">
+        <createIndex tableName="IGA_UNSIGNED_ENTITY"
+                     indexName="IDX_IGA_UNSIGNED_BY_CR">
+            <column name="ADOPT_CR_ID"/>
+        </createIndex>
+    </changeSet>
+
+    <!-- 4: Idempotent-ADOPT lookup index on IGA_CHANGE_REQUEST -->
+    <changeSet id="iga-2.1.0-4" author="tidecloak-iga">
+        <createIndex tableName="IGA_CHANGE_REQUEST"
+                     indexName="IDX_IGA_CR_REALM_ACTION_STATUS">
+            <column name="REALM_ID"/>
+            <column name="ACTION_TYPE"/>
+            <column name="STATUS"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>

@@ -3,14 +3,23 @@ package org.tidecloak.iga.providers;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.keycloak.models.ClientModel;
+import org.keycloak.models.ClientScopeModel;
+import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.RoleModel;
+import org.keycloak.models.UserModel;
+import org.keycloak.models.utils.ModelToRepresentation;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaCommentEntity;
+import org.tidecloak.iga.replay.IgaReplayExtension;
+import org.tidecloak.iga.services.IgaUnsignedEntityService;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -70,6 +79,135 @@ public class IgaChangeRequestService {
         em.persist(entity);
         em.flush();
         return entity;
+    }
+
+    /**
+     * Phase 6a — create a per-entity ADOPT change request for an entity that
+     * already exists in the realm but has not yet been attested.
+     *
+     * <p>Builds the per-entity REP_JSON capture via Keycloak's own
+     * {@code ModelToRepresentation}, persists a PENDING
+     * {@code ADOPT_<entityType>} change request, and inserts a sidecar row
+     * into {@code IGA_UNSIGNED_ENTITY} linking back to the new CR. The
+     * matching {@link org.tidecloak.iga.replay.IgaReplayExtension#tryReplay}
+     * path will, on commit, verify the entity still exists, stamp its
+     * attestation column, delete the sidecar row, and mark the CR APPROVED.
+     *
+     * <p>Throws {@link IllegalArgumentException} for an unsupported
+     * {@code entityType} or when the entity is not resolvable in the realm —
+     * a Phase 6b toggle-on scan should never see this, but it protects an
+     * unit/E2E driver from creating a dangling CR.</p>
+     *
+     * @param realm        target realm (must be IGA-enabled — caller's check)
+     * @param entityType   one of USER | ROLE | GROUP | CLIENT | CLIENT_SCOPE
+     * @param entityId     the entity's UUID
+     * @param requestedBy  admin user id stamped on the CR
+     * @return the new CR's id (UUID)
+     */
+    public String createAdoptCr(RealmModel realm, String entityType, String entityId,
+                                 String requestedBy) {
+        if (realm == null || entityType == null || entityId == null) {
+            throw new IllegalArgumentException(
+                    "createAdoptCr requires non-null realm + entityType + entityId");
+        }
+        String actionType;
+        Map<String, Object> repRow;
+        switch (entityType) {
+            case IgaReplayExtension.ENTITY_TYPE_USER: {
+                UserModel u = session.users().getUserById(realm, entityId);
+                if (u == null) {
+                    throw new IllegalArgumentException(
+                            "createAdoptCr: USER " + entityId + " not found in realm " + realm.getId());
+                }
+                actionType = IgaReplayExtension.ACTION_ADOPT_USER;
+                repRow = buildAdoptRow(entityId, u.getUsername(),
+                        serializeRep(ModelToRepresentation.toRepresentation(session, realm, u)));
+                break;
+            }
+            case IgaReplayExtension.ENTITY_TYPE_ROLE: {
+                RoleModel r = session.roles().getRoleById(realm, entityId);
+                if (r == null) {
+                    throw new IllegalArgumentException(
+                            "createAdoptCr: ROLE " + entityId + " not found in realm " + realm.getId());
+                }
+                actionType = IgaReplayExtension.ACTION_ADOPT_ROLE;
+                repRow = buildAdoptRow(entityId, r.getName(),
+                        serializeRep(ModelToRepresentation.toRepresentation(r)));
+                break;
+            }
+            case IgaReplayExtension.ENTITY_TYPE_GROUP: {
+                GroupModel g = session.groups().getGroupById(realm, entityId);
+                if (g == null) {
+                    throw new IllegalArgumentException(
+                            "createAdoptCr: GROUP " + entityId + " not found in realm " + realm.getId());
+                }
+                actionType = IgaReplayExtension.ACTION_ADOPT_GROUP;
+                repRow = buildAdoptRow(entityId, g.getName(),
+                        serializeRep(ModelToRepresentation.toRepresentation(g, false)));
+                break;
+            }
+            case IgaReplayExtension.ENTITY_TYPE_CLIENT: {
+                ClientModel c = session.clients().getClientById(realm, entityId);
+                if (c == null) {
+                    throw new IllegalArgumentException(
+                            "createAdoptCr: CLIENT " + entityId + " not found in realm " + realm.getId());
+                }
+                actionType = IgaReplayExtension.ACTION_ADOPT_CLIENT;
+                repRow = buildAdoptRow(entityId, c.getClientId(),
+                        serializeRep(ModelToRepresentation.toRepresentation(c, session)));
+                break;
+            }
+            case IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE: {
+                ClientScopeModel cs = session.clientScopes().getClientScopeById(realm, entityId);
+                if (cs == null) {
+                    throw new IllegalArgumentException(
+                            "createAdoptCr: CLIENT_SCOPE " + entityId + " not found in realm " + realm.getId());
+                }
+                actionType = IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE;
+                repRow = buildAdoptRow(entityId, cs.getName(),
+                        serializeRep(ModelToRepresentation.toRepresentation(cs)));
+                break;
+            }
+            default:
+                throw new IllegalArgumentException(
+                        "createAdoptCr: unsupported entityType '" + entityType
+                                + "' (expected USER | ROLE | GROUP | CLIENT | CLIENT_SCOPE)");
+        }
+
+        IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
+        cr.setId(UUID.randomUUID().toString());
+        cr.setRealmId(realm.getId());
+        cr.setEntityType(entityType);
+        cr.setEntityId(entityId);
+        cr.setActionType(actionType);
+        cr.setRowsJson(serializeRows(List.of(repRow)));
+        cr.setStatus("PENDING");
+        cr.setRequestedBy(requestedBy);
+        cr.setCreatedAt(System.currentTimeMillis());
+        em.persist(cr);
+
+        // Sidecar row linking the unattested entity to its ADOPT CR.
+        IgaUnsignedEntityService.markUnsigned(em, realm.getId(), entityType, entityId, cr.getId());
+
+        em.flush();
+        return cr.getId();
+    }
+
+    private static Map<String, Object> buildAdoptRow(String entityId, String humanName, String repJson) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("ID", entityId);
+        if (humanName != null) row.put("NAME", humanName);
+        if (repJson != null) row.put("REP_JSON", repJson);
+        return row;
+    }
+
+    private static String serializeRep(Object rep) {
+        if (rep == null) return null;
+        try {
+            return MAPPER.writeValueAsString(rep);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("createAdoptCr: failed to serialize representation", e);
+        }
     }
 
     /**
