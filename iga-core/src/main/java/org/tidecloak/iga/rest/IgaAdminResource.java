@@ -132,6 +132,24 @@ public class IgaAdminResource {
         return null;
     }
 
+    /**
+     * True iff the action type is one of the five ADOPT_* variants owned by
+     * the Phase 6+ extension router. ADOPT actions are uniquely resumable
+     * from the CANCELLED terminal status because (a) the underlying entity
+     * row was never modified (capture-then-veto's whole point is the entity
+     * already exists), (b) the entity's attestation column is still NULL
+     * after a toggle-off cancel, and (c) the operator may still want to
+     * complete the adoption on a subsequent admin pass.
+     */
+    private static boolean isAdoptAction(String actionType) {
+        if (actionType == null) return false;
+        return IgaReplayExtension.ACTION_ADOPT_USER.equals(actionType)
+                || IgaReplayExtension.ACTION_ADOPT_ROLE.equals(actionType)
+                || IgaReplayExtension.ACTION_ADOPT_GROUP.equals(actionType)
+                || IgaReplayExtension.ACTION_ADOPT_CLIENT.equals(actionType)
+                || IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE.equals(actionType);
+    }
+
     // -------------------------------------------------------------------------
     // GET /iga/change-requests
     // -------------------------------------------------------------------------
@@ -204,6 +222,25 @@ public class IgaAdminResource {
         if (cr == null || !realm.getId().equals(cr.getRealmId())) {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
+        // ADOPT_* CRs are resumable from the CANCELLED terminal status: the
+        // Phase 6d toggle-off cancel marks every still-PENDING ADOPT as
+        // CANCELLED so the realm can flip OFF cleanly, but the entity row
+        // is left untouched (attestation still NULL) and the operator may
+        // still want to complete the adoption on a subsequent admin pass.
+        // For ADOPT_* we therefore accept CANCELLED as authorize-input and
+        // promote it back to PENDING here; the per-admin auth record is
+        // accumulated normally, and the commit handler's replayAdopt tail
+        // flips to APPROVED. All other action types (CREATE_*/UPDATE_*/etc.)
+        // remain strictly PENDING-only — CANCELLED for those is genuinely
+        // terminal because the captured entity-create has been rolled back.
+        boolean isAdoptResume = isAdoptAction(cr.getActionType())
+                && "CANCELLED".equals(cr.getStatus());
+        if (isAdoptResume) {
+            cr.setStatus("PENDING");
+            cr.setResolvedAt(null);
+            log.infof("IGA ADOPT authorize: resuming CANCELLED CR %s (action=%s entity=%s/%s) — flipping back to PENDING",
+                    cr.getId(), cr.getActionType(), cr.getEntityType(), cr.getEntityId());
+        }
         if (!"PENDING".equals(cr.getStatus())) {
             return Response.status(Response.Status.CONFLICT)
                     .entity(Map.of("error", "Change request is not in PENDING state"))
@@ -267,6 +304,18 @@ public class IgaAdminResource {
         IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
         if (cr == null || !realm.getId().equals(cr.getRealmId())) {
             return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        // ADOPT_* CRs are resumable from CANCELLED — see authorize() for the
+        // semantic justification. We mirror the same lane here so a commit
+        // call (e.g. after a separate authorize that already resumed) or a
+        // commit-only call (threshold=0/auto-authorize) lands the ADOPT.
+        boolean isAdoptResume = isAdoptAction(cr.getActionType())
+                && "CANCELLED".equals(cr.getStatus());
+        if (isAdoptResume) {
+            cr.setStatus("PENDING");
+            cr.setResolvedAt(null);
+            log.infof("IGA ADOPT commit: resuming CANCELLED CR %s (action=%s entity=%s/%s) — flipping back to PENDING for replay",
+                    cr.getId(), cr.getActionType(), cr.getEntityType(), cr.getEntityId());
         }
         if (!"PENDING".equals(cr.getStatus())) {
             return Response.status(Response.Status.CONFLICT)

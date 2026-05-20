@@ -237,6 +237,27 @@ public final class IgaAdoptScan {
         long[] counters = new long[5]; // total, sysSkip, committedSkip, pendingSkip, errors
         long[] alreadyAttestedCounter = new long[1];
 
+        // The committed-ADOPT skip set is the contract's idempotent-re-toggle
+        // key: every entity in this realm that already has an APPROVED
+        // ADOPT_X CR is "already governed" and MUST NOT be re-emitted. Seed
+        // the skipped.alreadyCommittedAdopt counter with the total skip-set
+        // size BEFORE the per-entity loop, because the scanner's
+        // attestation-IS-NULL filter (in IgaUnsignedRowScanner.usersWithNames
+        // et al.) typically excludes these entities outright — a successful
+        // ADOPT replay stamps the entity row's attestation, so the row no
+        // longer surfaces in the per-type lists. Without this pre-tally the
+        // counter stays at 0 even when N entities are correctly being
+        // skipped: the per-entity branch at processOne can only fire when
+        // the scanner did surface the entity (the race-window case).
+        //
+        // The per-entity branch at processOne therefore no longer
+        // increments counters[2] — it just short-circuits to avoid emitting
+        // a duplicate CR for an attestation-NULL race row. The
+        // pre-tally above is the single source of truth for the counter.
+        for (Set<String> ids : committedAdoptByType.values()) {
+            counters[2] += ids.size();
+        }
+
         // Deterministic order — locked: USER → ROLE → GROUP → CLIENT →
         // CLIENT_SCOPE. The scanner returns rows in DB insertion order; we
         // process each list independently so per-type counts are clean.
@@ -314,9 +335,16 @@ public final class IgaAdoptScan {
                 return;
             }
             // 2. Already-committed ADOPT skip.
+            //    counters[2] (skippedAlreadyCommittedAdopt) is pre-tallied
+            //    from the skip-set size at scan start — see the scan() body
+            //    just above the per-type processing loop. We do NOT
+            //    increment again here to avoid double-counting the race
+            //    case where the scanner surfaces an entity that also lives
+            //    in the skip set (entity row's attestation is NULL but its
+            //    ADOPT CR is APPROVED). The short-circuit still returns so
+            //    we don't emit a duplicate ADOPT CR.
             Set<String> committed = committedAdoptByType.get(entityType);
             if (committed != null && committed.contains(row.entityId())) {
-                counters[2]++;
                 log.debugf("IGA scan skip(alreadyCommittedAdopt): realm=%s type=%s id=%s",
                         realm.getName(), entityType, row.entityId());
                 return;
