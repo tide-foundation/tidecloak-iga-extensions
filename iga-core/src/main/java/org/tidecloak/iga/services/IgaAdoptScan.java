@@ -7,6 +7,7 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.replay.IgaReplayExtension;
+import org.tidecloak.iga.replay.SidecarCapExceededException;
 
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -58,6 +59,32 @@ import java.util.Set;
 public final class IgaAdoptScan {
 
     private static final Logger log = Logger.getLogger(IgaAdoptScan.class);
+
+    /**
+     * Phase 6d sidecar soft-cap. If at scan-start the realm already has more
+     * than this many unattested sidecar rows, the toggle-on refuses with
+     * {@link SidecarCapExceededException} and the caller rolls back the
+     * realm-attribute write so IGA stays OFF. "Soft" here means the cap can
+     * be raised by editing this constant (and rebuilding) — it is NOT a
+     * realm attribute by design (so a misbehaving admin cannot lift it on
+     * their own realm).
+     *
+     * <p>To raise: change the constant and redeploy. For E2E only, the
+     * system property {@code iga.adopt.sidecarCap} overrides the constant —
+     * this is a test-only escape hatch (not documented for operators).</p>
+     */
+    public static final long SIDECAR_CAP_DEFAULT = 100_000L;
+
+    private static long sidecarCap() {
+        String prop = System.getProperty("iga.adopt.sidecarCap");
+        if (prop == null || prop.isEmpty()) return SIDECAR_CAP_DEFAULT;
+        try {
+            long parsed = Long.parseLong(prop.trim());
+            return parsed > 0 ? parsed : SIDECAR_CAP_DEFAULT;
+        } catch (NumberFormatException nfe) {
+            return SIDECAR_CAP_DEFAULT;
+        }
+    }
 
     /**
      * Result of one toggle-on scan. All counters are non-negative; the
@@ -145,6 +172,18 @@ public final class IgaAdoptScan {
         // users with IGA off — Phase 6b's happy/race/already cases all do.
         session.getContext().setRealm(realm);
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+        // Phase 6d sidecar cap (design risk #6). Reject before doing any work
+        // so a runaway realm cannot exhaust memory by emitting hundreds of
+        // thousands of ADOPT CRs in one scan. The caller catches the
+        // exception, restores isIGAEnabled=false on the realm, and returns
+        // 409 SIDECAR_CAP_EXCEEDED — see TideAdminCompatResource#toggleIga.
+        long cap = sidecarCap();
+        long current = IgaUnsignedEntityService.countByRealm(em, realm.getId());
+        if (current > cap) {
+            throw new SidecarCapExceededException(realm.getId(), cap, current);
+        }
+
         IgaUnsignedRowScanner scanner = new IgaUnsignedRowScanner(em);
         IgaChangeRequestService crService = new IgaChangeRequestService(em, session);
 

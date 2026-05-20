@@ -15,6 +15,8 @@ import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
+import org.tidecloak.iga.replay.SidecarCapExceededException;
+import org.tidecloak.iga.services.IgaAdoptCancel;
 import org.tidecloak.iga.services.IgaAdoptScan;
 
 import jakarta.persistence.EntityManager;
@@ -30,6 +32,14 @@ import java.util.Set;
  * <p>Phase 6b — on OFF→ON the handler triggers a one-shot {@link IgaAdoptScan}
  * in its own {@code runJobInTransaction} so a scan failure cannot abort the
  * toggle attribute write that just succeeded.</p>
+ *
+ * <p>Phase 6d — on ON→OFF the handler triggers a one-shot {@link IgaAdoptCancel}
+ * in its own {@code runJobInTransaction} that cancels every PENDING ADOPT_*
+ * CR and clears the entire sidecar register for the realm. The toggle-on path
+ * also gains a sidecar cap check: if the realm already has more than
+ * {@link IgaAdoptScan#SIDECAR_CAP_DEFAULT} unattested rows at scan-start, the
+ * toggle is refused with 409 SIDECAR_CAP_EXCEEDED and the realm-attribute
+ * write rolled back.</p>
  */
 @Path("tide-admin")
 @Vetoed
@@ -71,6 +81,7 @@ public class TideAdminCompatResource {
             String realmId = realm.getId();
 
             IgaAdoptScan.ScanResult[] resultHolder = new IgaAdoptScan.ScanResult[1];
+            SidecarCapExceededException[] capHolder = new SidecarCapExceededException[1];
             Throwable[] errHolder = new Throwable[1];
             try {
                 KeycloakModelUtils.runJobInTransaction(
@@ -83,6 +94,15 @@ public class TideAdminCompatResource {
                             }
                             resultHolder[0] = IgaAdoptScan.scan(scanSession, scanRealm, requestedBy, includeSystem);
                         });
+            } catch (SidecarCapExceededException cap) {
+                // Phase 6d cap (design risk #6). Roll back the realm-attribute
+                // write so IGA stays OFF — half-enabling is more confusing
+                // than refusing — and 409 SIDECAR_CAP_EXCEEDED with the
+                // numbers in the body. One INFO log line, no stack.
+                capHolder[0] = cap;
+                logger.infof("IGA toggle-on refused for realm %s — sidecar cap %d exceeded (current=%d); " +
+                                "isIGAEnabled rolled back to false.",
+                        realm.getName(), cap.getCap(), cap.getCurrent());
             } catch (RuntimeException ex) {
                 // Scan failed entirely — toggle ALREADY committed in the
                 // outer transaction. Surface the error in the response but
@@ -91,6 +111,19 @@ public class TideAdminCompatResource {
                 errHolder[0] = ex;
                 logger.errorf(ex, "IGA toggle-on scan FAILED for realm %s — toggle " +
                         "remains enabled, no ADOPT CRs were emitted.", realm.getName());
+            }
+
+            if (capHolder[0] != null) {
+                // Roll back the realm-attribute write — same outer
+                // transaction, so this resets isIGAEnabled to its pre-toggle
+                // value (false) before the response is sent.
+                realm.setAttribute(IGA_ATTRIBUTE, Boolean.toString(current));
+                Map<String, Object> capBody = new LinkedHashMap<>();
+                capBody.put("error", "SIDECAR_CAP_EXCEEDED");
+                capBody.put("realmId", capHolder[0].getRealmId());
+                capBody.put("cap", capHolder[0].getCap());
+                capBody.put("current", capHolder[0].getCurrent());
+                return Response.status(Response.Status.CONFLICT).entity(capBody).build();
             }
 
             if (resultHolder[0] != null) {
@@ -104,6 +137,46 @@ public class TideAdminCompatResource {
                 scanErr.put("error", errHolder[0].getClass().getSimpleName());
                 scanErr.put("message", String.valueOf(errHolder[0].getMessage()));
                 body.put("scan", scanErr);
+            }
+        }
+
+        // Phase 6d — ON→OFF: cancel PENDING ADOPT CRs + clear sidecar inside
+        // its own transaction (mirror of the OFF→ON pattern above). Master
+        // is excluded by symmetry: IGA is never enabled on master, so an
+        // ON→OFF for master is impossible in practice; the guard is
+        // defensive.
+        if (current && !next && !"master".equals(realm.getName())) {
+            String realmId = realm.getId();
+            IgaAdoptCancel.CancelResult[] offHolder = new IgaAdoptCancel.CancelResult[1];
+            Throwable[] offErrHolder = new Throwable[1];
+            try {
+                KeycloakModelUtils.runJobInTransaction(
+                        session.getKeycloakSessionFactory(),
+                        cancelSession -> {
+                            RealmModel cancelRealm = cancelSession.realms().getRealm(realmId);
+                            if (cancelRealm == null) {
+                                throw new IllegalStateException(
+                                        "IGA toggle-off cancel: realm " + realmId + " not loadable in cancel session");
+                            }
+                            offHolder[0] = IgaAdoptCancel.cancel(cancelSession, cancelRealm);
+                        });
+            } catch (RuntimeException ex) {
+                // Same policy as the scan: toggle attribute ALREADY committed
+                // in the outer transaction. Surface the error in the
+                // response but do NOT roll back — a half-cleared realm is
+                // recoverable; a stuck toggle is not.
+                offErrHolder[0] = ex;
+                logger.errorf(ex, "IGA toggle-off cancel FAILED for realm %s — toggle remains " +
+                        "disabled, sidecar/ADOPT-CR state may be partial.", realm.getName());
+            }
+
+            if (offHolder[0] != null) {
+                body.put("scanOff", offHolder[0].toMap());
+            } else if (offErrHolder[0] != null) {
+                Map<String, Object> err = new LinkedHashMap<>();
+                err.put("error", offErrHolder[0].getClass().getSimpleName());
+                err.put("message", String.valueOf(offErrHolder[0].getMessage()));
+                body.put("scanOff", err);
             }
         }
 
