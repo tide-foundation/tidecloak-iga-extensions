@@ -82,6 +82,25 @@ function importRep() {
     groups: [
       {
         name: GROUP_NAME,
+        // path MUST be supplied. KC's GroupsPartialImport.getModelId (KC
+        // 26.5.5 GroupsPartialImport.java:53) is `findGroupModel(...).getId()`
+        // where findGroupModel == KeycloakModelUtils.findGroupByPath(session,
+        // realm, groupRep.getPath()). findGroupByPath returns null at its
+        // first guard (`if (path == null) return null;`) when the rep omits
+        // path, → null.getId() → NPE → KC-SERVICES0037 → HTTP 500 (the
+        // role/user paths don't NPE: RealmRolesPartialImport.getModelId uses
+        // .orElse(null), UsersPartialImport.getModelId uses a createdIds
+        // cache). This is vanilla-KC behaviour, not IGA-specific —
+        // empirically verified: the same payload returns 500 on an
+        // IGA-disabled realm, and KC's own AbstractPartialImportTest
+        // .addGroups always sets BOTH name AND path
+        // ("/" + GROUP_PREFIX + i). IGA's Phase 4 import branch
+        // (IgaRealmProvider.createGroup) already persists the scratch group
+        // normally via super.createGroup so the find-by-name half of
+        // findGroupByPath would resolve it — but only if path != null at the
+        // call site. Supplying path here makes the payload conform to KC's
+        // partialImport contract and lets the Phase 4 batch governance run.
+        path: `/${GROUP_NAME}`,
         attributes: { [CUSTOM_ATTR]: ['group-val'] },
       },
     ],

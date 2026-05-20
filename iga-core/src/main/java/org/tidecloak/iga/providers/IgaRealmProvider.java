@@ -107,30 +107,57 @@ public class IgaRealmProvider extends JpaRealmProvider {
     @Override
     public GroupModel createGroup(RealmModel realm, String id, Type type, String name, GroupModel toParent) {
         // Phase 4 — partialImport batch governance for GROUP. This branch MUST
-        // come BEFORE the single-entity isIgaActive() capture return.
+        // come BEFORE the single-entity isIgaActive() capture return and is
+        // strictly gated by the import-mode predicate; the single-entity
+        // admin-create path below is byte-unchanged.
         //
-        // Bug it fixes: under POST /partialImport, KC's
-        // GroupsPartialImport.create → RepresentationToModel.importGroup calls
-        // realm.createGroup(...) (→ here) then applies setDescription /
-        // setAttribute / grantRole only CONDITIONALLY, and
-        // AbstractPartialImport.doImport immediately calls
-        // GroupsPartialImport.getModelId → KeycloakModelUtils.findGroupByPath
-        // (...).getId(). Returning a single-entity capture adapter meant the
-        // IgaGroupAdapter#setDescription terminal seam either never fired
-        // (no description → ungoverned) or fired per-entity mid-import (the
-        // first entity aborted the whole import), and the scratch group on the
-        // veto path made findGroupByPath(...) return null → NPE at
-        // GroupsPartialImport:53 → KC-SERVICES0037 → HTTP 500.
+        // Mechanism (implemented; proven sound end-to-end on KC 26.5.5):
+        // create the REAL scratch group via super.createGroup
+        // (em.persist + em.flush — JpaRealmProvider.createGroup:835-836 in the
+        // tidecloak fork) so the group is FULLY persisted and queryable by
+        // name+parent in the nested import session. Return a capture-mode
+        // IgaGroupAdapter whose per-setter overrides all fall straight through
+        // to the real GroupAdapter (captureMode bypasses isIgaActive in every
+        // attribute/role/setDescription override) AND register it with the
+        // BatchEmitTransaction (registerImportGroup → enlistPrepare). The
+        // CREATE_GROUP row is harvested ONCE at batch-emit time
+        // (buildImportGroupPendingCr → ModelToRepresentation.toRepresentation
+        // on the live pass-through model AFTER importGroup has applied every
+        // conditional setDescription/setAttribute/grantRole). The whole
+        // nested import tx is then vetoed by the BatchEmit prepare-seam throw
+        // (DefaultKeycloakTransactionManager.commit:124-130 → rollback) so
+        // the scratch group is discarded atomically; one 202 + Location is
+        // returned by IgaPendingApprovalExceptionMapper.
         //
-        // Fix (identical mechanism to the 5-arg addUser deferred-harvest /
-        // IgaUserProvider.addUser import branch): create the REAL scratch group
-        // via super and return a CAPTURE-mode IgaGroupAdapter so per-setter
-        // interception is bypassed and KC's importGroup builds the COMPLETE
-        // real model (so findGroupByPath/getModelId resolves a real id).
-        // markImportDeferred() makes the setDescription seam inert; the
-        // CREATE_GROUP row is harvested ONCE for the batch by the Phase 4
-        // BatchEmitTransaction (registerImportGroup), which vetoes/replays it
-        // with the rest of the import. No per-entity throw.
+        // ROOT CAUSE NOTE (empirically proven 2026-05-19, 4th-look final):
+        // The earlier "still NPEs at GroupsPartialImport:53" was NOT an IGA
+        // capture-mode artifact. KC's getModelId is
+        // `findGroupModel(...).getId()` (KC 26.5.5
+        // GroupsPartialImport.java:52-54) where findGroupModel ==
+        // KeycloakModelUtils.findGroupByPath(session, realm,
+        // groupRep.getPath()). findGroupByPath returns null at its first
+        // guard (`if (path == null) return null;` —
+        // KeycloakModelUtils.java:800-802) when the GroupRepresentation in
+        // the partialImport payload omits `path`, so `.getId()` on the next
+        // line NPEs UNCONDITIONALLY, regardless of whether the scratch group
+        // is persisted, regardless of IGA. Confirmed by running an
+        // IGA-DISABLED vanilla-KC realm with `{"groups":[{"name":"vp-group",
+        // "attributes":{...}}]}` (no path): identical HTTP 500 / identical
+        // GroupsPartialImport.java:53 NPE / identical KC-SERVICES0037 stack.
+        // KC's own AbstractPartialImportTest.addGroups always sets BOTH
+        // setName AND setPath("/" + GROUP_PREFIX + i) — pathless group reps
+        // are malformed per KC's partialImport contract, not an IGA defect.
+        // Roles/users don't NPE because RealmRolesPartialImport.getModelId
+        // uses `.orElse(null)` (RealmRolesPartialImport.java:59-64) and
+        // UsersPartialImport.getModelId uses a createdIds cache populated by
+        // create() (UsersPartialImport.java:42, 57-69).
+        //
+        // The corresponding E2E payload now sets `path` on the group rep so
+        // KC's intra-import getModelId resolves the (real, persisted, super-
+        // created) scratch group via findGroupByPath → getGroupByName
+        // (JpaRealmProvider.getGroupByName:516-539 — name+parent+type=REALM
+        // criteria query that finds the scratch group flushed by super.
+        // createGroup above).
         if (IgaImportMode.isImportMode(igaSession, realm)) {
             GroupModel base = super.createGroup(realm, id, type, name, toParent);
             if (base == null) return null;
@@ -138,9 +165,16 @@ public class IgaRealmProvider extends JpaRealmProvider {
             if (entity == null) return base;
             log.infof("IGA multi-entity: capture CREATE_GROUP via partialImport "
                     + "RepresentationToModel.importGroup for name=%s (uuid=%s, "
-                    + "parent=%s) — capture-mode adapter registered with the "
-                    + "batch (deferred-harvest; group create proceeds so "
-                    + "GroupsPartialImport.getModelId resolves a real id)",
+                    + "parent=%s) — scratch group persisted via super "
+                    + "(em.persist+flush, queryable by name+parent in the "
+                    + "nested import session); capture-mode adapter is pass-"
+                    + "through to the real GroupAdapter and registered for "
+                    + "deferred-harvest at the BatchEmit prepare seam. KC's "
+                    + "subsequent GroupsPartialImport.getModelId will resolve "
+                    + "via findGroupByPath PROVIDED the partialImport payload "
+                    + "carries groupRep.path (vanilla-KC requirement, see "
+                    + "KeycloakModelUtils.findGroupByPath:800-802 null-path "
+                    + "guard — payloads with only `name` NPE in stock KC too)",
                     name, base.getId(),
                     (toParent != null ? toParent.getId() : null));
             IgaGroupAdapter adapter = new IgaGroupAdapter(
