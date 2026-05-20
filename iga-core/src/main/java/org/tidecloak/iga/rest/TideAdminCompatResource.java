@@ -66,7 +66,17 @@ public class TideAdminCompatResource {
         auth.realm().requireManageRealm();
         boolean current = "true".equals(realm.getAttribute(IGA_ATTRIBUTE));
         boolean next = !current;
-        realm.setAttribute(IGA_ATTRIBUTE, Boolean.toString(next));
+        // The toggle endpoint IS the governing action (gated by
+        // requireManageRealm); routing the toggle attribute write through the
+        // IGA capture interceptor would create a SET_REALM_ATTRIBUTE CR
+        // instead of actually flipping the flag — leaving the realm in a
+        // "lying" state (response says enabled=false but isIGAEnabled still
+        // "true" pending CR approval) and arming a one-pending-CR-per-realm
+        // 409 trap on the next toggle. IGA_REPLAY_ACTIVE bypasses the
+        // wrapper for the duration of the attribute write so the realm
+        // attribute is actually flipped (matching the Phase 6b/6d cancel +
+        // scan contracts that assume the attribute is real after toggle).
+        writeIgaAttributeDirect(IGA_ATTRIBUTE, Boolean.toString(next));
         logger.infof("IGA has been toggled to : %s for realm %s", next, realm.getName());
 
         Map<String, Object> body = new LinkedHashMap<>();
@@ -116,8 +126,11 @@ public class TideAdminCompatResource {
             if (capHolder[0] != null) {
                 // Roll back the realm-attribute write — same outer
                 // transaction, so this resets isIGAEnabled to its pre-toggle
-                // value (false) before the response is sent.
-                realm.setAttribute(IGA_ATTRIBUTE, Boolean.toString(current));
+                // value (false) before the response is sent. Bypass the
+                // IGA capture (the just-written "true" would otherwise make
+                // isIgaActive() route this revert through SET_REALM_ATTRIBUTE
+                // CR creation instead of an actual rollback).
+                writeIgaAttributeDirect(IGA_ATTRIBUTE, Boolean.toString(current));
                 Map<String, Object> capBody = new LinkedHashMap<>();
                 capBody.put("error", "SIDECAR_CAP_EXCEEDED");
                 capBody.put("realmId", capHolder[0].getRealmId());
@@ -190,6 +203,48 @@ public class TideAdminCompatResource {
         auth.realm().requireViewRealm();
         boolean enabled = "true".equals(realm.getAttribute(IGA_ATTRIBUTE));
         return Response.ok(Map.of("enabled", enabled)).build();
+    }
+
+    /**
+     * Write the realm IGA attribute while bypassing the IGA realm-adapter
+     * capture interceptor.
+     *
+     * <p>{@link org.tidecloak.iga.providers.IgaRealmAdapter#setAttribute}
+     * intercepts every realm-attribute write when IGA is currently ON and
+     * routes it through a {@code SET_REALM_ATTRIBUTE} change request instead
+     * of writing directly. That behaviour is correct for arbitrary realm
+     * attributes but fatal for the toggle attribute itself: turning IGA OFF
+     * via this endpoint would emit a CR (response lies "enabled=false" while
+     * isIGAEnabled stays "true"), the Phase 6d cancel runs against a still-ON
+     * realm, and the next toggle hits {@code checkNoPendingCr} → 500 because
+     * the prior toggle-off CR is still PENDING.</p>
+     *
+     * <p>The toggle endpoint IS the governing action (gated by
+     * requireManageRealm), so the {@link
+     * org.tidecloak.iga.replay.IgaReplayExtension} bypass token
+     * {@code IGA_REPLAY_ACTIVE=true} is the correct, established way to
+     * declare "this write is the act of governance itself; do not capture
+     * it". The wrapper checks the session attribute and short-circuits to
+     * {@code super.setAttribute}.</p>
+     *
+     * <p>try/finally is mandatory — the session is request-scoped and a
+     * lingering IGA_REPLAY_ACTIVE on this thread/session would silently
+     * disable ALL subsequent IGA capture for the rest of the request,
+     * including any nested provider calls invoked by the scan/cancel
+     * follow-ups.</p>
+     */
+    private void writeIgaAttributeDirect(String name, String value) {
+        Object prior = session.getAttribute("IGA_REPLAY_ACTIVE");
+        session.setAttribute("IGA_REPLAY_ACTIVE", "true");
+        try {
+            realm.setAttribute(name, value);
+        } finally {
+            if (prior == null) {
+                session.removeAttribute("IGA_REPLAY_ACTIVE");
+            } else {
+                session.setAttribute("IGA_REPLAY_ACTIVE", prior);
+            }
+        }
     }
 
     /**
