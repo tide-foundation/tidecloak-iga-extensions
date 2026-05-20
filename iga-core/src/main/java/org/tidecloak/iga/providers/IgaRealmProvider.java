@@ -397,6 +397,64 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public ClientModel addClient(RealmModel realm, String id, String clientId) {
+        // Phase 4 — partialImport batch governance for CLIENT. This branch MUST
+        // come BEFORE the single-entity isIgaActive() capture return and is
+        // strictly gated by the import-mode predicate; the single-entity
+        // admin-create path below is byte-unchanged.
+        //
+        // Mechanism (mirrors createGroup / addRealmRole / addClientRole /
+        // 5-arg addUser exactly): under POST /partialImport,
+        // PartialImportManager.saveResources → ClientsPartialImport.doImport →
+        // ClientsPartialImport.create (services/.../ClientsPartialImport.java:
+        // 112-127) calls RepresentationToModel.createClient which in turn calls
+        // realm.addClient(rep.getId(), rep.getClientId()) (→ here). KC's very
+        // next call after create() returns is ClientsPartialImport.getModelId
+        // (ClientsPartialImport.java:77-79): `realm.getClientByClientId(
+        // getName(clientRep)).getId()`, where getName(clientRep) ==
+        // clientRep.getClientId(). That lookup MUST resolve in the nested
+        // import session — so we persist the REAL scratch ClientEntity via
+        // super.addClient (em.persist+flush in JpaRealmProvider.addClient)
+        // exactly like the single-entity branch already does, and return a
+        // capture-mode IgaClientAdapter whose every per-setter / every
+        // updateClient override falls through to the real ClientAdapter
+        // (captureMode bypasses isIgaActive in every override; the terminal
+        // updateClient() seam is gated on importDeferred to be a pure pass-
+        // through here so KC's createClient finishes normally and the
+        // resource-level getModelId lookup succeeds against the persisted
+        // scratch client). The CREATE_CLIENT row is harvested ONCE at
+        // batch-emit time (buildImportClientPendingCr →
+        // ModelToRepresentation.toRepresentation on the live pass-through
+        // model AFTER RepresentationToModel.createClient has applied every
+        // updateClientProperties field / protocol-mapper / scope / final
+        // updateClient — KC 26.5.5 RepresentationToModel.java:347-404). The
+        // whole nested import tx is then vetoed by the BatchEmit prepare-seam
+        // throw (DefaultKeycloakTransactionManager.commit:124-130 → rollback)
+        // so the scratch client + its mappers + scope links + redirectUri /
+        // webOrigin rows are discarded atomically; one 202 + Location is
+        // returned by IgaPendingApprovalExceptionMapper.
+        if (IgaImportMode.isImportMode(igaSession, realm)) {
+            ClientModel base = super.addClient(realm, id, clientId);
+            if (base == null) return null;
+            ClientEntity entity = em.find(ClientEntity.class, base.getId());
+            if (entity == null) return base;
+            log.infof("IGA multi-entity: capture CREATE_CLIENT via partialImport "
+                    + "ClientsPartialImport.create → RepresentationToModel."
+                    + "createClient for clientId=%s (uuid=%s) — scratch client "
+                    + "persisted via super (em.persist+flush, queryable by "
+                    + "clientId in the nested import session so KC's "
+                    + "ClientsPartialImport.getModelId — "
+                    + "realm.getClientByClientId(clientId).getId() — "
+                    + "resolves); capture-mode adapter is pass-through to the "
+                    + "real ClientAdapter and registered for deferred-harvest "
+                    + "at the BatchEmit prepare seam (the single-entity "
+                    + "updateClient terminal seam is inert for this client)",
+                    clientId, base.getId());
+            IgaClientAdapter adapter = new IgaClientAdapter(realm, em, igaSession,
+                    entity, /*captureMode=*/ true);
+            IgaImportMode.registerImportClient(igaSession, realm, adapter);
+            adapter.markImportDeferred();
+            return adapter;
+        }
         if (isIgaActive(realm)) {
             // Model-layer accumulate-then-veto (replaces the dead JAX-RS
             // IgaRepresentationCaptureFilter — provider-jar @Provider
@@ -465,6 +523,64 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public ClientScopeModel addClientScope(RealmModel realm, String id, String name) {
+        // Phase 4 — partialImport batch governance for CLIENT_SCOPE
+        // (DEFENSIVE PARITY with addClient — KC-source-confirmed). This branch
+        // MUST come BEFORE the single-entity isIgaActive() capture return and
+        // is strictly gated by the import-mode predicate; the single-entity
+        // admin-create path below is byte-unchanged.
+        //
+        // Source confirmation (KC 26.5.5): PartialImportManager
+        // (services/.../partialimport/PartialImportManager.java:47-52)
+        // registers ONLY ClientsPartialImport / RolesPartialImport /
+        // IdentityProvidersPartialImport / IdentityProviderMappersPartialImport
+        // / GroupsPartialImport / UsersPartialImport — there is NO
+        // ClientScopesPartialImport.java in the partialimport package, so no
+        // current per-type partialImport handler reaches addClientScope. This
+        // branch is therefore cheap insurance against (a) future KC versions
+        // that add ClientScopesPartialImport, and (b) any indirect
+        // multi-entity import path (export/import util, future SPI) that
+        // could call addClientScope under a partialImport frame.
+        //
+        // Mechanism (mirrors addClient exactly): persist the REAL scratch
+        // ClientScopeEntity via super.addClientScope (so any inbound resolve
+        // by id or by name works in the nested import session — same
+        // precondition the single-entity branch already establishes). Return
+        // a capture-mode IgaClientScopeAdapter whose per-setter / per-mapper
+        // overrides accumulate into capturedRep/capturedMappers/
+        // capturedAttributes AND pass through to the real ClientScopeAdapter;
+        // the terminal getId() seam is gated on importDeferred to be a pure
+        // pass-through here (so KC's createClientScope finishes normally).
+        // The CREATE_CLIENT_SCOPE row is harvested ONCE at batch-emit time
+        // (buildImportClientScopePendingCr from the SAME accumulator the
+        // single-entity getId seam emits from, so REP_JSON is byte-identical
+        // and IgaReplayDispatcher.replayCreateClientScope is byte-unchanged).
+        // The nested import tx is vetoed by the BatchEmit prepare-seam throw
+        // — the scratch scope + mappers + attributes are discarded
+        // atomically; one 202 + Location is returned.
+        if (IgaImportMode.isImportMode(igaSession, realm)) {
+            String resolvedId = (id != null) ? id : KeycloakModelUtils.generateId();
+            ClientScopeModel base = super.addClientScope(realm, resolvedId, name);
+            if (base == null) return null;
+            ClientScopeEntity entity = em.find(ClientScopeEntity.class, base.getId());
+            if (entity == null) return base;
+            log.infof("IGA multi-entity: capture CREATE_CLIENT_SCOPE via "
+                    + "partialImport / multi-entity import for name=%s "
+                    + "(uuid=%s) — scratch client-scope persisted via super "
+                    + "(em.persist+flush, queryable in the nested import "
+                    + "session); capture-mode adapter is pass-through to the "
+                    + "real ClientScopeAdapter and registered for deferred-"
+                    + "harvest at the BatchEmit prepare seam (DEFENSIVE "
+                    + "PARITY: KC 26.5.5 has no ClientScopesPartialImport so "
+                    + "no per-type partialImport handler reaches this branch "
+                    + "today; the single-entity getId terminal seam is inert "
+                    + "for this scope)",
+                    name, base.getId());
+            IgaClientScopeAdapter adapter = new IgaClientScopeAdapter(realm, em,
+                    igaSession, entity, /*captureMode=*/ true);
+            IgaImportMode.registerImportClientScope(igaSession, realm, adapter);
+            adapter.markImportDeferred();
+            return adapter;
+        }
         if (isIgaActive(realm)) {
             // Model-layer accumulate-then-veto — the SAME proven mechanism as
             // addRealmRole/addClientRole/addClient/createGroup (replaces the

@@ -163,6 +163,33 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
     /** Fire-once guard: only the first post-build getId() emits. */
     private boolean captureEmitted = false;
 
+    /**
+     * Phase 4 — true when this capture-mode adapter was created on a
+     * {@code partialImport} (or any multi-entity import) path that calls
+     * {@code realm.addClientScope(...)}
+     * ({@code IgaRealmProvider.addClientScope} registered it with
+     * {@link IgaImportMode#registerImportClientScope}). The
+     * {@code CREATE_CLIENT_SCOPE} row is then harvested ONCE at batch-emit
+     * time by {@link #buildImportClientScopePendingCr()} from the same
+     * {@link #capturedRep}/{@link #capturedMappers}/{@link #capturedAttributes}
+     * accumulator the single-entity {@link #getId()} seam emits from (so
+     * REP_JSON is byte-identical and {@code IgaReplayDispatcher
+     * .replayCreateClientScope} is byte-unchanged). For an import-deferred
+     * scope {@link #getId()} is a pure pass-through to {@code super.getId()}
+     * (no per-entity accumulate-emit, no throw, no setRollbackOnly — the
+     * BatchEmit prepare-tx owns the veto). Defaults false → the single-entity
+     * admin-create path is byte-unchanged.
+     *
+     * <p><b>Defensive parity:</b> KC 26.5.5 has no
+     * {@code ClientScopesPartialImport} (verified — {@code PartialImportManager
+     * .partialImports} registers only Clients/Roles/IdPs/IdP-mappers/Groups/
+     * Users; see {@code IgaImportMode#registerImportClientScope} javadoc), so
+     * the import path does not call this branch today; the wiring is cheap
+     * insurance against future KC versions or any indirect multi-entity import
+     * that one day adds it.
+     */
+    private boolean importDeferred = false;
+
     public IgaClientScopeAdapter(RealmModel realm, EntityManager em, KeycloakSession session, ClientScopeEntity clientScopeEntity) {
         this(realm, em, session, clientScopeEntity, false);
     }
@@ -172,6 +199,15 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         super(realm, em, session, clientScopeEntity);
         this.igaSession = session;
         this.captureMode = captureMode;
+    }
+
+    /**
+     * Mark this capture-mode adapter for partialImport deferred-harvest. Called
+     * once by {@code IgaRealmProvider.addClientScope} immediately after
+     * {@link IgaImportMode#registerImportClientScope}.
+     */
+    void markImportDeferred() {
+        this.importDeferred = true;
     }
 
     private IgaChangeRequestService getService() {
@@ -218,17 +254,76 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         if (!captureMode || captureEmitted || !nameObserved) {
             return super.getId();
         }
+        // Phase 4 — partialImport deferred-harvest. When this capture-mode
+        // adapter was created on an import path (IgaRealmProvider
+        // .addClientScope registered it with IgaImportMode), the
+        // CREATE_CLIENT_SCOPE row is harvested ONCE at batch-emit time by
+        // buildImportClientScopePendingCr(). This seam must then be inert
+        // (pass straight through to super.getId() — exactly what the
+        // single-entity admin-create branch would do in inline mode for a
+        // non-captured scope) and MUST NOT accumulate (the batch harvest is
+        // the single source of truth) and MUST NOT throw (the batch-emit
+        // prepare-tx owns the veto). The single-entity admin-create branch
+        // below is byte-unchanged. (Note: KC 26.5.5 has no
+        // ClientScopesPartialImport — see IgaImportMode#registerImportClientScope
+        // javadoc — so this branch is defensive parity with addClient, not
+        // exercised by current partialImport call paths.)
+        if (importDeferred) {
+            return super.getId();
+        }
         // Arm the fire-once guard BEFORE any further model/service call so the
         // emit path cannot re-enter this seam and the second getId() at
         // ClientScopesResource.createClientScope:135 falls through.
         captureEmitted = true;
         trace("getId#emit");
 
+        Map<String, Object> row = buildCapturedClientScopeRow();
+        String scopeId = (String) row.get("ID");
+
+        // Phase 4 — partialImport batch governance: accumulate + return the
+        // real scope id (NO per-entity CR/setRollbackOnly/throw). Sole
+        // behavioural change vs Phases 1–3; single-entity branch unchanged.
+        if (IgaImportMode.isImportMode(igaSession, realm)) {
+            IgaImportMode.accumulate(igaSession, realm, "CLIENT_SCOPE", scopeId,
+                    "CREATE_CLIENT_SCOPE", List.of(row), null);
+            return scopeId;
+        }
+
+        String[] crIdHolder = new String[1];
+        KeycloakModelUtils.runJobInTransaction(igaSession.getKeycloakSessionFactory(), newSession -> {
+            RealmModel newRealm = newSession.realms().getRealm(realm.getId());
+            EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
+            IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
+            crIdHolder[0] = newService.create(newRealm, "CLIENT_SCOPE", scopeId,
+                    "CREATE_CLIENT_SCOPE", List.of(row), null).getId();
+        });
+
+        // Mark the REQUEST KeycloakTransaction rollback-only so
+        // DefaultKeycloakSession#close() rolls back (not commits) and the
+        // scratch scope + its protocol mappers + attributes are discarded. The
+        // CR survives because it was written on a separate session/tx by
+        // runJobInTransaction. Same idiom and lifecycle proof as
+        // IgaRoleAdapter#getName / IgaClientAdapter#updateClient.
+        igaSession.getTransactionManager().setRollbackOnly();
+
+        throw new IgaPendingApprovalException(crIdHolder[0], "CLIENT_SCOPE", "CREATE_CLIENT_SCOPE");
+    }
+
+    /**
+     * Build the {@code CREATE_CLIENT_SCOPE} CR row from the accumulator — the
+     * SINGLE source of truth shared by the single-entity terminal seam
+     * ({@link #getId()}) and the Phase 4 partialImport deferred-harvest path
+     * ({@link #buildImportClientScopePendingCr()}). Identical rep/row contract
+     * in both cases (so {@code IgaReplayDispatcher.replayCreateClientScope} is
+     * byte-unchanged). NO side effects (no CR write, no throw, no
+     * rollback-only). Reads {@link #capturedRep}/{@link #capturedMappers}/
+     * {@link #capturedAttributes} (authoritative — see class javadoc for why
+     * the live model can read empty if {@code getId()} fires early).
+     */
+    private Map<String, Object> buildCapturedClientScopeRow() {
         String scopeId = super.getId();
         String scopeName = capturedRep.getName();
 
-        // Build the CR rep entirely from the accumulator (authoritative — the
-        // live model can read empty if getId() fires early; see class javadoc).
         ClientScopeRepresentation rep = new ClientScopeRepresentation();
         rep.setId(scopeId);
         rep.setName(scopeName);
@@ -262,23 +357,22 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
                     + "ClientScopeRepresentation for scope=" + scopeName, e);
         }
 
-        int mappers = rep.getProtocolMappers() == null ? 0 : rep.getProtocolMappers().size();
+        int mappersCount = rep.getProtocolMappers() == null ? 0 : rep.getProtocolMappers().size();
         int attrs = rep.getAttributes() == null ? 0 : rep.getAttributes().size();
         log.infof("IGA capture CREATE_CLIENT_SCOPE: accumulated-rep path for scope=%s (uuid=%s, "
                 + "protocol=%s, description=%s, protocolMappers=%d, attributes=%d, %d chars) "
                 + "captured at the post-build terminal seam "
-                + "(ClientScopesResource.createClientScope#getId, gated on setName-observed); "
-                + "observed order=[%s]; CR written in a separate tx, request tx marked "
-                + "rollback-only so the scratch scope + its mappers + attributes are discarded "
-                + "(zero rows persisted at draft); full config will replay on commit",
+                + "(ClientScopesResource.createClientScope#getId, gated on setName-observed / "
+                + "partialImport deferred-harvest); observed order=[%s]; full config will "
+                + "replay on commit",
                 scopeName, scopeId, rep.getProtocol(), rep.getDescription() != null,
-                mappers, attrs, repJson.length(), observedTrace);
+                mappersCount, attrs, repJson.length(), observedTrace);
 
-        // rowsJson contract (must match IgaReplayDispatcher.replayCreateClientScope:
+        // rowsJson contract (must match IgaReplayDispatcher.replayCreateClientScope):
         // ID = scope UUID, NAME = scope name, REALM_ID = realm UUID,
         // PROTOCOL/DESCRIPTION = bare-create safety-net fields (replay prefers
         // the REP_JSON full-config path when REP_JSON is present), REP_JSON =
-        // the full ClientScopeRepresentation JSON).
+        // the full ClientScopeRepresentation JSON.
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("ID", scopeId);
         row.put("NAME", scopeName);
@@ -286,34 +380,47 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         if (rep.getProtocol() != null) row.put("PROTOCOL", rep.getProtocol());
         if (rep.getDescription() != null) row.put("DESCRIPTION", rep.getDescription());
         row.put("REP_JSON", repJson);
+        return row;
+    }
 
-        // Phase 4 — partialImport batch governance: accumulate + return the
-        // real scope id (NO per-entity CR/setRollbackOnly/throw). Sole
-        // behavioural change vs Phases 1–3; single-entity branch unchanged.
-        if (IgaImportMode.isImportMode(igaSession, realm)) {
-            IgaImportMode.accumulate(igaSession, realm, "CLIENT_SCOPE", scopeId,
-                    "CREATE_CLIENT_SCOPE", List.of(row), null);
-            return scopeId;
+    /**
+     * Phase 4 — partialImport batch path (defensive parity with addClient).
+     * Build this scope's {@code CREATE_CLIENT_SCOPE}
+     * {@link IgaImportMode.PendingCr} from the accumulator. Called by
+     * {@link IgaImportMode.BatchEmitTransaction#commit} AFTER every observed
+     * {@code setName}/{@code setDescription}/{@code setProtocol}/
+     * {@code addProtocolMapper}/{@code setAttribute} has run (so the
+     * accumulator is complete) and BEFORE the scratch JPA tx commits. Uses
+     * the SAME {@link #buildCapturedClientScopeRow()} contract as the
+     * single-entity {@link #getId()} seam — replay is identical,
+     * {@code IgaReplayDispatcher} byte-unchanged. NO throw, NO rollback-only
+     * here — the batch-emit tx owns that.
+     *
+     * <p>If {@code setName} was never observed (e.g. a programmatic caller
+     * that bypassed the resource flow), the accumulator is empty and we
+     * skip — there is nothing meaningful to govern.
+     */
+    IgaImportMode.PendingCr buildImportClientScopePendingCr() {
+        if (!captureMode || !importDeferred) {
+            return null;
         }
-
-        String[] crIdHolder = new String[1];
-        KeycloakModelUtils.runJobInTransaction(igaSession.getKeycloakSessionFactory(), newSession -> {
-            RealmModel newRealm = newSession.realms().getRealm(realm.getId());
-            EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
-            IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
-            crIdHolder[0] = newService.create(newRealm, "CLIENT_SCOPE", scopeId,
-                    "CREATE_CLIENT_SCOPE", List.of(row), null).getId();
-        });
-
-        // Mark the REQUEST KeycloakTransaction rollback-only so
-        // DefaultKeycloakSession#close() rolls back (not commits) and the
-        // scratch scope + its protocol mappers + attributes are discarded. The
-        // CR survives because it was written on a separate session/tx by
-        // runJobInTransaction. Same idiom and lifecycle proof as
-        // IgaRoleAdapter#getName / IgaClientAdapter#updateClient.
-        igaSession.getTransactionManager().setRollbackOnly();
-
-        throw new IgaPendingApprovalException(crIdHolder[0], "CLIENT_SCOPE", "CREATE_CLIENT_SCOPE");
+        if (!nameObserved) {
+            log.warnf("IGA multi-entity ACCUM: CREATE_CLIENT_SCOPE deferred-"
+                    + "harvest SKIPPED (uuid=%s) — setName never observed, so "
+                    + "the accumulator is empty; no CR row will be emitted "
+                    + "for this scope (the scratch scope is still discarded "
+                    + "by the import rollback)", super.getId());
+            return null;
+        }
+        Map<String, Object> row = buildCapturedClientScopeRow();
+        String scopeId = (String) row.get("ID");
+        log.infof("IGA multi-entity ACCUM: CREATE_CLIENT_SCOPE %s (uuid=%s) — "
+                + "row harvested at batch emit (defensive parity — KC 26.5.5 "
+                + "has no ClientScopesPartialImport but the wiring covers any "
+                + "future multi-entity import that reaches addClientScope)",
+                row.get("NAME"), scopeId);
+        return new IgaImportMode.PendingCr("CLIENT_SCOPE", scopeId,
+                "CREATE_CLIENT_SCOPE", List.of(row), null);
     }
 
     // -------------------------------------------------------------------------

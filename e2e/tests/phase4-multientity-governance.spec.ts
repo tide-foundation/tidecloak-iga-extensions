@@ -11,7 +11,12 @@ import {
   authorizeAndCommit,
   getRole,
   getGroupByName,
+  getGroupById,
   getUserByUsername,
+  getClientByClientId,
+  getClientProtocolMappers,
+  getClientScopeByName,
+  getClientScopeProtocolMappers,
   locationHeader,
   safeJson,
   ChangeRequest,
@@ -36,14 +41,22 @@ import {
  * single 202 carrying the batch.
  *
  * Scenario: scratch realm + IGA on, ONE partialImport carrying 2 users +
- * 1 realm role + 1 group →
+ * 1 realm role + 1 group + 1 client + 1 client-scope →
  *   - single 202 (batch),
- *   - 4 PENDING CRs of the right types (2× CREATE_USER, 1× CREATE_ROLE,
- *     1× CREATE_GROUP),
- *   - NONE of the 4 entities exist at draft (GET each → absent, INCLUDING
+ *   - 6 PENDING CRs of the right types (2× CREATE_USER, 1× CREATE_ROLE,
+ *     1× CREATE_GROUP, 1× CREATE_CLIENT, 1× CREATE_CLIENT_SCOPE — clients +
+ *     client-scopes added so the import-mode branch covers addClient
+ *     symmetrically and addClientScope by defensive parity, even though KC
+ *     26.5.5 has no ClientScopesPartialImport per-type handler and the scope
+ *     in the partialImport payload is therefore not consumed by the per-type
+ *     import loop today; see IgaImportMode#registerImportClientScope
+ *     javadoc for the source-confirmed gap),
+ *   - NONE of the 6 entities exist at draft (GET each → absent, INCLUDING
  *     the 2 users — proving the 5-arg local-storage addUser bypass is
- *     closed),
- *   - authorize+commit all CRs → all 4 entities exist with config.
+ *     closed — AND the client, proving the addClient import branch closes
+ *     the same class of bypass),
+ *   - authorize+commit all CRs → all 6 entities exist with config (full
+ *     attribute / protocol-mapper / redirectUri fidelity).
  *
  * Pure API E2E (no browser). Idempotent; teardown deletes the scratch realm
  * even on failure.
@@ -64,9 +77,41 @@ const ROLE_NAME = 'p4-role';
 const GROUP_NAME = 'p4-group';
 const USER_A = 'p4-user-a';
 const USER_B = 'p4-user-b';
+const CLIENT_ID = 'p4-client';
+const CLIENT_SCOPE_NAME = 'p4-scope';
 const CUSTOM_ATTR = 'p4CustomAttr';
+// A non-default redirect URI proves redirectUri fidelity through capture+replay.
+const CLIENT_REDIRECT = 'https://phase4.example.test/cb';
+// Saml protocol on the client + a saml-user-attribute-mapper exercises a
+// non-default protocol AND mapper config (must survive capture+replay verbatim,
+// same shape Phase 2 exercises for client scopes).
+const CLIENT_MAPPER_NAME = 'p4-client-mapper';
+const SCOPE_MAPPER_NAME = 'p4-scope-mapper';
 
-/** The PartialImportRepresentation: 2 users + 1 realm role + 1 group. */
+/**
+ * The PartialImportRepresentation: 2 users + 1 realm role + 1 group + 1 client
+ * + 1 client-scope. Each entity carries enough non-default state (custom
+ * attribute / protocol mapper / redirectUri) to prove capture+replay fidelity.
+ *
+ * Client populated with the fields KC's ClientsPartialImport.getModelId reads
+ * after create() (services/.../ClientsPartialImport.java:77-79 —
+ * `realm.getClientByClientId(getName(clientRep)).getId()` where getName ==
+ * clientRep.getClientId()), so `clientId` is the only hard precondition. The
+ * IgaRealmProvider.addClient import branch persists the scratch client via
+ * super.addClient (em.persist+flush) so that lookup resolves in the nested
+ * import session — same precondition pattern as createGroup/path and the
+ * other Phase 4 branches.
+ *
+ * Client-scope is included for symmetry / defensive parity. KC 26.5.5 has NO
+ * ClientScopesPartialImport (PartialImportManager.partialImports —
+ * services/.../partialimport/PartialImportManager.java:47-52 — registers only
+ * Clients/Roles/IdPs/IdP-mappers/Groups/Users; the source set has no
+ * ClientScopesPartialImport.java), so the per-type import loop does NOT
+ * consume `clientScopes` from the payload and we cannot assert a
+ * CREATE_CLIENT_SCOPE batch CR here today. The payload entry documents the
+ * defensive wiring; if a future KC version adds the handler the assertions in
+ * the "future" block below will start passing automatically.
+ */
 function importRep() {
   return {
     ifResourceExists: 'FAIL',
@@ -124,6 +169,72 @@ function importRep() {
         attributes: { [CUSTOM_ATTR]: ['user-b-val'] },
       },
     ],
+    clients: [
+      {
+        clientId: CLIENT_ID,
+        protocol: 'openid-connect',
+        enabled: true,
+        publicClient: true,
+        redirectUris: [CLIENT_REDIRECT],
+        attributes: {
+          [CUSTOM_ATTR]: 'client-val',
+          // A non-default well-known KC client attribute also proves attribute
+          // fidelity through the capture+batch+replay round-trip.
+          'post.logout.redirect.uris': '+',
+        },
+        protocolMappers: [
+          {
+            name: CLIENT_MAPPER_NAME,
+            protocol: 'openid-connect',
+            protocolMapper: 'oidc-usermodel-attribute-mapper',
+            config: {
+              'user.attribute': CUSTOM_ATTR,
+              'claim.name': 'p4_custom_claim',
+              'jsonType.label': 'String',
+              'id.token.claim': 'true',
+              'access.token.claim': 'true',
+              'userinfo.token.claim': 'true',
+            },
+          },
+        ],
+      },
+    ],
+    clientScopes: [
+      {
+        name: CLIENT_SCOPE_NAME,
+        description: 'phase4 batch-imported client scope',
+        // Non-default protocol (saml) + an attribute + a mapper with full
+        // config, same fidelity shape as the Phase 2 single-entity client-
+        // scope spec. NOTE (source-confirmed): KC 26.5.5 has no
+        // ClientScopesPartialImport (PartialImportManager registers only
+        // Clients/Roles/IdPs/IdP-mappers/Groups/Users), so this payload entry
+        // is NOT consumed by the per-type import loop today; the
+        // IgaRealmProvider.addClientScope import branch is wired up for
+        // defensive parity (future KC versions / indirect multi-entity import
+        // paths). Therefore CREATE_CLIENT_SCOPE is NOT among the expected
+        // pending CRs; if KC ever adds the handler the future-coverage
+        // assertions below will start passing automatically.
+        protocol: 'saml',
+        attributes: {
+          [CUSTOM_ATTR]: 'scope-val',
+          'display.on.consent.screen': 'true',
+          'consent.screen.text': 'phase4-consent',
+        },
+        protocolMappers: [
+          {
+            name: SCOPE_MAPPER_NAME,
+            protocol: 'saml',
+            protocolMapper: 'saml-user-attribute-mapper',
+            config: {
+              'attribute.nameformat': 'Basic',
+              'user.attribute': CUSTOM_ATTR,
+              'attribute.name': 'p4-scope-attr-name',
+              'friendly.name': 'p4-scope-friendly',
+            },
+          },
+        ],
+      },
+    ],
   };
 }
 
@@ -164,7 +275,7 @@ test.describe('IGA Phase 4: partialImport batch governance', () => {
     await deleteRealm(request, PROBE_REALM).catch(() => {});
   });
 
-  test('partialImport (2 users + 1 role + 1 group) → ONE 202 batch, 4 pending CRs, NOTHING at draft (incl. users — 5-arg bypass closed), all created on commit', async ({
+  test('partialImport (2 users + 1 role + 1 group + 1 client + 1 client-scope) → ONE 202 batch, 5 pending CRs (clientScopes inert per KC 26.5.5 source), NOTHING at draft (incl. users — 5-arg bypass closed — and client), all created on commit', async ({
     request,
   }) => {
     // -----------------------------------------------------------------------
@@ -188,16 +299,29 @@ test.describe('IGA Phase 4: partialImport batch governance', () => {
         evidence.location = loc ?? null;
         evidence.body = body;
 
-        // Did anything persist immediately? (the decisive bypass check)
+        // Did anything persist immediately? (the decisive bypass check).
+        // Client also probed so an addClient leak (the SAME class of bypass
+        // the 5-arg addUser fix closed) is caught as a CODE BUG, not a
+        // restart issue. Client-scope is NOT probed here because KC 26.5.5
+        // has no ClientScopesPartialImport (PartialImportManager registers
+        // only Clients/Roles/IdPs/IdP-mappers/Groups/Users), so the per-type
+        // import loop never reaches addClientScope and the payload entry is
+        // deliberately discarded by KC itself — there is nothing to leak.
         const roleNow = await getRole(request, PROBE_REALM, ROLE_NAME);
         const grpNow = await getGroupByName(request, PROBE_REALM, GROUP_NAME);
         const uaNow = await getUserByUsername(request, PROBE_REALM, USER_A);
         const ubNow = await getUserByUsername(request, PROBE_REALM, USER_B);
+        const cliNow = await getClientByClientId(
+          request,
+          PROBE_REALM,
+          CLIENT_ID,
+        );
         const persisted = {
           role: roleNow.http === 200,
           group: !!grpNow.body,
           userA: !!uaNow.body,
           userB: !!ubNow.body,
+          client: !!cliNow.body,
         };
         evidence.persistedAtDraft = persisted;
 
@@ -253,7 +377,8 @@ test.describe('IGA Phase 4: partialImport batch governance', () => {
         const batchOk =
           (counts.CREATE_USER ?? 0) >= 2 &&
           (counts.CREATE_ROLE ?? 0) >= 1 &&
-          (counts.CREATE_GROUP ?? 0) >= 1;
+          (counts.CREATE_GROUP ?? 0) >= 1 &&
+          (counts.CREATE_CLIENT ?? 0) >= 1;
         if (!batchOk) {
           return {
             ok: false as const,
@@ -261,9 +386,9 @@ test.describe('IGA Phase 4: partialImport batch governance', () => {
             detail:
               `partialImport 202 + nothing at draft, but the pending CRs ` +
               `are not the expected batch (got ${JSON.stringify(counts)}; ` +
-              `expected ≥2 CREATE_USER, ≥1 CREATE_ROLE, ≥1 CREATE_GROUP) — ` +
-              `Phase 4 loaded but accumulation is lossy (CODE BUG, not a ` +
-              `restart).`,
+              `expected ≥2 CREATE_USER, ≥1 CREATE_ROLE, ≥1 CREATE_GROUP, ` +
+              `≥1 CREATE_CLIENT) — Phase 4 loaded but accumulation is lossy ` +
+              `(CODE BUG, not a restart).`,
             evidence,
           };
         }
@@ -362,7 +487,20 @@ test.describe('IGA Phase 4: partialImport batch governance', () => {
     }
 
     // -----------------------------------------------------------------------
-    // 3. Exactly the expected 4 PENDING CRs of the right types.
+    // 3. Exactly the expected 5 PENDING CRs of the right types.
+    //
+    // NOTE on the count: the payload carries 1 role + 1 group + 2 users + 1
+    // client + 1 client-scope (6 entities), but KC 26.5.5 has NO
+    // ClientScopesPartialImport — PartialImportManager.partialImports
+    // (services/.../partialimport/PartialImportManager.java:47-52) registers
+    // only Clients/Roles/IdPs/IdP-mappers/Groups/Users, and the per-type
+    // import loop discards the `clientScopes` payload entry on the way in.
+    // So we expect 5 governed CRs today: 2× CREATE_USER + 1× CREATE_ROLE +
+    // 1× CREATE_GROUP + 1× CREATE_CLIENT. The addClientScope import branch
+    // (registerImportClientScope) is defensive parity wiring — see
+    // IgaImportMode#registerImportClientScope javadoc. A "future" assertion
+    // block below documents the post-KC-handler shape (6 governed CRs incl.
+    // CREATE_CLIENT_SCOPE) without failing today.
     // -----------------------------------------------------------------------
     const crs = await listChangeRequests(request, REALM);
     const counts = actionCounts(crs);
@@ -378,15 +516,39 @@ test.describe('IGA Phase 4: partialImport batch governance', () => {
       counts.CREATE_GROUP ?? 0,
       `expected 1 CREATE_GROUP CR (got ${JSON.stringify(counts)})`,
     ).toBe(1);
+    expect(
+      counts.CREATE_CLIENT ?? 0,
+      `expected 1 CREATE_CLIENT CR (got ${JSON.stringify(counts)})`,
+    ).toBe(1);
+    // CREATE_CLIENT_SCOPE: 0 today (KC has no ClientScopesPartialImport).
+    // The defensive parity wiring in IgaRealmProvider.addClientScope means
+    // IF a future KC version starts dispatching addClientScope from
+    // partialImport, this assertion will tighten to 1 — the import branch is
+    // already in place and would emit the CR through the same batch.
+    expect(
+      counts.CREATE_CLIENT_SCOPE ?? 0,
+      `CREATE_CLIENT_SCOPE expected 0 — KC 26.5.5 has no ` +
+        `ClientScopesPartialImport so the per-type import loop discards the ` +
+        `clientScopes payload entry; the addClientScope import branch is ` +
+        `wired up for defensive parity (got ${JSON.stringify(counts)})`,
+    ).toBe(0);
     const governed = crs.filter((c) =>
-      ['CREATE_USER', 'CREATE_ROLE', 'CREATE_GROUP'].includes(c.actionType),
+      [
+        'CREATE_USER',
+        'CREATE_ROLE',
+        'CREATE_GROUP',
+        'CREATE_CLIENT',
+        'CREATE_CLIENT_SCOPE',
+      ].includes(c.actionType),
     );
     expect(
       governed.length,
-      `exactly 4 governed CRs expected (got ${governed.length}: ${JSON.stringify(
-        counts,
-      )})`,
-    ).toBe(4);
+      `exactly 5 governed CRs expected today (got ${governed.length}: ` +
+        `${JSON.stringify(
+          counts,
+        )}) — 2 users + 1 role + 1 group + 1 client; client-scope is 0 per ` +
+        `KC 26.5.5 source (no ClientScopesPartialImport)`,
+    ).toBe(5);
     for (const cr of governed) {
       expect(
         cr.status,
@@ -411,6 +573,32 @@ test.describe('IGA Phase 4: partialImport batch governance', () => {
       `both user CRs must carry their usernames (got ${JSON.stringify([
         ...userNames,
       ])})`,
+    ).toBeTruthy();
+    // Client CR REP_JSON must carry clientId + at least one protocol mapper +
+    // the captured redirectUri (proves the batch-harvest snapshot is full-rep,
+    // not bare). This matches the single-entity CREATE_CLIENT contract that
+    // IgaReplayDispatcher.replayCreateClient consumes byte-for-byte.
+    const clientCr = governed.find((c) => c.actionType === 'CREATE_CLIENT')!;
+    const clientCrFull = await getChangeRequest(request, REALM, clientCr.id);
+    const clientRep = parseRep(clientCrFull.body);
+    expect(clientRep?.clientId, 'client CR rep carries clientId').toBe(
+      CLIENT_ID,
+    );
+    const repMappers = Array.isArray(clientRep?.protocolMappers)
+      ? clientRep.protocolMappers
+      : [];
+    expect(
+      repMappers.some((m: any) => m?.name === CLIENT_MAPPER_NAME),
+      `client CR rep must carry the protocol mapper '${CLIENT_MAPPER_NAME}' ` +
+        `(got ${JSON.stringify(repMappers.map((m: any) => m?.name))})`,
+    ).toBeTruthy();
+    const repRedirects = Array.isArray(clientRep?.redirectUris)
+      ? clientRep.redirectUris
+      : [];
+    expect(
+      repRedirects.includes(CLIENT_REDIRECT),
+      `client CR rep must carry redirectUri '${CLIENT_REDIRECT}' ` +
+        `(got ${JSON.stringify(repRedirects)})`,
     ).toBeTruthy();
 
     // -----------------------------------------------------------------------
@@ -443,6 +631,37 @@ test.describe('IGA Phase 4: partialImport batch governance', () => {
       `user ${USER_B} must NOT exist before commit — proves the 5-arg ` +
         `local-storage addUser partialImport bypass is CLOSED (got ` +
         `${JSON.stringify(ubDraft.body)})`,
+    ).toBeFalsy();
+    // Client also must NOT exist at draft. The IgaRealmProvider.addClient
+    // import branch persists the scratch ClientEntity via super.addClient so
+    // KC's ClientsPartialImport.getModelId can resolve in the nested import
+    // session, but the BatchEmit prepare-tx throw triggers the nested import
+    // tx rollback — the scratch client + its mappers + scope links + redirect
+    // URI rows are discarded atomically. If this assertion fails the addClient
+    // import branch (or its scratch-rollback handshake) is broken.
+    const cliDraft = await getClientByClientId(request, REALM, CLIENT_ID);
+    expect(
+      cliDraft.body,
+      `client ${CLIENT_ID} must NOT exist before commit — proves the ` +
+        `addClient partialImport branch's batch-emit scratch rollback ` +
+        `discards the (super-persisted) scratch client (got ` +
+        `${JSON.stringify(cliDraft.body)})`,
+    ).toBeFalsy();
+    // Client-scope: today KC 26.5.5 discards the clientScopes payload entry
+    // at the per-type import loop (no ClientScopesPartialImport), so it
+    // never reached the IGA branch and never had any scratch row to roll
+    // back. Asserting absence proves nothing about Phase 4 today but is the
+    // baseline for the future-coverage block.
+    const scopeDraft = await getClientScopeByName(
+      request,
+      REALM,
+      CLIENT_SCOPE_NAME,
+    );
+    expect(
+      scopeDraft.body,
+      `client-scope ${CLIENT_SCOPE_NAME} must NOT exist before commit ` +
+        `(KC discards the payload entry; baseline check for future ` +
+        `coverage) (got ${JSON.stringify(scopeDraft.body)})`,
     ).toBeFalsy();
 
     // -----------------------------------------------------------------------
@@ -486,10 +705,19 @@ test.describe('IGA Phase 4: partialImport batch governance', () => {
       grpAfter.body,
       `group ${GROUP_NAME} must exist after commit`,
     ).toBeTruthy();
+    // The list endpoint (?search=) returns the BRIEF group rep only — no
+    // attributes — so fetch the full rep by uuid to assert attribute
+    // fidelity. KC 26.5.5 GroupsResource.getGroups serves the brief form
+    // and GroupResource.getGroup (/groups/{id}) serves the full rep.
+    const grpAfterFull = await getGroupById(request, REALM, grpAfter.body.id);
     expect(
-      grpAfter.body?.attributes?.[CUSTOM_ATTR]?.[0],
+      grpAfterFull.http,
+      `group ${GROUP_NAME} full-rep fetch http (got ${grpAfterFull.http})`,
+    ).toBe(200);
+    expect(
+      grpAfterFull.body?.attributes?.[CUSTOM_ATTR]?.[0],
       `group custom attribute fidelity (got ${JSON.stringify(
-        grpAfter.body?.attributes,
+        grpAfterFull.body?.attributes,
       )})`,
     ).toBe('group-val');
 
@@ -518,6 +746,102 @@ test.describe('IGA Phase 4: partialImport batch governance', () => {
         ubAfter.body?.attributes,
       )})`,
     ).toBe('user-b-val');
+
+    // Client must exist after commit, with its redirectUri / attribute /
+    // protocol mapper all faithful to the import payload (the
+    // IgaReplayDispatcher.replayCreateClient REP_JSON path rebuilds the
+    // complete client via RepresentationToModel.createClient — KC 26.5.5
+    // RepresentationToModel.java:332-408 — so every field the snapshot
+    // carried is round-tripped).
+    const cliAfter = await getClientByClientId(request, REALM, CLIENT_ID);
+    expect(
+      cliAfter.body,
+      `client ${CLIENT_ID} must exist after commit`,
+    ).toBeTruthy();
+    expect(
+      cliAfter.body?.redirectUris,
+      `client redirectUris fidelity (got ${JSON.stringify(
+        cliAfter.body?.redirectUris,
+      )})`,
+    ).toContain(CLIENT_REDIRECT);
+    expect(
+      cliAfter.body?.attributes?.[CUSTOM_ATTR],
+      `client custom attribute fidelity (got ${JSON.stringify(
+        cliAfter.body?.attributes,
+      )})`,
+    ).toBe('client-val');
+    const cliPms = await getClientProtocolMappers(
+      request,
+      REALM,
+      cliAfter.body.id,
+    );
+    expect(cliPms.http, 'client protocol-mappers list http').toBe(200);
+    const cliMapper = cliPms.body.find(
+      (m: any) => m?.name === CLIENT_MAPPER_NAME,
+    );
+    expect(
+      cliMapper,
+      `client protocol mapper '${CLIENT_MAPPER_NAME}' must exist after commit ` +
+        `(got names=${JSON.stringify(cliPms.body.map((m: any) => m?.name))})`,
+    ).toBeTruthy();
+    expect(
+      cliMapper?.config?.['user.attribute'],
+      `client mapper config 'user.attribute' fidelity (got ${JSON.stringify(
+        cliMapper?.config,
+      )})`,
+    ).toBe(CUSTOM_ATTR);
+    expect(
+      cliMapper?.config?.['claim.name'],
+      `client mapper config 'claim.name' fidelity`,
+    ).toBe('p4_custom_claim');
+
+    // -----------------------------------------------------------------------
+    // 6b. Future-coverage block — documents the post-KC-handler shape for
+    // client-scope governance through partialImport. Today KC 26.5.5 has no
+    // ClientScopesPartialImport so this block is a no-op; the moment a KC
+    // version adds the handler, the IgaRealmProvider.addClientScope import
+    // branch (already wired) will emit a CREATE_CLIENT_SCOPE CR and
+    // CREATE_CLIENT_SCOPE will be 1, at which point the conditional
+    // assertion below will start exercising the full replay fidelity. This
+    // is deliberately a NON-failing check today.
+    // -----------------------------------------------------------------------
+    if ((counts.CREATE_CLIENT_SCOPE ?? 0) >= 1) {
+      const scopeAfter = await getClientScopeByName(
+        request,
+        REALM,
+        CLIENT_SCOPE_NAME,
+      );
+      expect(
+        scopeAfter.body,
+        `client-scope ${CLIENT_SCOPE_NAME} must exist after commit (future ` +
+          `coverage — KC partialImport now dispatches addClientScope)`,
+      ).toBeTruthy();
+      expect(scopeAfter.body?.protocol, 'scope protocol fidelity').toBe('saml');
+      expect(
+        scopeAfter.body?.attributes?.[CUSTOM_ATTR],
+        `scope custom attribute fidelity`,
+      ).toBe('scope-val');
+      const scopePms = await getClientScopeProtocolMappers(
+        request,
+        REALM,
+        scopeAfter.body.id,
+      );
+      expect(
+        scopePms.body.some((m: any) => m?.name === SCOPE_MAPPER_NAME),
+        `scope protocol mapper '${SCOPE_MAPPER_NAME}' must exist after commit`,
+      ).toBeTruthy();
+    } else {
+      // Make the source-confirmed gap explicit in the test output, but do
+      // NOT fail — the defensive parity branch is correct by construction.
+      console.log(
+        `[INFO phase4] CREATE_CLIENT_SCOPE=0 as expected — KC 26.5.5 has ` +
+          `no ClientScopesPartialImport (PartialImportManager registers ` +
+          `only Clients/Roles/IdPs/IdP-mappers/Groups/Users). The ` +
+          `IgaRealmProvider.addClientScope import branch is defensive ` +
+          `parity wiring; it will activate automatically if a future KC ` +
+          `version adds the per-type handler.`,
+      );
+    }
 
     // -----------------------------------------------------------------------
     // 7. Cleanup (afterAll also deletes; do it here too and confirm).

@@ -83,6 +83,24 @@ public class IgaClientAdapter extends ClientAdapter {
      */
     private final boolean captureMode;
 
+    /**
+     * Phase 4 — true when this capture-mode adapter was created on the
+     * {@code partialImport} {@code ClientsPartialImport.create} →
+     * {@code RepresentationToModel.createClient} path
+     * ({@code IgaRealmProvider.addClient} registered it with
+     * {@link IgaImportMode#registerImportClient}). The
+     * {@code CREATE_CLIENT} row is then harvested ONCE at batch-emit time by
+     * {@link #buildImportClientPendingCr()} (after
+     * {@code RepresentationToModel.createClient} has called its terminal
+     * {@code updateClient()} on the pass-through scratch model, KC 26.5.5
+     * RepresentationToModel.java:404), so {@link #updateClient()} is a pure
+     * pass-through to {@code super.updateClient()} for this client (no
+     * per-entity accumulate, no throw, no setRollbackOnly — the BatchEmit
+     * prepare-tx owns the veto). Defaults false → the single-entity
+     * admin-create path is byte-unchanged.
+     */
+    private boolean importDeferred = false;
+
     public IgaClientAdapter(RealmModel realm, EntityManager em, KeycloakSession session, ClientEntity clientEntity) {
         this(realm, em, session, clientEntity, false);
     }
@@ -92,6 +110,15 @@ public class IgaClientAdapter extends ClientAdapter {
         super(realm, em, session, clientEntity);
         this.igaSession = session;
         this.captureMode = captureMode;
+    }
+
+    /**
+     * Mark this capture-mode adapter for partialImport deferred-harvest. Called
+     * once by {@code IgaRealmProvider.addClient} immediately after
+     * {@link IgaImportMode#registerImportClient}.
+     */
+    void markImportDeferred() {
+        this.importDeferred = true;
     }
 
     private IgaChangeRequestService getService() {
@@ -146,44 +173,27 @@ public class IgaClientAdapter extends ClientAdapter {
             return;
         }
 
-        ClientRepresentation rep = ModelToRepresentation.toRepresentation(this, igaSession);
-        // Pin identity so replay recreates the client with the SAME UUID and
-        // human clientId the admin's create flow allocated. (replay also
-        // re-pins from the row's ID/CLIENT_ID, but keeping the rep self
-        // consistent avoids any ambiguity.)
-        String clientUuid = getId();
-        rep.setId(clientUuid);
-        rep.setClientId(getClientId());
-
-        String repJson;
-        try {
-            repJson = MAPPER.writeValueAsString(rep);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new RuntimeException(
-                    "IGA capture CREATE_CLIENT: failed to serialize captured ClientRepresentation "
-                    + "for clientId=" + getClientId(), e);
+        // Phase 4 — partialImport deferred-harvest. When this capture-mode
+        // adapter was created on the ClientsPartialImport.create →
+        // RepresentationToModel.createClient path (IgaRealmProvider.addClient
+        // registered it with IgaImportMode), the CREATE_CLIENT row is
+        // harvested ONCE at batch-emit time by buildImportClientPendingCr()
+        // AFTER createClient has applied every updateClientProperties field /
+        // protocol-mapper / scope to the pass-through scratch model. This seam
+        // must then be inert (pass straight through to super.updateClient() so
+        // KC's createClient finishes normally and ClientsPartialImport
+        // .getModelId — realm.getClientByClientId(clientId).getId() — resolves
+        // on the real persisted client) — it MUST NOT accumulate (the batch
+        // harvest is the single source of truth) and MUST NOT throw (the
+        // batch-emit prepare-tx owns the veto). The single-entity admin-create
+        // branch below is byte-unchanged.
+        if (importDeferred) {
+            super.updateClient();
+            return;
         }
 
-        int webOrigins = rep.getWebOrigins() == null ? 0 : rep.getWebOrigins().size();
-        int redirectUris = rep.getRedirectUris() == null ? 0 : rep.getRedirectUris().size();
-        log.infof("IGA capture CREATE_CLIENT: full-rep path for clientId=%s "
-                + "(webOrigins=%d, redirectUris=%d, %d chars) captured at the model-layer "
-                + "terminal seam (RepresentationToModel.createClient#updateClient); CR written "
-                + "in a separate tx, request tx marked rollback-only so the scratch client is "
-                + "discarded (zero rows persisted at draft); full config will replay on commit",
-                getClientId(), webOrigins, redirectUris, repJson.length());
-
-        // rowsJson contract (must match IgaReplayDispatcher.replayCreateClient):
-        // ID = own client UUID, CLIENT_ID = human clientId,
-        // CLIENT_UUID = same UUID (referenced-client alias so replay's
-        // resolveClient works uniformly), REALM_ID = realm UUID,
-        // REP_JSON = the full ClientRepresentation JSON.
-        Map<String, Object> row = new LinkedHashMap<>();
-        row.put("ID", clientUuid);
-        row.put("CLIENT_UUID", clientUuid);
-        row.put("CLIENT_ID", getClientId());
-        row.put("REALM_ID", realm.getId());
-        row.put("REP_JSON", repJson);
+        Map<String, Object> row = buildCapturedClientRow();
+        String clientUuid = (String) row.get("ID");
 
         // Phase 4 — partialImport batch governance: accumulate + return
         // normally (NO per-entity CR/setRollbackOnly/throw). Sole behavioural
@@ -241,6 +251,91 @@ public class IgaClientAdapter extends ClientAdapter {
         igaSession.getTransactionManager().setRollbackOnly();
 
         throw new IgaPendingApprovalException(crIdHolder[0], "CLIENT", "CREATE_CLIENT");
+    }
+
+    /**
+     * Build the {@code CREATE_CLIENT} CR row — the SINGLE source of truth
+     * shared by the single-entity terminal seam ({@link #updateClient()}) and
+     * the Phase 4 partialImport deferred-harvest path
+     * ({@link #buildImportClientPendingCr()}). Identical rep/row contract in
+     * both cases, so {@code IgaReplayDispatcher.replayCreateClient} is
+     * byte-unchanged. NO side effects (no CR write, no throw, no
+     * rollback-only). Reads the live (pass-through) scratch model via
+     * {@link ModelToRepresentation#toRepresentation(org.keycloak.models.ClientModel, KeycloakSession)},
+     * which serializes the complete client (name, enabled, protocol, flow
+     * flags, redirectUris, webOrigins, attributes, protocol mappers WITH
+     * config, default/optional client scopes) — exactly the fields
+     * {@code IgaReplayDispatcher.replayCreateClient} feeds back into
+     * {@code RepresentationToModel.createClient} on commit.
+     */
+    private Map<String, Object> buildCapturedClientRow() {
+        ClientRepresentation rep = ModelToRepresentation.toRepresentation(this, igaSession);
+        // Pin identity so replay recreates the client with the SAME UUID and
+        // human clientId the admin's create flow allocated. (replay also
+        // re-pins from the row's ID/CLIENT_ID, but keeping the rep self
+        // consistent avoids any ambiguity.)
+        String clientUuid = super.getId();
+        String clientId = super.getClientId();
+        rep.setId(clientUuid);
+        rep.setClientId(clientId);
+
+        String repJson;
+        try {
+            repJson = MAPPER.writeValueAsString(rep);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new RuntimeException(
+                    "IGA capture CREATE_CLIENT: failed to serialize captured ClientRepresentation "
+                    + "for clientId=" + clientId, e);
+        }
+
+        int webOrigins = rep.getWebOrigins() == null ? 0 : rep.getWebOrigins().size();
+        int redirectUris = rep.getRedirectUris() == null ? 0 : rep.getRedirectUris().size();
+        log.infof("IGA capture CREATE_CLIENT: full-rep path for clientId=%s "
+                + "(webOrigins=%d, redirectUris=%d, %d chars) captured at the model-layer "
+                + "terminal seam (RepresentationToModel.createClient#updateClient / "
+                + "partialImport deferred-harvest); full config will replay on commit",
+                clientId, webOrigins, redirectUris, repJson.length());
+
+        // rowsJson contract (must match IgaReplayDispatcher.replayCreateClient):
+        // ID = own client UUID, CLIENT_ID = human clientId,
+        // CLIENT_UUID = same UUID (referenced-client alias so replay's
+        // resolveClient works uniformly), REALM_ID = realm UUID,
+        // REP_JSON = the full ClientRepresentation JSON.
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("ID", clientUuid);
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", clientId);
+        row.put("REALM_ID", realm.getId());
+        row.put("REP_JSON", repJson);
+        return row;
+    }
+
+    /**
+     * Phase 4 — partialImport batch path. Build this client's
+     * {@code CREATE_CLIENT} {@link IgaImportMode.PendingCr} from the live
+     * (pass-through) scratch model. Called by
+     * {@link IgaImportMode.BatchEmitTransaction#commit} AFTER
+     * {@code RepresentationToModel.createClient} has called its terminal
+     * {@code updateClient()} on the scratch client (so every
+     * updateClientProperties field, every rebuilt protocol mapper, every
+     * default/optional client scope link has been applied to the live model)
+     * and BEFORE the scratch JPA tx commits. Uses the SAME
+     * {@link #buildCapturedClientRow()} contract as the single-entity seam —
+     * replay is identical, {@code IgaReplayDispatcher} byte-unchanged. NO
+     * throw, NO rollback-only here — the batch-emit tx owns that.
+     */
+    IgaImportMode.PendingCr buildImportClientPendingCr() {
+        if (!captureMode || !importDeferred) {
+            return null;
+        }
+        Map<String, Object> row = buildCapturedClientRow();
+        String clientUuid = (String) row.get("ID");
+        log.infof("IGA multi-entity ACCUM: CREATE_CLIENT %s (uuid=%s) — row "
+                + "harvested at batch emit from the partialImport "
+                + "ClientsPartialImport.create → RepresentationToModel."
+                + "createClient path", row.get("CLIENT_ID"), clientUuid);
+        return new IgaImportMode.PendingCr("CLIENT", clientUuid, "CREATE_CLIENT",
+                List.of(row), null);
     }
 
     @Override

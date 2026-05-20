@@ -332,6 +332,42 @@ export async function clientUuid(
   return arr[0].id as string;
 }
 
+/**
+ * Find a client by its human clientId. Returns {http, body} where body is the
+ * full ClientRepresentation or undefined if not present. Used to assert
+ * presence/absence and to verify field fidelity (attributes/redirectUris)
+ * after a partialImport commits.
+ */
+export async function getClientByClientId(
+  request: APIRequestContext,
+  realm: string,
+  clientId: string,
+): Promise<{ http: number; body: any }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/clients?clientId=${encodeURIComponent(clientId)}`,
+  );
+  const arr = await safeJson(res);
+  const match = Array.isArray(arr)
+    ? arr.find((c: any) => c?.clientId === clientId)
+    : undefined;
+  return { http: res.status(), body: match };
+}
+
+/** Protocol mappers of a client (by client UUID). Array of mapper reps. */
+export async function getClientProtocolMappers(
+  request: APIRequestContext,
+  realm: string,
+  clientUuid: string,
+): Promise<{ http: number; body: any[] }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/clients/${clientUuid}/protocol-mappers/models`,
+  );
+  const body = await safeJson(res);
+  return { http: res.status(), body: Array.isArray(body) ? body : [] };
+}
+
 // ---------------------------------------------------------------------------
 // Client scopes
 // ---------------------------------------------------------------------------
@@ -439,6 +475,25 @@ export async function getGroupByName(
     ? list.find((g: any) => g?.name === name)
     : undefined;
   return { http: res.status(), body: match };
+}
+
+/**
+ * GET a full group by its UUID. KC's `?search=` list endpoint returns the
+ * BRIEF representation only (id/name/path/subGroupCount/access) — attributes
+ * are not included. To assert per-attribute fidelity after a partialImport
+ * commit, fetch the full group via `/groups/{id}` (which serializes
+ * attributes alongside the rest of the rep).
+ */
+export async function getGroupById(
+  request: APIRequestContext,
+  realm: string,
+  groupId: string,
+): Promise<{ http: number; body: any }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/groups/${groupId}`,
+  );
+  return { http: res.status(), body: await safeJson(res) };
 }
 
 // ---------------------------------------------------------------------------

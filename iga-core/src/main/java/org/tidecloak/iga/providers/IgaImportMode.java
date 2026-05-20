@@ -169,6 +169,22 @@ public final class IgaImportMode {
         // scratch model.
         final List<IgaGroupAdapter> pendingGroups = new ArrayList<>();
         final List<IgaRoleAdapter> pendingRoles = new ArrayList<>();
+        // Phase 4 extension — capture-mode client/client-scope adapters created
+        // on the partialImport ClientsPartialImport.create → RepresentationToModel
+        // .createClient path (and the symmetrically defensive addClientScope
+        // path, even though KC 26.5.5 has NO ClientScopesPartialImport so
+        // partialImport itself never reaches addClientScope through a per-type
+        // import handler today — see addClientScope branch javadoc / KC-source
+        // confirmation in IgaRealmProvider). Same deferred-harvest contract as
+        // pendingGroups/pendingRoles/pendingUsers: row is built ONCE at batch-
+        // emit time by buildImport{Client,ClientScope}PendingCr from the live,
+        // fully-built capture state (so RepresentationToModel.createClient's
+        // unconditional terminal updateClient() and the resource-terminal
+        // getId() are inert pass-throughs for an import-registered adapter, no
+        // per-entity throw, no setRollbackOnly — the BatchEmitTransaction owns
+        // the veto and writes one combined batch CR).
+        final List<IgaClientAdapter> pendingClients = new ArrayList<>();
+        final List<IgaClientScopeAdapter> pendingClientScopes = new ArrayList<>();
         boolean prepareEnlisted = false;
 
         Accumulator(String realmId) {
@@ -326,6 +342,82 @@ public final class IgaImportMode {
                 + "reached on the import path)");
     }
 
+    /**
+     * Register a capture-mode client adapter built on the partialImport
+     * {@code ClientsPartialImport.create} → {@code RepresentationToModel
+     * .createClient} path. Mirrors {@link #registerImportGroup} /
+     * {@link #registerImportRole} / {@link #registerImportUser}: the
+     * {@code CREATE_CLIENT} row is harvested at batch-emit time by
+     * {@link IgaClientAdapter#buildImportClientPendingCr()}
+     * AFTER {@code RepresentationToModel.createClient} (KC 26.5.5 line 404) has
+     * called its terminal {@code updateClient()} on the pass-through scratch
+     * model (every {@code updateClientProperties} field / protocol-mapper /
+     * scope already applied to the real, super-persisted scratch client). So
+     * governance does not depend on the single-entity
+     * {@code IgaClientAdapter#updateClient} terminal seam — that seam is
+     * deliberately inert for an import-deferred client so it cannot emit a
+     * second per-entity CR or throw mid-batch.
+     *
+     * <p>KC's {@code ClientsPartialImport.getModelId}
+     * ({@code services/.../ClientsPartialImport.java:77-79} —
+     * {@code realm.getClientByClientId(getName(clientRep)).getId()}) is called
+     * immediately after {@code create()} returns, so the import branch in
+     * {@code IgaRealmProvider.addClient} MUST call {@code super.addClient(...)}
+     * (em.persist+flush of the scratch ClientEntity) so the
+     * {@code getClientByClientId} lookup resolves in the nested import session
+     * — exactly the same precondition the existing addClient single-entity
+     * branch establishes.
+     */
+    public static void registerImportClient(KeycloakSession session, RealmModel realm,
+                                             IgaClientAdapter client) {
+        Accumulator acc = accumulator(session, realm);
+        enlistPrepareOnce(session, realm, acc);
+        acc.pendingClients.add(client);
+        log.infof("IGA multi-entity ACCUM: CREATE_CLIENT (deferred-harvest) "
+                + "registered for the partialImport ClientsPartialImport."
+                + "create → RepresentationToModel.createClient path — row "
+                + "built at batch emit (no per-entity throw; the single-entity "
+                + "updateClient seam is inert for this client; KC's "
+                + "ClientsPartialImport.getModelId — "
+                + "realm.getClientByClientId(clientId).getId() — resolves "
+                + "because super.addClient already em.persist+flush'd the "
+                + "scratch ClientEntity)");
+    }
+
+    /**
+     * Register a capture-mode client-scope adapter. <b>Defensive parity</b>
+     * with {@link #registerImportClient}: KC 26.5.5 has NO
+     * {@code ClientScopesPartialImport} ({@code PartialImportManager}
+     * registers only Clients/Roles/IdPs/IdP-mappers/Groups/Users — verified
+     * against {@code services/.../partialimport/PartialImportManager.java:47-52},
+     * and the per-type source set has no {@code ClientScopesPartialImport.java}
+     * — see the audit log), so no current partialImport call path reaches
+     * {@code addClientScope}. This registration is wired up as cheap insurance
+     * against future KC versions or any indirect multi-entity import path that
+     * could one day call {@code addClientScope} — same import-mode predicate,
+     * same batch-emit prepare-tx, same CR row contract as the single-entity
+     * capture so {@code IgaReplayDispatcher.replayCreateClientScope} is
+     * byte-unchanged. The {@code CREATE_CLIENT_SCOPE} row is harvested at
+     * batch-emit time by {@link IgaClientScopeAdapter
+     * #buildImportClientScopePendingCr()}, so the single-entity terminal
+     * {@code getId()} seam is inert for an import-deferred scope (cannot
+     * mid-batch throw).
+     */
+    public static void registerImportClientScope(KeycloakSession session, RealmModel realm,
+                                                  IgaClientScopeAdapter scope) {
+        Accumulator acc = accumulator(session, realm);
+        enlistPrepareOnce(session, realm, acc);
+        acc.pendingClientScopes.add(scope);
+        log.infof("IGA multi-entity ACCUM: CREATE_CLIENT_SCOPE (deferred-"
+                + "harvest, DEFENSIVE PARITY) registered — KC 26.5.5 has no "
+                + "ClientScopesPartialImport so no per-type partialImport "
+                + "handler reaches addClientScope today, but the import branch "
+                + "is symmetric with addClient and covers any future KC "
+                + "version / indirect multi-entity import that calls "
+                + "addClientScope (row built at batch emit, no per-entity "
+                + "throw; getId seam inert for this scope)");
+    }
+
     private static String shortName(List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) {
             return "?";
@@ -416,6 +508,38 @@ public final class IgaImportMode {
             // byte-unchanged.
             for (IgaRoleAdapter r : acc.pendingRoles) {
                 PendingCr cr = r.buildImportRolePendingCr();
+                if (cr != null) {
+                    acc.pending.add(cr);
+                }
+            }
+
+            // Harvest the deferred-harvest client rows now (every
+            // RepresentationToModel.createClient updateClientProperties /
+            // protocol-mapper rebuild / updateClientScopes / final
+            // updateClient() — KC 26.5.5 RepresentationToModel.java:347-404 —
+            // has run on the pass-through scratch ClientAdapter, so the live
+            // model is fully built). Same contract/row shape as the
+            // single-entity IgaClientAdapter#updateClient seam, so
+            // IgaReplayDispatcher is byte-unchanged.
+            for (IgaClientAdapter c : acc.pendingClients) {
+                PendingCr cr = c.buildImportClientPendingCr();
+                if (cr != null) {
+                    acc.pending.add(cr);
+                }
+            }
+
+            // Harvest the deferred-harvest client-scope rows now (defensive —
+            // KC 26.5.5 has no ClientScopesPartialImport so this list is
+            // empty under partialImport today; if a future KC version or any
+            // indirect multi-entity import path adds one, the same
+            // accumulate-then-emit contract used by addClient applies). Row
+            // built from the IgaClientScopeAdapter's capturedRep/
+            // capturedMappers/capturedAttributes (the same accumulator the
+            // single-entity getId() seam emits from, so REP_JSON is byte-
+            // identical and IgaReplayDispatcher.replayCreateClientScope is
+            // byte-unchanged).
+            for (IgaClientScopeAdapter s : acc.pendingClientScopes) {
+                PendingCr cr = s.buildImportClientScopePendingCr();
                 if (cr != null) {
                     acc.pending.add(cr);
                 }
