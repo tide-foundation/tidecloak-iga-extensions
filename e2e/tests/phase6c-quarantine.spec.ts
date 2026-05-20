@@ -258,22 +258,22 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
     await createScratchRealm(request, REALM_USER);
 
     const u1Create = await createUser(request, REALM_USER, {
-      username: 'u1',
+      username: 'usr1',
       enabled: true,
       emailVerified: true,
-      email: 'u1@example.test',
+      email: 'usr1@example.test',
       firstName: 'U',
       lastName: 'One',
     });
     expect(u1Create.status(), 'create u1 IGA-off').toBe(201);
-    const u1Lookup = await getUserByUsername(request, REALM_USER, 'u1');
+    const u1Lookup = await getUserByUsername(request, REALM_USER, 'usr1');
     const u1Id = u1Lookup.body?.id as string;
     expect(u1Id).toBeTruthy();
     await setPassword(request, REALM_USER, u1Id, 'pw-u1');
     await finalizeUser(request, REALM_USER, u1Id);
 
     // Confirm pre-IGA: direct-grant works.
-    const preTok = await directGrantToken(request, REALM_USER, 'u1', 'pw-u1');
+    const preTok = await directGrantToken(request, REALM_USER, 'usr1', 'pw-u1');
     expect(preTok.http, 'pre-IGA direct-grant').toBe(200);
     expect(preTok.body?.access_token).toBeTruthy();
 
@@ -290,7 +290,7 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
     );
 
     // Direct-grant MUST now fail — user is unsigned, quarantine hard-refuses.
-    const blocked = await directGrantToken(request, REALM_USER, 'u1', 'pw-u1');
+    const blocked = await directGrantToken(request, REALM_USER, 'usr1', 'pw-u1');
     expect(
       [400, 401].includes(blocked.http),
       `unsigned-user direct-grant should fail with 400/401, got ${blocked.http} ${JSON.stringify(blocked.body)}`,
@@ -308,7 +308,7 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
     expect(adoptU1Body?.status).toBe('APPROVED');
 
     // Direct-grant now works again.
-    const after = await directGrantToken(request, REALM_USER, 'u1', 'pw-u1');
+    const after = await directGrantToken(request, REALM_USER, 'usr1', 'pw-u1');
     expect(after.http, 'post-ADOPT direct-grant').toBe(200);
     expect(after.body?.access_token).toBeTruthy();
 
@@ -323,15 +323,15 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
     expect(r2Rep?.id).toBeTruthy();
 
     const u2Create = await createUser(request, REALM_ROLE, {
-      username: 'u2',
+      username: 'usr2',
       enabled: true,
       emailVerified: true,
-      email: 'u2@example.test',
+      email: 'usr2@example.test',
       firstName: 'U',
       lastName: 'Two',
     });
     expect(u2Create.status(), 'create u2 IGA-off').toBe(201);
-    const u2Id = (await getUserByUsername(request, REALM_ROLE, 'u2')).body
+    const u2Id = (await getUserByUsername(request, REALM_ROLE, 'usr2')).body
       ?.id as string;
     expect(u2Id).toBeTruthy();
     await setPassword(request, REALM_ROLE, u2Id, 'pw-u2');
@@ -344,7 +344,7 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
 
     // Confirm pre-IGA: direct-grant works.
     expect(
-      (await directGrantToken(request, REALM_ROLE, 'u2', 'pw-u2')).http,
+      (await directGrantToken(request, REALM_ROLE, 'usr2', 'pw-u2')).http,
     ).toBe(200);
 
     await enableIga(request, REALM_ROLE);
@@ -369,7 +369,7 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
     const stillBlocked = await directGrantToken(
       request,
       REALM_ROLE,
-      'u2',
+      'usr2',
       'pw-u2',
     );
     expect(
@@ -382,7 +382,7 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
     const acR2 = await authorizeAndCommit(request, REALM_ROLE, adoptR2);
     expect(acR2.commit.http).toBe(200);
 
-    const u2After = await directGrantToken(request, REALM_ROLE, 'u2', 'pw-u2');
+    const u2After = await directGrantToken(request, REALM_ROLE, 'usr2', 'pw-u2');
     expect(u2After.http, 'post-ADOPT_ROLE u2 token').toBe(200);
     expect(u2After.body?.access_token).toBeTruthy();
     const u2Claims = decodeJwtPayload(u2After.body.access_token as string);
@@ -513,15 +513,15 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
     expect(grpClient.status(), 'create grp-client IGA-off').toBe(201);
 
     const u3Create = await createUser(request, REALM_GROUP, {
-      username: 'u3',
+      username: 'usr3',
       enabled: true,
       emailVerified: true,
-      email: 'u3@example.test',
+      email: 'usr3@example.test',
       firstName: 'U',
       lastName: 'Three',
     });
     expect(u3Create.status(), 'create u3 IGA-off').toBe(201);
-    const u3Id = (await getUserByUsername(request, REALM_GROUP, 'u3')).body
+    const u3Id = (await getUserByUsername(request, REALM_GROUP, 'usr3')).body
       ?.id as string;
     await setPassword(request, REALM_GROUP, u3Id, 'pw-u3');
     await finalizeUser(request, REALM_GROUP, u3Id);
@@ -540,7 +540,7 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
         form: {
           grant_type: 'password',
           client_id: 'p6c-grp-client',
-          username: 'u3',
+          username: 'usr3',
           password: 'pw-u3',
         },
       },
@@ -595,7 +595,7 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
         form: {
           grant_type: 'password',
           client_id: 'p6c-grp-client',
-          username: 'u3',
+          username: 'usr3',
           password: 'pw-u3',
         },
       },
@@ -624,7 +624,7 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
         form: {
           grant_type: 'password',
           client_id: 'p6c-grp-client',
-          username: 'u3',
+          username: 'usr3',
           password: 'pw-u3',
         },
       },
@@ -703,15 +703,15 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
 
     // Create a user for the token issuance.
     const u4Create = await createUser(request, REALM_SCOPE, {
-      username: 'u4',
+      username: 'usr4',
       enabled: true,
       emailVerified: true,
-      email: 'u4@example.test',
+      email: 'usr4@example.test',
       firstName: 'U',
       lastName: 'Four',
     });
     expect(u4Create.status()).toBe(201);
-    const u4Id = (await getUserByUsername(request, REALM_SCOPE, 'u4')).body
+    const u4Id = (await getUserByUsername(request, REALM_SCOPE, 'usr4')).body
       ?.id as string;
     await setPassword(request, REALM_SCOPE, u4Id, 'pw-u4');
     await finalizeUser(request, REALM_SCOPE, u4Id);
@@ -723,7 +723,7 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
         form: {
           grant_type: 'password',
           client_id: scopeClientId,
-          username: 'u4',
+          username: 'usr4',
           password: 'pw-u4',
         },
       },
@@ -782,7 +782,7 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
         form: {
           grant_type: 'password',
           client_id: scopeClientId,
-          username: 'u4',
+          username: 'usr4',
           password: 'pw-u4',
         },
       },
@@ -809,7 +809,7 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
         form: {
           grant_type: 'password',
           client_id: scopeClientId,
-          username: 'u4',
+          username: 'usr4',
           password: 'pw-u4',
         },
       },

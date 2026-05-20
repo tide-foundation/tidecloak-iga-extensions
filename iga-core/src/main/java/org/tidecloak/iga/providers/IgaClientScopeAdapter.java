@@ -689,17 +689,47 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
     // itself is not refused) but any claim the unsigned scope's mappers would
     // have added is absent.
     //
-    // Capture mode is a special case: the scratch scope mid-createClientScope
-    // is never in the IGA_UNSIGNED_ENTITY table (the row is created at
-    // ADOPT, not at CREATE_CLIENT_SCOPE), and the quarantine cache is
-    // additionally short-circuited by the IGA_REPLAY_ACTIVE gate during
-    // replay. So this override is safe to apply unconditionally — but the
-    // quarantine cache's own gates (replay-active / IGA-off) cover those
-    // cases.
+    // Capture mode is a HARD bypass (Phase 6c regression fix — Failure A):
+    // RepresentationToModel.createClientScope (KC 26.5.5
+    // RepresentationToModel.java:724) calls
+    //   clientScope.getProtocolMappersStream().collect(...).forEach(removeProtocolMapper)
+    // STRICTLY AFTER setName(719)/setDescription(720)/setProtocol(721) and
+    // STRICTLY BEFORE the rep's addProtocolMapper loop (725-728) and
+    // setAttribute loop (732-734). At that point nameObserved==true and
+    // captureEmitted==false. If this override consults IgaQuarantineCache the
+    // cache code calls scope.getId() (parameter dereference inside the cache
+    // helper); that getId() routes through THIS adapter's getId() override
+    // whose capture-mode terminal-emit predicate matches (captureMode &&
+    // !captureEmitted && nameObserved && !importDeferred) — so the emit
+    // fires INSIDE getProtocolMappersStream(), the CR is written, the request
+    // tx is marked rollback-only and IgaPendingApprovalException is thrown
+    // BEFORE KC's createClientScope ever reaches lines 725-734. The rep
+    // therefore captured only setName/setDescription/setProtocol — that is
+    // the exact symptom Failure A reports (observed order ends in
+    // setProtocol,getId#emit; the probe scope's mapper + attribute setters
+    // never fired).
+    //
+    // In capture mode the scratch scope CANNOT be quarantined (no
+    // IGA_UNSIGNED_ENTITY row is written until ADOPT, never at
+    // CREATE_CLIENT_SCOPE) so we MUST NOT consult the cache here. Pure
+    // pass-through to super.getProtocolMappersStream() lets KC's
+    // createClientScope dedupe-then-rebuild the mappers; the
+    // addProtocolMapper / setAttribute setters then fire as expected and the
+    // accumulator captures them. The non-capture path (already-persisted
+    // scope being read by token mapping) is unchanged — that is the only
+    // path where this strip is supposed to fire, and there the cache check
+    // is safe because getId() is just a field read on a fully-built model.
     // -------------------------------------------------------------------------
 
     @Override
     public Stream<ProtocolMapperModel> getProtocolMappersStream() {
+        // HARD bypass during capture-mode create. See header comment above
+        // for the Failure A root cause: consulting the cache here causes
+        // scope.getId() to re-enter this adapter's terminal-emit seam mid-
+        // createClientScope, truncating the captured rep.
+        if (captureMode) {
+            return super.getProtocolMappersStream();
+        }
         if (IgaQuarantineCache.isClientScopeUnsigned(igaSession, realm, this)) {
             if (IgaQuarantineCache.firstObservation(igaSession,
                     "scope:" + super.getId())) {

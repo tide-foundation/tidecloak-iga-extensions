@@ -1210,11 +1210,46 @@ public class IgaUserAdapter extends UserAdapter {
      * unsigned group are simply absent from the issued token; the user can
      * still log in. Roles inherited via an unsigned group are also stripped
      * at the same point (groups gone → role-through-group gone).</p>
+     *
+     * <p><b>Phase 6c regression fix (Failure B): admin-REST context bypass.</b>
+     * Per the Phase 6c brief, "admin reads: WARN but don't block — operators
+     * must see the queue". The no-arg {@code getGroupsStream()} is invoked from
+     * BOTH the token-mapping path (oidc/saml GroupMembershipMapper,
+     * TokenManager → must strip) AND from the admin-REST path
+     * ({@code UserResource.groupMembership} and the
+     * {@code UserPermissions.evaluateHierarchy} permission check before it,
+     * {@code RoleUtils.hasRoleFromGroup} during admin reads, etc. — must NOT
+     * strip; operators must observe the unsigned group so they can ADOPT it).
+     * The discriminator is the live call stack: if any frame is one of KC's
+     * admin REST resource classes (under {@code
+     * org.keycloak.services.resources.admin}) we are servicing an admin
+     * operation and the strip must NOT fire. The StackWalker can't be spoofed
+     * by a malicious caller (the discriminator IS the call site itself), so
+     * this is safe even if a token-issuing request ever attempted to set a
+     * session attribute. Token-mapping call sites
+     * ({@code GroupMembershipMapper}, {@code TokenManager}) are NEVER in the
+     * admin resource package — the strip fires there as designed.</p>
      */
     @Override
     public Stream<GroupModel> getGroupsStream() {
+        final boolean adminContext = isCalledFromAdminRestResource();
         return super.getGroupsStream().filter(g -> {
             if (!IgaQuarantineCache.isGroupUnsigned(igaSession, realm, g)) {
+                return true;
+            }
+            if (adminContext) {
+                // Operator-observable read: keep the unsigned group visible
+                // so the admin can ADOPT it. WARN (one-shot per session per
+                // group) so the unsigned-membership is still surfaced in the
+                // log for triage, but do NOT strip.
+                if (IgaQuarantineCache.firstObservation(igaSession,
+                        "group-admin:" + g.getId())) {
+                    log.warnf("IGA quarantine VISIBLE-IN-ADMIN: group=%s "
+                            + "realm=%s — ADOPT pending; group surfaced to "
+                            + "admin REST caller (token-mapping reads will "
+                            + "still strip until ADOPT commits).",
+                            g.getId(), realm.getName());
+                }
                 return true;
             }
             if (IgaQuarantineCache.firstObservation(igaSession,
@@ -1225,5 +1260,42 @@ public class IgaUserAdapter extends UserAdapter {
             }
             return false;
         });
+    }
+
+    /**
+     * Phase 6c regression fix (Failure B) — true iff any frame on the live
+     * call stack is one of KC's admin REST resource classes (declaring class
+     * FQN starts with {@code org.keycloak.services.resources.admin.}). When
+     * true, the no-arg {@link #getGroupsStream()} MUST NOT strip — admins
+     * must see unsigned groups so they can authorize ADOPT.
+     *
+     * <p>Why a stack-walk rather than a session attribute: per the Phase 6c
+     * brief security note, the discriminator must not be spoofable. A
+     * malicious caller could set an arbitrary session attribute before
+     * issuing a token-issuance request and trick the gate into NOT stripping;
+     * the StackWalker is immune because the discriminator IS the call site.
+     * Token-mapping callers ({@code oidc/saml GroupMembershipMapper},
+     * {@code TokenManager}, {@code AccountRestService},
+     * {@code ClientUpdaterSourceGroupsCondition}) have NO frame under
+     * {@code services.resources.admin} on the stack — the predicate returns
+     * false and the strip fires as designed.
+     *
+     * <p>The walk short-circuits on the first matching frame (typically
+     * very near the top of the stack for an admin REST request — the
+     * resource method is on the call path). RETAIN_CLASS_REFERENCE is used
+     * for parity with the existing {@code computeImmediateCaller} (no
+     * lookupClass overhead for a missed match).
+     */
+    private static boolean isCalledFromAdminRestResource() {
+        return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
+                .walk(frames -> frames.anyMatch(f -> {
+                    String cn = f.getDeclaringClass().getName();
+                    // The admin resource package covers every admin REST
+                    // class (UserResource, UsersResource, GroupResource,
+                    // RoleMapperResource, …) including its fgap subpackage
+                    // (UserPermissions.evaluateHierarchy →
+                    // user.getGroupsStream()).
+                    return cn.startsWith("org.keycloak.services.resources.admin.");
+                }));
     }
 }
