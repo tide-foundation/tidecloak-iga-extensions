@@ -11,6 +11,7 @@ import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.ModelToRepresentation;
 import org.keycloak.representations.idm.ClientRepresentation;
+import org.tidecloak.iga.services.IgaQuarantineCache;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -611,5 +612,39 @@ public class IgaClientAdapter extends ClientAdapter {
         row.put("values", redirectUris == null ? new ArrayList<String>() : new ArrayList<>(redirectUris));
         service.create(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_REDIRECT_URIS",
                 List.of(row), null);
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 6c — client quarantine hook (HARD refuse).
+    //
+    // KC checkpoints surfaced by client.isEnabled() (cross-checked vs
+    // /tmp/kc-all-src/...):
+    //   ClientIdAndSecretAuthenticator.java:114  (client_secret_basic/post)
+    //   AbstractJWTClientValidator.java:124      (client JWT auth)
+    //   AccessTokenIntrospectionProvider.java:267 (introspection)
+    //
+    // Defers to super.isEnabled() first so an admin-disabled client stays
+    // disabled regardless. If super reports enabled, the quarantine cache
+    // refuses the operation when the client has an unattested sidecar row,
+    // making client_credentials / client-auth / introspection requests fail
+    // until the ADOPT_CLIENT CR commits.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public boolean isEnabled() {
+        boolean superEnabled = super.isEnabled();
+        if (!superEnabled) {
+            return false;
+        }
+        if (IgaQuarantineCache.isClientUnsigned(igaSession, realm, this)) {
+            if (IgaQuarantineCache.firstObservation(igaSession,
+                    "client:" + super.getId())) {
+                log.infof("IGA quarantine REFUSE: client=%s (uuid=%s) realm=%s — "
+                        + "ADOPT pending; treating as not-enabled.",
+                        super.getClientId(), super.getId(), realm.getName());
+            }
+            return false;
+        }
+        return true;
     }
 }

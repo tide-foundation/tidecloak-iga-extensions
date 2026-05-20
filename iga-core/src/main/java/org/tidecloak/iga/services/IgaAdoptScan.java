@@ -102,11 +102,23 @@ public final class IgaAdoptScan {
         public final long skippedPendingCreateCr;
         public final long skippedAlreadyAttested;
         public final long errors;
+        /**
+         * Phase 6c — number of live user sessions invalidated on this
+         * toggle-on so newly-quarantined users do NOT retain their existing
+         * cookies / refresh tokens past the OFF→ON transition. Surfaced in
+         * the toggle response as {@code scan.sessionsInvalidated}. Populated
+         * by {@link #withSessionsInvalidated(long)} after
+         * {@link IgaAdoptScan#scan} returns — the scan itself does NOT touch
+         * sessions, the toggle-on caller does (see
+         * {@link org.tidecloak.iga.rest.TideAdminCompatResource#toggleIga}).
+         */
+        public final long sessionsInvalidated;
 
         ScanResult(String realmId, long durationMs, long totalEntitiesScanned,
                    Map<String, Long> adoptCrsCreated, long skippedSystemFilter,
                    long skippedAlreadyCommittedAdopt, long skippedPendingCreateCr,
-                   long skippedAlreadyAttested, long errors) {
+                   long skippedAlreadyAttested, long errors,
+                   long sessionsInvalidated) {
             this.realmId = realmId;
             this.durationMs = durationMs;
             this.totalEntitiesScanned = totalEntitiesScanned;
@@ -116,6 +128,20 @@ public final class IgaAdoptScan {
             this.skippedPendingCreateCr = skippedPendingCreateCr;
             this.skippedAlreadyAttested = skippedAlreadyAttested;
             this.errors = errors;
+            this.sessionsInvalidated = sessionsInvalidated;
+        }
+
+        /**
+         * Return a new ScanResult with the supplied {@code sessionsInvalidated}
+         * count folded in. Immutability-preserving so the scan itself (which
+         * has no session/sessions provider on its scan-session) can return a
+         * zero-count result that the caller then enriches.
+         */
+        public ScanResult withSessionsInvalidated(long count) {
+            return new ScanResult(realmId, durationMs, totalEntitiesScanned,
+                    adoptCrsCreated, skippedSystemFilter,
+                    skippedAlreadyCommittedAdopt, skippedPendingCreateCr,
+                    skippedAlreadyAttested, errors, count);
         }
 
         /** Map shape for the toggle response body — matches the locked contract. */
@@ -132,6 +158,7 @@ public final class IgaAdoptScan {
             skipped.put("alreadyAttested", skippedAlreadyAttested);
             m.put("skipped", skipped);
             m.put("errors", errors);
+            m.put("sessionsInvalidated", sessionsInvalidated);
             return m;
         }
     }
@@ -288,6 +315,11 @@ public final class IgaAdoptScan {
         }
 
         long durationMs = System.currentTimeMillis() - t0;
+        // sessionsInvalidated is populated by the toggle-on caller AFTER this
+        // scan returns — see ScanResult.withSessionsInvalidated. The scan
+        // session has no live UserSessionProvider (fresh runJobInTransaction
+        // session bound to its own JPA-only transaction); the caller's
+        // request-bound session is the one with sessions().
         ScanResult result = new ScanResult(
                 realm.getId(),
                 durationMs,
@@ -297,7 +329,8 @@ public final class IgaAdoptScan {
                 counters[2],
                 counters[3],
                 alreadyAttestedCounter[0],
-                counters[4]
+                counters[4],
+                0L
         );
         log.infof("IGA toggle-on scan: realm=%s durationMs=%d scanned=%d created=%s "
                         + "skippedSystem=%d skippedCommittedAdopt=%d skippedPendingCreate=%d "

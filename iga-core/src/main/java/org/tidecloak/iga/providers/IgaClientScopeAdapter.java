@@ -11,6 +11,7 @@ import org.keycloak.models.jpa.entities.ClientScopeEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.representations.idm.ClientScopeRepresentation;
 import org.keycloak.representations.idm.ProtocolMapperRepresentation;
+import org.tidecloak.iga.services.IgaQuarantineCache;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -20,6 +21,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 /**
  * Wraps ClientScopeAdapter and intercepts scope operations for IGA.
@@ -675,5 +677,38 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         row.put("CLIENT_SCOPE_ID", scopeId);
         service.create(realm, "CLIENT_SCOPE", scopeId, "REMOVE_PROTOCOL_MAPPER",
                 List.of(row), null);
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 6c — client-scope quarantine hook (SILENT strip).
+    //
+    // Protocol mappers attached to an unsigned client scope must not
+    // contribute to the issued token until the ADOPT_CLIENT_SCOPE CR commits.
+    // Returning Stream.empty() here makes KC's token-mapping path treat the
+    // scope as carrying no mappers — the token still issues (the operation
+    // itself is not refused) but any claim the unsigned scope's mappers would
+    // have added is absent.
+    //
+    // Capture mode is a special case: the scratch scope mid-createClientScope
+    // is never in the IGA_UNSIGNED_ENTITY table (the row is created at
+    // ADOPT, not at CREATE_CLIENT_SCOPE), and the quarantine cache is
+    // additionally short-circuited by the IGA_REPLAY_ACTIVE gate during
+    // replay. So this override is safe to apply unconditionally — but the
+    // quarantine cache's own gates (replay-active / IGA-off) cover those
+    // cases.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public Stream<ProtocolMapperModel> getProtocolMappersStream() {
+        if (IgaQuarantineCache.isClientScopeUnsigned(igaSession, realm, this)) {
+            if (IgaQuarantineCache.firstObservation(igaSession,
+                    "scope:" + super.getId())) {
+                log.infof("IGA quarantine STRIP scope: scope=%s realm=%s — "
+                        + "ADOPT pending; protocol-mapper stream emptied for "
+                        + "token mapping.", super.getId(), realm.getName());
+            }
+            return Stream.empty();
+        }
+        return super.getProtocolMappersStream();
     }
 }

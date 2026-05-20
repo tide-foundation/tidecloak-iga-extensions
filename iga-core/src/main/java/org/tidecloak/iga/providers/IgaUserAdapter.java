@@ -10,6 +10,7 @@ import org.keycloak.models.jpa.UserAdapter;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.representations.idm.UserRepresentation;
+import org.tidecloak.iga.services.IgaQuarantineCache;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -21,6 +22,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /**
  * Wraps {@link UserAdapter} and intercepts user mutations for IGA.
@@ -1135,5 +1137,93 @@ public class IgaUserAdapter extends UserAdapter {
         } catch (Exception ignored) {
         }
         return null;
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 6c — quarantine hooks.
+    //
+    // The IGA capture-then-veto workflow leaves an entity that pre-dates IGA
+    // (or that pre-dates an OFF→ON toggle) "unsigned" until its ADOPT_X CR
+    // commits. Per the locked Phase 6c brief, an unsigned user — or a user who
+    // holds ANY unsigned role — is treated as not-enabled (HARD refuse, per
+    // user decision: NOT silent strip). The group quarantine is silent-strip
+    // (membership simply vanishes from token mapping) so the user can still
+    // log in while their unsigned-group claims are absent.
+    //
+    // KC checkpoints surfaced by user.isEnabled():
+    //   TokenManager.java:193, :267              (token issuance / refresh)
+    //   AuthorizationCodeGrantType.java:121      (auth-code → token)
+    //   JWTAuthorizationGrantType.java:114       (JWT bearer grant)
+    //   DeviceGrantType.java:313                 (device code → token)
+    //   CibaGrantType.java:234                   (CIBA → token)
+    //   AbstractTokenExchangeProvider.java:407   (token exchange)
+    //   ResourceOwnerPasswordCredentialsGrantType: via authenticator-flow
+    //   browser flow: via AbstractUsernameFormAuthenticator etc.
+    // (cross-checked vs /tmp/kc-all-src/...)
+    //
+    // KC checkpoints surfaced by client.isEnabled():
+    //   ClientIdAndSecretAuthenticator.java:114  (client_secret_basic/post)
+    //   AbstractJWTClientValidator.java:124      (client JWT auth)
+    //   AccessTokenIntrospectionProvider.java:267 (introspection)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Phase 6c — user quarantine hook (HARD refuse).
+     *
+     * <p>Defers to {@code super.isEnabled()} first to preserve vanilla KC
+     * behaviour: if the user was explicitly disabled by an admin, that
+     * remains the answer (no need to even hit the quarantine cache). If the
+     * user is otherwise enabled, consult the quarantine cache: when the user
+     * OR any role they effectively hold has an unattested
+     * {@code IGA_UNSIGNED_ENTITY} sidecar row, return {@code false} so every
+     * KC isEnabled checkpoint (TokenManager:193,267 etc.) hard-refuses the
+     * operation. The cache is request-scoped (memoised on the session) so a
+     * single token issuance pays the batched query at most once.</p>
+     */
+    @Override
+    public boolean isEnabled() {
+        boolean superEnabled = super.isEnabled();
+        if (!superEnabled) {
+            return false;
+        }
+        if (IgaQuarantineCache.isUserUnsignedWithRoles(igaSession, realm, this)) {
+            // One INFO line per request per user — the dedupe key partitions
+            // log noise from token issuance hot-path while still surfacing
+            // EVERY first quarantine refusal (per user, per request) for
+            // operator triage.
+            if (IgaQuarantineCache.firstObservation(igaSession, "user:" + super.getId())) {
+                log.infof("IGA quarantine REFUSE: user=%s realm=%s — user or "
+                        + "one of their roles is unsigned (ADOPT pending); "
+                        + "treating as not-enabled.",
+                        super.getId(), realm.getName());
+            }
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Phase 6c — group quarantine hook (SILENT strip).
+     *
+     * <p>Filter the user's group stream so unsigned groups never reach the
+     * token-mapping path. Group membership claims that derive from an
+     * unsigned group are simply absent from the issued token; the user can
+     * still log in. Roles inherited via an unsigned group are also stripped
+     * at the same point (groups gone → role-through-group gone).</p>
+     */
+    @Override
+    public Stream<GroupModel> getGroupsStream() {
+        return super.getGroupsStream().filter(g -> {
+            if (!IgaQuarantineCache.isGroupUnsigned(igaSession, realm, g)) {
+                return true;
+            }
+            if (IgaQuarantineCache.firstObservation(igaSession,
+                    "group:" + g.getId())) {
+                log.infof("IGA quarantine STRIP group: group=%s realm=%s — "
+                        + "ADOPT pending; group membership omitted from "
+                        + "token mapping.", g.getId(), realm.getName());
+            }
+            return false;
+        });
     }
 }
