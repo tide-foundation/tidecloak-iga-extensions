@@ -686,6 +686,55 @@ public class IgaReplayDispatcher {
 
             // === transcription of OrganizationInvitationResource.sendInvitation ===
             org.keycloak.organization.InvitationManager invitationManager = orgs.getInvitationManager();
+
+            // ORG_RESEND_INVITE only: the capture seam (IgaInvitationManager
+            // .create) snapshotted the id of the still-present original
+            // invitation row. KC's resendInvitation defers the remove of that
+            // row until AFTER sendInvitation returns synchronously (so a
+            // denied resend preserves the original). At replay time the
+            // original is therefore still in place and a naive create would
+            // violate UK_ORG_INVITATION_EMAIL on (organization_id, email) —
+            // Postgres SQLState 23505 — failing the commit with HTTP 409.
+            // Removing it here, BEFORE create, is the deterministic equivalent
+            // of the synchronous post-success remove in KC's resendInvitation:
+            // the new invitation row replaces the old one, atomically inside
+            // the replay transaction. (No-ops on ORG_INVITE_MEMBER rows: the
+            // capture path doesn't set ORIGINAL_INVITATION_ID for non-resend.)
+            //
+            // CRITICAL: JpaInvitationManager.remove() calls em.remove() and
+            // create() calls em.persist() — both DEFERRED until tx flush.
+            // Hibernate's default ActionQueue executes INSERTs BEFORE DELETEs
+            // within a single flush (org.hibernate.engine.spi.ActionQueue
+            // EXECUTABLE_LISTS_ENTRY ordering: insertions, updates, deletions),
+            // so the new INSERT goes to the DB FIRST and the duplicate-key
+            // unique-constraint UK_ORG_INVITATION_EMAIL fires (Postgres 23505)
+            // even though we asked for the remove first in Java-call order.
+            // We must FORCE a flush between remove and create so the DELETE
+            // is committed to the DB before the new INSERT is issued.
+            String originalInvitationId = str(row, "ORIGINAL_INVITATION_ID");
+            if (originalInvitationId != null && !originalInvitationId.isEmpty()) {
+                try {
+                    boolean removed = invitationManager.remove(originalInvitationId);
+                    if (removed) {
+                        // Flush the DELETE to the DB before the INSERT below
+                        // is queued — otherwise hibernate's INSERT-first action
+                        // ordering re-triggers UK_ORG_INVITATION_EMAIL.
+                        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+                        em.flush();
+                    }
+                } catch (Exception e) {
+                    // If the original was deleted out-of-band between capture
+                    // and replay (admin manually deleted, or the row expired
+                    // and was garbage-collected), the create below will simply
+                    // succeed with a fresh row. Log and proceed.
+                    log.warnf(e,
+                            "IGA replay ORG_RESEND_INVITE: remove of original"
+                                    + " invitation id=%s failed (may have been deleted"
+                                    + " out-of-band); proceeding with create.",
+                            originalInvitationId);
+                }
+            }
+
             org.keycloak.models.OrganizationInvitationModel invitation = invitationManager.create(
                     organization, user.getEmail(), user.getFirstName(), user.getLastName());
 

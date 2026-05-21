@@ -371,12 +371,43 @@ public class IgaOrganizationProvider extends InfinispanOrganizationProvider {
      */
     void recordOrgInvite(String orgId, String email, String firstName, String lastName,
                          String actionType) {
+        recordOrgInvite(orgId, email, firstName, lastName, actionType, null);
+    }
+
+    /**
+     * Record an org-invite-style change request, optionally carrying the id of
+     * an invitation row that should be removed at replay time (RESEND only).
+     *
+     * <p>For {@code ORG_RESEND_INVITE}, KC's
+     * {@code OrganizationInvitationResource.resendInvitation} now defers the
+     * {@code invitationManager.remove(id)} of the original until AFTER
+     * {@code sendInvitation} returns synchronously (so a denied resend preserves
+     * the original row). That means at IGA-capture time the original invitation
+     * row is STILL present. If replay later calls
+     * {@code invitationManager.create(org, email, firstName, lastName)} with the
+     * same {@code (organization_id, email)} pair, the
+     * {@code UK_ORG_INVITATION_EMAIL} unique constraint (jpa-changelog-26.5.0.xml
+     * line 231-233) is violated and the commit transaction aborts with
+     * SQLState 23505 (translated by KC into HTTP 409 on the {@code /commit}
+     * call). To avoid that without weakening deny semantics, the seam captures
+     * the original invitation id here; {@link IgaReplayDispatcher
+     * #replayOrgInviteMember} removes that row before re-creating.</p>
+     *
+     * <p>Deny path: replay never runs, so the original is left intact —
+     * exactly the contract phase7a-resend-deny-preserves-original.spec.ts
+     * relies on.</p>
+     */
+    void recordOrgInvite(String orgId, String email, String firstName, String lastName,
+                         String actionType, String originalInvitationId) {
         RealmModel realm = realm();
         Map<String, Object> row = new java.util.LinkedHashMap<>();
         row.put("ORG_ID", orgId);
         if (email != null) row.put("INVITE_EMAIL", email);
         if (firstName != null) row.put("INVITE_FIRST_NAME", firstName);
         if (lastName != null) row.put("INVITE_LAST_NAME", lastName);
+        if (originalInvitationId != null) {
+            row.put("ORIGINAL_INVITATION_ID", originalInvitationId);
+        }
         row.put("REALM_ID", realm.getId());
         recordAndThrow(realm, "ORGANIZATION", orgId, actionType, List.of(row));
     }

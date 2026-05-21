@@ -132,8 +132,37 @@ public class IgaInvitationManager implements InvitationManager {
             // through the same sendInvitation → invitationManager.create path,
             // and the request URI is still .../invitations/{id}/resend at this
             // point (we run inside the resend handler's call stack).
-            String action = resendInFlight() ? ACTION_RESEND : ACTION_INVITE;
-            provider.recordOrgInvite(organization.getId(), email, firstName, lastName, action);
+            boolean isResend = resendInFlight();
+            String action = isResend ? ACTION_RESEND : ACTION_INVITE;
+
+            // For RESEND: snapshot the original invitation id so replay can
+            // remove the pre-existing row BEFORE re-creating. KC's
+            // resendInvitation now defers the remove until AFTER sendInvitation
+            // returns synchronously (so a denied resend preserves the original),
+            // which means the original row is STILL present here. At replay
+            // time, calling invitationManager.create with the same (org, email)
+            // would violate the UK_ORG_INVITATION_EMAIL unique constraint
+            // (DB-level, on (organization_id, email)). Capturing the id now
+            // gives replay a deterministic "delete this first" instruction
+            // without changing deny semantics (replay never runs on deny).
+            String originalInvitationId = null;
+            if (isResend) {
+                try {
+                    OrganizationInvitationModel existing = delegate.getByEmail(organization, email);
+                    if (existing != null) {
+                        originalInvitationId = existing.getId();
+                    }
+                } catch (Exception ignored) {
+                    // Best-effort lookup: on capture we still record the CR
+                    // (action type already determined) and replay falls back
+                    // to the no-id path. The unique-constraint would still
+                    // fire at replay, but that's strictly no-worse than the
+                    // pre-fix behaviour and surfaces a clear error.
+                }
+            }
+
+            provider.recordOrgInvite(organization.getId(), email, firstName, lastName,
+                    action, originalInvitationId);
             return null; // unreachable — recordOrgInvite always throws
         }
         return delegate.create(organization, email, firstName, lastName);
