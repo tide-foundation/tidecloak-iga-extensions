@@ -1470,17 +1470,10 @@ export async function addOrgMemberById(
   orgId: string,
   userId: string,
 ): Promise<APIResponse> {
-  const { baseUrl } = kcEnv();
-  const token = await adminToken(request);
-  return request.post(
-    `${baseUrl}/admin/realms/${realm}/organizations/${orgId}/members`,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'text/plain',
-      },
-      data: userId,
-    },
+  return kcFetch(
+    request,
+    `/admin/realms/${realm}/organizations/${orgId}/members`,
+    { method: 'POST', json: userId },
   );
 }
 
