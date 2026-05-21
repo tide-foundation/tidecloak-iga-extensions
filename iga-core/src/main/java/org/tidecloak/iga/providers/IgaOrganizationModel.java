@@ -14,6 +14,8 @@ import org.keycloak.representations.idm.OrganizationRepresentation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import org.tidecloak.iga.services.IgaQuarantineCache;
+
 import jakarta.persistence.EntityManager;
 import java.util.List;
 import java.util.Map;
@@ -262,9 +264,52 @@ public class IgaOrganizationModel implements OrganizationModel {
         return delegate.getAlias();
     }
 
+    // -------------------------------------------------------------------------
+    // Phase 7c — organization quarantine hook (HARD refuse, cascading through
+    // KC's own org-aware enforcement points).
+    //
+    // KC checkpoints surfaced by org.isEnabled() (cross-checked vs
+    // /home/sasha/project/tidecloak/services/src/main/java/org/keycloak/...):
+    //   Organizations.isReadOnlyOrganizationMember:290           (managed members go read-only)
+    //   OrganizationAuthenticator.authenticate:215               (org-aware login refused)
+    //   IdpAddOrganizationMemberAuthenticator:82                 (IdP-brokered org membership blocked)
+    //   RegistrationPage.validate:69                             (org-scoped registration blocked)
+    //
+    // Defers to super.isEnabled() (i.e. the wrapped delegate's real flag)
+    // first so an admin-disabled org stays disabled regardless. If the
+    // delegate reports enabled, the quarantine cache refuses the operation
+    // when the org has an unattested IGA_UNSIGNED_ENTITY sidecar row, making
+    // every consumer of org.isEnabled() observe the org as not-enabled until
+    // the ADOPT_ORGANIZATION CR commits. The cache memoises per
+    // (session, org) under IGA_QUARANTINE:org:<id> and respects the
+    // IGA_REPLAY_ACTIVE gate (so the commit traversal can touch the org
+    // mid-replay even while it's still nominally quarantined).
+    // -------------------------------------------------------------------------
+
     @Override
     public boolean isEnabled() {
-        return delegate.isEnabled();
+        boolean superEnabled = delegate.isEnabled();
+        if (!superEnabled) {
+            return false;
+        }
+        RealmModel realm = session.getContext().getRealm();
+        if (IgaQuarantineCache.isOrganizationUnsigned(session, realm, this)) {
+            // One INFO line per request per org — dedupe key partitions log
+            // noise from hot-path org-aware checks while still surfacing
+            // every first quarantine refusal (per org, per request) for
+            // operator triage.
+            if (IgaQuarantineCache.firstObservation(session, "org:" + delegate.getId())) {
+                log.infof("IGA quarantine REFUSE: org=%s (%s) realm=%s — "
+                        + "ADOPT_ORGANIZATION pending; treating as not-enabled "
+                        + "(cascades through KC org-aware login + "
+                        + "read-only-managed-member + IdP-broker-membership + "
+                        + "registration enforcement).",
+                        delegate.getName(), delegate.getId(),
+                        realm != null ? realm.getName() : "<null>");
+            }
+            return false;
+        }
+        return true;
     }
 
     @Override
