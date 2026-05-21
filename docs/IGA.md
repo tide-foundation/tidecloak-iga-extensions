@@ -1,8 +1,9 @@
 # Identity Governance and Administration (IGA)
 
-> **Last updated:** 2026-05-21. Reflects Phases 1–6 as of commit `c8d12a2`
-> (branch `iga-approval-workflow`). This guide is the operator/administrator
-> reference. Developers extending IGA should start at
+> **Last updated:** 2026-05-21. Reflects Phases 1–7 as of commit `742c9eb`
+> (branch `iga-approval-workflow`; Phase 7e docs refresh on top of Phase 7d
+> backend HEAD). This guide is the operator/administrator reference.
+> Developers extending IGA should start at
 > [`EXTENDING-IGA.md`](EXTENDING-IGA.md).
 
 ## TL;DR
@@ -59,6 +60,12 @@
 11. [Failure responses an operator will see](#failure-responses-an-operator-will-see)
 12. [Default behavior when nothing is configured](#default-behavior-when-nothing-is-configured)
 13. [Governing Keycloak Organizations](#governing-keycloak-organizations)
+    - [Bootstrap: retroactive ADOPT_ORGANIZATION on IGA toggle (Phase 7b)](#bootstrap-retroactive-adopt_organization-on-iga-toggle-phase-7b)
+    - [Quarantine: the org `isEnabled` override and its cascade (Phase 7c)](#quarantine-the-org-isenabled-override-and-its-cascade-phase-7c)
+    - [IdP-aware scope for ORG_ADD_IDP / ORG_REMOVE_IDP (Phase 7d)](#idp-aware-scope-for-org_add_idp--org_remove_idp-phase-7d)
+    - [Bootstrap-safety and escape hatches (organizations)](#bootstrap-safety-and-escape-hatches-organizations)
+    - [SMTP-tolerance on invitation replay](#smtp-tolerance-on-invitation-replay)
+    - [Known gaps and follow-ups (organizations)](#known-gaps-and-follow-ups-organizations)
 14. [Phase 6: retroactive ADOPT and quarantine on IGA toggle](#phase-6-retroactive-adopt-and-quarantine-on-iga-toggle)
 15. [Bulk-authorizing pending change requests](#bulk-authorizing-pending-change-requests)
 16. [Operator runbook](#operator-runbook)
@@ -775,8 +782,9 @@ intercepts client/group/role creation
 | `ADD_ORG_MEMBER` | `POST {realm}/organizations/{id}/members` | The organization |
 | `REMOVE_ORG_MEMBER` | `DELETE {realm}/organizations/{id}/members/{member-id}` | The organization |
 | `ORG_INVITE_MEMBER` | `POST {realm}/organizations/{id}/members/invite-user` and `.../invite-existing-user` | The organization |
-| `ORG_ADD_IDP` | `POST {realm}/organizations/{id}/identity-providers` | The organization |
-| `ORG_REMOVE_IDP` | `DELETE {realm}/organizations/{id}/identity-providers/{alias}` | The organization |
+| `ORG_RESEND_INVITE` | `POST {realm}/organizations/{id}/invitations/{inv-id}/resend` | The organization |
+| `ORG_ADD_IDP` | `POST {realm}/organizations/{id}/identity-providers` | The organization (+ the linked IdP — see [IdP-aware scope](#idp-aware-scope-for-org_add_idp--org_remove_idp-phase-7d)) |
+| `ORG_REMOVE_IDP` | `DELETE {realm}/organizations/{id}/identity-providers/{alias}` | The organization (+ the linked IdP — see [IdP-aware scope](#idp-aware-scope-for-org_add_idp--org_remove_idp-phase-7d)) |
 
 > **Note**
 > Organization **domains** are not a separate governed action. KC 26.5.5
@@ -833,6 +841,248 @@ exactly like other top-level creates (`IgaScopeResolver.java:165-170`,
 > (`IgaReplayDispatcher.java:618-689`). Replay runs at most once per
 > change request, so exactly one invitation/token/e-mail is produced —
 > never a duplicate.
+
+### Bootstrap: retroactive ADOPT_ORGANIZATION on IGA toggle (Phase 7b)
+
+The Phase 6b OFF→ON adopt scan
+([Phase 6: retroactive ADOPT and quarantine](#phase-6-retroactive-adopt-and-quarantine-on-iga-toggle))
+was extended in Phase 7b to cover organizations. When
+`POST /admin/realms/{realm}/tide-admin/toggle-iga` flips `isIGAEnabled`
+from `false` → `true`, the toggle handler now also walks every existing
+`OrganizationEntity` in the realm and emits one PENDING
+`ADOPT_ORGANIZATION` change request per row, plus a matching
+`IGA_UNSIGNED_ENTITY` sidecar row keyed on
+`(realmId, entityType='ORGANIZATION', entityId=orgId)`. The scan response
+JSON exposes the count under `scan.adoptCrsCreated.ORGANIZATION` alongside
+the existing USER / ROLE / GROUP / CLIENT / CLIENT_SCOPE counts (see
+[Toggle response shape](#toggle-response-shape) for the full body).
+
+> **Note**
+> The `OrganizationEntity` table has **no `attestation` column**. This is
+> a deliberate departure from the Phase 6 storage-on-the-entity pattern:
+> orgs are sidecar-only. The signed/unsigned state lives entirely in
+> `IGA_UNSIGNED_ENTITY` plus the CR row's `status=APPROVED` — there is no
+> per-org attestation byte. This avoided a schema migration on the stock
+> KC organization table and keeps the IGA provider a pure wrapper around
+> `JpaOrganizationProvider`
+> (`IgaReplayDispatcher.java:483-497`,
+> `IgaOrganizationProvider.java`).
+
+The ADOPT_* gate bypass from Phase 6c
+([ADOPT gate bypass: threshold + approver-role](#adopt-gate-bypass-threshold--approver-role))
+applies unchanged to `ADOPT_ORGANIZATION`: threshold is forced to 1 and
+no `iga.approverRole` check fires, so any admin with `manage-realm`
+can self-authorize + self-commit a freshly-emitted ADOPT_ORGANIZATION CR
+on the toggled realm. This is what keeps the toggle-on event a single
+maintenance window rather than a multi-admin coordination problem.
+
+### Quarantine: the org `isEnabled` override and its cascade (Phase 7c)
+
+While a PENDING `ADOPT_ORGANIZATION` CR exists for an org (equivalently:
+while the org's `IGA_UNSIGNED_ENTITY` sidecar row is present), the IGA
+provider's `IgaOrganizationModel.isEnabled()` returns **`false`**
+regardless of the underlying `OrganizationEntity.enabled` column. The
+override is implemented at `IgaOrganizationModel.java:289-310` (defers
+first to the wrapped delegate's real flag, then consults
+`IgaQuarantineCache.isOrganizationUnsigned`; respects the
+`IGA_REPLAY_ACTIVE` gate so the ADOPT commit's own replay can touch the
+org mid-commit). Operators observe this directly on admin REST: a
+`GET /admin/realms/{realm}/organizations/{orgId}` while the CR is
+PENDING returns the org rep with `enabled=false`.
+
+The override is consumed by KC's own org-aware enforcement points — the
+override does not need a new IGA seam for each of them, every consumer
+that reads `org.isEnabled()` observes the quarantine automatically. The
+known cascade points in KC 26.5.5 are:
+
+| KC source (line ref) | What it gates | Cascade effect while ADOPT_ORGANIZATION is PENDING |
+|----------------------|---------------|----------------------------------------------------|
+| `Organizations.isReadOnlyOrganizationMember:288-291` | `UserCacheSession.getUserById:384` wraps managed members in `ReadOnlyUserModelDelegate` | Managed org members become read-only on admin REST: `PUT {realm}/users/{userId}` setters throw `ReadOnlyException` → `400 Bad Request "User is read only!"` (`UserResource.java:249-251`). Unmanaged members are unaffected. |
+| `OrganizationAuthenticator.authenticate:215` | Org-aware browser auth flow (the post-username-form branch that picks an org by domain) | Org-scoped browser logins are refused. The user sees the standard authenticator failure page; KC does not reveal `enabled=false` to the end-user. |
+| `IdpAddOrganizationMemberAuthenticator.configuredFor:82` | The IdP-broker authenticator that calls `provider.addManagedMember(...)` at completion | IdP-brokered users who would have been auto-added to the org as managed members are NOT added; the authenticator's `configuredFor` returns false and the auth step is `attempted()` (advances to the next step) rather than succeeding. |
+| `RegistrationPage.render:69` | The invitation-flow registration form's pre-render gate | Registration via an `InviteOrgActionToken` for the quarantined org is rejected with `BAD_REQUEST` + `EXPIRED_ACTION` message. (Existing minted tokens still bind to the org id; they just can't complete until the org is un-quarantined.) |
+| `OrganizationScope.resolveOrganizations:196` + `OrganizationMembershipMapper.resolveValue:159` | The OIDC `organization` claim mapper attached to the stock `organization` client-scope | Tokens issued via direct-grant / authorization-code while the org is quarantined OMIT the org from the `organization` claim. This is the cascade point Phase 7e exercises end-to-end (`e2e/tests/phase7e-org-cascade.spec.ts`). |
+
+> **Note**
+> The fifth row (the OIDC claim mapper) is what the Phase 7e
+> cascading-enforcement E2E asserts: it lifts user + client quarantine
+> via ADOPT_USER + ADOPT_CLIENT commits, leaves ADOPT_ORGANIZATION
+> PENDING, then issues a `scope=openid organization` direct-grant token
+> and observes the `organization` claim is absent until
+> ADOPT_ORGANIZATION commits and the cascade lifts.
+
+> **Important**
+> The managed-member-read-only branch
+> (`Organizations.isReadOnlyOrganizationMember:290`) only fires for
+> members whose `UserGroupMembership.MembershipType` is `MANAGED`. KC
+> 26.5.5 exposes no admin-REST endpoint that creates a managed
+> membership — `POST {realm}/organizations/{id}/members` always creates
+> UNMANAGED. Managed status is set exclusively by
+> `IdpAddOrganizationMemberAuthenticator.authenticate:63` during an
+> IdP-broker login. If your deployment has no IdP-broker traffic for an
+> org, no members of that org are managed, and the read-only cascade is
+> latent (visible if/when an IdP-broker login first runs).
+
+The lift path is symmetric: once `ADOPT_ORGANIZATION` commits, the IGA
+replay clears the sidecar row, evicts the per-org `CachedOrganization`
+entry via the public `CacheRealmProvider.registerInvalidation(orgId)`
+primitive (`TideAdminCompatResource.java:627-659`), and the next
+`getById` / `getByMember` lookup re-runs through the IGA provider chain
+and observes the sidecar absence — `isEnabled()` returns `true` again,
+and every cascade point above reverts to the pre-quarantine path.
+
+### IdP-aware scope for ORG_ADD_IDP / ORG_REMOVE_IDP (Phase 7d)
+
+`ORG_ADD_IDP` and `ORG_REMOVE_IDP` are **two-entity** actions: each binds
+both the organization and the linked identity provider. Phase 7d
+extended `IgaScopeResolver` so the commit-time gate merges scope
+contributions from BOTH the org AND the IdP, not just the org.
+
+For these two action types, `IgaScopeResolver.resolve`
+(`IgaScopeResolver.java:174-189`) calls
+`resolveOrganizationScopesFromRows` AND `resolveIdpScopesFromRows`,
+keyed off the captured `ORG_ID` and `IDP_ALIAS` rows respectively. The
+IdP-side helper (`collectIdpScope` at `IgaScopeResolver.java:444-457`)
+reads `iga.approverRole` and `iga.threshold` off
+`IdentityProviderModel.getConfig()` (the stock KC IdP-config map at
+`server-spi:208`), conditional on `iga.approverRole` being set on the
+IdP — same coupling rule as everywhere else
+([the approver-role / threshold coupling rule](#warning-the-approver-role--threshold-coupling-rule)).
+
+Merge semantics (shared `ResolvedScope` across both helpers):
+
+- **`requiredApproverRoles`**: UNION of the org's + the IdP's approver
+  roles. In default scope mode (`any`) a single match by ANY signer
+  satisfies the gate; in `all` mode every contributed role must be
+  matched at least once across the set of signers.
+- **`thresholds`**: MAX across all collected thresholds
+  (`resolveThresholdInternal:280-298` takes the max across
+  `scope.thresholds`; the realm-level `iga.threshold` is only the
+  fallback when `scope.thresholds` is empty).
+
+> **Note**
+> Setting `iga.threshold` / `iga.approverRole` on an IdP is identical to
+> setting them on an org or a role: edit the IdP's config map via
+> `PUT /admin/realms/{realm}/identity-provider/instances/{alias}`
+> carrying `config: { "iga.threshold": "3", "iga.approverRole": "idp-approver", ... }`.
+> The coupling rule still applies — set both or the threshold is
+> silently ignored. Same gotcha as everywhere else, just on a different
+> entity surface.
+
+> **Warning**
+> IdPs are **not in the toggle-on ADOPT scan**. Identity providers are
+> configuration objects rather than user-data, and the Phase 7b scan
+> deliberately scans only the five user-data tables plus
+> `OrganizationEntity`. IdPs are pulled into governance only when they
+> participate as a scope contributor for `ORG_ADD_IDP` / `ORG_REMOVE_IDP`
+> CRs, not as ADOPT subjects in their own right.
+
+### Bootstrap-safety and escape hatches (organizations)
+
+The general bootstrap-safety guarantees from Phase 6
+([Bootstrap-safety and escape hatches](#bootstrap-safety-and-escape-hatches))
+apply unchanged to organizations:
+
+- **Master-realm admin is the unconditional escape.** The master realm
+  is system-skipped: no IGA capture fires on master-realm operations,
+  so a master-realm admin can always disable IGA on a non-master realm
+  via `POST /admin/realms/{realm}/tide-admin/toggle-iga` even if every
+  org in that realm is quarantined.
+- **`ADOPT_ORGANIZATION` reuses the ADOPT_* gate bypass.** Threshold is
+  forced to 1; no `iga.approverRole` check fires. A single admin with
+  `manage-realm` can always sign + commit. This is what makes the
+  toggle-on adopt scan recoverable: even if `iga.approverRole` is
+  mis-configured on the realm or on individual orgs, the ADOPT family
+  is still committable by any admin holding the base management role.
+
+### SMTP-tolerance on invitation replay
+
+The `ORG_INVITE_MEMBER` and `ORG_RESEND_INVITE` replay paths (both
+handled by the same `replayOrgInviteMember` method at
+`IgaReplayDispatcher.java:618-744`) **tolerate SMTP failure**: the
+invitation row is persisted by `invitationManager.create(...)` BEFORE
+the e-mail send is attempted, and a `try/catch (EmailException)` wraps
+the e-mail send so a misconfigured / down SMTP server emits a WARN log
+line and the commit still returns 200. The CR is marked APPROVED and
+the invitation persists.
+
+> **Warning**
+> If your deployment relies on the invitation e-mail actually being
+> delivered (rather than the action token being communicated
+> out-of-band), monitor the IGA replay logs for the line:
+>
+> ```
+> IGA replay ORG_INVITE_MEMBER: invitation persisted but e-mail send failed
+> ```
+>
+> Recovery: the same invitation can be re-triggered via the standard
+> `POST {realm}/organizations/{id}/invitations/{inv-id}/resend`
+> endpoint (which itself flows through `ORG_RESEND_INVITE` governance
+> and lands back in the same replay path) once SMTP is restored.
+> Reasoning for the swallow-and-log behaviour — and why the commit must
+> not fail on an infrastructure problem post-approval — is documented
+> inline at `IgaReplayDispatcher.java:697-708`.
+
+### Known gaps and follow-ups (organizations)
+
+These are documented limitations of the Phase 7 org governance surface
+as it ships at HEAD `742c9eb`. None are blockers; each is recorded so
+operators know what NOT to rely on.
+
+- **`ORG_RESEND_INVITE` removes the original invitation BEFORE the IGA
+  capture seam fires.** KC's
+  `OrganizationInvitationResource.resendInvitation:322-333` calls
+  `invitationManager.remove(id)` and only *then* delegates to
+  `inviteUser(...)` — that delegation is where IGA intercepts. So even
+  if approval is later denied, the original invitation row is already
+  gone. The user-facing effect: a denied resend leaves the org with no
+  pending invitation for that email (whereas a denied initial invite
+  leaves the original — there was no original to begin with). This is
+  a KC ordering quirk, not an IGA bug; IGA-side this could be papered
+  over by deferring the remove to commit time, but doing so would
+  require shadowing more of KC's invitation lifecycle than the current
+  design accepts.
+- **Cache-coherence with the Infinispan organization layer.** The IGA
+  org provider extends `JpaOrganizationProvider` directly rather than
+  wrapping `InfinispanOrganizationProvider`. The Infinispan layer's
+  IdP-removed / user-removed event listeners still register (because
+  `postInit` runs on every factory regardless of which one is selected
+  as the default — see
+  [Wire-up lessons](EXTENDING-IGA.md#wire-up-lessons-the-phase-7a-discoveries))
+  but cache invalidations for IGA-mediated org mutations don't
+  automatically fire through the Infinispan cache path. The IGA toggle
+  + ADOPT replay both invoke `CacheRealmProvider.registerInvalidation`
+  for affected org ids
+  (`TideAdminCompatResource.java:627-659`,
+  `IgaReplayExtension.evictCacheForAdopt`), so authoritative reads are
+  fine. The observable side-effect: operators who rely on reading
+  `OrganizationModel.getIdentityProviders()` immediately after an
+  IGA-mediated `ORG_ADD_IDP` / `ORG_REMOVE_IDP` commit may see a brief
+  stale broker list until the next per-request session loads the
+  evicted entry. The E2E harness sidesteps this by reading
+  authoritative DB-backed fields rather than re-resolving cache
+  entries.
+- **IdPs are not toggle-on ADOPT subjects.** As noted under
+  [IdP-aware scope](#idp-aware-scope-for-org_add_idp--org_remove_idp-phase-7d):
+  identity providers participate in governance only via the
+  ORG_ADD_IDP / ORG_REMOVE_IDP scope merge, never as adoption targets
+  in their own right. If a future phase decides per-IdP attestation
+  matters (e.g. to govern raw `PUT /admin/realms/{r}/identity-provider/instances/{alias}`
+  edits) the scan would need a sixth pass over the IdP table.
+- **Phase 7e cascade coverage is exemplary, not exhaustive.** Of the
+  five `org.isEnabled()` cascade points enumerated in the
+  [quarantine cascade table](#quarantine-the-org-isenabled-override-and-its-cascade-phase-7c),
+  Phase 7e exercises one end-to-end (the OIDC `organization` claim
+  mapper at `OrganizationMembershipMapper.resolveValue:159`). The
+  other four — managed-member read-only, org-aware browser auth, IdP-
+  broker membership block, registration-flow block — are verified by
+  KC source inspection at the cited line refs. End-to-end exercise of
+  those four requires either a UI driver (browser auth + registration
+  flow) or a federated IdP server (managed-member and IdP-broker
+  branches), both out of scope for the REST-only harness. The single
+  `IgaOrganizationModel.isEnabled` override is the one primitive every
+  cited cascade point reads, so a Phase 7c-style change to that
+  primitive would propagate to all five.
 
 ## Phase 6: retroactive ADOPT and quarantine on IGA toggle
 

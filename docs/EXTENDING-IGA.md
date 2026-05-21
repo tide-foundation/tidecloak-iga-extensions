@@ -1,8 +1,9 @@
 # Extending IGA: contributor guide
 
-> **Last updated:** 2026-05-21. Reflects Phases 1–6 as of commit `c8d12a2`
-> (branch `iga-approval-workflow`). The operator/administrator companion
-> is [`docs/IGA.md`](IGA.md).
+> **Last updated:** 2026-05-21. Reflects Phases 1–7 as of commit `742c9eb`
+> (branch `iga-approval-workflow`; Phase 7e docs refresh on top of Phase 7d
+> backend HEAD). The operator/administrator companion is
+> [`docs/IGA.md`](IGA.md).
 
 Audience: developers extending the IGA approval workflow with a new
 governed entity type, action, or capture seam.
@@ -79,6 +80,13 @@ re-capture.
 13. [Canonical example index](#canonical-example-index)
 14. [Phase 6: retroactive ADOPT + quarantine — contributor notes](#phase-6-retroactive-adopt--quarantine--contributor-notes)
 15. [Recipe: add a new ADOPT-able entity type](#recipe-add-a-new-adopt-able-entity-type)
+16. [Phase 7: organization governance — contributor notes](#phase-7-organization-governance--contributor-notes)
+    - [Wire-up lessons (the Phase 7a discoveries)](#wire-up-lessons-the-phase-7a-discoveries)
+    - [No `attestation` column on `OrganizationEntity`](#no-attestation-column-on-organizationentity)
+    - [IdP-aware scope merge (Phase 7d)](#idp-aware-scope-merge-phase-7d)
+    - [SMTP-tolerance pattern (Phase 7a/b)](#smtp-tolerance-pattern-phase-7ab)
+    - [`getOrganizationsResource` REST sub-path conventions](#getorganizationsresource-rest-sub-path-conventions)
+    - [Quarantine cascade pattern (Phase 7c)](#quarantine-cascade-pattern-phase-7c)
 
 ---
 
@@ -1402,4 +1410,294 @@ shape):
     quarantine table in
     [`IGA.md` — Quarantine semantics](IGA.md#quarantine-semantics-per-entity-type)
     so operators know what the new type does under quarantine.
+
+---
+
+## Phase 7: organization governance — contributor notes
+
+Phase 7 brought KC organizations under IGA. The architecture is the same
+capture-then-veto + ADOPT + quarantine pattern as Phase 6, with three
+differences worth a contributor's attention:
+
+1. The provider extends `JpaOrganizationProvider` (not the cache layer)
+   because KC's organization caching lives ON the same
+   `OrganizationProviderFactory` SPI as JPA (not in a separate
+   `*CacheProviderFactory` like every other entity type). See
+   [Wire-up lessons](#wire-up-lessons-the-phase-7a-discoveries) below
+   for the priority pitfall.
+2. The `OrganizationEntity` schema has **no `attestation` column** —
+   governance state lives entirely on the sidecar table + CR row. See
+   [No `attestation` column on `OrganizationEntity`](#no-attestation-column-on-organizationentity).
+3. Two of the org action types (`ORG_ADD_IDP` / `ORG_REMOVE_IDP`) bind
+   TWO entities — the org AND the linked IdP — so the scope resolver
+   merges contributions from both. See
+   [IdP-aware scope merge](#idp-aware-scope-merge-phase-7d).
+
+The org governance surface ships with these action types:
+`CREATE_ORGANIZATION`, `UPDATE_ORGANIZATION`, `DELETE_ORGANIZATION`,
+`ADD_ORG_MEMBER`, `REMOVE_ORG_MEMBER`, `ORG_INVITE_MEMBER`,
+`ORG_RESEND_INVITE`, `ORG_ADD_IDP`, `ORG_REMOVE_IDP`. The toggle-on
+adopt scan emits `ADOPT_ORGANIZATION` for each pre-existing org
+(Phase 7b). While an `ADOPT_ORGANIZATION` is PENDING the org's
+`IgaOrganizationModel.isEnabled()` returns `false`, cascading through
+every KC org-aware enforcement point that reads `org.isEnabled()`
+(Phase 7c — see the
+[operator-facing cascade table](IGA.md#quarantine-the-org-isenabled-override-and-its-cascade-phase-7c)).
+
+### Wire-up lessons (the Phase 7a discoveries)
+
+Two latent defects in the initial Phase 7a wire-up that any future org-
+adjacent work needs to be aware of. Both were fixed in
+commit `5b48b8c` / `102acce` (the Phase 7a fix commits).
+
+**Defect 1: provider-factory priority pitfall.**
+Unlike Realm / User / Client / Group / Role caching — which lives under
+separate `*CacheProviderFactory` provider types so `order() == 2` above
+the stock JPA factory is enough — organization caching lives ON the
+same `OrganizationProviderFactory` SPI via
+`InfinispanOrganizationProviderFactory.order() == 10`
+(KC 26.5.5,
+`model/infinispan/.../organization/InfinispanOrganizationProviderFactory.java:80-82`).
+Anything with `order() <= 10` LOSES to the Infinispan factory and the
+IGA wrapper is never instantiated. The Phase 7a fix bumped
+`IgaOrganizationProviderFactory.order() = 20`; future contributors
+adding new IGA wrappers in this surface area should leave headroom
+above 20 (e.g. 30) for future Tide-side organization wrappers.
+
+Cross-check: the same trade-off exists for every other Iga* provider
+that beats a stock cache factory — IGA replaces (not wraps) the cache
+layer in exchange for first-class capture authority. The Infinispan
+factory's `postInit` (IdP-removed / user-removed event listeners) is
+still registered because `postInit` runs on every factory regardless
+of which one is selected as the default
+(`DefaultKeycloakSessionFactory#initializeProviders`).
+
+**Defect 2: `IgaOrganizationModel.equals/hashCode` must mirror
+`OrganizationAdapter`.**
+KC's stock `OrganizationAdapter:252-263` defines `equals` by ID and
+`hashCode` by ID hash. Wrapping the model without overriding both
+methods falls back to `Object` identity → two `IgaOrganizationModel`
+wrappers around the same underlying org compare NOT-EQUAL, and KC's
+own org-side `anyMatch(organization::equals)` lookups silently fail.
+The most visible symptom: `OrganizationProvider.getMemberById` (and the
+`isMember` default method that delegates to it) returns `null` for
+members that are actually present in the org. Fixed in `102acce` by
+mirroring the stock equals/hashCode contract:
+
+```java
+@Override
+public boolean equals(Object o) {
+    if (this == o) return true;
+    if (!(o instanceof OrganizationModel that)) return false;
+    return that.getId().equals(getId());
+}
+
+@Override
+public int hashCode() {
+    return getId().hashCode();
+}
+```
+
+> **Rule.** Any IGA model wrapper that subclasses or replaces a stock
+> KC adapter MUST inherit the adapter's `equals/hashCode` semantics
+> verbatim. KC's own provider streams use `anyMatch(::equals)` /
+> `.equals(other)` against the wrapped instance — if your override
+> degrades to identity equality, you'll get nondeterministic
+> not-found bugs that only surface when two distinct wrapper
+> instances of the same underlying entity exist in the same session.
+
+### No `attestation` column on `OrganizationEntity`
+
+The Phase 6 entity types (`UserEntity`, `KeycloakRoleEntity`,
+`KeycloakGroupEntity`, `ClientEntity`, `ClientScopeEntity`) all carry an
+`attestation` byte/blob column added by the IGA schema migration. The
+column gets stamped on commit and is what
+`IgaUnsignedRowScanner.usersWithNames` etc. read to identify
+unattested rows during the toggle-on scan.
+
+`OrganizationEntity` is **deliberately sidecar-only**: the IGA schema
+adds NO column to the stock KC organization table. Two design reasons:
+
+1. **Schema-migration cost.** The KC organization table is part of the
+   stock 26.5.5 schema. Adding an IGA-side column would mean an
+   `ALTER TABLE` migration that ships with this jar — high-risk for
+   any deployment already running KC 26.5.5 with existing org data.
+2. **Sidecar suffices.** The signed/unsigned bit is fully captured by
+   `(IGA_UNSIGNED_ENTITY.entity_type='ORGANIZATION' AND entity_id=orgId)
+   ROW EXISTS` plus the corresponding `ADOPT_ORGANIZATION` CR row's
+   `status` field. No second bit of state is needed.
+
+Practical consequences for contributors:
+
+- **The toggle-on org scan iterates via `OrganizationProvider.getAllStream`,
+  not via raw JPA.** There is no `IgaUnsignedRowScanner.organizations`
+  method analogous to `usersWithNames` — the scan adds a separate code
+  path that streams every org and emits one `ADOPT_ORGANIZATION` CR
+  plus one `IGA_UNSIGNED_ENTITY` row per stream element (subject to
+  the same already-committed-ADOPT skip + pending-create-CR skip as
+  Phase 6b).
+- **Per-org cache eviction uses `CacheRealmProvider.registerInvalidation(orgId)`.**
+  KC's `InfinispanOrganizationProvider.registerOrganizationInvalidation`
+  is package-private, but the cached `CachedOrganization` is keyed on
+  the org id alone (`InfinispanOrganizationProvider.java:94` in KC
+  26.5.5), and that key is invalidated via the public
+  `CacheRealmProvider.registerInvalidation(id)` primitive — the same
+  primitive used by `IgaReplayExtension.evictCacheForAdopt`'s
+  `ADOPT_ORGANIZATION` branch. Domain-key cache entries (e.g.
+  `getByDomainName`) are NOT separately invalidated because no current
+  IGA-mediated flow mutates the domain key in a way that would survive
+  the per-org invalidation; if a future contributor adds a flow that
+  needs that precision (e.g. governing
+  `OrganizationDomain.setVerified()` independently), the eviction
+  surface needs to expand.
+
+### IdP-aware scope merge (Phase 7d)
+
+`ORG_ADD_IDP` / `ORG_REMOVE_IDP` are the first IGA action types that
+bind TWO entities to the same CR — the org id (`ORG_ID` row) AND the
+IdP alias (`IDP_ALIAS` row). The scope resolver was extended to call
+both `resolveOrganizationScopesFromRows` AND `resolveIdpScopesFromRows`
+in the same `case` branch (`IgaScopeResolver.java:174-189`), writing
+into a shared `ResolvedScope` instance.
+
+`resolveIdpScopesFromRows` (`:418-442`) does:
+
+1. Pulls each `IDP_ALIAS` row from the captured CR.
+2. Looks up the corresponding `IdentityProviderModel` via
+   `session.identityProviders().getByAlias(...)`.
+3. Calls `collectIdpScope(idp, out)` which reads `iga.approverRole` and
+   `iga.threshold` off `IdentityProviderModel.getConfig()` (the
+   `Map<String,String>` config map at `server-spi:208`) conditional on
+   `iga.approverRole` being non-empty — same coupling rule as
+   `collectOrganizationScope` and `collectClientScope`.
+
+If the IdP is missing at resolve time (e.g. it was removed between
+capture and commit for `ORG_REMOVE_IDP`), the row is silently skipped
+— the org-side scope contribution still applies. This matches the
+existing `resolveRoleScopesFromRows` skip-missing semantics.
+
+> **Note**
+> `collectIdpScope` does NOT consult `iga.scopeMode` on the IdP — the
+> realm-level scopeMode is the single source of truth for whether the
+> required-approver-role set is `any` or `all`. Per-IdP scopeMode
+> override has no use case today.
+
+**Cache invalidation extension.** `evictRealmCache` in
+`TideAdminCompatResource.java:661-703` was extended in Phase 7d to
+invalidate both IdP cache keys: `idp.getInternalId()` AND
+`realmId + "." + alias + ".idp.alias"` (the alias-keyed lookup path
+used by `InfinispanIdentityProviderStorageProvider.cacheKeyIdpAlias`).
+Without both keys evicted, an `iga.approverRole` / `iga.threshold` edit
+made on an IdP BEFORE the IGA toggle-on could remain cached post-toggle
+and an `ORG_ADD_IDP` / `ORG_REMOVE_IDP` CR would resolve against the
+pre-edit config — wrong gate verdict. The alias-key suffix string is
+identical to KC's private constant; if a future KC release renames it
+the eviction will silently no-op until the suffix is updated to match.
+
+### SMTP-tolerance pattern (Phase 7a/b)
+
+`replayOrgInviteMember` (`IgaReplayDispatcher.java:618-744`) wraps
+`sendOrgInviteEmail` in `try/catch (EmailException) → log.warn` rather
+than rethrowing. The reasoning, documented at
+`IgaReplayDispatcher.java:697-708`:
+
+- The invitation row is already persisted by `invitationManager.create(...)`
+  before the e-mail send is attempted, and the invite link is stored
+  on the invitation entity (`JpaInvitationManager.create` does
+  `em.persist + flush` at end of the commit tx). So the invitee can
+  still be notified out-of-band (admin UI / resend) even if SMTP is
+  down.
+- The original requester is long gone by the time replay runs — there
+  is no operator to surface the SMTP error to via an HTTP response.
+- Failing the commit would discard an already-approved governance
+  decision over an infrastructure problem (SMTP down / misconfigured),
+  and the surrounding tx rollback would discard the persisted
+  invitation row, leaving the system in a state inconsistent with the
+  approved CR.
+
+The shared handler is reused by `ORG_INVITE_MEMBER` and
+`ORG_RESEND_INVITE` — both replay paths inherit the swallow-and-log
+behaviour. The operator-facing warning log line is exactly:
+
+```
+IGA replay ORG_INVITE_MEMBER: invitation persisted but e-mail send failed
+```
+
+> **Rule.** Any future replay path that produces user-facing side-
+> effects via `EmailException`-throwing KC code (password-reset
+> e-mails, verify-email actions, etc.) MUST follow this pattern: log
+> at WARN, persist the action token / state, return commit success.
+> A commit-time exception unrelated to the governed decision is an
+> infrastructure problem and must not roll back the approved CR.
+
+### `getOrganizationsResource` REST sub-path conventions
+
+The Phase 7a harness work surfaced a handful of KC org REST conventions
+that aren't obvious from the OpenAPI surface. Contributors writing new
+org-adjacent harness helpers (or new admin-UI integrations) should
+mirror these:
+
+- **Invitations live under `/invitations`, NOT `/members/invitations`.**
+  KC mounts `OrganizationInvitationResource` as a sub-resource at
+  `/admin/realms/{realm}/organizations/{orgId}/invitations`
+  (`OrganizationResource.java:131` in KC 26.5.5). A common
+  harness-side mistake is to assume the path is nested under
+  `/members/` because invitations conceptually map to future members;
+  KC's routing is flat. The `@GET` listing method is at
+  `OrganizationInvitationResource.java:231-273`; the `@POST .../resend`
+  endpoint is at `:316-334`.
+- **IdP link / unlink uses `application/json` with the alias as a
+  JSON string in the body, NOT `text/plain`.**
+  `OrganizationIdentityProvidersResource.addIdentityProvider` is
+  `@Consumes(MediaType.APPLICATION_JSON)`. The body is the IdP id /
+  alias as a JSON-string-literal (i.e.
+  `JSON.stringify(alias)`). KC strips the surrounding quotes
+  server-side at `OrganizationIdentityProvidersResource.java:87`
+  (the same `^"|"$` strip applied by
+  `OrganizationMemberResource.addMember:99` per
+  [KC issue 34401](https://github.com/keycloak/keycloak/issues/34401)).
+  Sending the raw alias with `Content-Type: text/plain` works
+  against some legacy KC paths but fails on KC 26.5.5 org-IdP link
+  with HTTP 415.
+- **`POST /organizations/{id}/members` body is also a JSON string,
+  same KC34401 strip.** Same convention as IdP link — see
+  `OrganizationMemberResource.addMember:98-99` and
+  `e2e/lib/kc.ts addOrgMemberById`. The harness sends
+  `JSON.stringify(userId)`.
+
+### Quarantine cascade pattern (Phase 7c)
+
+`IgaOrganizationModel.isEnabled` is the first quarantine hook that
+**defers to the wrapped delegate's flag first** before consulting the
+quarantine cache:
+
+```java
+public boolean isEnabled() {
+    boolean superEnabled = delegate.isEnabled();
+    if (!superEnabled) {
+        return false;
+    }
+    // ... then consult IgaQuarantineCache.isOrganizationUnsigned(...)
+}
+```
+
+This is intentional: an admin who explicitly disables an org via
+`PUT /organizations/{id}` with `enabled=false` should stay disabled
+regardless of IGA quarantine state. The quarantine override is purely
+ADDITIVE — it can take an enabled org and treat it as disabled, but
+it can never un-disable an admin-disabled org. Any future quarantine
+override that gates a "boolean attribute the operator can toggle"
+should follow this pattern: defer to the delegate first, override only
+when the delegate is in the affirmative state.
+
+The cascade is implicit: every KC code path that reads
+`org.isEnabled()` observes the override automatically. The Phase 7c
+implementation does NOT add a new IGA seam at each cascade point —
+the override at the model layer is the entire mechanism. End-to-end
+verification of cascade points lives in `e2e/tests/phase7e-org-cascade.spec.ts`
+(exercises the OIDC `organization` claim mapper cascade); the other
+four documented cascade points
+([operator doc table](IGA.md#quarantine-the-org-isenabled-override-and-its-cascade-phase-7c))
+are source-grounded only because they require UI / IdP-federation
+harness work that's out of scope for the REST-only E2E surface.
 
