@@ -366,6 +366,53 @@ public class IgaChangeRequestService {
     }
 
     // -------------------------------------------------------------------------
+    // Phase 6e — bulk-authorize PENDING CR selector. See
+    // IgaAdminResource#bulkAuthorize. Backed by IDX_IGA_CR_REALM_ACTION_STATUS
+    // (REALM_ID, ACTION_TYPE, STATUS). Applies LIMIT at the query level so a
+    // wide actionTypeIn filter cannot pull a runaway result set into memory.
+    // Order is createdAt ASC so oldest PENDING CRs drain first — operationally
+    // matches the FIFO mental model of "clear the queue".
+    // -------------------------------------------------------------------------
+
+    /**
+     * Project PENDING CRs in (realmId) matching any actionType in
+     * {@code actionTypes} with {@code createdAt <= olderThan} when non-null.
+     * Ordered by createdAt ASC, capped at {@code limit}.
+     *
+     * @param realmId      target realm
+     * @param actionTypes  non-empty list of action-type strings to match
+     * @param olderThan    optional epoch-millis upper bound on createdAt
+     *                     (inclusive); {@code null} disables the filter
+     * @param limit        max rows to return (caller enforces hard cap; this
+     *                     method passes through to setMaxResults verbatim)
+     */
+    public List<IgaChangeRequestEntity> listPendingByActionTypeIn(String realmId,
+                                                                   List<String> actionTypes,
+                                                                   Long olderThan,
+                                                                   int limit) {
+        if (actionTypes == null || actionTypes.isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+        StringBuilder jpql = new StringBuilder(
+                "SELECT cr FROM IgaChangeRequestEntity cr " +
+                        "WHERE cr.realmId = :realmId " +
+                        "AND cr.status = 'PENDING' " +
+                        "AND cr.actionType IN :actionTypes");
+        if (olderThan != null) {
+            jpql.append(" AND cr.createdAt <= :olderThan");
+        }
+        jpql.append(" ORDER BY cr.createdAt ASC");
+        TypedQuery<IgaChangeRequestEntity> query = em.createQuery(
+                        jpql.toString(), IgaChangeRequestEntity.class)
+                .setParameter("realmId", realmId)
+                .setParameter("actionTypes", actionTypes);
+        if (olderThan != null) {
+            query.setParameter("olderThan", olderThan);
+        }
+        return query.setMaxResults(limit).getResultList();
+    }
+
+    // -------------------------------------------------------------------------
     // Phase 6b — already-attested guard. See createAdoptCr JavaDoc.
     // -------------------------------------------------------------------------
 

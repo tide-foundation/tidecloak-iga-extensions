@@ -3,6 +3,7 @@ package org.tidecloak.iga.rest;
 import jakarta.enterprise.inject.Vetoed;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.ForbiddenException;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.PUT;
@@ -46,6 +47,8 @@ import org.tidecloak.iga.attestors.IgaScopeResolver;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -383,6 +386,326 @@ public class IgaAdminResource {
         IgaChangeRequestService service = getService();
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
         return Response.ok(toRepresentation(updated, service)).build();
+    }
+
+    // -------------------------------------------------------------------------
+    // POST /iga/change-requests/bulk-authorize  — Phase 6e
+    //
+    // Operator one-shot to drain large PENDING ADOPT_* (or any other action)
+    // queues. The body selects CRs by action-type list and an optional
+    // createdAt upper-bound; the loop reuses the SAME per-CR
+    // authorize+commit gate the per-CR endpoints use, so:
+    //   - ADOPT_*  → threshold=1, approver-role bypass (system-bootstrap
+    //                short-circuit inside IgaScopeResolver.requireApprover /
+    //                resolveThreshold via the action-type-aware overloads).
+    //   - CREATE_* / UPDATE_* / etc. → full threshold + approver-role gate.
+    //     A caller without the required role will see that CR rejected in
+    //     the results array; the bulk response is still HTTP 200 because the
+    //     bulk endpoint itself succeeded — see the rejected[] entries.
+    //
+    // The endpoint is idempotent: a CR observed PENDING at filter time but
+    // committed/denied/cancelled by another caller mid-bulk is detected as
+    // non-PENDING in the per-CR re-fetch and surfaces in skipped[].
+    //
+    // Concurrency: per-realm in-memory mutex via {@link IgaBulkLock}; a
+    // second concurrent bulk against the same realm gets 429. Single-node
+    // limitation documented on IgaBulkLock — the per-CR gate is the real
+    // safety net.
+    //
+    // Response is buffered JSON (option b in the Phase 6 brief). Streaming
+    // (option a) was rejected because (1) KC's JAX-RS stack has no
+    // ergonomic incremental-array primitive, (2) the hard cap of 1000
+    // bounds the response size, and (3) the summary block at the tail
+    // requires the totals — buffered preserves a single read pass for the
+    // caller.
+    // -------------------------------------------------------------------------
+
+    /** Default cap when no {@code limit} is supplied in the body. */
+    private static final int BULK_DEFAULT_LIMIT = 100;
+    /** Hard upper-bound on per-call {@code limit}. */
+    private static final int BULK_MAX_LIMIT = 1000;
+
+    @POST
+    @Path("change-requests/bulk-authorize")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    @SuppressWarnings("unchecked")
+    public Response bulkAuthorize(Map<String, Object> body) {
+        auth.realm().requireManageRealm();
+
+        // -- Body / limit validation ------------------------------------------
+        if (body == null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Missing JSON body"))
+                    .build();
+        }
+        Object actionTypeInObj = body.get("actionTypeIn");
+        if (!(actionTypeInObj instanceof List<?>) || ((List<?>) actionTypeInObj).isEmpty()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error",
+                            "actionTypeIn is required and must be a non-empty list of action-type strings"))
+                    .build();
+        }
+        List<String> actionTypes = new ArrayList<>();
+        for (Object o : (List<Object>) actionTypeInObj) {
+            if (o == null) continue;
+            String s = o.toString();
+            if (!s.isBlank()) actionTypes.add(s);
+        }
+        if (actionTypes.isEmpty()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error",
+                            "actionTypeIn must contain at least one non-blank action-type string"))
+                    .build();
+        }
+
+        Long olderThan = null;
+        Object olderThanObj = body.get("olderThan");
+        if (olderThanObj instanceof Number) {
+            olderThan = ((Number) olderThanObj).longValue();
+        } else if (olderThanObj instanceof String && !((String) olderThanObj).isBlank()) {
+            try {
+                olderThan = Long.parseLong((String) olderThanObj);
+            } catch (NumberFormatException nfe) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error",
+                                "olderThan must be a numeric epoch-millis value"))
+                        .build();
+            }
+        }
+
+        int limit = BULK_DEFAULT_LIMIT;
+        Object limitObj = body.get("limit");
+        if (limitObj instanceof Number) {
+            limit = ((Number) limitObj).intValue();
+        } else if (limitObj instanceof String && !((String) limitObj).isBlank()) {
+            try {
+                limit = Integer.parseInt((String) limitObj);
+            } catch (NumberFormatException nfe) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error", "limit must be an integer"))
+                        .build();
+            }
+        }
+        if (limit <= 0) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "limit must be > 0"))
+                    .build();
+        }
+        if (limit > BULK_MAX_LIMIT) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error",
+                            "limit must be <= " + BULK_MAX_LIMIT + " (got " + limit + ")",
+                            "maxLimit", BULK_MAX_LIMIT))
+                    .build();
+        }
+
+        // -- Per-realm concurrency lock ---------------------------------------
+        if (!IgaBulkLock.tryAcquire(realm.getId())) {
+            return Response.status(429)
+                    .entity(Map.of("error",
+                            "Another bulk-authorize is already running for this realm",
+                            "realm", realm.getName()))
+                    .build();
+        }
+
+        UserModel admin = currentUser();
+        if (admin == null) {
+            IgaBulkLock.release(realm.getId());
+            return Response.status(Response.Status.UNAUTHORIZED)
+                    .entity(Map.of("error", "No authenticated admin user"))
+                    .build();
+        }
+
+        long startedAt = System.currentTimeMillis();
+        List<Map<String, Object>> results = new ArrayList<>();
+        long committed = 0;
+        long rejected = 0;
+        long skipped = 0;
+
+        try {
+            IgaChangeRequestService service = getService();
+            List<IgaChangeRequestEntity> candidates =
+                    service.listPendingByActionTypeIn(realm.getId(), actionTypes, olderThan, limit);
+
+            for (IgaChangeRequestEntity candidate : candidates) {
+                String crId = candidate.getId();
+                Map<String, Object> outcome = processOneCr(crId, admin);
+                results.add(outcome);
+                String status = String.valueOf(outcome.get("status"));
+                if ("COMMITTED".equals(status)) committed++;
+                else if ("REJECTED".equals(status)) rejected++;
+                else skipped++;
+            }
+        } finally {
+            IgaBulkLock.release(realm.getId());
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("total", results.size());
+        summary.put("committed", committed);
+        summary.put("rejected", rejected);
+        summary.put("skipped", skipped);
+        summary.put("durationMs", System.currentTimeMillis() - startedAt);
+        summary.put("limit", limit);
+        summary.put("defaultLimit", BULK_DEFAULT_LIMIT);
+        summary.put("maxLimit", BULK_MAX_LIMIT);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("results", results);
+        response.put("summary", summary);
+        return Response.ok(response).build();
+    }
+
+    /**
+     * Authorize + commit a single CR on behalf of {@code admin}, returning a
+     * per-CR outcome record for the bulk response. NEVER throws — every
+     * exception is converted into a {@code REJECTED} or {@code SKIPPED}
+     * outcome with a stable error code so the caller can post-process the
+     * whole array uniformly.
+     *
+     * <p>Status values:
+     * <ul>
+     *   <li>{@code COMMITTED} — CR replayed and now APPROVED.</li>
+     *   <li>{@code REJECTED} — the per-CR gate refused this CR (missing
+     *       signature, threshold not met, approver-role missing, vanished
+     *       entity, dispatcher error, etc.). Error code in {@code error}.</li>
+     *   <li>{@code SKIPPED} — CR existed at filter time but was no longer
+     *       PENDING by the time we re-fetched it (concurrent
+     *       commit/deny/cancel).</li>
+     * </ul>
+     *
+     * <p>The body intentionally mirrors the per-CR endpoint flow rather than
+     * extracting a private helper from authorize/commit: the per-CR endpoints
+     * have HTTP-shaped early-returns (404/409/etc) that don't translate
+     * cleanly into "rejected per-CR" outcomes — so this method walks the
+     * same gate (record → threshold → combineFinal → tryReplay/dispatch)
+     * directly and converts every failure into a per-CR result row.</p>
+     */
+    private Map<String, Object> processOneCr(String crId, UserModel admin) {
+        Map<String, Object> outcome = new LinkedHashMap<>();
+        outcome.put("crId", crId);
+
+        EntityManager em = getEm();
+        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, crId);
+        if (cr == null || !realm.getId().equals(cr.getRealmId())) {
+            outcome.put("status", "SKIPPED");
+            outcome.put("error", "NOT_FOUND");
+            return outcome;
+        }
+        outcome.put("actionType", cr.getActionType());
+        outcome.put("entityType", cr.getEntityType());
+        outcome.put("entityId", cr.getEntityId());
+
+        // Idempotent: a CR resolved by another caller mid-bulk is no longer
+        // PENDING — skip rather than error. The bulk endpoint explicitly
+        // contracts to handle in-flight concurrency.
+        if (!"PENDING".equals(cr.getStatus())) {
+            outcome.put("status", "SKIPPED");
+            outcome.put("error", "ALREADY_RESOLVED");
+            outcome.put("crStatus", cr.getStatus());
+            return outcome;
+        }
+
+        // -- authorize step: record() enforces requireApprover() internally;
+        //    ADOPT_* CRs short-circuit the approver gate inside the resolver.
+        try {
+            // Reject a duplicate signature from the same admin — mirrors the
+            // per-CR authorize endpoint's pre-check. In bulk this typically
+            // means the operator already ran a previous bulk that partially
+            // signed but didn't commit; we then proceed straight to commit
+            // rather than fail (the existing signature counts toward
+            // threshold).
+            List<IgaAuthorizationEntity> existing = em.createNamedQuery(
+                            "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
+                    .setParameter("changeRequestId", cr.getId())
+                    .getResultList();
+            boolean alreadySigned = false;
+            for (IgaAuthorizationEntity a : existing) {
+                if (admin.getUsername() != null && admin.getUsername().equals(a.getPartialSig())) {
+                    alreadySigned = true;
+                    break;
+                }
+                if (admin.getId() != null && admin.getId().equals(a.getAuthorizedBy())) {
+                    alreadySigned = true;
+                    break;
+                }
+            }
+
+            if (!alreadySigned) {
+                IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
+                attestor.record(session, cr, admin, null);
+            }
+        } catch (ForbiddenException fe) {
+            // Approver-role gate refused this caller for THIS CR. Per the
+            // Phase 6 brief: non-ADOPT CRs must NOT be shortcut — surface
+            // the per-CR rejection in the results array.
+            outcome.put("status", "REJECTED");
+            outcome.put("error", "FORBIDDEN_APPROVER_ROLE");
+            outcome.put("httpStatus", 403);
+            String msg = fe.getMessage();
+            if (msg != null) outcome.put("message", msg);
+            return outcome;
+        } catch (RuntimeException rex) {
+            outcome.put("status", "REJECTED");
+            outcome.put("error", "AUTHORIZE_FAILED");
+            String msg = rex.getMessage();
+            if (msg != null) outcome.put("message", msg);
+            log.warnf(rex, "IGA bulk-authorize: CR %s authorize step failed", crId);
+            return outcome;
+        }
+
+        // -- commit step: same gate the per-CR commit runs (requireApprover
+        //    + threshold + combineFinal + tryReplay/dispatch).
+        try {
+            IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
+            IgaScopeResolver.requireApprover(session, realm, admin, scope, cr);
+
+            IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
+            List<IgaAuthorizationEntity> all = em.createNamedQuery(
+                            "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
+                    .setParameter("changeRequestId", cr.getId())
+                    .getResultList();
+            int threshold = attestor.getThreshold(session, realm, cr);
+            if (all.size() < threshold) {
+                outcome.put("status", "REJECTED");
+                outcome.put("error", "THRESHOLD_NOT_MET");
+                outcome.put("threshold", threshold);
+                outcome.put("authCount", all.size());
+                return outcome;
+            }
+
+            String finalAttestation = attestor.combineFinal(session, cr, all);
+            try {
+                if (!IgaReplayExtension.tryReplay(session, cr, finalAttestation)) {
+                    IgaReplayDispatcher.replay(session, cr, finalAttestation);
+                }
+            } catch (EntityVanishedException ev) {
+                outcome.put("status", "REJECTED");
+                outcome.put("error", "ENTITY_VANISHED");
+                outcome.put("vanishedEntityType", ev.getEntityType());
+                outcome.put("vanishedEntityId", ev.getEntityId());
+                log.infof("IGA bulk-authorize: CR %s vanished entity %s/%s — skipped",
+                        crId, ev.getEntityType(), ev.getEntityId());
+                return outcome;
+            }
+            outcome.put("status", "COMMITTED");
+            return outcome;
+        } catch (ForbiddenException fe) {
+            outcome.put("status", "REJECTED");
+            outcome.put("error", "FORBIDDEN_APPROVER_ROLE");
+            outcome.put("httpStatus", 403);
+            String msg = fe.getMessage();
+            if (msg != null) outcome.put("message", msg);
+            return outcome;
+        } catch (RuntimeException rex) {
+            outcome.put("status", "REJECTED");
+            outcome.put("error", "COMMIT_FAILED");
+            String msg = rex.getMessage();
+            if (msg != null) outcome.put("message", msg);
+            log.warnf(rex, "IGA bulk-authorize: CR %s commit step failed", crId);
+            return outcome;
+        }
     }
 
     // -------------------------------------------------------------------------
