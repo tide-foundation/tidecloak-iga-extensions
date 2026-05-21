@@ -1528,7 +1528,11 @@ export async function inviteOrgMember(
   );
 }
 
-/** GET invitations of an org (KC's /invitations endpoint). */
+/** GET invitations of an org (KC's /invitations endpoint).
+ *  KC mounts the OrganizationInvitationResource sub-resource at
+ *  /organizations/{id}/invitations (OrganizationResource.java:131), NOT under
+ *  /members. The @GET listing method lives at OrganizationInvitationResource
+ *  .java:231-273. */
 export async function getOrgInvitations(
   request: APIRequestContext,
   realm: string,
@@ -1536,16 +1540,17 @@ export async function getOrgInvitations(
 ): Promise<{ http: number; body: any[] }> {
   const res = await kcFetch(
     request,
-    `/admin/realms/${realm}/organizations/${orgId}/members/invitations`,
+    `/admin/realms/${realm}/organizations/${orgId}/invitations`,
   );
   const body = await safeJson(res);
   return { http: res.status(), body: Array.isArray(body) ? body : [] };
 }
 
 /**
- * POST {realm}/organizations/{id}/members/invitations/{invId}/resend — KC's
- * resendInvitation. IGA intercepts as ORG_RESEND_INVITE (URI-sniffed in
- * IgaInvitationManager).
+ * POST {realm}/organizations/{id}/invitations/{invId}/resend — KC's
+ * resendInvitation (OrganizationInvitationResource.java:315). IGA intercepts
+ * as ORG_RESEND_INVITE (URI-sniffed in IgaInvitationManager — only checks
+ * path.endsWith("/resend"), so the canonical /invitations/ path is safe).
  */
 export function resendOrgInvitation(
   request: APIRequestContext,
@@ -1555,7 +1560,7 @@ export function resendOrgInvitation(
 ): Promise<APIResponse> {
   return kcFetch(
     request,
-    `/admin/realms/${realm}/organizations/${orgId}/members/invitations/${invitationId}/resend`,
+    `/admin/realms/${realm}/organizations/${orgId}/invitations/${invitationId}/resend`,
     { method: 'POST' },
   );
 }
@@ -1582,8 +1587,10 @@ export async function createIdentityProvider(
 
 /**
  * POST {realm}/organizations/{id}/identity-providers — IGA intercepts as
- * ORG_ADD_IDP. KC's OrganizationIdentityProviderResource.addIdentityProvider
- * accepts the IdP alias as a plain-text request body.
+ * ORG_ADD_IDP. KC's OrganizationIdentityProvidersResource.addIdentityProvider
+ * is @Consumes(APPLICATION_JSON) (OrganizationIdentityProvidersResource.java
+ * :73); the body is the IdP id/alias as a JSON string (surrounding quotes are
+ * stripped server-side per the KC34401 fix at line 87).
  */
 export async function addOrgIdp(
   request: APIRequestContext,
@@ -1598,9 +1605,9 @@ export async function addOrgIdp(
     {
       headers: {
         Authorization: `Bearer ${token}`,
-        'Content-Type': 'text/plain',
+        'Content-Type': 'application/json',
       },
-      data: idpAlias,
+      data: JSON.stringify(idpAlias),
     },
   );
 }

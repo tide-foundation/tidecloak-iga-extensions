@@ -301,4 +301,38 @@ public class IgaOrganizationModel implements OrganizationModel {
     public boolean isMember(UserModel user) {
         return delegate.isMember(user);
     }
+
+    // ---- equality/hash by org id ----
+    //
+    // KC's JpaOrganizationProvider.getMemberById (KC 26.5.5,
+    // {@code JpaOrganizationProvider.java:444-457}) probes membership with
+    // {@code getByMember(user).anyMatch(organization::equals)}. The
+    // {@code organization} argument on the inbound REST call is the
+    // {@link IgaOrganizationModel} returned by {@code getById}; the stream
+    // entries are ALSO {@link IgaOrganizationModel} instances built fresh per
+    // call by {@code IgaOrganizationProvider.getByMember}. Two distinct wrapper
+    // objects for the same underlying org → {@code Object.equals} (identity)
+    // returns false → {@code anyMatch} returns false → {@code getMemberById}
+    // returns null → {@code OrganizationMemberResource.getMember} throws
+    // {@code NotFoundException} and the admin REST call (e.g. DELETE
+    // .../members/{id}, GET .../members/{id}) responds with HTTP 404 — which
+    // breaks every {@code REMOVE_ORG_MEMBER}-style flow.
+    //
+    // Mirror KC's own pattern (model/jpa OrganizationAdapter.java:252-263):
+    // any two {@link OrganizationModel} instances with the same {@code getId()}
+    // are equal, hash on the id alone. Identical contract — symmetric across
+    // mixed (wrapped vs raw) comparisons used by KC's own anyMatch.
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof OrganizationModel)) return false;
+
+        OrganizationModel that = (OrganizationModel) o;
+        return that.getId().equals(getId());
+    }
+
+    @Override
+    public int hashCode() {
+        return getId().hashCode();
+    }
 }
