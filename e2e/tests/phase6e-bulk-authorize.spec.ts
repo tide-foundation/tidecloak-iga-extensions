@@ -467,8 +467,15 @@ test.describe('IGA Phase 6e: bulk-authorize endpoint', () => {
     const pendingBefore = await countPendingAdopts(request, D_LOCK);
     expect(pendingBefore).toBeGreaterThanOrEqual(GROUP_COUNT);
 
-    // Two bulks fired in parallel. The lock IS in-memory + per-realm, so
-    // contention is reliable on a single-node KC.
+    // Two bulks fired in parallel. The lock is now cluster-safe and
+    // per-realm, backed by KC's canonical
+    // ClusterProvider.executeIfNotExecuted(...) primitive (see
+    // iga-core/src/main/java/org/tidecloak/iga/rest/IgaBulkLock.java →
+    // server-spi-private ClusterProvider). In single-node dev mode the
+    // SPI is still wired through the Infinispan local-cache impl, so the
+    // taskKey ("iga-bulk:" + realmId) reliably contends here; in a
+    // multi-node cluster the same key contends across nodes — that was
+    // the whole reason for the swap.
     const [a, b] = await Promise.all([
       bulkAuthorize(request, D_LOCK, {
         actionTypeIn: ['ADOPT_GROUP'],

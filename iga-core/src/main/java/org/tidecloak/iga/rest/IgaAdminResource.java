@@ -407,10 +407,15 @@ public class IgaAdminResource {
     // committed/denied/cancelled by another caller mid-bulk is detected as
     // non-PENDING in the per-CR re-fetch and surfaces in skipped[].
     //
-    // Concurrency: per-realm in-memory mutex via {@link IgaBulkLock}; a
-    // second concurrent bulk against the same realm gets 429. Single-node
-    // limitation documented on IgaBulkLock — the per-CR gate is the real
-    // safety net.
+    // Concurrency: per-realm cluster-safe mutex via {@link IgaBulkLock},
+    // which delegates to KC's canonical
+    // ClusterProvider.executeIfNotExecuted(...) primitive. Two simultaneous
+    // bulk calls against the same realm — whether they land on the same
+    // JVM or different cluster nodes — race the same Infinispan-backed
+    // lock; the loser gets 429. The per-CR gate inside the loop is still
+    // the real correctness floor (idempotent: a CR already-resolved by a
+    // concurrent caller is detected as non-PENDING and skipped — see
+    // processOneCr below).
     //
     // Response is buffered JSON (option b in the Phase 6 brief). Streaming
     // (option a) was rejected because (1) KC's JAX-RS stack has no
@@ -500,8 +505,71 @@ public class IgaAdminResource {
                     .build();
         }
 
-        // -- Per-realm concurrency lock ---------------------------------------
-        if (!IgaBulkLock.tryAcquire(realm.getId())) {
+        UserModel admin = currentUser();
+        if (admin == null) {
+            return Response.status(Response.Status.UNAUTHORIZED)
+                    .entity(Map.of("error", "No authenticated admin user"))
+                    .build();
+        }
+
+        // -- Per-realm cluster-safe concurrency lock --------------------------
+        // Wrap the whole bulk loop in ClusterProvider.executeIfNotExecuted via
+        // IgaBulkLock. If another node (or another in-flight call on this
+        // node) already holds the lock for this realm, the wrapper returns
+        // notHeld and we respond 429. Lock auto-expires after
+        // BULK_LOCK_TIMEOUT_SECONDS in case the holder crashes — see
+        // IgaBulkLock for the timeout justification.
+        final int finalLimit = limit;
+        final Long finalOlderThan = olderThan;
+        final List<String> finalActionTypes = actionTypes;
+        final UserModel finalAdmin = admin;
+
+        IgaBulkLock.Result<Map<String, Object>> lockResult = IgaBulkLock.runIfNotRunning(
+                session,
+                realm.getId(),
+                () -> {
+                    long startedAt = System.currentTimeMillis();
+                    List<Map<String, Object>> results = new ArrayList<>();
+                    long committed = 0;
+                    long rejected = 0;
+                    long skipped = 0;
+
+                    IgaChangeRequestService service = getService();
+                    List<IgaChangeRequestEntity> candidates =
+                            service.listPendingByActionTypeIn(realm.getId(), finalActionTypes, finalOlderThan, finalLimit);
+
+                    for (IgaChangeRequestEntity candidate : candidates) {
+                        String crId = candidate.getId();
+                        Map<String, Object> outcome = processOneCr(crId, finalAdmin);
+                        results.add(outcome);
+                        String status = String.valueOf(outcome.get("status"));
+                        if ("COMMITTED".equals(status)) committed++;
+                        else if ("REJECTED".equals(status)) rejected++;
+                        else skipped++;
+                    }
+
+                    Map<String, Object> summary = new LinkedHashMap<>();
+                    summary.put("total", results.size());
+                    summary.put("committed", committed);
+                    summary.put("rejected", rejected);
+                    summary.put("skipped", skipped);
+                    summary.put("durationMs", System.currentTimeMillis() - startedAt);
+                    summary.put("limit", finalLimit);
+                    summary.put("defaultLimit", BULK_DEFAULT_LIMIT);
+                    summary.put("maxLimit", BULK_MAX_LIMIT);
+
+                    Map<String, Object> response = new LinkedHashMap<>();
+                    response.put("results", results);
+                    response.put("summary", summary);
+                    return response;
+                });
+
+        if (!lockResult.isHeld()) {
+            // Preserve the existing 429 response shape so the existing
+            // phase6e-bulk-authorize.spec.ts "concurrent bulk lock" case
+            // (regex /already running/i + realm name) still passes — the
+            // underlying lock is now cluster-safe (executeIfNotExecuted),
+            // see IgaBulkLock.
             return Response.status(429)
                     .entity(Map.of("error",
                             "Another bulk-authorize is already running for this realm",
@@ -509,52 +577,7 @@ public class IgaAdminResource {
                     .build();
         }
 
-        UserModel admin = currentUser();
-        if (admin == null) {
-            IgaBulkLock.release(realm.getId());
-            return Response.status(Response.Status.UNAUTHORIZED)
-                    .entity(Map.of("error", "No authenticated admin user"))
-                    .build();
-        }
-
-        long startedAt = System.currentTimeMillis();
-        List<Map<String, Object>> results = new ArrayList<>();
-        long committed = 0;
-        long rejected = 0;
-        long skipped = 0;
-
-        try {
-            IgaChangeRequestService service = getService();
-            List<IgaChangeRequestEntity> candidates =
-                    service.listPendingByActionTypeIn(realm.getId(), actionTypes, olderThan, limit);
-
-            for (IgaChangeRequestEntity candidate : candidates) {
-                String crId = candidate.getId();
-                Map<String, Object> outcome = processOneCr(crId, admin);
-                results.add(outcome);
-                String status = String.valueOf(outcome.get("status"));
-                if ("COMMITTED".equals(status)) committed++;
-                else if ("REJECTED".equals(status)) rejected++;
-                else skipped++;
-            }
-        } finally {
-            IgaBulkLock.release(realm.getId());
-        }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("total", results.size());
-        summary.put("committed", committed);
-        summary.put("rejected", rejected);
-        summary.put("skipped", skipped);
-        summary.put("durationMs", System.currentTimeMillis() - startedAt);
-        summary.put("limit", limit);
-        summary.put("defaultLimit", BULK_DEFAULT_LIMIT);
-        summary.put("maxLimit", BULK_MAX_LIMIT);
-
-        Map<String, Object> response = new LinkedHashMap<>();
-        response.put("results", results);
-        response.put("summary", summary);
-        return Response.ok(response).build();
+        return Response.ok(lockResult.getValue()).build();
     }
 
     /**
