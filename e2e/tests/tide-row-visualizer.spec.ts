@@ -240,6 +240,28 @@ interface Bundle {
     assignmentKind: 'default' | 'optional';
     attestation: string;
   }>;
+  // Set-attested relationships (interpretation B): one CR commit binds the
+  // SET of rows it stamped. Groups are keyed by (attestation_string, kind);
+  // empty-attestation rows collapse into a single sentinel group per kind
+  // with an explicit `note` so the gap is visible to the human reader.
+  attestedRelationships: Array<{
+    attestation: string;
+    kind: string;
+    applied: Array<Record<string, unknown>>;
+    note?: string;
+  }>;
+}
+
+// Legacy per-row bundle shape, used ONLY to keep the side-by-side comparison
+// output for the human reader (Option (a) in the task spec).
+interface LegacyEdgeBundle {
+  version: string;
+  realm: Bundle['realm'];
+  client: Bundle['client'];
+  user: Bundle['user'];
+  effectiveRoles: Bundle['effectiveRoles'];
+  groups: Bundle['groups'];
+  clientScopes: Bundle['clientScopes'];
   edges: Array<{ kind: string; [k: string]: unknown }>;
 }
 
@@ -271,9 +293,9 @@ async function expandComposites(
   return out;
 }
 
-/** Substitute every `attestation` slot in a (deeply) cloned bundle. */
-function withSimulatedAttestations(b: Bundle): Bundle {
-  const clone: Bundle = JSON.parse(JSON.stringify(b));
+/** Substitute every `attestation` slot in a (deeply) cloned legacy bundle. */
+function withSimulatedAttestationsLegacy(b: LegacyEdgeBundle): LegacyEdgeBundle {
+  const clone: LegacyEdgeBundle = JSON.parse(JSON.stringify(b));
   clone.realm.attestation = ATTEST_PLACEHOLDER;
   clone.client.attestation = ATTEST_PLACEHOLDER;
   clone.user.attestation = ATTEST_PLACEHOLDER;
@@ -284,7 +306,36 @@ function withSimulatedAttestations(b: Bundle): Bundle {
   return clone;
 }
 
-function sizeOf(b: Bundle): { pretty: number; minified: number; gzip: number } {
+/**
+ * Simulated variant of the SET-ATTESTED bundle.
+ *
+ * CRITICAL: we PRESERVE the grouping structure computed from the REAL bundle.
+ * If we re-grouped from the placeholder strings, every kind would collapse to
+ * a single group because all placeholders are identical — that would
+ * misrepresent the cost. Instead we walk the existing groups and swap the
+ * `attestation` field in-place. Empty-attestation sentinel groups stay empty
+ * (placeholder substitution doesn't apply — those rows never went through
+ * IGA capture, so a Tide attestor would still produce no signature).
+ */
+function withSimulatedAttestationsSet(b: Bundle): Bundle {
+  const clone: Bundle = JSON.parse(JSON.stringify(b));
+  clone.realm.attestation = ATTEST_PLACEHOLDER;
+  clone.client.attestation = ATTEST_PLACEHOLDER;
+  clone.user.attestation = ATTEST_PLACEHOLDER;
+  for (const r of clone.effectiveRoles) r.attestation = ATTEST_PLACEHOLDER;
+  for (const g of clone.groups) g.attestation = ATTEST_PLACEHOLDER;
+  for (const s of clone.clientScopes) s.attestation = ATTEST_PLACEHOLDER;
+  // Walk the SAME group structure — substitute attestation only on groups
+  // that actually carried one (skip sentinel/empty-attestation groups).
+  for (const rel of clone.attestedRelationships) {
+    if (rel.attestation !== '') {
+      rel.attestation = ATTEST_PLACEHOLDER;
+    }
+  }
+  return clone;
+}
+
+function sizeOf(b: object): { pretty: number; minified: number; gzip: number } {
   const pretty = JSON.stringify(b, null, 2);
   const minified = JSON.stringify(b);
   return {
@@ -294,7 +345,11 @@ function sizeOf(b: Bundle): { pretty: number; minified: number; gzip: number } {
   };
 }
 
-function printArtifact(label: string, b: Bundle, contributors: string): void {
+function printArtifact(
+  label: string,
+  b: object,
+  contributors: string,
+): void {
   const sizes = sizeOf(b);
   // eslint-disable-next-line no-console
   console.log(`\n=== Tide-network login-row (${label}) ===`);
@@ -310,6 +365,53 @@ function printArtifact(label: string, b: Bundle, contributors: string): void {
   console.log(`Gzip:           ${sizes.gzip} bytes`);
   // eslint-disable-next-line no-console
   console.log(`Contributors:   ${contributors}`);
+}
+
+/**
+ * Group per-row edges into set-attested relationships.
+ *
+ * Grouping rule: GROUP BY (attestation_string, kind). Empty attestations
+ * collapse into a single sentinel group per kind with an explicit `note`
+ * so the gap (rows that never went through IGA capture) is visible.
+ *
+ * `appliedKeys` lists which edge fields belong in the `applied[]` row body
+ * for each kind (everything BUT `kind` and `attestation`).
+ */
+function groupEdgesByAttestation(
+  edges: Array<{ kind: string; [k: string]: unknown }>,
+): Bundle['attestedRelationships'] {
+  // key = `${kind}\x00${attestation}` (NUL separator avoids collision with
+  // any realistic attestation char).
+  const groups = new Map<
+    string,
+    { attestation: string; kind: string; applied: Array<Record<string, unknown>> }
+  >();
+  for (const edge of edges) {
+    const { kind, attestation, ...rest } = edge as {
+      kind: string;
+      attestation?: string;
+      [k: string]: unknown;
+    };
+    const att = (attestation as string) ?? '';
+    const key = `${kind}\x00${att}`;
+    if (!groups.has(key)) {
+      groups.set(key, { attestation: att, kind, applied: [] });
+    }
+    groups.get(key)!.applied.push(rest);
+  }
+  // Stable order: by kind, then attestation (empty last so the sentinel
+  // groups sit at the bottom of each kind cluster).
+  const out = Array.from(groups.values()).sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind.localeCompare(b.kind);
+    if (a.attestation === '' && b.attestation !== '') return 1;
+    if (b.attestation === '' && a.attestation !== '') return -1;
+    return a.attestation.localeCompare(b.attestation);
+  });
+  return out.map((g) =>
+    g.attestation === ''
+      ? { ...g, note: 'no IGA capture — built-in entities' }
+      : g,
+  );
 }
 
 test.describe('Tide-network login-row visualizer', () => {
@@ -930,30 +1032,53 @@ test.describe('Tide-network login-row visualizer', () => {
       }
     }
 
-    const bundleReal: Bundle = {
+    // Common entity heads — shared between the legacy per-row bundle (kept
+    // around purely for the side-by-side comparison output) and the new
+    // set-attested bundle.
+    const realmHead = {
+      id: realmRep.id,
+      name: REALM,
+      // REALM table has no attestation column — use a sentinel so the human
+      // reader can see the gap explicitly (not silently empty).
+      attestation: REALM_ANCHOR_SENTINEL,
+    };
+    const clientHead = {
+      id: clientRep.id,
+      clientId: CLIENT_ID_HUMAN,
+      attestation: clientAttestation ?? '',
+    };
+    const userHead = {
+      id: aliceId,
+      username: USER_NAME,
+      email: 'alice@example.test',
+      attestation: userAttestation ?? '',
+    };
+
+    // Legacy bundle (per-row edges) — retained for direct comparison output.
+    const bundleRealLegacy: LegacyEdgeBundle = {
       version: '1',
-      realm: {
-        id: realmRep.id,
-        name: REALM,
-        // REALM table has no attestation column — use a sentinel so the human
-        // reader can see the gap explicitly (not silently empty).
-        attestation: REALM_ANCHOR_SENTINEL,
-      },
-      client: {
-        id: clientRep.id,
-        clientId: CLIENT_ID_HUMAN,
-        attestation: clientAttestation ?? '',
-      },
-      user: {
-        id: aliceId,
-        username: USER_NAME,
-        email: 'alice@example.test',
-        attestation: userAttestation ?? '',
-      },
+      realm: realmHead,
+      client: clientHead,
+      user: userHead,
       effectiveRoles,
       groups: groupsOut,
       clientScopes: scopesOut,
       edges,
+    };
+
+    // Set-attested bundle (interpretation B) — group per-row edges by
+    // (attestation_string, kind). Same `edges` data, different framing.
+    const attestedRelationships = groupEdgesByAttestation(edges);
+
+    const bundleReal: Bundle = {
+      version: '1',
+      realm: realmHead,
+      client: clientHead,
+      user: userHead,
+      effectiveRoles,
+      groups: groupsOut,
+      clientScopes: scopesOut,
+      attestedRelationships,
     };
 
     // Light assertions — this is a visualizer, not a contract test.
@@ -969,39 +1094,127 @@ test.describe('Tide-network login-row visualizer', () => {
       bundleReal.clientScopes.length,
       'client scopes ≥ 3 (2 default + 1 optional)',
     ).toBeGreaterThanOrEqual(3);
-    expect(bundleReal.edges.length, 'edges ≥ 6').toBeGreaterThanOrEqual(6);
+    expect(bundleRealLegacy.edges.length, 'edges ≥ 6').toBeGreaterThanOrEqual(6);
+    expect(
+      bundleReal.attestedRelationships.length,
+      'attestedRelationships ≥ 1',
+    ).toBeGreaterThanOrEqual(1);
+    // Set-attested grouping must NEVER lose data: total applied rows across
+    // groups must equal the per-row edge count.
+    const totalApplied = bundleReal.attestedRelationships.reduce(
+      (n, g) => n + g.applied.length,
+      0,
+    );
+    expect(
+      totalApplied,
+      'sum(applied) per group == edges.length (no rows lost in grouping)',
+    ).toBe(bundleRealLegacy.edges.length);
 
-    const contributorsSummary = `user=1 roles=${bundleReal.effectiveRoles.length} groups=${bundleReal.groups.length} scopes=${bundleReal.clientScopes.length} edges=${bundleReal.edges.length}`;
+    const totalEdges = bundleRealLegacy.edges.length;
+    const groupCount = bundleReal.attestedRelationships.length;
+    const contributorsSummary = `user=1 roles=${bundleReal.effectiveRoles.length} groups=${bundleReal.groups.length} scopes=${bundleReal.clientScopes.length} edges=${totalEdges} attestedRelationships=${groupCount}`;
 
     // -----------------------------------------------------------------------
-    // 9. Print BOTH artifacts (real Tideless stamps + Tide-sized simulation).
+    // 9. Print FOUR artifacts side-by-side (legacy per-row + set-attested,
+    //    each in REAL and SIMULATED variants) then a Comparison block.
     // -----------------------------------------------------------------------
+
+    // (a) Legacy per-row, REAL — kept for direct visual comparison.
     printArtifact(
-      'REAL Tideless attestations',
-      bundleReal,
+      'REAL Tideless attestations, per-row edges (legacy)',
+      bundleRealLegacy,
       contributorsSummary,
     );
 
-    const bundleSimulated = withSimulatedAttestations(bundleReal);
+    // (b) Set-attested, REAL.
     printArtifact(
-      'SIMULATED Tide attestations, 88-char base64 placeholder',
+      'REAL, set-attested relationships',
+      bundleReal,
+      contributorsSummary,
+    );
+    // eslint-disable-next-line no-console
+    console.log(
+      `Relationships: ${groupCount} groups covering ${totalApplied} total applied rows (was ${totalEdges} per-row edges)`,
+    );
+
+    // (c) Legacy per-row, SIMULATED Tide-sized.
+    const bundleSimulatedLegacy = withSimulatedAttestationsLegacy(bundleRealLegacy);
+    printArtifact(
+      'SIMULATED Tide-sized, per-row edges (legacy)',
+      bundleSimulatedLegacy,
+      contributorsSummary,
+    );
+
+    // (d) Set-attested, SIMULATED — preserves the group structure from (b).
+    const bundleSimulated = withSimulatedAttestationsSet(bundleReal);
+    printArtifact(
+      'SIMULATED Tide-sized, set-attested relationships',
       bundleSimulated,
       contributorsSummary,
     );
 
-    // Sanity: simulated bundle's keys + ID set must match real bundle's shape.
+    // -----------------------------------------------------------------------
+    // 10. Comparison block — show the byte delta between per-row and set-
+    //     attested framings for both REAL and SIMULATED. Gzip and minified
+    //     are the load-bearing numbers (pretty JSON is whitespace-dominated).
+    // -----------------------------------------------------------------------
+    const sLegacyReal = sizeOf(bundleRealLegacy);
+    const sSetReal = sizeOf(bundleReal);
+    const sLegacySim = sizeOf(bundleSimulatedLegacy);
+    const sSetSim = sizeOf(bundleSimulated);
+
+    const fmt = (s: { pretty: number; minified: number; gzip: number }) =>
+      `pretty=${s.pretty}B  minified=${s.minified}B  gzip=${s.gzip}B`;
+
+    const pct = (was: number, now: number) =>
+      was === 0 ? '0.0%' : `${(((was - now) / was) * 100).toFixed(1)}%`;
+
+    // eslint-disable-next-line no-console
+    console.log(`\n=== Comparison ===`);
+    // eslint-disable-next-line no-console
+    console.log(`Real per-row (previous):       ${fmt(sLegacyReal)}`);
+    // eslint-disable-next-line no-console
+    console.log(`Real set-attested (new):       ${fmt(sSetReal)}`);
+    // eslint-disable-next-line no-console
+    console.log(`Simulated per-row (previous):  ${fmt(sLegacySim)}`);
+    // eslint-disable-next-line no-console
+    console.log(`Simulated set-attested (new):  ${fmt(sSetSim)}`);
+    // eslint-disable-next-line no-console
+    console.log(
+      `Delta (REAL):       minified saving ${sLegacyReal.minified - sSetReal.minified} bytes (${pct(sLegacyReal.minified, sSetReal.minified)}), gzip saving ${sLegacyReal.gzip - sSetReal.gzip} bytes (${pct(sLegacyReal.gzip, sSetReal.gzip)})`,
+    );
+    // eslint-disable-next-line no-console
+    console.log(
+      `Delta (SIMULATED):  minified saving ${sLegacySim.minified - sSetSim.minified} bytes (${pct(sLegacySim.minified, sSetSim.minified)}), gzip saving ${sLegacySim.gzip - sSetSim.gzip} bytes (${pct(sLegacySim.gzip, sSetSim.gzip)})`,
+    );
+
+    // Sanity: simulated bundle's keys + counts must match real bundle's shape.
     expect(Object.keys(bundleSimulated).sort()).toEqual(
       Object.keys(bundleReal).sort(),
     );
     expect(bundleSimulated.effectiveRoles.length).toBe(
       bundleReal.effectiveRoles.length,
     );
-    expect(bundleSimulated.edges.length).toBe(bundleReal.edges.length);
+    // Group structure preservation: simulated must have the EXACT same
+    // number of groups, in the SAME order, with the SAME applied-row counts
+    // as the real bundle (otherwise we accidentally re-grouped from the
+    // placeholder strings).
+    expect(bundleSimulated.attestedRelationships.length).toBe(
+      bundleReal.attestedRelationships.length,
+    );
+    for (let i = 0; i < bundleReal.attestedRelationships.length; i++) {
+      expect(bundleSimulated.attestedRelationships[i].kind).toBe(
+        bundleReal.attestedRelationships[i].kind,
+      );
+      expect(bundleSimulated.attestedRelationships[i].applied.length).toBe(
+        bundleReal.attestedRelationships[i].applied.length,
+      );
+    }
 
     // Both size reports MUST have been printed (load-bearing for the human
     // reader). The check is implicit via the console.log labels — we assert
     // the bundles are non-empty so the printing path executed.
-    expect(sizeOf(bundleReal).minified).toBeGreaterThan(0);
-    expect(sizeOf(bundleSimulated).minified).toBeGreaterThan(0);
+    expect(sSetReal.minified).toBeGreaterThan(0);
+    expect(sSetSim.minified).toBeGreaterThan(0);
   });
 });
