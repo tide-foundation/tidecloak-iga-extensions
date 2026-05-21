@@ -15,6 +15,7 @@ import {
   getClientScopeByName,
   getChangeRequest,
   findChangeRequest,
+  listChangeRequests,
   authorizeAndCommit,
   directGrantToken,
   locationHeader,
@@ -137,6 +138,17 @@ async function clientCredentialsToken(
  * `oidc-usermodel-realm-role-mapper`, so admin-cli direct-grant tokens NEVER
  * carry `realm_access.roles`. Asserting role membership requires a client
  * with full-scope and no lightweight-token attribute.
+ *
+ * TEST-HARNESS-ONLY self-heal: when a dedicated client is created BEFORE
+ * `toggleIga`, the toggle-on adopt scan retro-emits an ADOPT_CLIENT CR for
+ * it. Until that CR commits, the client is unsigned and the Phase 6c CLIENT
+ * quarantine refuses the token endpoint (401, "Invalid client / disabled").
+ * The spec is about user/role quarantine, not client adoption plumbing —
+ * exactly the same shape as `userTokenFor` in `lib/kc.ts` for ADOPT_USER +
+ * ADOPT_ROLE. So if IGA is enabled and a PENDING ADOPT_CLIENT exists for the
+ * client's UUID, the master-admin authorizes+commits it before the grant.
+ * Master is exempt from quarantine/approver gates via the system-entity
+ * filter; this is not a privilege escalation.
  */
 async function directGrantTokenForClient(
   request: APIRequestContext,
@@ -146,6 +158,37 @@ async function directGrantTokenForClient(
   username: string,
   password: string,
 ): Promise<{ http: number; body: any }> {
+  // Self-heal: if IGA is on and an ADOPT_CLIENT is PENDING for this client,
+  // commit it via the master-admin token before attempting the grant.
+  const status = await igaStatus(request, realm);
+  if (status.http === 200 && status.enabled === true) {
+    let uuid: string | undefined;
+    try {
+      uuid = await clientUuid(request, realm, clientId);
+    } catch {
+      // Unknown client_id — fall through and let the token endpoint surface
+      // the natural error.
+    }
+    if (uuid) {
+      const pending = await listChangeRequests(request, realm, 'PENDING');
+      const adoptClient = pending.find(
+        (cr) => cr.actionType === 'ADOPT_CLIENT' && cr.entityId === uuid,
+      );
+      if (adoptClient) {
+        const ac = await authorizeAndCommit(request, realm, adoptClient.id);
+        if (ac.authorize.http !== 200 && ac.authorize.http !== 409) {
+          throw new Error(
+            `directGrantTokenForClient(${realm}, ${clientId}) ADOPT_CLIENT(${uuid}) authorize expected 200/409, got HTTP ${ac.authorize.http} ${JSON.stringify(ac.authorize.body)}`,
+          );
+        }
+        if (ac.commit.http !== 200 && ac.commit.http !== 412) {
+          throw new Error(
+            `directGrantTokenForClient(${realm}, ${clientId}) ADOPT_CLIENT(${uuid}) commit expected 200/412, got HTTP ${ac.commit.http} ${JSON.stringify(ac.commit.body)}`,
+          );
+        }
+      }
+    }
+  }
   const { baseUrl } = kcEnv();
   const res = await request.post(
     `${baseUrl}/realms/${realm}/protocol/openid-connect/token`,
@@ -677,11 +720,34 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
       'ADOPT_GROUP',
       g3Id as string,
     );
+    // The toggle-on scan also retro-emits ADOPT_CLIENT for p6c-grp-client
+    // (created above, pre-IGA). Once 0f3b5d9's realm-cache eviction lands,
+    // that client is correctly quarantined as unsigned until ADOPT_CLIENT
+    // commits — which would refuse the u3 token requests below (CASE 4 is
+    // about GROUP quarantine, not CLIENT). Commit it now so the GROUP
+    // silent-strip can be observed in isolation. Same pattern CASE 5 already
+    // uses for `adoptScopeClient`.
+    const grpClientUuid = await clientUuid(
+      request,
+      REALM_GROUP,
+      'p6c-grp-client',
+    );
+    const adoptGrpClient = await waitForAdoptCr(
+      request,
+      REALM_GROUP,
+      'ADOPT_CLIENT',
+      grpClientUuid,
+    );
 
     // Commit ADOPT_USER (and any default-role ADOPTs if present) so u3 can
     // log in. Leave ADOPT_GROUP PENDING.
     const acU3 = await authorizeAndCommit(request, REALM_GROUP, adoptU3);
     expect(acU3.commit.http).toBe(200);
+    // Commit ADOPT_CLIENT for the test-vehicle client (see comment above).
+    expect(
+      (await authorizeAndCommit(request, REALM_GROUP, adoptGrpClient)).commit
+        .http,
+    ).toBe(200);
 
     // The realm's default-roles role usually exists and may need an ADOPT
     // commit too; commit any ADOPT_ROLE PENDING for the default-roles role so
