@@ -1366,3 +1366,276 @@ export function assignGroupRealmRoleMapping(
     { method: 'POST', json: roles },
   );
 }
+
+// ---------------------------------------------------------------------------
+// Organizations (KC 26.5.5 org SPI — IGA Phase 7a)
+//
+// Thin admin-REST wrappers over the eight POST/PUT/DELETE org endpoints the
+// IGA OrganizationProvider intercepts. Every helper returns the raw response
+// so the caller can assert HTTP status, Location, and body shape (the 202s
+// here are the load-signal that Phase 7a is wired up — pre-Phase-7a these
+// went straight to 201/204).
+// ---------------------------------------------------------------------------
+
+export interface OrganizationDomainSpec {
+  name: string;
+  verified?: boolean;
+}
+
+export interface OrganizationSpec {
+  name: string;
+  alias?: string;
+  description?: string;
+  redirectUrl?: string;
+  enabled?: boolean;
+  attributes?: Record<string, string[]>;
+  domains?: OrganizationDomainSpec[];
+}
+
+/** POST {realm}/organizations — IGA intercepts as CREATE_ORGANIZATION. */
+export function createOrganization(
+  request: APIRequestContext,
+  realm: string,
+  org: OrganizationSpec,
+): Promise<APIResponse> {
+  return kcFetch(request, `/admin/realms/${realm}/organizations`, {
+    method: 'POST',
+    json: org,
+  });
+}
+
+/** PUT {realm}/organizations/{id} — IGA intercepts as UPDATE_ORGANIZATION. */
+export function updateOrganization(
+  request: APIRequestContext,
+  realm: string,
+  orgId: string,
+  rep: OrganizationSpec & { id?: string },
+): Promise<APIResponse> {
+  return kcFetch(request, `/admin/realms/${realm}/organizations/${orgId}`, {
+    method: 'PUT',
+    json: rep,
+  });
+}
+
+/** DELETE {realm}/organizations/{id} — IGA intercepts as DELETE_ORGANIZATION. */
+export function deleteOrganization(
+  request: APIRequestContext,
+  realm: string,
+  orgId: string,
+): Promise<APIResponse> {
+  return kcFetch(request, `/admin/realms/${realm}/organizations/${orgId}`, {
+    method: 'DELETE',
+  });
+}
+
+/** GET an org by id (full rep). */
+export async function getOrganization(
+  request: APIRequestContext,
+  realm: string,
+  orgId: string,
+): Promise<{ http: number; body: any }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/organizations/${orgId}`,
+  );
+  return { http: res.status(), body: await safeJson(res) };
+}
+
+/** Search orgs by name/domain (KC's `search` query). */
+export async function findOrganizationByName(
+  request: APIRequestContext,
+  realm: string,
+  name: string,
+): Promise<{ http: number; body: any }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/organizations?search=${encodeURIComponent(name)}&exact=true`,
+  );
+  const list = await safeJson(res);
+  const match = Array.isArray(list)
+    ? list.find((o: any) => o?.name === name)
+    : undefined;
+  return { http: res.status(), body: match };
+}
+
+/**
+ * POST {realm}/organizations/{id}/members with the user id as the request
+ * body — KC's OrganizationMemberResource.addMember in 26.5.5 reads the body
+ * as `String id`. Matches what the KC admin UI sends. IGA intercepts as
+ * ADD_ORG_MEMBER.
+ */
+export async function addOrgMemberById(
+  request: APIRequestContext,
+  realm: string,
+  orgId: string,
+  userId: string,
+): Promise<APIResponse> {
+  const { baseUrl } = kcEnv();
+  const token = await adminToken(request);
+  return request.post(
+    `${baseUrl}/admin/realms/${realm}/organizations/${orgId}/members`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/plain',
+      },
+      data: userId,
+    },
+  );
+}
+
+/** DELETE {realm}/organizations/{id}/members/{memberId} — REMOVE_ORG_MEMBER. */
+export function removeOrgMember(
+  request: APIRequestContext,
+  realm: string,
+  orgId: string,
+  memberId: string,
+): Promise<APIResponse> {
+  return kcFetch(
+    request,
+    `/admin/realms/${realm}/organizations/${orgId}/members/${memberId}`,
+    { method: 'DELETE' },
+  );
+}
+
+/** GET members of an org. */
+export async function getOrgMembers(
+  request: APIRequestContext,
+  realm: string,
+  orgId: string,
+): Promise<{ http: number; body: any[] }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/organizations/${orgId}/members`,
+  );
+  const body = await safeJson(res);
+  return { http: res.status(), body: Array.isArray(body) ? body : [] };
+}
+
+/**
+ * POST {realm}/organizations/{id}/members/invite-user — KC's
+ * OrganizationMemberResource.inviteUser. Form-encoded body
+ * {email, firstName, lastName}. IGA intercepts as ORG_INVITE_MEMBER.
+ */
+export async function inviteOrgMember(
+  request: APIRequestContext,
+  realm: string,
+  orgId: string,
+  email: string,
+  firstName?: string,
+  lastName?: string,
+): Promise<APIResponse> {
+  const form: Record<string, string> = { email };
+  if (firstName) form.firstName = firstName;
+  if (lastName) form.lastName = lastName;
+  return kcFetch(
+    request,
+    `/admin/realms/${realm}/organizations/${orgId}/members/invite-user`,
+    { method: 'POST', form },
+  );
+}
+
+/** GET invitations of an org (KC's /invitations endpoint). */
+export async function getOrgInvitations(
+  request: APIRequestContext,
+  realm: string,
+  orgId: string,
+): Promise<{ http: number; body: any[] }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/organizations/${orgId}/members/invitations`,
+  );
+  const body = await safeJson(res);
+  return { http: res.status(), body: Array.isArray(body) ? body : [] };
+}
+
+/**
+ * POST {realm}/organizations/{id}/members/invitations/{invId}/resend — KC's
+ * resendInvitation. IGA intercepts as ORG_RESEND_INVITE (URI-sniffed in
+ * IgaInvitationManager).
+ */
+export function resendOrgInvitation(
+  request: APIRequestContext,
+  realm: string,
+  orgId: string,
+  invitationId: string,
+): Promise<APIResponse> {
+  return kcFetch(
+    request,
+    `/admin/realms/${realm}/organizations/${orgId}/members/invitations/${invitationId}/resend`,
+    { method: 'POST' },
+  );
+}
+
+/** Create an identity provider (alias, providerId='oidc' by default). */
+export async function createIdentityProvider(
+  request: APIRequestContext,
+  realm: string,
+  alias: string,
+  providerId = 'oidc',
+  config: Record<string, string> = {
+    authorizationUrl: 'https://example.test/auth',
+    tokenUrl: 'https://example.test/token',
+    clientId: 'idp-client',
+    clientAuthMethod: 'client_secret_post',
+    clientSecret: 'idp-secret',
+  },
+): Promise<APIResponse> {
+  return kcFetch(request, `/admin/realms/${realm}/identity-provider/instances`, {
+    method: 'POST',
+    json: { alias, providerId, enabled: true, config },
+  });
+}
+
+/**
+ * POST {realm}/organizations/{id}/identity-providers — IGA intercepts as
+ * ORG_ADD_IDP. KC's OrganizationIdentityProviderResource.addIdentityProvider
+ * accepts the IdP alias as a plain-text request body.
+ */
+export async function addOrgIdp(
+  request: APIRequestContext,
+  realm: string,
+  orgId: string,
+  idpAlias: string,
+): Promise<APIResponse> {
+  const { baseUrl } = kcEnv();
+  const token = await adminToken(request);
+  return request.post(
+    `${baseUrl}/admin/realms/${realm}/organizations/${orgId}/identity-providers`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/plain',
+      },
+      data: idpAlias,
+    },
+  );
+}
+
+/** DELETE {realm}/organizations/{id}/identity-providers/{alias} — ORG_REMOVE_IDP. */
+export function removeOrgIdp(
+  request: APIRequestContext,
+  realm: string,
+  orgId: string,
+  idpAlias: string,
+): Promise<APIResponse> {
+  return kcFetch(
+    request,
+    `/admin/realms/${realm}/organizations/${orgId}/identity-providers/${idpAlias}`,
+    { method: 'DELETE' },
+  );
+}
+
+/** GET identity providers associated with an org. */
+export async function getOrgIdps(
+  request: APIRequestContext,
+  realm: string,
+  orgId: string,
+): Promise<{ http: number; body: any[] }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/organizations/${orgId}/identity-providers`,
+  );
+  const body = await safeJson(res);
+  return { http: res.status(), body: Array.isArray(body) ? body : [] };
+}

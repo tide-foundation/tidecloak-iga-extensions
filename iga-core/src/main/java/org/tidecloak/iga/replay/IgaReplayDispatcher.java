@@ -81,17 +81,22 @@ import java.util.function.Consumer;
  *             REMOVE_ORG_MEMBER).</li>
  *         <li>{@code INVITE_EMAIL}, {@code INVITE_FIRST_NAME},
  *             {@code INVITE_LAST_NAME} — invitee payload
- *             ({@code ORG_INVITE_MEMBER}). Captured at the
- *             {@code InvitationManager.create} SPI seam BEFORE any invitation
- *             entity / action token / e-mail. Both invite endpoints
- *             ({@code .../members/invite-user} and
+ *             ({@code ORG_INVITE_MEMBER} and {@code ORG_RESEND_INVITE}).
+ *             Captured at the {@code InvitationManager.create} SPI seam
+ *             BEFORE any invitation entity / action token / e-mail. Both
+ *             invite endpoints ({@code .../members/invite-user} and
  *             {@code .../members/invite-existing-user}) converge on
  *             {@code InvitationManager.create(org,email,firstName,lastName)}
  *             so the email/name triple alone reconstructs either; replay
  *             re-resolves an existing user by e-mail vs. a registration link
  *             exactly like KC's {@code inviteUser}. NOT a {@code REP_JSON}
  *             action (the invite endpoints are form-encoded, not a JSON
- *             representation the capture filter handles).</li>
+ *             representation the capture filter handles). The resend variant
+ *             ({@code ORG_RESEND_INVITE}) carries the identical row shape and
+ *             replays through the SAME {@code replayOrgInviteMember} body —
+ *             the action type is the audit-/scope-relevant distinction set by
+ *             {@link org.tidecloak.iga.providers.IgaInvitationManager} via
+ *             request-URI sniffing of the in-flight admin call.</li>
  *         <li>{@code IDP_ALIAS} — identity-provider alias (ORG_ADD_IDP /
  *             ORG_REMOVE_IDP); resolved via
  *             {@code session.identityProviders().getByIdOrAlias}.</li>
@@ -213,7 +218,7 @@ public class IgaReplayDispatcher {
             case "DELETE_ORGANIZATION" -> replayDeleteOrganization(session, realm, rows);
             case "ADD_ORG_MEMBER" -> replayAddOrgMember(session, realm, rows);
             case "REMOVE_ORG_MEMBER" -> replayRemoveOrgMember(session, realm, rows);
-            case "ORG_INVITE_MEMBER" -> replayOrgInviteMember(session, realm, rows);
+            case "ORG_INVITE_MEMBER", "ORG_RESEND_INVITE" -> replayOrgInviteMember(session, realm, rows);
             case "ORG_ADD_IDP" -> replayOrgAddIdp(session, realm, rows);
             case "ORG_REMOVE_IDP" -> replayOrgRemoveIdp(session, realm, rows);
 

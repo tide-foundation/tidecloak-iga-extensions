@@ -21,9 +21,18 @@ import java.util.Map;
  *
  * <h2>Intercepted operations</h2>
  * <ul>
- *   <li>{@code create(name, alias[, redirectUrl])} — POST {realm}/organizations
- *       → {@code CREATE_ORGANIZATION} (full {@code OrganizationRepresentation}
- *       captured by the JAX-RS filter as {@code REP_JSON}).</li>
+ *   <li>{@code create(id, name, alias)} — POST {realm}/organizations
+ *       (KC's REST resource calls the 2-arg default {@code create(name, alias)}
+ *       which forwards to {@code create(null, name, alias)} on the
+ *       OrganizationProvider SPI — the 3-arg id-bearing overload is the one
+ *       method KC actually dispatches to). →
+ *       {@code CREATE_ORGANIZATION} (full {@code OrganizationRepresentation}
+ *       captured by the JAX-RS filter as {@code REP_JSON}). The
+ *       {@code redirectUrl} field is NOT a {@code create()} argument in the
+ *       OrganizationProvider SPI — it is applied later via
+ *       {@code OrganizationModel.setRedirectUrl} inside
+ *       {@code RepresentationToModel.toModel(rep, model)}, captured by
+ *       {@link IgaOrganizationModel} as part of the full-rep terminal seam.</li>
  *   <li>{@code remove(org)} — DELETE {realm}/organizations/{id}
  *       → {@code DELETE_ORGANIZATION}.</li>
  *   <li>{@code addMember(org, user)} / {@code addManagedMember(org, user)}
@@ -114,8 +123,21 @@ public class IgaOrganizationProvider extends JpaOrganizationProvider {
     // CREATE ORGANIZATION
     // -------------------------------------------------------------------------
 
+    /**
+     * The id-bearing create overload IS the OrganizationProvider SPI method
+     * KC dispatches to. The default 2-arg {@code create(name, alias)} forwards
+     * to {@code create(null, name, alias)} (see
+     * {@link org.keycloak.organization.OrganizationProvider#create(String, String)}
+     * default body), and KC's REST path
+     * ({@code OrganizationsResource.create}) calls the 2-arg flavour. So
+     * intercepting here covers BOTH the REST POST and replay's explicit
+     * 2-arg call ({@code IgaReplayDispatcher.replayCreateOrganization}). The
+     * previously-defined 3-arg {@code create(name, alias, redirectUrl)} did
+     * NOT match any SPI method — it overrode nothing and the interception was
+     * therefore unreachable (the latent wire-up defect fixed in Phase 7a).
+     */
     @Override
-    public OrganizationModel create(String name, String alias, String redirectUrl) {
+    public OrganizationModel create(String id, String name, String alias) {
         if (isIgaActive()) {
             // Model-layer accumulate-then-veto, identical mechanism to
             // IgaRealmProvider.addClient/createGroup. Create the REAL (scratch)
@@ -134,11 +156,11 @@ public class IgaOrganizationProvider extends JpaOrganizationProvider {
             // The scratch org is discarded by the request-tx rollback. See
             // IgaOrganizationModel#setDomains and the IgaClientAdapter
             // lifecycle proof.
-            OrganizationModel base = super.create(name, alias, redirectUrl);
+            OrganizationModel base = super.create(id, name, alias);
             if (base == null) return null;
             return new IgaOrganizationModel(igaSession, base, this, /*captureCreate=*/ true);
         }
-        return super.create(name, alias, redirectUrl);
+        return super.create(id, name, alias);
     }
 
     // -------------------------------------------------------------------------
@@ -161,6 +183,16 @@ public class IgaOrganizationProvider extends JpaOrganizationProvider {
 
     boolean igaActive() {
         return isIgaActive();
+    }
+
+    /**
+     * Expose the wrapping {@link KeycloakSession} to peers in this package
+     * (specifically {@link IgaInvitationManager}, which needs the request URI
+     * to discriminate the resend path from a fresh invite). Package-private
+     * to keep the surface intentionally small; not part of the public org SPI.
+     */
+    KeycloakSession session() {
+        return igaSession;
     }
 
     // -------------------------------------------------------------------------
@@ -239,20 +271,37 @@ public class IgaOrganizationProvider extends JpaOrganizationProvider {
 
     @Override
     public org.keycloak.organization.InvitationManager getInvitationManager() {
-        return new IgaInvitationManager(super.getInvitationManager(), this);
+        return new IgaInvitationManager(super.getInvitationManager(), this, igaSession);
     }
 
     /**
      * Record an {@code ORG_INVITE_MEMBER} change request and throw to interrupt
-     * the invitation flow before any token/e-mail. Scoped/keyed by the target
-     * organization ({@code ORG_ID}) exactly like ADD_/REMOVE_ORG_MEMBER so
+     * the invitation flow before any token/e-mail. Convenience wrapper that
+     * pins the action type to {@code ORG_INVITE_MEMBER}; see the action-type
+     * overload below for the canonical body and rationale.
+     */
+    void recordOrgInvite(String orgId, String email, String firstName, String lastName) {
+        recordOrgInvite(orgId, email, firstName, lastName, "ORG_INVITE_MEMBER");
+    }
+
+    /**
+     * Record an org-invite-style change request ({@code ORG_INVITE_MEMBER} or
+     * {@code ORG_RESEND_INVITE}) and throw to interrupt the invitation flow
+     * before any token/e-mail. Scoped/keyed by the target organization
+     * ({@code ORG_ID}) exactly like ADD_/REMOVE_ORG_MEMBER so
      * {@code IgaScopeResolver.collectOrganizationScope} resolves
      * {@code iga.approverRole}/{@code iga.threshold} off the org. The invitee
      * identity travels as plain row keys (no REP_JSON — the invite endpoints
      * are form-encoded, not a JSON representation the capture filter handles)
-     * so replay can reconstruct the exact KC invite call.
+     * so replay can reconstruct the exact KC invite call. Both action types
+     * carry the same row shape and replay through the same
+     * {@code replayOrgInviteMember} body (a faithful transcription of KC's
+     * {@code sendInvitation}), so a resend's replay mints a fresh token + sends
+     * a fresh e-mail exactly like the original invite — the action type is the
+     * audit-/scope-relevant distinction.
      */
-    void recordOrgInvite(String orgId, String email, String firstName, String lastName) {
+    void recordOrgInvite(String orgId, String email, String firstName, String lastName,
+                         String actionType) {
         RealmModel realm = realm();
         Map<String, Object> row = new java.util.LinkedHashMap<>();
         row.put("ORG_ID", orgId);
@@ -260,7 +309,7 @@ public class IgaOrganizationProvider extends JpaOrganizationProvider {
         if (firstName != null) row.put("INVITE_FIRST_NAME", firstName);
         if (lastName != null) row.put("INVITE_LAST_NAME", lastName);
         row.put("REALM_ID", realm.getId());
-        recordAndThrow(realm, "ORGANIZATION", orgId, "ORG_INVITE_MEMBER", List.of(row));
+        recordAndThrow(realm, "ORGANIZATION", orgId, actionType, List.of(row));
     }
 
     // -------------------------------------------------------------------------
