@@ -16,6 +16,7 @@ import org.keycloak.models.UserModel;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.GroupModel;
+import org.keycloak.models.IdentityProviderModel;
 import org.keycloak.models.cache.CacheRealmProvider;
 import org.keycloak.models.cache.UserCache;
 import org.keycloak.models.OrganizationModel;
@@ -530,7 +531,7 @@ public class TideAdminCompatResource {
         }
 
         String realmId = realm.getId();
-        int clients = 0, roles = 0, groups = 0, scopes = 0, orgs = 0;
+        int clients = 0, roles = 0, groups = 0, scopes = 0, orgs = 0, idps = 0;
 
         // Clients — the immediate Phase 6c CASE 3 fix surface.
         try {
@@ -657,8 +658,52 @@ public class TideAdminCompatResource {
                     realm.getName(), orgs);
         }
 
-        logger.infof("IGA toggle realm-cache eviction: realm=%s — evicted clients=%d roles=%d groups=%d scopes=%d orgs=%d (next client/role/group/scope/org read will re-load through IGA providers so the quarantine override fires)",
-                realm.getName(), clients, roles, groups, scopes, orgs);
+        // Phase 7d — identity providers. IdPs aren't quarantineable entities
+        // (toggle-on doesn't scan IdPs, no IGA_UNSIGNED_ENTITY rows) but the
+        // Phase 7d IdP-aware scope resolver reads iga.approverRole /
+        // iga.threshold off IdentityProviderModel.getConfig() via
+        // session.identityProviders().getByAlias(...). That path goes through
+        // InfinispanIdentityProviderStorageProvider which caches the
+        // CachedIdentityProvider snapshot under two keys: the internalId and
+        // realmId + "." + alias + ".idp.alias" (see
+        // InfinispanIdentityProviderStorageProvider.cacheKeyIdpAlias:69 in
+        // KC 26.5.5 — both suffix constants are private). Without invalidating
+        // those entries, an iga.approverRole / iga.threshold edit on an IdP
+        // made BEFORE toggle-on could remain stale post-toggle, letting an
+        // ORG_ADD_IDP / ORG_REMOVE_IDP CR resolve against pre-edit config and
+        // produce the wrong gate verdict. We reconstruct the alias key here
+        // (KC's suffix string is identical and the realmId-prefixed shape is
+        // stable across the cache lifecycle).
+        //
+        // Iterate via realm.getIdentityProvidersStream() — the deprecated
+        // accessor is still the simplest surface; the canonical
+        // IdentityProviderStorageProvider.getAllStream() requires constructing
+        // an IdentityProviderQuery which adds noise for no functional gain
+        // here.
+        try {
+            for (IdentityProviderModel idp : realm.getIdentityProvidersStream().toList()) {
+                try {
+                    if (idp.getInternalId() != null) {
+                        cache.registerInvalidation(idp.getInternalId());
+                    }
+                    if (idp.getAlias() != null) {
+                        cache.registerInvalidation(realmId + "." + idp.getAlias() + ".idp.alias");
+                    }
+                    idps++;
+                } catch (RuntimeException ex) {
+                    logger.debugf(ex,
+                            "IGA toggle realm-cache eviction: idp=%s (id=%s) realm=%s — registerInvalidation failed (continuing).",
+                            idp.getAlias(), idp.getInternalId(), realm.getName());
+                }
+            }
+        } catch (RuntimeException ex) {
+            logger.warnf(ex,
+                    "IGA toggle realm-cache eviction: realm=%s — idp iteration failed after evicting %d.",
+                    realm.getName(), idps);
+        }
+
+        logger.infof("IGA toggle realm-cache eviction: realm=%s — evicted clients=%d roles=%d groups=%d scopes=%d orgs=%d idps=%d (next client/role/group/scope/org/idp read will re-load through IGA providers so the quarantine override fires)",
+                realm.getName(), clients, roles, groups, scopes, orgs, idps);
     }
 
     /**

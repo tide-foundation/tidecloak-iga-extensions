@@ -6,6 +6,7 @@ import jakarta.ws.rs.ForbiddenException;
 import org.jboss.logging.Logger;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.GroupModel;
+import org.keycloak.models.IdentityProviderModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
@@ -173,7 +174,18 @@ public final class IgaScopeResolver {
             case "ORG_RESEND_INVITE":
             case "ORG_ADD_IDP":
             case "ORG_REMOVE_IDP":
+                // Two-entity scope (mirrors GRANT_ROLES which binds user+role):
+                // ORG_ADD_IDP / ORG_REMOVE_IDP bind both the org and the linked
+                // IdP, so collect scope contributions from both entities. The
+                // existing ResolvedScope merge semantics — union of required
+                // approver roles, max of thresholds (see
+                // resolveThresholdInternal:280) — apply automatically once
+                // both helpers write into the same `scope` instance. IdP
+                // attributes live in IdentityProviderModel.getConfig()
+                // (server-spi:208) so a separate resolver branch reads them
+                // out of the IdP's config map.
                 resolveOrganizationScopesFromRows(session, realm, cr, scope, "ORG_ID");
+                resolveIdpScopesFromRows(session, realm, cr, scope, "IDP_ALIAS");
                 break;
             // CREATE_USER / CREATE_ROLE / CREATE_GROUP / CREATE_CLIENT /
             // CREATE_ORGANIZATION, the Phase 6+ ADOPT_* family, and realm-wide
@@ -387,6 +399,55 @@ public final class IgaScopeResolver {
             if (id == null) continue;
             org.keycloak.models.OrganizationModel org = orgs.getById(id);
             if (org != null) collectOrganizationScope(org, out);
+        }
+    }
+
+    /**
+     * Walk the CR rows for the IdP alias column ({@code IDP_ALIAS}) and harvest
+     * scope contributions from each linked IdP. Used by ORG_ADD_IDP /
+     * ORG_REMOVE_IDP — the row shape carries both ORG_ID and IDP_ALIAS (see
+     * IgaOrganizationProvider.recordIdp:337-343), so this helper is a sibling
+     * to {@link #resolveOrganizationScopesFromRows} called from the same case
+     * branch. We look the IdP up via {@code session.identityProviders()
+     * .getByAlias(alias)} (the canonical SPI surface KC uses everywhere else,
+     * e.g. OrganizationIdentityProvidersResource.addIdentityProvider:131); if
+     * the IdP can't be resolved (e.g. it's already been detached at commit
+     * time for ORG_REMOVE_IDP), the row is silently skipped — the org-side
+     * contribution still gates the change, and the resolver is best-effort.
+     */
+    private static void resolveIdpScopesFromRows(KeycloakSession session, RealmModel realm,
+                                                 IgaChangeRequestEntity cr, ResolvedScope out,
+                                                 String key) {
+        for (Map<String, Object> row : rows(cr)) {
+            String alias = str(row, key);
+            if (alias == null || alias.isBlank()) continue;
+            IdentityProviderModel idp;
+            try {
+                idp = session.identityProviders().getByAlias(alias);
+            } catch (RuntimeException ignored) {
+                // Storage failures (e.g. stale read during a parallel detach)
+                // must never break the gate — fall through to the org-only
+                // contribution.
+                continue;
+            }
+            if (idp != null) collectIdpScope(idp, out);
+        }
+    }
+
+    /**
+     * Harvest iga.approverRole / iga.threshold from an IdP's config map.
+     * IdentityProviderModel exposes only the full config map
+     * ({@link IdentityProviderModel#getConfig()} — server-spi:208), so we
+     * read the keys directly. Mirrors {@link #collectClientScope} (single
+     * value per key, no per-attribute list shape).
+     */
+    private static void collectIdpScope(IdentityProviderModel idp, ResolvedScope out) {
+        Map<String, String> config = idp.getConfig();
+        if (config == null) return;
+        String role = config.get(ATTR_APPROVER_ROLE);
+        if (role != null && !role.isBlank()) {
+            out.requiredApproverRoles.add(role.trim());
+            addThreshold(config.get(ATTR_THRESHOLD), out);
         }
     }
 
