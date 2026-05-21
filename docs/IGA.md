@@ -1,6 +1,6 @@
 # Identity Governance and Administration (IGA)
 
-> **Last updated:** 2026-05-20. Reflects Phases 1–5 as of commit `5276c40`
+> **Last updated:** 2026-05-21. Reflects Phases 1–6 as of commit `c8d12a2`
 > (branch `iga-approval-workflow`). This guide is the operator/administrator
 > reference. Developers extending IGA should start at
 > [`EXTENDING-IGA.md`](EXTENDING-IGA.md).
@@ -59,9 +59,11 @@
 11. [Failure responses an operator will see](#failure-responses-an-operator-will-see)
 12. [Default behavior when nothing is configured](#default-behavior-when-nothing-is-configured)
 13. [Governing Keycloak Organizations](#governing-keycloak-organizations)
-14. [Operator runbook](#operator-runbook)
-15. [Known limitations](#known-limitations)
-16. [Internals](#internals)
+14. [Phase 6: retroactive ADOPT and quarantine on IGA toggle](#phase-6-retroactive-adopt-and-quarantine-on-iga-toggle)
+15. [Bulk-authorizing pending change requests](#bulk-authorizing-pending-change-requests)
+16. [Operator runbook](#operator-runbook)
+17. [Known limitations](#known-limitations)
+18. [Internals](#internals)
 
 ## Overview
 
@@ -832,12 +834,398 @@ exactly like other top-level creates (`IgaScopeResolver.java:165-170`,
 > change request, so exactly one invitation/token/e-mail is produced —
 > never a duplicate.
 
-## Operator runbook
+## Phase 6: retroactive ADOPT and quarantine on IGA toggle
 
-Quick references for the most common operations. All requests assume
-`TOKEN` is a `manage-realm` bearer for the target realm.
+Phases 1–5 govern the *next* admin write. **Phase 6 retroactively brings
+every entity that already exists in a realm under governance** when IGA
+is toggled OFF→ON, and **quarantines** those entities until an admin
+signs them off. This solves the bootstrap gap: a realm imported pre-IGA,
+or operated for a while with IGA off, contains users / roles / groups /
+clients / client-scopes that nothing in Phases 1–5 ever attested.
 
-### Enable IGA on a realm
+> **Important**
+> Read the [Ordering](#ordering-configure-governance-before-enabling-iga)
+> section first. The Phase 6 OFF→ON path is **strictly more disruptive**
+> than the pre-Phase-6 flip: turning IGA on for a non-empty realm will
+> quarantine every pre-existing user, client, role, group and
+> operator-authored client-scope until each one's ADOPT change request is
+> committed. Plan the toggle as a maintenance event.
+
+### Bootstrap onramp: the OFF→ON ADOPT scan
+
+When `POST /admin/realms/{realm}/tide-admin/toggle-iga` flips
+`isIGAEnabled` from `false` → `true`, the toggle handler runs the **Phase
+6b adopt scan** in its own transaction
+(`TideAdminCompatResource.toggleIga`,
+`TideAdminCompatResource.java:91-210`):
+
+- The scan walks `USER_ENTITY`, `KEYCLOAK_ROLE`, `KEYCLOAK_GROUP`,
+  `CLIENT`, and `CLIENT_SCOPE`, projecting every row whose `attestation`
+  column is still `NULL` (`IgaUnsignedRowScanner.usersWithNames` etc.).
+- For each surviving row it emits a per-entity
+  `ADOPT_USER` / `ADOPT_ROLE` / `ADOPT_GROUP` / `ADOPT_CLIENT` /
+  `ADOPT_CLIENT_SCOPE` change request via
+  `IgaChangeRequestService.createAdoptCr`, and inserts a sidecar row in
+  `IGA_UNSIGNED_ENTITY` keyed on `(realmId, entityType, entityId)` that
+  points back at the ADOPT CR.
+- Three pre-existing skip lanes apply (see
+  [System-entity filter](#system-entity-filter-which-pre-existing-entities-are-skipped)):
+  the system-entity filter, an already-committed-ADOPT skip (so a
+  re-toggle is a no-op), and a pending-`CREATE_*` race skip (the entity
+  is mid-flight under Phase 1–4 governance and must not be ADOPTed
+  concurrently).
+
+After the scan, the toggle handler:
+
+1. Invalidates every live user session on the realm
+   (`session.sessions().removeUserSessions(realm)`,
+   `TideAdminCompatResource.java:160`) so a user newly quarantined by
+   the scan cannot ride an existing cookie or refresh token past the
+   transition.
+2. Evicts the realm's user cache
+   (`UserStorageUtil.userCache(session).evict(realm)`) — Keycloak's
+   `UserCacheSession` snapshots `isEnabled` at cache-load time and would
+   otherwise keep returning the pre-toggle `enabled=true` until the
+   entry expires.
+3. Evicts the realm's client/role/group/scope cache via
+   `evictRealmCache`
+   (`TideAdminCompatResource.java:514-626`) — Keycloak's
+   `RealmCacheSession` likewise caches client/role/group/scope adapters,
+   so the OFF→ON transition must invalidate per-entity entries before
+   the next read so the quarantine override fires.
+
+### Quarantine semantics per entity type
+
+Until each pre-existing entity's ADOPT CR commits, the entity is
+**quarantined** by the Phase 6c hooks. Quarantine semantics are
+deliberately different per entity type — hard refusal for user/client
+(operationally inert), silent strip for group/client-scope (token shape
+diverges, but the request still succeeds).
+
+| Entity | Hook | Semantic | Operator-observed behaviour |
+|--------|------|----------|-----------------------------|
+| User | `IgaUserAdapter.isEnabled() → false` (`IgaUserAdapter.java:1184-1203`) | **Hard refuse.** | Direct-grant returns `400`/`401 invalid_grant`. Browser flow rejects login. |
+| Role held by a user | `IgaUserAdapter.isEnabled() → false` via the role fan-out in `IgaQuarantineCache.isUserUnsignedWithRoles` (`IgaQuarantineCache.java:134-227`) | **Hard refuse on the user.** | Any user that holds an unsigned realm-role or client-role is treated as not-enabled. Not a silent role-strip — explicit refusal at the token endpoint. |
+| Client | `IgaClientAdapter.isEnabled() → false` (`IgaClientAdapter.java:634-649`) | **Hard refuse.** | `client_credentials`, `client_secret_basic`/`_post`, JWT client-auth, and token introspection all refuse. |
+| Group | `IgaUserAdapter.getGroupsStream()` filters unsigned groups out (`IgaUserAdapter.java:1234-1263`) | **Silent strip from token mapping.** | The user can still log in; group claims and roles-via-the-group are absent from the issued token. **Admin REST reads still see the group** — the StackWalker bypass keeps the group visible so operators can ADOPT it. |
+| Client scope | `IgaClientScopeAdapter.getProtocolMappersStream() → Stream.empty()` (`IgaClientScopeAdapter.java:724-743`) | **Silent strip from token mapping.** | The scope's mappers don't fire; any claim the scope would have added is absent. Token still issues. |
+
+> **Note**
+> Every quarantine check is bypassed when the session attribute
+> `IGA_REPLAY_ACTIVE` is `"true"` — that is the gate that lets an ADOPT
+> commit *replay* against the very entity it is about to attest. Without
+> it the replay would be refused by the quarantine on its target. The
+> attribute is set by `IgaReplayExtension.tryReplay` and by the toggle
+> handler around its own attribute write (so the toggle's
+> `isIGAEnabled` write is not itself captured as a CR — see
+> [Bootstrap-safety + escape hatches](#bootstrap-safety-and-escape-hatches)).
+
+### Toggle response shape
+
+The toggle endpoint returns a JSON body describing what the scan / cancel
+did. Use the body to feed your runbook (e.g. seed the bulk-authorize
+call below).
+
+**OFF→ON example** (newly-toggled realm with 5 users, 10 roles, 10
+groups, and 0 operator-authored client-scopes):
+
+```json
+{
+  "enabled": true,
+  "scan": {
+    "realmId": "f7c0e1e0-...",
+    "durationMs": 312,
+    "totalEntitiesScanned": 47,
+    "adoptCrsCreated": {
+      "USER": 5,
+      "ROLE": 10,
+      "GROUP": 10,
+      "CLIENT": 0,
+      "CLIENT_SCOPE": 0
+    },
+    "skipped": {
+      "systemFilter": 22,
+      "alreadyCommittedAdopt": 0,
+      "pendingCreateCr": 0,
+      "alreadyAttested": 0
+    },
+    "errors": 0,
+    "sessionsInvalidated": 3
+  },
+  "warning": "Fewer than 2 distinct admin holders detected for realm 'test-realm' (manage-realm + iga.approverRole candidates: 1). Phase 6c will enforce ADOPT approval before admin actions — provision a second manage-realm admin (or configure iga.approverRole) NOW. Recovery path if locked out: the master-realm admin can always disable IGA on this realm via the master realm (escape hatch) — there is no other recovery."
+}
+```
+
+The optional `warning` (`buildAdminCoverageWarning`,
+`TideAdminCompatResource.java:657-698`) appears when the realm has fewer
+than two distinct `manage-realm` or `iga.approverRole` holders — i.e.
+the realm is at risk of self-lockout. The toggle still succeeds; the
+warning is advisory.
+
+**ON→OFF example**:
+
+```json
+{
+  "enabled": false,
+  "scanOff": {
+    "realmId": "f7c0e1e0-...",
+    "cancelledAdoptCrs": 17,
+    "sidecarRowsCleared": 17,
+    "durationMs": 28
+  }
+}
+```
+
+ON→OFF runs the **Phase 6d cancel** in its own transaction
+(`IgaAdoptCancel.cancel`, `IgaAdoptCancel.java:93-134`): every PENDING
+ADOPT_* CR for the realm is flipped to `CANCELLED` with `resolvedAt=now`,
+and the entire sidecar (`IGA_UNSIGNED_ENTITY`) for the realm is
+bulk-cleared. **Committed ADOPTs are preserved as audit history** and
+will be the idempotent-skip set on the next OFF→ON.
+
+### Configuration-error responses on toggle
+
+| Trigger | HTTP | Body shape |
+|---------|------|-----------|
+| Sidecar would exceed the soft-cap of **100 000 rows per realm** at scan start (`IgaAdoptScan.SIDECAR_CAP_DEFAULT`, `IgaAdoptScan.java:76`). | **409 Conflict** | `{"error":"SIDECAR_CAP_EXCEEDED", "realmId":"<uuid>", "cap":100000, "current":<long>}` — the `isIGAEnabled` write is **rolled back** so IGA stays OFF. |
+| Toggle-on scan itself fails (any other RuntimeException). | **200 OK** | `{"enabled":true, "scan":{"error":"<Class>", "message":"<msg>"}}` — the toggle attribute is already committed; the scan failure is surfaced in the response but **does not roll back the toggle** (a stuck toggle is worse than a partially-scanned realm). |
+| Toggle-off cancel itself fails (any other RuntimeException). | **200 OK** | `{"enabled":false, "scanOff":{"error":"<Class>", "message":"<msg>"}}` — symmetric: the toggle attribute is already committed; a partial cancel is recoverable, a stuck toggle is not. |
+
+### System-entity filter: which pre-existing entities are skipped
+
+By default the OFF→ON scan does NOT emit ADOPT CRs for Keycloak's own
+bootstrap surface — quarantining those would freeze the realm. The
+filter is `IgaSystemEntityFilter.shouldSkip`
+(`IgaSystemEntityFilter.java:166-225`).
+
+**Hard-pinned skips** (always applied, regardless of opt-in):
+
+- The realm composite role `default-roles-<realm>` (every new user is
+  bound to this composite at create time).
+- The bookkeeping client `default-roles-<realm>` that backs the
+  composite.
+
+**Soft skips** (lifted by setting the realm attribute
+`iga.adopt.includeSystem=true`):
+
+- Keycloak's built-in per-realm admin clients —
+  `realm-management`, `account`, `account-console`,
+  `security-admin-console`, `broker`, `admin-cli` — and **every
+  client-role under them**
+  (`IgaSystemEntityFilter.BUILTIN_CLIENT_IDS`).
+- Keycloak's default client-scopes — the full set in
+  `IgaSystemEntityFilter.DEFAULT_CLIENT_SCOPE_NAMES`: `profile`,
+  `email`, `address`, `phone`, `offline_access`, `roles`,
+  `web-origins`, `microprofile-jwt`, `acr`, `basic`, `service_account`,
+  `organization`, `role_list`, `saml_organization`,
+  `oid4vc_natural_person`. Operator-authored scopes are NOT in this set
+  and **are** quarantined.
+- Keycloak's default realm-roles `offline_access` and
+  `uma_authorization`
+  (`IgaSystemEntityFilter.DEFAULT_REALM_ROLE_NAMES`). The composite
+  `default-roles-<realm>` is hard-pinned above.
+
+**Opting in to govern system entities**:
+
+```bash
+# Set BEFORE toggling IGA on, otherwise this is itself a captured CR.
+curl -fsS -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"attributes":{"iga.adopt.includeSystem":"true"}}' \
+  "$KC_URL/admin/realms/$REALM"
+
+# Then toggle IGA on. Built-in admin clients + their roles + KC default
+# scopes + default realm-roles will all receive ADOPT_* CRs. The
+# default-roles-<realm> composite remains hard-pinned regardless.
+```
+
+The toggle handler logs at WARN when scan starts with
+`includeSystem=true`, surfacing that the bootstrap surface is about to
+be quarantined (`IgaAdoptScan.java:217-222`).
+
+### ADOPT gate bypass: threshold + approver-role
+
+The ADOPT_* CRs created by the scan are a **system-bootstrap onramp**.
+Applying the realm's normal governance gate to them would create a
+chicken-and-egg deadlock: a high-threshold realm with pre-IGA admins
+cannot bootstrap because the admins themselves are quarantined and the
+ADOPTs need their signature to unlock them.
+
+`IgaScopeResolver` therefore short-circuits the gate for ADOPT_* CRs
+(`IgaScopeResolver.java:213-220` for `requireApprover`,
+`IgaScopeResolver.java:270-277` for `resolveThreshold` — both via
+`IgaReplayExtension.isAdoptAction(actionType)`):
+
+- **Threshold for ADOPT_***: unconditionally `1`, regardless of realm
+  `iga.threshold` or per-scope `iga.threshold`.
+- **Approver-role for ADOPT_***: no check. Any caller passing the
+  endpoint's `manage-realm` requirement can authorize and commit.
+
+The bypass fires one INFO log line per (request, CR, gate) for audit:
+
+```
+IGA ADOPT gate bypass: actionType=ADOPT_USER CR=<uuid> — threshold=1, no approver-role check (system-bootstrap action) [gate=requireApprover]
+```
+
+`CREATE_*` / `UPDATE_*` / `GRANT_ROLES` / `SET_*_ATTRIBUTE` and every
+other non-ADOPT action continue to enforce realm `iga.threshold` and
+per-scope `iga.approverRole` exactly as in Phases 1–5.
+
+### Bootstrap-safety and escape hatches
+
+> **Warning — the self-locked-realm failure mode.**
+> If a realm's only `manage-realm` admin is themselves quarantined by
+> the OFF→ON scan (because they were a pre-IGA user adopted by the
+> scan), they cannot sign their own `ADOPT_USER`. The quarantine
+> hard-refuses their token request before any IGA endpoint sees them.
+> The toggle-time admin-coverage warning in the response body exists to
+> surface this risk before it happens.
+
+The supported recovery path is the permanently-exempt `master` realm:
+
+- `IgaChangeRequestService.isIgaEnabled` returns `false` unconditionally
+  when the realm name is `master`
+  (`IgaChangeRequestService.java:36-39`) — IGA is never enforced on
+  master.
+- A master-realm admin holds `manage-realm` on any realm via the
+  cross-realm admin scope, is **exempt from the target realm's IGA scan
+  (master is system-skipped)**, and can therefore authorize + commit any
+  ADOPT_* in any realm using either the per-CR endpoints or the
+  [bulk-authorize endpoint](#bulk-authorizing-pending-change-requests).
+
+The escape hatch is single-purpose: a master-realm admin signing the
+quarantined realm's ADOPTs out of the queue. There is no per-realm
+override.
+
+### Re-toggle and CANCELLED-status caveat
+
+| Scenario | Behaviour |
+|----------|-----------|
+| OFF→ON → ADOPT commits → ON→OFF → OFF→ON | **Idempotent.** The second OFF→ON skips every entity whose ADOPT is already APPROVED (the scan builds the "already committed" skip set from `IDX_IGA_CR_REALM_ACTION_STATUS` at scan start). |
+| OFF→ON → some ADOPTs still PENDING → ON→OFF → OFF→ON | The PENDING ADOPTs are CANCELLED on ON→OFF (sidecar cleared). On the next OFF→ON, the scan re-emits ADOPT CRs for those entities (a CANCELLED row is not in the "already committed" skip set). Per-entity history: the operator now sees both the cancelled CR and the fresh PENDING CR for the same entity. |
+| Authorize / commit a CANCELLED ADOPT directly | **ADOPT_* CRs are resumable** (`IgaAdminResource.authorize`, `IgaAdminResource.java:225-243`; `IgaAdminResource.commit`, `IgaAdminResource.java:307-321`): the endpoint promotes the CR back to `PENDING` and proceeds with the normal authorize/commit flow. |
+| Authorize / commit a CANCELLED CR of any other action type | **Terminal — rejected with 409.** `CREATE_*` / `UPDATE_*` / etc. CANCELLED rows are NOT resumable because the captured-entity rollback already happened; re-running the replay would attempt to recreate the rolled-back scratch entity. |
+
+In other words: **CANCELLED is terminal for every CR family except
+ADOPT_***. ADOPT_* CRs uniquely preserve the underlying entity (the
+whole point of capture-then-veto is that the entity already exists), so
+resuming them is meaningful.
+
+## Bulk-authorizing pending change requests
+
+`POST /admin/realms/{realm}/iga/change-requests/bulk-authorize`
+(`IgaAdminResource.bulkAuthorize`, `IgaAdminResource.java:428-558`) is
+the operator one-shot for draining a large queue of PENDING CRs in a
+single call — primarily intended for the Phase 6b ADOPT_* deluge on the
+first OFF→ON toggle of a non-empty realm, but usable against any action
+type.
+
+### Authority
+
+- Requires `manage-realm` on the target realm.
+- Per-realm **in-memory mutex** (`IgaBulkLock`): a second concurrent
+  bulk against the same realm returns **HTTP 429** with body
+  `{"error":"Another bulk-authorize is already running for this realm","realm":"<name>"}`.
+- **Single-node limitation.** The lock is a per-JVM `ConcurrentHashMap`
+  entry. Two bulk calls against the same realm hitting two different
+  Keycloak nodes can both acquire the lock; the per-CR gate (re-run for
+  every CR) is the real safety net — duplicate signatures and
+  non-PENDING CRs are detected per-CR and skipped.
+
+### Body shape
+
+| Field | Type | Required | Default | Notes |
+|-------|------|----------|---------|-------|
+| `actionTypeIn` | `string[]` | yes (non-empty) | — | The CR `actionType` strings to drain (e.g. `["ADOPT_USER","ADOPT_ROLE",...]`). Blank entries are dropped. |
+| `limit` | `int` | no | `100` | Hard upper-bound **`1000`**. `<=0` → 400. `>1000` → 400 with body `{"error":"limit must be <= 1000 (got <n>)", "maxLimit":1000}`. |
+| `olderThan` | `long` epoch-millis | no | `null` | When set, only CRs whose `createdAt <= olderThan` are considered. |
+
+### Response shape (HTTP 200)
+
+```json
+{
+  "results": [
+    {
+      "crId": "...",
+      "actionType": "ADOPT_USER",
+      "entityType": "USER",
+      "entityId": "...",
+      "status": "COMMITTED"
+    },
+    {
+      "crId": "...",
+      "actionType": "CREATE_ROLE",
+      "entityType": "ROLE",
+      "entityId": "...",
+      "status": "REJECTED",
+      "error": "THRESHOLD_NOT_MET",
+      "threshold": 2,
+      "authCount": 1
+    },
+    {
+      "crId": "...",
+      "actionType": "ADOPT_USER",
+      "entityType": "USER",
+      "entityId": "...",
+      "status": "SKIPPED",
+      "error": "ALREADY_RESOLVED",
+      "crStatus": "APPROVED"
+    }
+  ],
+  "summary": {
+    "total": 25,
+    "committed": 24,
+    "rejected": 0,
+    "skipped": 1,
+    "durationMs": 412,
+    "limit": 1000,
+    "defaultLimit": 100,
+    "maxLimit": 1000
+  }
+}
+```
+
+Per-CR `status` values:
+
+- **`COMMITTED`** — CR was authorized + replayed; now `APPROVED`.
+- **`REJECTED`** — the per-CR gate refused this CR. The result row's
+  `error` field gives the reason: `FORBIDDEN_APPROVER_ROLE` (`httpStatus:403`),
+  `THRESHOLD_NOT_MET` (with `threshold` + `authCount` keys),
+  `ENTITY_VANISHED` (with `vanishedEntityType` + `vanishedEntityId`),
+  `AUTHORIZE_FAILED`, or `COMMIT_FAILED`.
+- **`SKIPPED`** — CR was no longer `PENDING` by the time the bulk loop
+  re-fetched it (concurrent commit/deny/cancel) — `error:
+  "ALREADY_RESOLVED"` with the observed `crStatus`. Or `NOT_FOUND` if
+  the CR id selected at filter time has vanished entirely.
+
+> **Important — the per-CR gate is NOT shortcut for non-ADOPT.** Every
+> CR runs the same authorize+commit gate the per-CR endpoints use,
+> including `IgaScopeResolver.requireApprover` and the threshold check.
+> ADOPT_* CRs short-circuit those gates (system-bootstrap bypass — see
+> [ADOPT gate bypass](#adopt-gate-bypass-threshold--approver-role)).
+> Non-ADOPT CRs in the same bulk call get full enforcement: a
+> `CREATE_ROLE` whose realm `iga.threshold=2` will surface as
+> `REJECTED THRESHOLD_NOT_MET` in the response array (the overall HTTP
+> is still 200 — the bulk endpoint succeeded; per-CR outcomes ride
+> inside `results`).
+
+### Drain runbook: clear the toggle-on ADOPT queue
+
+```bash
+# Right after a OFF→ON toggle on a non-empty realm:
+curl -fsS -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{
+        "actionTypeIn": ["ADOPT_USER","ADOPT_ROLE","ADOPT_GROUP","ADOPT_CLIENT","ADOPT_CLIENT_SCOPE"],
+        "limit": 1000
+      }' \
+  "$KC_URL/admin/realms/$REALM/iga/change-requests/bulk-authorize"
+# → 200 OK
+# → {"results":[...], "summary":{"committed": 25, "rejected": 0, "skipped": 0, ...}}
+```
+
+For queues larger than 1000, page by repeated calls — the endpoint is
+idempotent (`SKIPPED ALREADY_RESOLVED` is a no-op).
+
+
 
 ```bash
 # 1. Configure governance FIRST (see the procedure sections above).
@@ -969,6 +1357,26 @@ curl -fsS -H "Authorization: Bearer $TOKEN" \
   required actions, federated identities, `createdTimestamp` and
   `federationLink` are intentionally NOT in the captured
   `UserRepresentation`. See [What gets captured](#what-gets-captured-per-entity-type).
+- **Bulk-authorize lock is per-JVM, not per-cluster.** `IgaBulkLock` is
+  an in-memory `ConcurrentHashMap` entry. Two simultaneous bulk calls
+  for the same realm hitting two different Keycloak nodes can both
+  acquire it; the per-CR gate (re-run for every CR) is the real safety
+  net.
+- **OFF→ON ADOPT scan is bounded by a 100 000-row sidecar soft-cap.**
+  Realms whose pre-IGA `attestation IS NULL` count exceeds the cap
+  refuse the toggle with **HTTP 409 SIDECAR_CAP_EXCEEDED** and roll
+  `isIGAEnabled` back to `false`. Raising the cap requires editing
+  `IgaAdoptScan.SIDECAR_CAP_DEFAULT` and rebuilding (not a realm
+  attribute by design).
+- **CANCELLED is terminal for every CR family except ADOPT_*.** Use the
+  toggle-off cancel ONLY for ADOPT cleanup — `CREATE_*`/`UPDATE_*`/etc.
+  PENDING CRs that need to be undone should be `deny`d, not toggled-off
+  away.
+- **Self-locked realm is recoverable only through the master realm.**
+  If a realm's only `manage-realm` admin is themselves quarantined by
+  the OFF→ON scan, they cannot sign their own ADOPT. The master-realm
+  admin (always exempt from IGA) signs the queue using the per-CR or
+  bulk-authorize endpoints. There is no per-realm override.
 
 ## Internals
 
@@ -1040,11 +1448,54 @@ contributor guide: [Extending IGA](EXTENDING-IGA.md).
   **Byte-unchanged from commit `742f944`.**
 - **`IgaAdminResource`** (`rest/`, `@Path("iga")`) — all operator
   endpoints: `change-requests`
-  (list/get/update/authorize/commit/deny/comments), `role-policies`,
-  `authorizers`, `forseti-contracts`, `server-certs`, `licensing`,
-  `adopt` (Phase 6 per-entity ADOPT seed). Every endpoint requires
-  `manage-realm` (deny / comment-delete additionally allow the
-  original author).
+  (list/get/update/authorize/commit/deny/comments/**bulk-authorize**),
+  `role-policies`, `authorizers`, `forseti-contracts`, `server-certs`,
+  `licensing`, `adopt` (Phase 6 per-entity ADOPT seed). Every endpoint
+  requires `manage-realm` (deny / comment-delete additionally allow the
+  original author). The authorize/commit handlers special-case
+  ADOPT_* CANCELLED → PENDING (resumable) — see
+  [CANCELLED status caveat](#re-toggle-and-cancelled-status-caveat).
 - **`TideAdminCompatResource`** (`rest/`, `@Path("tide-admin")`) —
   backwards-compatible `toggle-iga` / `iga-status` endpoints driving
-  the `isIGAEnabled` realm attribute.
+  the `isIGAEnabled` realm attribute. The toggle handler also runs the
+  Phase 6b OFF→ON adopt scan, the Phase 6d ON→OFF cancel, and the
+  per-realm session + cache eviction passes that make the quarantine
+  observable on the next read — see
+  [Phase 6: retroactive ADOPT](#phase-6-retroactive-adopt-and-quarantine-on-iga-toggle).
+- **`IgaReplayExtension`** (`replay/`) — Phase 6+ replay extension
+  router for the five ADOPT_* action types
+  (`USER`/`ROLE`/`GROUP`/`CLIENT`/`CLIENT_SCOPE`). `tryReplay` is
+  consulted by `IgaAdminResource.commit` BEFORE `IgaReplayDispatcher`
+  so the ADOPT path stays out of the dispatcher's switch (which
+  remains byte-unchanged from `742f944` / `d785326`). Replay verifies
+  the entity still exists (else throws `EntityVanishedException` →
+  HTTP 404 `ENTITY_VANISHED`), stamps the entity row's `attestation`
+  column via per-type JPQL UPDATE, deletes the matching sidecar row,
+  and evicts the per-entity cache (user → `UserCache.evict`;
+  client/role/group/scope → `CacheRealmProvider.register*Invalidation`;
+  ADOPT_ROLE/ADOPT_GROUP also realm-wide user-cache evict to flush the
+  role/group fan-out snapshot).
+- **`IgaAdoptScan`** + **`IgaUnsignedRowScanner`** + **`IgaSystemEntityFilter`**
+  (`services/`) — Phase 6b OFF→ON adopt scan. Walks every realm entity
+  whose `attestation IS NULL`, applies the system-entity filter
+  (default skips KC built-ins + default scopes/realm-roles; hard-pin
+  on `default-roles-<realm>`), skips entities with already-committed
+  ADOPT or pending CREATE_* CRs (via the
+  `IDX_IGA_CR_REALM_ACTION_STATUS` index), and emits one `ADOPT_*` CR
+  per surviving entity. Refuses when the sidecar would exceed
+  `SIDECAR_CAP_DEFAULT = 100 000` rows.
+- **`IgaAdoptCancel`** (`services/`) — Phase 6d ON→OFF cancel. Bulk
+  UPDATE every PENDING ADOPT_* CR to CANCELLED + bulk DELETE the
+  realm's sidecar rows. APPROVED ADOPTs preserved as audit history;
+  DENIED untouched.
+- **`IgaUnsignedEntityService`** + **`IgaUnsignedEntityEntity`**
+  (`services/` + `entities/`) — sidecar table. Phase 6c quarantine
+  guards do a single PK probe here; the role fan-out in
+  `IgaQuarantineCache.isUserUnsignedWithRoles` is a single batched
+  IN-clause query.
+- **`IgaQuarantineCache`** (`services/`) — per-request, session-attribute
+  memoised quarantine cache for user/client/group/scope. Bypassed when
+  `IGA_REPLAY_ACTIVE=true` or when IGA is not active on the realm.
+- **`IgaBulkLock`** (`rest/`) — per-realm in-memory mutex used by the
+  bulk-authorize endpoint. Single-node only; see
+  [Known limitations](#known-limitations).

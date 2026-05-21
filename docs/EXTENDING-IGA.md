@@ -1,6 +1,6 @@
 # Extending IGA: contributor guide
 
-> **Last updated:** 2026-05-20. Reflects Phases 1–5 as of commit `5276c40`
+> **Last updated:** 2026-05-21. Reflects Phases 1–6 as of commit `c8d12a2`
 > (branch `iga-approval-workflow`). The operator/administrator companion
 > is [`docs/IGA.md`](IGA.md).
 
@@ -77,6 +77,8 @@ re-capture.
 11. [Testing harness (`e2e/lib/kc.ts`)](#testing-harness-e2elibkts)
 12. [Git hygiene and contribution checklist](#git-hygiene-and-contribution-checklist)
 13. [Canonical example index](#canonical-example-index)
+14. [Phase 6: retroactive ADOPT + quarantine — contributor notes](#phase-6-retroactive-adopt--quarantine--contributor-notes)
+15. [Recipe: add a new ADOPT-able entity type](#recipe-add-a-new-adopt-able-entity-type)
 
 ---
 
@@ -254,10 +256,16 @@ re-capturing.
 > dispatcher case if the type is genuinely new.
 
 `IgaReplayDispatcher.java` is **byte-unchanged** from commit
-`742f944` and must remain so. Verify with:
+`d785326` (post-Phase-6a baseline — the BASELINE_APPROVAL stamping step
+was removed in `742f944`; that single deletion is the only diff
+between `742f944` and `d785326`, and the dispatcher has been frozen at
+`d785326` ever since). Phase 6's ADOPT_* replay lives in a separate
+`IgaReplayExtension` routed BEFORE the dispatcher's switch — see
+[Phase 6 contributor notes](#phase-6-retroactive-adopt--quarantine--contributor-notes).
+Verify with:
 
 ```bash
-git diff --quiet 742f944 HEAD -- \
+git diff --quiet d785326 HEAD -- \
   iga-core/src/main/java/org/tidecloak/iga/replay/IgaReplayDispatcher.java
 ```
 
@@ -991,10 +999,13 @@ Current expected E2E count on this branch: **12 passed**.
       new captured type — name the KC class/method/line of the
       terminal seam and one sentence on why it is the last
       unconditional call.
-- [ ] `IgaReplayDispatcher.java` byte-unchanged from `742f944`
-      (`git diff --quiet 742f944 HEAD -- iga-core/.../replay/IgaReplayDispatcher.java`)
-      unless the PR explicitly modifies it.
-- [ ] Full E2E suite green; current expected count = **12 passed**.
+- [ ] `IgaReplayDispatcher.java` byte-unchanged from `d785326`
+      (`git diff --quiet d785326 HEAD -- iga-core/.../replay/IgaReplayDispatcher.java`)
+      unless the PR explicitly modifies it. Phase 6 ADOPT lives in
+      `IgaReplayExtension`, routed BEFORE the dispatcher — adding a new
+      ADOPT-able type should NOT touch the dispatcher (see
+      [Recipe](#recipe-add-a-new-adopt-able-entity-type)).
+- [ ] Full E2E suite green.
 
 ---
 
@@ -1010,3 +1021,385 @@ Current expected E2E count on this branch: **12 passed**.
 | client scope | `IgaClientScopeAdapter.getId()`; provider `IgaRealmProvider.addClientScope` | `IgaReplayDispatcher.replayCreateClientScope` | partialImport branch is **defensive parity** — KC 26.5.5 has no `ClientScopesPartialImport`, so the import path is wired up but never reached today. |
 | action (relationship) | `IgaUserAdapter.grantRole` → `GRANT_ROLES` (`:43-56`) | `replayRelationship` + `grantRoleDirect` | Delta action: records CR via `service.create`, does NOT throw. Scoped on `USER_ID` + `ROLE_ID` in `IgaScopeResolver`. |
 | batch | `IgaImportMode.BatchEmitTransaction.commit()` (`:441-612`); provider hooks: every `IgaRealmProvider.addX` + `IgaUserProvider.addUser` import-mode branch | (re-uses each per-type `replayCreate*`) | `entityType=BATCH`, `actionType=PARTIAL_IMPORT`; CR id in the 202 is the **first** per-type CR; whole batch rolls back via prepare-tx throw on the nested import session. |
+| ADOPT_* (Phase 6) | `IgaAdoptScan.scan` (`:184-341`) → `IgaChangeRequestService.createAdoptCr` per row | `IgaReplayExtension.tryReplay` (`:105-123`) → `replayAdopt` (per-type JPQL stamp + sidecar delete + cache evict) | **No entity-model write on commit** — capture-then-veto for *pre-existing* entities. Routed BEFORE `IgaReplayDispatcher.replay` so dispatcher stays byte-unchanged. Threshold + approver-role gates short-circuited (system-bootstrap). See [Phase 6 section](#phase-6-retroactive-adopt--quarantine--contributor-notes). |
+
+---
+
+## Phase 6: retroactive ADOPT + quarantine — contributor notes
+
+Phases 1–5 govern the *next* admin write: a `POST` becomes a `CREATE_*`
+CR; the captured entity does not exist until commit. **Phase 6 governs
+entities that already exist** — pre-IGA users, the realm's client list
+before `isIGAEnabled` was first set to `"true"`, etc. — by retroactively
+emitting an `ADOPT_*` CR on the OFF→ON toggle and **quarantining** the
+entity until the ADOPT commits.
+
+### Design recap
+
+Two layers — no overlap, both required.
+
+1. **One sidecar table, one bit of state per entity**:
+   `IGA_UNSIGNED_ENTITY` (PK = `(realmId, entityType, entityId)`,
+   payload = the ADOPT CR id, see
+   `iga-core/.../services/IgaUnsignedEntityService.java`). The toggle-on
+   scan inserts one row per quarantined entity; ADOPT replay deletes
+   the matching row; toggle-off bulk-deletes the realm.
+2. **Per-type quarantine overrides on the existing
+   IgaUserAdapter / IgaClientAdapter / IgaGroupAdapter (via
+   `IgaUserAdapter.getGroupsStream` filter) / IgaClientScopeAdapter**.
+   Each consults `IgaQuarantineCache`, which does the
+   sidecar-table lookup (with per-request memoisation on session
+   attributes — see "the cache" below).
+
+The capture-then-veto and the retroactive-ADOPT machinery share *one*
+sidecar abstraction (`IgaUnsignedEntityService.markUnsigned` / `isUnsigned` /
+`clearByAdoptCr` / `clearByRealm` / `countByRealm`). There is no
+"pre-IGA" vs "post-IGA" distinction at the quarantine call site — a row
+either has an `IGA_UNSIGNED_ENTITY` entry (quarantined) or it does not
+(operational).
+
+The ADOPT_* replay extension is **deliberately routed BEFORE
+`IgaReplayDispatcher.replay`** in `IgaAdminResource.commit`
+(`IgaReplayExtension.tryReplay` returns `true` when it owns the CR;
+otherwise the dispatcher's switch runs). This keeps the dispatcher
+byte-unchanged from `d785326` (and `742f944` for everything else).
+
+### Per-type quarantine hook table
+
+Cite this when adding a new ADOPT-able type.
+
+| Entity | Adapter override | KC call site(s) `isEnabled` fires on | Quarantine cache primitive | Strip vs refuse |
+|--------|------------------|--------------------------------------|----------------------------|------------------|
+| User | `IgaUserAdapter.isEnabled()` (`:1184-1203`) | `TokenManager:193,267`; `AuthorizationCodeGrantType:121`; `JWTAuthorizationGrantType:114`; `DeviceGrantType:313`; `CibaGrantType:234`; `AbstractTokenExchangeProvider:407`; resource-owner password & browser flows via authenticator-flow | `IgaQuarantineCache.isUserUnsignedWithRoles` (direct + role fan-out, batched IN-clause) | HARD refuse |
+| Client | `IgaClientAdapter.isEnabled()` (`:634-649`) | `ClientIdAndSecretAuthenticator:114`; `AbstractJWTClientValidator:124`; `AccessTokenIntrospectionProvider:267` | `IgaQuarantineCache.isClientUnsigned` (single PK probe) | HARD refuse |
+| Role (held by user) | folded into `IgaUserAdapter.isEnabled` via the role fan-out branch of `IgaQuarantineCache.isUserUnsignedWithRoles` | (user's `isEnabled` checkpoints — see User row) | batched IN-clause: `SELECT u.entityId FROM IgaUnsignedEntityEntity u WHERE u.realmId=:r AND u.entityType='ROLE' AND u.entityId IN :ids` | HARD refuse on the user (not a silent role strip) |
+| Group | `IgaUserAdapter.getGroupsStream()` filter (`:1234-1263`) | OIDC + SAML `GroupMembershipMapper`; `TokenManager`; admin REST reads (kept visible via StackWalker bypass) | `IgaQuarantineCache.isGroupUnsigned` (single PK probe) | SILENT strip from token mapping (admin reads keep the group visible) |
+| Client scope | `IgaClientScopeAdapter.getProtocolMappersStream()` (`:724-743`) | `TokenManager` / `OIDCLoginProtocol` token-mapping path; any caller resolving a scope's mappers | `IgaQuarantineCache.isClientScopeUnsigned` (single PK probe) | SILENT strip (returns `Stream.empty()`) |
+
+KC source-line references come from the comment headers in each
+adapter file (cross-checked against `keycloak-services` 26.5.5 at the
+time the hooks were written). When a new KC release changes these
+line numbers, update the comments — they are the only place those
+numbers live.
+
+### The `IGA_REPLAY_ACTIVE` gate (and why every new seam must honour it)
+
+`IgaQuarantineCache.isReplayActive(session)` short-circuits every
+public method to `false` ("not unsigned") when the session attribute
+`IGA_REPLAY_ACTIVE` equals `"true"`. The same gate exists on every
+Phase 1–5 capture seam (so commit-time replay doesn't get re-captured).
+For Phase 6 it has a second purpose: **ADOPT replay needs to read the
+entity it is about to attest.** Without the gate the quarantine would
+refuse the replay's own model lookup. `IgaReplayExtension.tryReplay`
+sets the attribute around `replayAdopt` (`:113-118`); the toggle
+handler sets it around its own `isIGAEnabled` attribute write
+(`TideAdminCompatResource.writeIgaAttributeDirect`, `:313-325`) so the
+toggle itself is not captured as a `SET_REALM_ATTRIBUTE` CR.
+
+> **Rule.** If you add a new quarantine seam (new entity type, new KC
+> checkpoint), the first line of the seam must be:
+>
+> ```java
+> if ("true".equals(session.getAttribute("IGA_REPLAY_ACTIVE"))) {
+>     return /* not unsigned */;
+> }
+> ```
+>
+> Or — preferably — route through `IgaQuarantineCache` which already
+> implements the gate.
+
+### Cache-eviction gotchas (the painful Phase 6c lessons)
+
+Keycloak's caches snapshot `isEnabled` and adapter state at cache-load
+time. The Phase 1–5 capture seams never had to worry about this —
+they only fire at admin-write time, which already invalidates the
+relevant cache entry via KC's own machinery. **Phase 6's quarantine
+hooks fire at *read* time, which is exactly where the cache short-circuits
+the adapter override.** Three lessons came out of this:
+
+#### Lesson 7: KC's `UserCacheSession` returns a `CachedUser`-backed adapter whose `isEnabled()` reads the cache snapshot, NOT the IGA adapter
+
+Receipt: `keycloak-model-infinispan` `UserAdapter.java:166-168`; the
+adapter is built from a `CachedUser` whose `isEnabled` field was set
+at cache-load time, before the IGA quarantine could refuse. A user
+loaded into the cache BEFORE the OFF→ON toggle keeps returning
+`enabled=true` after the toggle even though `IgaUserAdapter.isEnabled`
+would refuse.
+
+**Fix**: the toggle handler explicitly evicts the realm's user cache
+after the OFF→ON scan (and symmetrically on ON→OFF):
+`UserStorageUtil.userCache(session).evict(realm)`
+(`TideAdminCompatResource.evictRealmUserCache`,
+`TideAdminCompatResource.java:179`). The ADOPT replay extension
+additionally per-evicts the just-attested user
+(`IgaReplayExtension.evictCacheForAdopt`, USER branch).
+
+ADOPT_ROLE and ADOPT_GROUP **cannot** per-evict the users they unblock
+(KC's cache API offers no role→user / group→user reverse index that's
+cheaper than walking every member). They fall back to the same
+realm-wide user-cache eviction the toggle uses
+(`IgaReplayExtension.evictRealmUserCacheFallback`,
+`IgaReplayExtension.java:362-378`).
+
+#### Lesson 8: KC's `RealmCacheSession` does the same thing for client / role / group / scope adapters
+
+Receipt: `keycloak-model-infinispan` `RealmCacheSession.java:1170-1192,
+1215-1248`; `ClientAdapter.isEnabled()` returns `cached.isEnabled()`
+(`ClientAdapter.java:150-152`) rather than delegating. A confidential
+client loaded pre-toggle keeps granting `client_credentials` post-toggle.
+
+**Fix**: `evictRealmCache` in `TideAdminCompatResource`
+(`:514-626`) walks every client, every realm-role, every client-role,
+every group, every client-scope and calls
+`CacheRealmProvider.registerClientInvalidation` /
+`registerRoleInvalidation` / `registerGroupInvalidation` /
+`registerClientScopeInvalidation` per-entity. Per-entity is mandatory:
+`registerRealmInvalidation` does NOT cascade to per-entity entries.
+
+The ADOPT replay extension does the same per-attested-entity in
+`IgaReplayExtension.evictCacheForAdopt` (CLIENT / ROLE / GROUP /
+CLIENT_SCOPE branches).
+
+#### Lesson 9: the toggle's OWN `realm.setAttribute("isIGAEnabled", ...)` write must bypass IGA capture
+
+Receipt: `IgaRealmAdapter.setAttribute` intercepts every realm-attribute
+write when `isIgaActive()`; routing the toggle attribute through that
+interceptor would create a `SET_REALM_ATTRIBUTE` CR and leave the
+realm in a lying state ("enabled=false" in the response while
+`isIGAEnabled` remains `"true"` pending CR approval).
+
+**Fix**: the toggle handler sets `IGA_REPLAY_ACTIVE=true` around its
+own `realm.setAttribute(IGA_ATTRIBUTE, ...)` call, in a try/finally
+that restores the prior value
+(`TideAdminCompatResource.writeIgaAttributeDirect`,
+`TideAdminCompatResource.java:313-325`). The try/finally is mandatory
+— a lingering `IGA_REPLAY_ACTIVE` would silently disable ALL
+subsequent IGA capture for the rest of the request, including the
+scan/cancel follow-ups.
+
+#### Lesson 10: `IgaClientScopeAdapter.getProtocolMappersStream` must HARD-bypass the quarantine cache when `captureMode=true`
+
+Receipt: `IgaClientScopeAdapter.java:685-722` (the comment header
+explains in detail). `RepresentationToModel.createClientScope` (KC
+26.5.5 `RepresentationToModel.java:724`) calls
+`clientScope.getProtocolMappersStream().collect(...).forEach(removeProtocolMapper)`
+STRICTLY AFTER `setName`/`setDescription`/`setProtocol` and STRICTLY
+BEFORE the rep's `addProtocolMapper` loop. At that point the
+capture-mode terminal-emit predicate
+(`captureMode && !captureEmitted && nameObserved && !importDeferred`)
+is true; consulting the quarantine cache would call `scope.getId()`,
+which routes through this adapter's `getId()` override and triggers
+the terminal-EMIT seam mid-`createClientScope`. The CR is written,
+the request tx is marked rollback-only, and the rep ends up captured
+with ONLY `setName`/`setDescription`/`setProtocol` — the
+addProtocolMapper / setAttribute setters never fire.
+
+**Fix**: `if (captureMode) return super.getProtocolMappersStream();`
+as the first line of the override. In capture mode no sidecar row
+exists yet (the row is only written on ADOPT, never on
+`CREATE_CLIENT_SCOPE`), so the quarantine check is structurally
+unnecessary and consulting it is positively harmful.
+
+> **Generalisation.** Any future quarantine seam that KC's own
+> create/update flow calls *during the build of the capture-mode
+> scratch entity* must hard-bypass the cache in capture mode. The cache
+> consults `entity.getId()`, which routes through the adapter override,
+> which can re-enter the terminal seam. If your terminal seam can be
+> reached from any KC builder call that the quarantine seam might
+> trigger, gate the quarantine on `captureMode == false` first.
+
+### Admin-context discriminator: StackWalker, not session attribute
+
+`IgaUserAdapter.getGroupsStream()` must strip unsigned groups for the
+token-mapping path but **must NOT strip them for admin REST reads** —
+otherwise the operator who is supposed to ADOPT the group can no
+longer see it. The discriminator is
+`IgaUserAdapter.isCalledFromAdminRestResource()`
+(`IgaUserAdapter.java:1289-1300`):
+
+```java
+private static boolean isCalledFromAdminRestResource() {
+    return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
+            .walk(frames -> frames.anyMatch(f -> {
+                String cn = f.getDeclaringClass().getName();
+                return cn.startsWith("org.keycloak.services.resources.admin.");
+            }));
+}
+```
+
+> **Security-critical: do not replace this with a session attribute.**
+> A malicious caller could set an arbitrary session attribute before
+> issuing a token-issuance request and trick the gate into not
+> stripping. The StackWalker is immune because the discriminator IS the
+> call site itself — token-mapping callers
+> (`OIDCLoginProtocol.GroupMembershipMapper`, `TokenManager`,
+> `AccountRestService`) have NO frame under
+> `org.keycloak.services.resources.admin` on the stack. This is the
+> same threat model that drives `IgaUserAdapter`'s create-time
+> terminal-seam StackWalker.
+
+When the predicate returns `true`, the adapter still emits a
+one-shot-per-session WARN log line per visible-but-unsigned group, so
+the unsigned membership is surfaced for operator triage.
+
+### ADOPT_* gate bypass mechanism
+
+`IgaScopeResolver.requireApprover` and `resolveThreshold` each have an
+**action-type-aware overload** (`IgaScopeResolver.java:213-220` and
+`:270-277`) that short-circuits to no-op / `1` when
+`IgaReplayExtension.isAdoptAction(actionType)` returns `true`. The
+deprecated zero-CR overloads remain for any caller that doesn't have
+CR context.
+
+**Why the bypass is in the resolver, not the endpoint:** every code path
+that enforces the gate (per-CR authorize, per-CR commit, bulk-authorize
+loop, list-representation enrichment) calls the resolver. Centralising
+the bypass in one place — and routing both gates through the single
+`isAdoptAction` predicate — means a new ADOPT action type is added in
+exactly one place (`IgaReplayExtension.isAdoptAction`).
+
+The bypass logs one INFO line per (request, CR, gate) via
+`logAdoptBypassOnce` (`IgaScopeResolver.java:308-315`), deduped through
+a session attribute so a single request that hits both gates twice
+(resolve-then-threshold, list-enrichment, etc.) only logs once.
+
+### Test-harness self-heal pattern
+
+When an E2E spec creates entities BEFORE enabling IGA and then needs to
+authenticate as one of those entities AFTER enabling IGA, the Phase 6b
+toggle-on adopt scan will quarantine the entity. The spec must commit
+the entity's ADOPT_USER (plus any ADOPT_ROLE for the user's
+realm/client-role mappings) before the direct-grant request, or the
+quarantine refuses with `400 invalid_grant`.
+
+Helpers in `e2e/lib/kc.ts`:
+
+- `userTokenFor(request, realm, username, password)` (`kc.ts:1106-1247`):
+  if IGA is on and ADOPT_USER for the user is PENDING, master-admin
+  authorize+commit it (plus every PENDING ADOPT_ROLE for a role the user
+  holds), then run the direct-grant. Returns the access token string.
+- `directGrantTokenForClient(...)` in
+  `e2e/tests/phase6c-quarantine.spec.ts:153`: same pattern but targets
+  a specific client and self-heals the matching `ADOPT_CLIENT` first.
+
+When adding a new ADOPT-able type, mirror this pattern: detect the
+pending ADOPT_X for the test's target entity, master-admin authorize +
+commit it, then drive the operation that would otherwise be quarantined.
+
+The master-admin shortcut works because IGA is permanently disabled on
+the `master` realm (`IgaChangeRequestService.isIgaEnabled` returns
+`false` when the realm name is `master`), and a master-admin has
+`manage-realm` on every realm via the cross-realm admin scope. Test
+specs that don't have access to a master-admin token must instead
+provision the test realm with enough admins to clear the queue under
+normal `manage-realm` rules — but at that point the spec is
+exercising more than just the change under test.
+
+---
+
+## Recipe: add a new ADOPT-able entity type
+
+Use the five Phase 6b types as worked examples
+(USER / ROLE / GROUP / CLIENT / CLIENT_SCOPE).
+
+**Procedure** (each step references the exact file + concrete change
+shape):
+
+1. **Add the action type + entity type to
+   `IgaReplayExtension`.** Define
+   `ACTION_ADOPT_<TYPE> = "ADOPT_<TYPE>"` and
+   `ENTITY_TYPE_<TYPE> = "<TYPE>"` constants
+   (`IgaReplayExtension.java:62-72`). Extend `isAdoptAction(...)` to
+   recognise the new action string (`:91-98`) — this is the single
+   source of truth used by both the resolver bypass and the
+   resume-from-CANCELLED lane in `IgaAdminResource`.
+
+2. **Add the per-type scanner to `IgaUnsignedRowScanner`**: a JPQL
+   projection over the entity table's
+   `WHERE realmId = ?1 AND attestation IS NULL` rows. Mirror
+   `usersWithNames` / `rolesWithNames` etc. Return rows in DB
+   insertion order; the scanner caller is the only place per-type
+   counting happens (so the projection's row order does not matter
+   for correctness, only for deterministic logs).
+
+3. **Add default-skip rules to `IgaSystemEntityFilter`.** Identify
+   the new type's Keycloak built-ins (study
+   `RepresentationToModel.getBuiltinClients` or the type's protocol
+   factory for KC's auto-created defaults). Extend the
+   `BUILTIN_*` / `DEFAULT_*_NAMES` constant sets, then add a new
+   branch to `shouldSkip` for the type. Distinguish hard-pinned skips
+   (the realm composite — never quarantine) from soft skips
+   (`iga.adopt.includeSystem=true` opt-out).
+
+4. **Add the per-type processor to `IgaAdoptScan`.** Add a new
+   `for (InfoRow row : scanner.<type>sWithNames(realm.getId())) { processOne(...); }`
+   loop in `scan(...)`. Initialise the per-type entry in the `created`
+   counter map (`IgaAdoptScan.java:257-262`). Add an entry to the
+   per-type `committedAdoptByType` and `pendingCreateByType` skip-set
+   maps (`:226-253`).
+
+5. **Add the per-type cache eviction to
+   `IgaReplayExtension.evictCacheForAdopt`.** Map the new
+   `ACTION_ADOPT_<TYPE>` to the appropriate per-entity invalidation:
+   `UserCache.evict(realm, user)` for user-shaped types,
+   `CacheRealmProvider.register<X>Invalidation` for realm-cached
+   types. If the new type fans out to users (like role or group),
+   call `evictRealmUserCacheFallback` after the per-entity invalidation
+   so user-cache snapshots are refreshed.
+
+6. **Add the per-type stamp JPQL to
+   `IgaReplayExtension.stampJpqlFor`** (`:433-447`):
+   `"UPDATE <Entity>Entity e SET e.attestation = :sig WHERE e.id = :id AND e.attestation IS NULL"`.
+   Requires an `attestation` column on the entity's JPA mapping.
+
+7. **Add the per-type existence check to
+   `IgaReplayExtension.assertEntityExists`** (`:390-425`). Use KC's
+   model API (`session.<type>s().get<Type>ById`) rather than raw JPA
+   so user-storage federation / cache layers are honoured.
+
+8. **Add the per-type quarantine check to `IgaQuarantineCache`.**
+   New `is<Type>Unsigned(session, realm, model)` method mirroring
+   `isClientUnsigned` (single PK probe + per-request memoisation under
+   `ATTR_PREFIX_<TYPE>`). Or, for a type that needs role-style
+   fan-out, mirror `isUserUnsignedWithRoles`.
+
+9. **Add the per-type adapter override** in the relevant
+   `Iga<Type>Adapter`. Decide HARD refuse vs SILENT strip per the
+   Phase 6c brief (refer to the
+   [per-type quarantine hook table](#per-type-quarantine-hook-table)):
+
+   - HARD refuse → override `isEnabled()` to defer to `super` first,
+     then return `false` when the quarantine cache says unsigned.
+   - SILENT strip → override the specific stream/getter the
+     token-mapping path consults (e.g. `getProtocolMappersStream`,
+     `getGroupsStream`), filter out unsigned entities.
+   - If the type has NO KC checkpoint that would surface the
+     quarantine, **document why** rather than skipping the override.
+     Then the type's adoption is purely audit (the ADOPT must commit
+     for the entity to lose its sidecar row, but no operation against
+     the entity is blocked in the meantime).
+
+10. **If the adapter has a `captureMode` flag**, the quarantine
+    override MUST hard-bypass in capture mode — see
+    [Lesson 10](#lesson-10-igaclientscopeadaptergetprotocolmappersstream-must-hard-bypass-the-quarantine-cache-when-capturemodetrue).
+    Test by capturing a `CREATE_<TYPE>` while IGA is on and
+    confirming the captured `REP_JSON` is complete.
+
+11. **Extend the test harness self-heal** (`e2e/lib/kc.ts`
+    `userTokenFor` and equivalent) to recognise the new ADOPT_<TYPE>
+    as a blocker for the operation the new helper drives. Add an E2E
+    spec covering: toggle-on quarantines the type, ADOPT commits
+    un-quarantine the type, toggle-off cancels pending ADOPTs of the
+    type.
+
+12. **Verify dispatcher byte-unchanged** —
+    `IgaReplayDispatcher.java` is NOT touched by this recipe (the
+    ADOPT lane lives in `IgaReplayExtension`, routed BEFORE the
+    dispatcher's switch). Confirm with the standard check (see
+    [Git hygiene checklist](#git-hygiene-and-contribution-checklist)).
+
+13. **Cross-link the operator doc.** Add a row to the per-type
+    quarantine table in
+    [`IGA.md` — Quarantine semantics](IGA.md#quarantine-semantics-per-entity-type)
+    so operators know what the new type does under quarantine.
+
