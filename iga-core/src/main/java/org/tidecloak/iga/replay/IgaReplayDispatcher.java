@@ -694,6 +694,25 @@ public class IgaReplayDispatcher {
                     : createInvitationLink(session, realm, organization, user, invitation);
             invitation.setInviteLink(link);
 
+            // Best-effort e-mail send. The invitation row is already persisted
+            // by invitationManager.create(...) above (JpaInvitationManager.create
+            // does em.persist + flush at end of the commit tx), and the invite
+            // link is stored on the invitation entity, so the invitee can be
+            // notified out-of-band (admin UI / resend) even if SMTP is down.
+            //
+            // Unlike KC's request-time OrganizationInvitationResource.sendInvitation,
+            // we are running POST-approval inside an IGA commit. The original
+            // requester is long gone — there is no operator to surface the
+            // SMTP error to via an HTTP response. Failing the commit would
+            // discard an already-approved governance decision over an
+            // infrastructure problem (SMTP down / misconfigured), and the
+            // surrounding transaction would roll back the persisted invitation
+            // row, leaving the system in a state inconsistent with the
+            // approved CR. So we log at WARN and return commit success; the
+            // CR is marked APPROVED and the invitation persists. Admins can
+            // re-trigger e-mail via the standard resend endpoint once SMTP is
+            // restored (which itself flows through ORG_RESEND_INVITE governance
+            // and lands back in this same replay path).
             try {
                 long expMinutes = java.util.concurrent.TimeUnit.SECONDS.toMinutes(
                         realm.getActionTokenGeneratedByAdminLifespan());
@@ -702,9 +721,11 @@ public class IgaReplayDispatcher {
                         .setUser(user)
                         .sendOrgInviteEmail(organization, link, expMinutes);
             } catch (org.keycloak.email.EmailException e) {
-                throw new RuntimeException(
-                        "ORG_INVITE_MEMBER replay: failed to send invite e-mail (org=" + orgId
-                                + ", email=" + email + ")", e);
+                log.warnf(e,
+                        "IGA replay ORG_INVITE_MEMBER: invitation persisted but e-mail send failed"
+                                + " (org=%s, email=%s, reason=%s) — invite link is stored on the"
+                                + " invitation entity; admins can resend once SMTP is configured.",
+                        orgId, email, e.getMessage());
             }
         }
     }
