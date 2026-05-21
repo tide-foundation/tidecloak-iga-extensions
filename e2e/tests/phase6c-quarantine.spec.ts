@@ -128,6 +128,75 @@ async function clientCredentialsToken(
   return { http: res.status(), body: await safeJson(res) };
 }
 
+/**
+ * Direct-grant (Resource Owner Password) against a specific confidential
+ * client. Unlike {@link directGrantToken} (which targets `admin-cli`), this
+ * lets us pick a client we control — important because admin-cli in this
+ * Tide deployment carries `client.use.lightweight.access.token.enabled=true`,
+ * and KC 24+ lightweight-token semantics suppress the stock
+ * `oidc-usermodel-realm-role-mapper`, so admin-cli direct-grant tokens NEVER
+ * carry `realm_access.roles`. Asserting role membership requires a client
+ * with full-scope and no lightweight-token attribute.
+ */
+async function directGrantTokenForClient(
+  request: APIRequestContext,
+  realm: string,
+  clientId: string,
+  clientSecret: string,
+  username: string,
+  password: string,
+): Promise<{ http: number; body: any }> {
+  const { baseUrl } = kcEnv();
+  const res = await request.post(
+    `${baseUrl}/realms/${realm}/protocol/openid-connect/token`,
+    {
+      form: {
+        grant_type: 'password',
+        client_id: clientId,
+        client_secret: clientSecret,
+        username,
+        password,
+      },
+    },
+  );
+  return { http: res.status(), body: await safeJson(res) };
+}
+
+/**
+ * Create a confidential, full-scope, direct-grant-enabled client suitable
+ * for asserting `realm_access.roles` claim contents. Returns the secret.
+ *
+ * Deliberately omits the `client.use.lightweight.access.token.enabled`
+ * attribute so the stock `oidc-usermodel-realm-role-mapper` on the `roles`
+ * client-scope fires.
+ */
+async function createConfidentialDirectGrantClient(
+  request: APIRequestContext,
+  realm: string,
+  clientId: string,
+  secret: string,
+): Promise<void> {
+  const res = await kcFetch(request, `/admin/realms/${realm}/clients`, {
+    method: 'POST',
+    json: {
+      clientId,
+      enabled: true,
+      publicClient: false,
+      fullScopeAllowed: true,
+      directAccessGrantsEnabled: true,
+      standardFlowEnabled: false,
+      serviceAccountsEnabled: false,
+      secret,
+      clientAuthenticatorType: 'client-secret',
+    },
+  });
+  if (res.status() !== 201) {
+    throw new Error(
+      `createConfidentialDirectGrantClient(${clientId}) expected 201, got ${res.status()}: ${await res.text()}`,
+    );
+  }
+}
+
 /** Decode the access_token JWT payload (no signature verification). */
 function decodeJwtPayload(token: string): Record<string, unknown> {
   const parts = token.split('.');
@@ -342,10 +411,42 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
     ]);
     expect(assignR2.status(), 'assign r2 to u2 IGA-off').toBe(204);
 
-    // Confirm pre-IGA: direct-grant works.
+    // Create a dedicated confidential, full-scope, direct-grant-enabled
+    // client for asserting `realm_access.roles` contents. We cannot use
+    // admin-cli here: it carries `client.use.lightweight.access.token.enabled`
+    // in this deployment and KC 24+ lightweight-token semantics suppress the
+    // stock realm-role mapper, so admin-cli direct-grant tokens never carry
+    // `realm_access.roles` regardless of role mappings or IGA state.
+    const roleGrantClientId = 'phase6c-role-grant-client';
+    const roleGrantClientSecret = 'phase6c-role-grant-secret';
+    await createConfidentialDirectGrantClient(
+      request,
+      REALM_ROLE,
+      roleGrantClientId,
+      roleGrantClientSecret,
+    );
+
+    // Confirm pre-IGA: direct-grant works AND the token already carries r2
+    // in realm_access.roles. This locks the baseline so any future regression
+    // (e.g. the lightweight-token trap) is caught immediately, not silently
+    // masked by an http-only assertion.
+    const preIgaTok = await directGrantTokenForClient(
+      request,
+      REALM_ROLE,
+      roleGrantClientId,
+      roleGrantClientSecret,
+      'usr2',
+      'pw-u2',
+    );
+    expect(preIgaTok.http, 'pre-IGA direct-grant (role-grant-client)').toBe(200);
+    expect(preIgaTok.body?.access_token).toBeTruthy();
+    const preIgaClaims = decodeJwtPayload(preIgaTok.body.access_token as string);
+    const preIgaRoles =
+      ((preIgaClaims as any).realm_access?.roles as string[]) || [];
     expect(
-      (await directGrantToken(request, REALM_ROLE, 'usr2', 'pw-u2')).http,
-    ).toBe(200);
+      preIgaRoles.includes('r2'),
+      `pre-IGA token MUST carry r2 in realm_access.roles — if this fails the test client is misconfigured (likely a lightweight-token attribute is suppressing the role mapper) and downstream assertions are meaningless. claims=${JSON.stringify(preIgaClaims)}`,
+    ).toBe(true);
 
     await enableIga(request, REALM_ROLE);
     const adoptU2 = await waitForAdoptCr(
@@ -382,7 +483,16 @@ test.describe('IGA Phase 6c: quarantine hooks block unsigned entities', () => {
     const acR2 = await authorizeAndCommit(request, REALM_ROLE, adoptR2);
     expect(acR2.commit.http).toBe(200);
 
-    const u2After = await directGrantToken(request, REALM_ROLE, 'usr2', 'pw-u2');
+    // Use the same dedicated confidential client (NOT admin-cli) so the
+    // `realm_access.roles` claim is actually populated — see preamble above.
+    const u2After = await directGrantTokenForClient(
+      request,
+      REALM_ROLE,
+      roleGrantClientId,
+      roleGrantClientSecret,
+      'usr2',
+      'pw-u2',
+    );
     expect(u2After.http, 'post-ADOPT_ROLE u2 token').toBe(200);
     expect(u2After.body?.access_token).toBeTruthy();
     const u2Claims = decodeJwtPayload(u2After.body.access_token as string);
