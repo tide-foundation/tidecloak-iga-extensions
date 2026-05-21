@@ -28,12 +28,31 @@ import org.keycloak.organization.jpa.JpaOrganizationProviderFactory;
  * {@code model/infinispan/.../organization/InfinispanOrganizationProviderFactory.java:80-82}).
  * The original {@code order() == 2} therefore lost to the Infinispan cache
  * factory and the IGA wrapper was never instantiated. Bumping to {@code 20}
- * wins. Trade-off: this replaces (not wraps) the Infinispan cache layer for
- * organizations — same trade-off all other Iga* providers make. The
- * Infinispan factory's {@code postInit} (idp/user-removed event listeners) is
- * still registered because {@code postInit} runs on every factory regardless
- * of which one is selected as the default
- * ({@code DefaultKeycloakSessionFactory#initializeProviders}).
+ * wins.
+ *
+ * <h2>Phase 7f architectural fix — wrap the cache, don't replace it</h2>
+ * Until Phase 7f the IGA provider class {@code extends JpaOrganizationProvider}
+ * directly, so winning {@code order()==20} also bypassed the Infinispan cache
+ * layer entirely. Cache invalidations registered by KC's own
+ * {@code InfinispanOrganizationProviderFactory.postInit} listeners
+ * ({@code IdentityProviderUpdatedEvent}/{@code IdentityProviderRemovedEvent}/
+ * {@code UserPreRemovedEvent}) had no reader and stale reads could leak after
+ * IGA-mediated mutations — the per-org explicit eviction loop in
+ * {@code TideAdminCompatResource.evictRealmCache} was the Phase 7b/7c/7d
+ * workaround. Phase 7f re-architects {@link IgaOrganizationProvider} to
+ * {@code extends InfinispanOrganizationProvider}, so the layering is now
+ * IGA (top) → Infinispan cache (middle, via {@code super} calls) → JPA (bottom,
+ * resolved by Infinispan's {@code getDelegate()} via
+ * {@code session.getProvider(OrganizationProvider.class, "jpa")}). The factory
+ * code does not change — it's still {@code order()==20}, still delegates
+ * lifecycle to a {@code JpaOrganizationProviderFactory}. The Infinispan factory
+ * is still in the SPI registry and its {@code postInit} listeners still fire
+ * (see {@code DefaultKeycloakSessionFactory#initializeProviders}); its
+ * listeners resolve {@code session.getProvider(OrganizationProvider.class,
+ * "infinispan")} which sees a fresh {@link
+ * org.keycloak.models.cache.infinispan.organization.InfinispanOrganizationProvider}
+ * sharing the same {@code RealmCacheSession} as our subclass instance — so the
+ * invalidations land on the same cache pane we read through.
  */
 public class IgaOrganizationProviderFactory implements OrganizationProviderFactory {
 
