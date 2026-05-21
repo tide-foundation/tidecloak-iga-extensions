@@ -35,6 +35,7 @@ import {
   safeJson,
   kcFetch,
 } from '../lib/kc';
+import { kcEnv } from '../lib/env';
 
 /**
  * Tide-network login-row visualizer (single test, no production-code changes).
@@ -69,6 +70,7 @@ const REALM = 'iga-tide-row-viz';
 const CLIENT_ID_HUMAN = 'tide-viz-client';
 const CLIENT_SECRET = 'tide-viz-secret';
 const USER_NAME = 'alice';
+const USER_PASSWORD = 'tide-viz-alice-pw';
 
 // Roles
 const REALM_ROLES = ['viz-realm-admin', 'viz-realm-editor', 'viz-realm-viewer'];
@@ -239,7 +241,18 @@ interface Bundle {
     name: string;
     assignmentKind: 'default' | 'optional';
     attestation: string;
+    producedClaim?: { name: string; value: unknown } | null;
   }>;
+  // Decoded payloads of the actual access + id tokens KC just issued for
+  // (alice, tide-viz-client). The Tide network needs to validate what is
+  // actually being signed, not just the relational graph — so we ship the
+  // resolved claim values alongside the entities + attestations. Optional
+  // because the "set-attested WITHOUT claims" variant is kept for direct
+  // size comparison against the "WITH claims" variant.
+  tokenClaims?: {
+    access: Record<string, unknown>;
+    id: Record<string, unknown>;
+  };
   // Set-attested relationships (interpretation B): one CR commit binds the
   // SET of rows it stamped. Groups are keyed by (attestation_string, kind);
   // empty-attestation rows collapse into a single sentinel group per kind
@@ -412,6 +425,50 @@ function groupEdgesByAttestation(
       ? { ...g, note: 'no IGA capture — built-in entities' }
       : g,
   );
+}
+
+/**
+ * Decode the payload of a compact-serialised JWT (header.payload.signature).
+ * Inline because we only need it twice and don't want a new npm dep. The
+ * payload segment is base64url; Node's Buffer accepts 'base64url' since 16.
+ */
+function decodeJwtPayload(jwt: string): Record<string, unknown> {
+  const parts = jwt.split('.');
+  if (parts.length < 2) {
+    throw new Error(`decodeJwtPayload: not a JWT (parts=${parts.length})`);
+  }
+  const json = Buffer.from(parts[1], 'base64url').toString('utf8');
+  return JSON.parse(json) as Record<string, unknown>;
+}
+
+/**
+ * Best-effort correlation from a protocol-mapper's KC config to the claim
+ * name+value it produced in the issued token. Returns the resolved claim
+ * (lookup against `claimsByName`) or null when the mapper config has a
+ * `claim.name` but the token didn't carry it (mapper filtered out) or when
+ * the mapper has no `claim.name` at all (e.g. allowed-origins / scope /
+ * audience-resolve mappers that don't emit a single named claim).
+ *
+ * `mapperConfigRaw` is the raw `config` blob KC stores in `protocol_mapper`
+ * (or the rendered map from /protocol-mappers/models GET) — both expose
+ * `claim.name` for mappers that emit one.
+ */
+function correlateProducedClaim(
+  mapperConfigRaw: Record<string, unknown> | null | undefined,
+  claimsByName: Record<string, unknown>,
+): { name: string; value: unknown } | null {
+  if (!mapperConfigRaw) return null;
+  // KC stores configs as a flat string→string map. The naming convention is
+  // dotted ("claim.name", "user.attribute"); we read whichever is present.
+  const claimName =
+    (mapperConfigRaw['claim.name'] as string | undefined) ??
+    (mapperConfigRaw['userinfo.token.claim.name'] as string | undefined) ??
+    undefined;
+  if (!claimName) return null;
+  if (Object.prototype.hasOwnProperty.call(claimsByName, claimName)) {
+    return { name: claimName, value: claimsByName[claimName] };
+  }
+  return null;
 }
 
 test.describe('Tide-network login-row visualizer', () => {
@@ -732,6 +789,72 @@ test.describe('Tide-network login-row visualizer', () => {
     await drainAllPending(request, REALM);
 
     // -----------------------------------------------------------------------
+    // 7b. Set alice's password (after all alice-touching CRs commit, so the
+    //     quarantine cache lets the direct-grant through) and issue real
+    //     access + id tokens against tide-viz-client. The decoded payloads
+    //     are what KC actually signed; we ship them in the visualizer so the
+    //     human reader can see the resolved claim values (web-origins,
+    //     realm_access.roles, email, etc) alongside the entity attestations.
+    // -----------------------------------------------------------------------
+    const pwRes = await kcFetch(
+      request,
+      `/admin/realms/${REALM}/users/${aliceId}/reset-password`,
+      {
+        method: 'PUT',
+        json: { type: 'password', value: USER_PASSWORD, temporary: false },
+      },
+    );
+    expect(
+      pwRes.status(),
+      `reset alice password expected 204, got ${pwRes.status()}`,
+    ).toBe(204);
+
+    // Fetch the client secret from the admin endpoint (we KNOW it — we set it
+    // on create — but reading via the endpoint mirrors how a real integrator
+    // would discover it, and verifies the secret is in place).
+    const secretRes = await kcFetch(
+      request,
+      `/admin/realms/${REALM}/clients/${cUuid}/client-secret`,
+    );
+    expect(secretRes.status(), 'client-secret GET').toBe(200);
+    const secretBody = await safeJson(secretRes);
+    const tideVizSecret = (secretBody?.value as string) || CLIENT_SECRET;
+    expect(tideVizSecret, 'tide-viz-client secret').toBeTruthy();
+
+    // Direct-grant against tide-viz-client. We need `scope=openid` so KC
+    // emits an id_token alongside the access_token. Use Playwright's request
+    // context with a `form` body — same shape as directGrantToken() in
+    // lib/kc.ts but with the per-client confidential credentials.
+    const { baseUrl } = kcEnv();
+    const tokenRes = await request.post(
+      `${baseUrl}/realms/${REALM}/protocol/openid-connect/token`,
+      {
+        form: {
+          grant_type: 'password',
+          client_id: CLIENT_ID_HUMAN,
+          client_secret: tideVizSecret,
+          username: USER_NAME,
+          password: USER_PASSWORD,
+          scope: 'openid',
+        },
+      },
+    );
+    expect(
+      tokenRes.status(),
+      `tide-viz-client password grant expected 200, got ${tokenRes.status()} ${await tokenRes.text().catch(() => '')}`,
+    ).toBe(200);
+    const tokenBody = (await safeJson(tokenRes)) as {
+      access_token: string;
+      id_token?: string;
+      refresh_token?: string;
+    };
+    expect(tokenBody.access_token, 'access_token present').toBeTruthy();
+    expect(tokenBody.id_token, 'id_token present (scope=openid)').toBeTruthy();
+
+    const accessClaims = decodeJwtPayload(tokenBody.access_token);
+    const idClaims = decodeJwtPayload(tokenBody.id_token as string);
+
+    // -----------------------------------------------------------------------
     // 8. Snapshot assembly — read everything KC's future Tide-mode would
     //    collect for an OIDC token issuance: realm + client + user +
     //    effective-roles (direct + composite + group) + groups + scopes +
@@ -1012,11 +1135,34 @@ test.describe('Tide-network login-row visualizer', () => {
         });
       }
     }
-    // PROTOCOL_MAPPER (mappers on the in-scope client + scopes).
+    // PROTOCOL_MAPPER (mappers on the in-scope client + scopes). We also
+    // pull each mapper's config from protocol_mapper_config so we can
+    // correlate the mapper to the resolved claim it produced in the issued
+    // access token (see correlateProducedClaim — applied later in the
+    // "with claims" bundle variant, not on the base edges).
+    const mapperConfigById = new Map<string, Record<string, string>>();
     {
       const ownerIds = [`'${clientRep.id}'`, ...scopesOut.map((s) => `'${s.id}'`)].join(',');
       const sql = `SELECT id, name, protocol, COALESCE(client_id,''), COALESCE(client_scope_id,''), attestation FROM protocol_mapper WHERE client_id IN (${ownerIds}) OR client_scope_id IN (${ownerIds})`;
       const lines = psql(sql).split('\n').filter(Boolean);
+      // Build a map mapperId -> config (one extra SQL round-trip).
+      const mapperIds = lines.map((l) => l.split('|')[0]);
+      if (mapperIds.length > 0) {
+        const ids = mapperIds.map((m) => `'${m}'`).join(',');
+        const cfgSql = `SELECT protocol_mapper_id, name, value FROM protocol_mapper_config WHERE protocol_mapper_id IN (${ids})`;
+        const cfgLines = psql(cfgSql).split('\n').filter(Boolean);
+        for (const cfgLine of cfgLines) {
+          // Split on FIRST two `|` only — `value` may itself contain `|`.
+          const firstSep = cfgLine.indexOf('|');
+          const secondSep = cfgLine.indexOf('|', firstSep + 1);
+          if (firstSep < 0 || secondSep < 0) continue;
+          const mid = cfgLine.slice(0, firstSep);
+          const cname = cfgLine.slice(firstSep + 1, secondSep);
+          const cval = cfgLine.slice(secondSep + 1);
+          if (!mapperConfigById.has(mid)) mapperConfigById.set(mid, {});
+          mapperConfigById.get(mid)![cname] = cval;
+        }
+      }
       for (const line of lines) {
         const [id, name, protocol, clientOwnerId, scopeOwnerId, att] =
           line.split('|');
@@ -1152,6 +1298,155 @@ test.describe('Tide-network login-row visualizer', () => {
       bundleSimulated,
       contributorsSummary,
     );
+
+    // -----------------------------------------------------------------------
+    // 9b. Third variant: set-attested + REAL tokenClaims. We clone the
+    //     (b) bundle, layer the decoded access + id-token payloads on top
+    //     (placed before attestedRelationships per the visualizer schema),
+    //     and add best-effort producedClaim annotations to clientScopes +
+    //     each PROTOCOL_MAPPER row inside attestedRelationships so the human
+    //     reader can see which mapper config emitted which token claim.
+    // -----------------------------------------------------------------------
+    const bundleRealWithClaims: Bundle = JSON.parse(JSON.stringify(bundleReal));
+
+    // Annotate clientScopes from the per-mapper config (first mapper that
+    // owns the scope and whose claim landed in the access token wins). A
+    // scope with mappers but none whose claim shows up in the token gets
+    // producedClaim:null so the gap is visible. A scope with NO mappers at
+    // all gets no producedClaim field (absence = no correlation possible).
+    {
+      const scopeIdToProduced = new Map<
+        string,
+        { name: string; value: unknown } | null
+      >();
+      for (const edge of edges) {
+        if (edge.kind !== 'PROTOCOL_MAPPER') continue;
+        const ownerScopeId = (edge as any).ownerScopeId as string | null;
+        if (!ownerScopeId) continue;
+        const cfg = mapperConfigById.get((edge as any).id as string) || null;
+        const prod = correlateProducedClaim(cfg, accessClaims);
+        if (prod && !scopeIdToProduced.get(ownerScopeId)) {
+          scopeIdToProduced.set(ownerScopeId, prod);
+        } else if (!scopeIdToProduced.has(ownerScopeId)) {
+          scopeIdToProduced.set(ownerScopeId, null);
+        }
+      }
+      for (const s of bundleRealWithClaims.clientScopes) {
+        if (scopeIdToProduced.has(s.id)) {
+          s.producedClaim = scopeIdToProduced.get(s.id) ?? null;
+        }
+      }
+    }
+
+    // Annotate each PROTOCOL_MAPPER row inside attestedRelationships.applied
+    // with the claim it produced (lookup by mapper id against the config
+    // map + access-token payload).
+    for (const rel of bundleRealWithClaims.attestedRelationships) {
+      if (rel.kind !== 'PROTOCOL_MAPPER') continue;
+      for (const row of rel.applied) {
+        const mid = (row as any).id as string | undefined;
+        if (!mid) continue;
+        const cfg = mapperConfigById.get(mid) || null;
+        const prod = correlateProducedClaim(cfg, accessClaims);
+        if (prod) (row as any).producedClaim = prod;
+      }
+    }
+
+    // Layer tokenClaims into the bundle. Ordered insertion: rebuild the
+    // object so `tokenClaims` sits BEFORE `attestedRelationships` in the
+    // JSON output (matters for the human reader; JSON.stringify follows
+    // insertion order in V8 for string keys).
+    const orderedWithClaims: Bundle = {
+      version: bundleRealWithClaims.version,
+      realm: bundleRealWithClaims.realm,
+      client: bundleRealWithClaims.client,
+      user: bundleRealWithClaims.user,
+      effectiveRoles: bundleRealWithClaims.effectiveRoles,
+      groups: bundleRealWithClaims.groups,
+      clientScopes: bundleRealWithClaims.clientScopes,
+      tokenClaims: { access: accessClaims, id: idClaims },
+      attestedRelationships: bundleRealWithClaims.attestedRelationships,
+    };
+
+    // Print the REAL set-attested + tokenClaims artifact.
+    const sSetRealWithClaims = sizeOf(orderedWithClaims);
+    // eslint-disable-next-line no-console
+    console.log(
+      `\n=== Tide-network login-row (REAL, set-attested + claim values) ===`,
+    );
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify(orderedWithClaims, null, 2));
+    // eslint-disable-next-line no-console
+    console.log(`\n=== Sizes WITH tokenClaims (REAL, set-attested + claim values) ===`);
+    // eslint-disable-next-line no-console
+    console.log(`Pretty JSON:    ${sSetRealWithClaims.pretty} bytes`);
+    // eslint-disable-next-line no-console
+    console.log(`Minified JSON:  ${sSetRealWithClaims.minified} bytes`);
+    // eslint-disable-next-line no-console
+    console.log(`Gzip:           ${sSetRealWithClaims.gzip} bytes`);
+    // eslint-disable-next-line no-console
+    const sSetRealNoClaims = sizeOf(bundleReal);
+    console.log(
+      `Token-claims contribution: ${sSetRealWithClaims.minified - sSetRealNoClaims.minified} bytes minified (+${sSetRealWithClaims.gzip - sSetRealNoClaims.gzip} gzip)`,
+    );
+    // eslint-disable-next-line no-console
+    console.log(`Contributors:   ${contributorsSummary}`);
+
+    // Simulated counterpart: claim values don't change with attestation
+    // simulation — only entity attestation strings get the 88-char
+    // placeholder. So we clone the WithClaims bundle and run the same
+    // attestation substitution.
+    const bundleSimulatedWithClaims: Bundle = JSON.parse(
+      JSON.stringify(orderedWithClaims),
+    );
+    bundleSimulatedWithClaims.realm.attestation = ATTEST_PLACEHOLDER;
+    bundleSimulatedWithClaims.client.attestation = ATTEST_PLACEHOLDER;
+    bundleSimulatedWithClaims.user.attestation = ATTEST_PLACEHOLDER;
+    for (const r of bundleSimulatedWithClaims.effectiveRoles)
+      r.attestation = ATTEST_PLACEHOLDER;
+    for (const g of bundleSimulatedWithClaims.groups)
+      g.attestation = ATTEST_PLACEHOLDER;
+    for (const s of bundleSimulatedWithClaims.clientScopes)
+      s.attestation = ATTEST_PLACEHOLDER;
+    for (const rel of bundleSimulatedWithClaims.attestedRelationships) {
+      if (rel.attestation !== '') rel.attestation = ATTEST_PLACEHOLDER;
+    }
+    const sSetSimWithClaims = sizeOf(bundleSimulatedWithClaims);
+    // eslint-disable-next-line no-console
+    console.log(
+      `\n=== Sizes WITH tokenClaims (SIMULATED Tide-sized, set-attested + claim values) ===`,
+    );
+    // eslint-disable-next-line no-console
+    console.log(`Pretty JSON:    ${sSetSimWithClaims.pretty} bytes`);
+    // eslint-disable-next-line no-console
+    console.log(`Minified JSON:  ${sSetSimWithClaims.minified} bytes`);
+    // eslint-disable-next-line no-console
+    console.log(`Gzip:           ${sSetSimWithClaims.gzip} bytes`);
+    // eslint-disable-next-line no-console
+    const sSetSimNoClaims = sizeOf(bundleSimulated);
+    console.log(
+      `Token-claims contribution: ${sSetSimWithClaims.minified - sSetSimNoClaims.minified} bytes minified (+${sSetSimWithClaims.gzip - sSetSimNoClaims.gzip} gzip)`,
+    );
+    // eslint-disable-next-line no-console
+    console.log(`Contributors:   ${contributorsSummary}`);
+
+    // Light assertions on the new variant.
+    expect(
+      Object.keys(orderedWithClaims).indexOf('tokenClaims'),
+      'tokenClaims placed before attestedRelationships',
+    ).toBeLessThan(Object.keys(orderedWithClaims).indexOf('attestedRelationships'));
+    expect(
+      orderedWithClaims.tokenClaims?.access?.iss,
+      'access.iss present (real KC token)',
+    ).toBeTruthy();
+    expect(
+      orderedWithClaims.tokenClaims?.id?.sub,
+      'id.sub present (real KC id-token)',
+    ).toBeTruthy();
+    expect(
+      (orderedWithClaims.tokenClaims?.access as any)?.preferred_username,
+      'access.preferred_username == alice',
+    ).toBe(USER_NAME);
 
     // -----------------------------------------------------------------------
     // 10. Comparison block — show the byte delta between per-row and set-
