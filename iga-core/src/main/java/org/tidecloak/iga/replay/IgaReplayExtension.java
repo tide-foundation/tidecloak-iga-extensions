@@ -7,11 +7,13 @@ import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.OrganizationModel;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.cache.CacheRealmProvider;
 import org.keycloak.models.cache.UserCache;
+import org.keycloak.organization.OrganizationProvider;
 import org.keycloak.storage.UserStorageUtil;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.services.IgaUnsignedEntityService;
@@ -64,12 +66,25 @@ public final class IgaReplayExtension {
     public static final String ACTION_ADOPT_GROUP = "ADOPT_GROUP";
     public static final String ACTION_ADOPT_CLIENT = "ADOPT_CLIENT";
     public static final String ACTION_ADOPT_CLIENT_SCOPE = "ADOPT_CLIENT_SCOPE";
+    /**
+     * Phase 7b — retroactive ADOPT for KC organizations.
+     *
+     * <p>Sidecar-only governance: orgs reuse the existing
+     * {@code IGA_UNSIGNED_ENTITY} table with {@code entity_type='ORGANIZATION'}.
+     * Unlike the other five entity types, {@code OrganizationEntity} has NO
+     * {@code attestation} column (see {@link IgaReplayDispatcher} line 496-497
+     * for the design choice). Replay therefore performs NO JPQL stamp; the
+     * commit is signalled entirely by the sidecar-row deletion + the CR's
+     * {@code status=APPROVED} transition.</p>
+     */
+    public static final String ACTION_ADOPT_ORGANIZATION = "ADOPT_ORGANIZATION";
 
     public static final String ENTITY_TYPE_USER = "USER";
     public static final String ENTITY_TYPE_ROLE = "ROLE";
     public static final String ENTITY_TYPE_GROUP = "GROUP";
     public static final String ENTITY_TYPE_CLIENT = "CLIENT";
     public static final String ENTITY_TYPE_CLIENT_SCOPE = "CLIENT_SCOPE";
+    public static final String ENTITY_TYPE_ORGANIZATION = "ORGANIZATION";
 
     private IgaReplayExtension() {
     }
@@ -94,7 +109,8 @@ public final class IgaReplayExtension {
                 || ACTION_ADOPT_ROLE.equals(actionType)
                 || ACTION_ADOPT_GROUP.equals(actionType)
                 || ACTION_ADOPT_CLIENT.equals(actionType)
-                || ACTION_ADOPT_CLIENT_SCOPE.equals(actionType);
+                || ACTION_ADOPT_CLIENT_SCOPE.equals(actionType)
+                || ACTION_ADOPT_ORGANIZATION.equals(actionType);
     }
 
     /**
@@ -110,6 +126,7 @@ public final class IgaReplayExtension {
             case ACTION_ADOPT_GROUP:
             case ACTION_ADOPT_CLIENT:
             case ACTION_ADOPT_CLIENT_SCOPE:
+            case ACTION_ADOPT_ORGANIZATION:
                 session.setAttribute("IGA_REPLAY_ACTIVE", "true");
                 try {
                     replayAdopt(session, cr, finalAttestation);
@@ -153,7 +170,15 @@ public final class IgaReplayExtension {
         // Borrowing the per-table idiom from the BASELINE_APPROVAL stamping
         // step (which is being deleted in the same commit; the idiom lives on
         // here as the per-entity ADOPT stamp).
-        if (finalAttestation != null && !finalAttestation.isEmpty()) {
+        //
+        // Phase 7b — ADOPT_ORGANIZATION SKIPS this step: OrganizationEntity
+        // has no `attestation` column (see IgaReplayDispatcher.java:496-497
+        // for the design choice — orgs are governed by the sidecar row alone
+        // because cross-repo schema changes were out of scope). The sidecar
+        // delete in step 4 + the APPROVED status in step 6 are the entire
+        // "signed" post-condition for an org.
+        if (finalAttestation != null && !finalAttestation.isEmpty()
+                && !ACTION_ADOPT_ORGANIZATION.equals(actionType)) {
             String jpql = stampJpqlFor(actionType);
             int updated = em.createQuery(jpql)
                     .setParameter("sig", finalAttestation)
@@ -330,6 +355,46 @@ public final class IgaReplayExtension {
                             entityId, realm.getId());
                     return;
                 }
+                case ACTION_ADOPT_ORGANIZATION: {
+                    // Phase 7b — per-org cache eviction. KC's
+                    // CacheRealmProvider has no public registerOrgInvalidation
+                    // primitive (the InfinispanOrganizationProvider's
+                    // registerOrganizationInvalidation is package-private), but
+                    // InfinispanOrganizationProvider.getById keys the cached
+                    // CachedOrganization on the org id alone
+                    // ({@code realmCache.getCache().get(id, CachedOrganization.class)}
+                    // — KC 26.5.5 InfinispanOrganizationProvider.java:94), and
+                    // {@code registerOrganizationInvalidation} (line 371-372)
+                    // invalidates that key via the public
+                    // {@code CacheRealmProvider.registerInvalidation(id)}
+                    // method. Calling that public method here drops the
+                    // CachedOrganization for this org so the next getById
+                    // re-loads through the IGA provider chain and observes
+                    // the post-ADOPT sidecar absence — i.e. the (future
+                    // Phase 7c) IgaOrganizationModel.isEnabled quarantine
+                    // override sees the just-cleared sidecar on the very next
+                    // request.
+                    //
+                    // We deliberately do NOT iterate the org's domains or
+                    // member-related cache keys here: those are populated by
+                    // CREATE/UPDATE replay paths and not by ADOPT (which does
+                    // not mutate the org). Dropping the primary id-keyed
+                    // entry is sufficient for the per-org isEnabled signal,
+                    // and the auxiliary domain/member entries converge on
+                    // their own as their TTLs expire — matching the
+                    // best-effort policy of every other ADOPT eviction
+                    // branch in this file.
+                    CacheRealmProvider realmCache = session.getProvider(CacheRealmProvider.class);
+                    if (realmCache == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=ORGANIZATION id=%s realm=%s — CacheRealmProvider not installed (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    realmCache.registerInvalidation(entityId);
+                    log.infof("IGA ADOPT cache eviction: type=ORGANIZATION id=%s realm=%s — evicted",
+                            entityId, realm.getId());
+                    return;
+                }
                 default:
                     log.warnf("IGA ADOPT cache eviction: unknown action type %s — no eviction performed",
                             actionType);
@@ -414,6 +479,24 @@ public final class IgaReplayExtension {
             case ACTION_ADOPT_CLIENT_SCOPE: {
                 ClientScopeModel cs = session.clientScopes().getClientScopeById(realm, entityId);
                 exists = cs != null;
+                break;
+            }
+            case ACTION_ADOPT_ORGANIZATION: {
+                // Phase 7b — resolve through KC's OrganizationProvider SPI so
+                // federation / cache layers are honoured (same idiom as the
+                // other ADOPT existence probes). If the OrganizationProvider
+                // factory isn't installed (deployment without the orgs
+                // feature) getProvider returns null — treat as vanished so
+                // the commit endpoint surfaces 404 ENTITY_VANISHED.
+                OrganizationProvider orgs = session.getProvider(OrganizationProvider.class);
+                if (orgs == null) {
+                    log.warnf("ADOPT_ORGANIZATION replay: OrganizationProvider not installed (id=%s realm=%s) — treating as vanished",
+                            entityId, realm.getId());
+                    exists = false;
+                } else {
+                    OrganizationModel o = orgs.getById(entityId);
+                    exists = o != null;
+                }
                 break;
             }
             default:

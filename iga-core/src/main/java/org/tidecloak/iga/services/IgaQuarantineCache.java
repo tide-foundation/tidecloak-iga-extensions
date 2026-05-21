@@ -7,6 +7,7 @@ import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.OrganizationModel;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
@@ -82,6 +83,7 @@ public final class IgaQuarantineCache {
     private static final String ATTR_PREFIX_CLIENT = "IGA_QUARANTINE:client:";
     private static final String ATTR_PREFIX_GROUP = "IGA_QUARANTINE:group:";
     private static final String ATTR_PREFIX_SCOPE = "IGA_QUARANTINE:scope:";
+    private static final String ATTR_PREFIX_ORG = "IGA_QUARANTINE:org:";
 
     private IgaQuarantineCache() {
     }
@@ -322,6 +324,45 @@ public final class IgaQuarantineCache {
         } catch (RuntimeException ex) {
             log.warnf(ex, "isClientScopeUnsigned: lookup failed for scope=%s realm=%s — treating as not-unsigned",
                     scopeId, realm.getId());
+            unsigned = false;
+        }
+        session.setAttribute(attrKey, unsigned ? "true" : "false");
+        return unsigned;
+    }
+
+    // -------------------------------------------------------------------------
+    // Organization quarantine — single PK probe, memoised (Phase 7b
+    // groundwork for Phase 7c).
+    //
+    // Phase 7b doesn't USE this method yet — IgaOrganizationModel.isEnabled
+    // is NOT overridden until Phase 7c — but the lookup primitive lives here
+    // alongside the other four entity types so 7c just needs to call it.
+    // Shape mirrors isClientUnsigned / isGroupUnsigned: gate on
+    // IGA_REPLAY_ACTIVE + isIgaActive(realm) + sidecar PK probe; memoise
+    // per (session, org) under {@code IGA_QUARANTINE:org:<id>}.
+    // -------------------------------------------------------------------------
+
+    public static boolean isOrganizationUnsigned(KeycloakSession session,
+                                                  RealmModel realm,
+                                                  OrganizationModel org) {
+        if (session == null || realm == null || org == null) return false;
+        if (isReplayActive(session)) return false;
+        if (!isIgaActive(realm)) return false;
+        String orgId = org.getId();
+        if (orgId == null) return false;
+        String attrKey = ATTR_PREFIX_ORG + orgId;
+        Object cached = session.getAttribute(attrKey);
+        if (cached instanceof String) {
+            return "true".equals(cached);
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        boolean unsigned;
+        try {
+            unsigned = IgaUnsignedEntityService.isUnsigned(em, realm.getId(),
+                    IgaReplayExtension.ENTITY_TYPE_ORGANIZATION, orgId);
+        } catch (RuntimeException ex) {
+            log.warnf(ex, "isOrganizationUnsigned: lookup failed for org=%s realm=%s — treating as not-unsigned",
+                    orgId, realm.getId());
             unsigned = false;
         }
         session.setAttribute(attrKey, unsigned ? "true" : "false");

@@ -223,34 +223,40 @@ public final class IgaAdoptScan {
 
         // Build per-type "already committed ADOPT" skip sets ONCE at scan
         // start. Uses the IDX_IGA_CR_REALM_ACTION_STATUS index added in 6a.
-        Map<String, Set<String>> committedAdoptByType = Map.of(
-                IgaReplayExtension.ENTITY_TYPE_USER,
-                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_USER, "APPROVED"),
-                IgaReplayExtension.ENTITY_TYPE_ROLE,
-                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_ROLE, "APPROVED"),
-                IgaReplayExtension.ENTITY_TYPE_GROUP,
-                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_GROUP, "APPROVED"),
-                IgaReplayExtension.ENTITY_TYPE_CLIENT,
-                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_CLIENT, "APPROVED"),
-                IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE,
-                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE, "APPROVED")
-        );
+        // Phase 7b — adds ORGANIZATION (Map.of caps at 10 entries so we
+        // switch to a builder-style LinkedHashMap once we have 6 keys).
+        Map<String, Set<String>> committedAdoptByType = new LinkedHashMap<>();
+        committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_USER,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_USER, "APPROVED"));
+        committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_ROLE,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_ROLE, "APPROVED"));
+        committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_GROUP,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_GROUP, "APPROVED"));
+        committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_CLIENT,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_CLIENT, "APPROVED"));
+        committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE, "APPROVED"));
+        committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_ORGANIZATION,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_ORGANIZATION, "APPROVED"));
 
         // Build per-type "pending CREATE_*" race skip sets. CREATE actions
         // are literal strings (no central constants in the IgaReplayExtension
         // surface today — see IgaGroupAdapter / IgaUserProvider / etc).
-        Map<String, Set<String>> pendingCreateByType = Map.of(
-                IgaReplayExtension.ENTITY_TYPE_USER,
-                queryEntityIdsByCr(em, realm.getId(), "CREATE_USER", "PENDING"),
-                IgaReplayExtension.ENTITY_TYPE_ROLE,
-                queryEntityIdsByCr(em, realm.getId(), "CREATE_ROLE", "PENDING"),
-                IgaReplayExtension.ENTITY_TYPE_GROUP,
-                queryEntityIdsByCr(em, realm.getId(), "CREATE_GROUP", "PENDING"),
-                IgaReplayExtension.ENTITY_TYPE_CLIENT,
-                queryEntityIdsByCr(em, realm.getId(), "CREATE_CLIENT", "PENDING"),
-                IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE,
-                queryEntityIdsByCr(em, realm.getId(), "CREATE_CLIENT_SCOPE", "PENDING")
-        );
+        // Phase 7b adds CREATE_ORGANIZATION (the literal action type emitted
+        // by IgaOrganizationModel.setDomains when captureCreate=true).
+        Map<String, Set<String>> pendingCreateByType = new LinkedHashMap<>();
+        pendingCreateByType.put(IgaReplayExtension.ENTITY_TYPE_USER,
+                queryEntityIdsByCr(em, realm.getId(), "CREATE_USER", "PENDING"));
+        pendingCreateByType.put(IgaReplayExtension.ENTITY_TYPE_ROLE,
+                queryEntityIdsByCr(em, realm.getId(), "CREATE_ROLE", "PENDING"));
+        pendingCreateByType.put(IgaReplayExtension.ENTITY_TYPE_GROUP,
+                queryEntityIdsByCr(em, realm.getId(), "CREATE_GROUP", "PENDING"));
+        pendingCreateByType.put(IgaReplayExtension.ENTITY_TYPE_CLIENT,
+                queryEntityIdsByCr(em, realm.getId(), "CREATE_CLIENT", "PENDING"));
+        pendingCreateByType.put(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE,
+                queryEntityIdsByCr(em, realm.getId(), "CREATE_CLIENT_SCOPE", "PENDING"));
+        pendingCreateByType.put(IgaReplayExtension.ENTITY_TYPE_ORGANIZATION,
+                queryEntityIdsByCr(em, realm.getId(), "CREATE_ORGANIZATION", "PENDING"));
 
         // Tallies — per-type CR counts initialized to 0 so the response shape
         // is stable even when nothing was created.
@@ -260,6 +266,7 @@ public final class IgaAdoptScan {
         created.put(IgaReplayExtension.ENTITY_TYPE_GROUP, 0L);
         created.put(IgaReplayExtension.ENTITY_TYPE_CLIENT, 0L);
         created.put(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, 0L);
+        created.put(IgaReplayExtension.ENTITY_TYPE_ORGANIZATION, 0L);
 
         long[] counters = new long[5]; // total, sysSkip, committedSkip, pendingSkip, errors
         long[] alreadyAttestedCounter = new long[1];
@@ -310,6 +317,22 @@ public final class IgaAdoptScan {
         }
         for (IgaUnsignedRowScanner.InfoRow row : scanner.clientScopesWithNames(realm.getId())) {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, row, null,
+                    requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
+                    created, counters, alreadyAttestedCounter);
+        }
+        // Phase 7b — orgs. The scanner enumerates EVERY org in the realm
+        // (no attestation-IS-NULL filter; OrganizationEntity has no such
+        // column — see IgaUnsignedRowScanner.organizationsWithNames). The
+        // committedAdoptByType skip-set is the sole "already governed"
+        // filter; the pendingCreateByType skip-set covers a mid-flight
+        // CREATE_ORGANIZATION CR's target. IgaSystemEntityFilter has no
+        // ORGANIZATION rules today (no built-in/default orgs in stock KC),
+        // so shouldSkip returns false for every entity-type-mismatched
+        // branch — i.e. the filter is a no-op for orgs by design. If KC
+        // ever introduces a default "platform" org we'll add the rule then;
+        // for now an explicit skip would be invented complexity.
+        for (IgaUnsignedRowScanner.InfoRow row : scanner.organizationsWithNames(realm.getId())) {
+            processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_ORGANIZATION, row, null,
                     requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
                     created, counters, alreadyAttestedCounter);
         }

@@ -18,7 +18,9 @@ import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.cache.CacheRealmProvider;
 import org.keycloak.models.cache.UserCache;
+import org.keycloak.models.OrganizationModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.organization.OrganizationProvider;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.keycloak.storage.UserStorageUtil;
 import org.tidecloak.iga.replay.SidecarCapExceededException;
@@ -528,7 +530,7 @@ public class TideAdminCompatResource {
         }
 
         String realmId = realm.getId();
-        int clients = 0, roles = 0, groups = 0, scopes = 0;
+        int clients = 0, roles = 0, groups = 0, scopes = 0, orgs = 0;
 
         // Clients — the immediate Phase 6c CASE 3 fix surface.
         try {
@@ -621,8 +623,42 @@ public class TideAdminCompatResource {
                     realm.getName(), scopes);
         }
 
-        logger.infof("IGA toggle realm-cache eviction: realm=%s — evicted clients=%d roles=%d groups=%d scopes=%d (next client/role/group/scope read will re-load through IGA providers so the quarantine override fires)",
-                realm.getName(), clients, roles, groups, scopes);
+        // Phase 7b — organizations. KC's CacheRealmProvider has no public
+        // registerOrgInvalidation primitive (the InfinispanOrganizationProvider's
+        // registerOrganizationInvalidation is package-private), but the cached
+        // CachedOrganization is keyed on the org id alone
+        // (InfinispanOrganizationProvider.java:94 in KC 26.5.5) and that key
+        // is invalidated via the public CacheRealmProvider.registerInvalidation(id)
+        // call — see the same primitive used in
+        // IgaReplayExtension.evictCacheForAdopt's ADOPT_ORGANIZATION branch.
+        //
+        // Iterate via OrganizationProvider (the SPI surface KC uses everywhere
+        // else); skip silently if the realm doesn't have orgs feature on
+        // (provider returns empty stream) or the provider isn't installed at
+        // all. Best-effort wrapping mirrors the clients/roles/groups/scopes
+        // branches above.
+        try {
+            OrganizationProvider orgProvider = session.getProvider(OrganizationProvider.class);
+            if (orgProvider != null) {
+                for (OrganizationModel org : orgProvider.getAllStream().toList()) {
+                    try {
+                        cache.registerInvalidation(org.getId());
+                        orgs++;
+                    } catch (RuntimeException ex) {
+                        logger.debugf(ex,
+                                "IGA toggle realm-cache eviction: org=%s (id=%s) realm=%s — registerInvalidation failed (continuing).",
+                                org.getName(), org.getId(), realm.getName());
+                    }
+                }
+            }
+        } catch (RuntimeException ex) {
+            logger.warnf(ex,
+                    "IGA toggle realm-cache eviction: realm=%s — organization iteration failed after evicting %d.",
+                    realm.getName(), orgs);
+        }
+
+        logger.infof("IGA toggle realm-cache eviction: realm=%s — evicted clients=%d roles=%d groups=%d scopes=%d orgs=%d (next client/role/group/scope/org read will re-load through IGA providers so the quarantine override fires)",
+                realm.getName(), clients, roles, groups, scopes, orgs);
     }
 
     /**

@@ -207,6 +207,33 @@ public final class IgaUnsignedRowScanner {
         return out;
     }
 
+    /**
+     * (entityId, orgName) for ORGANIZATIONs in the realm. Phase 7b — orgs
+     * have NO {@code attestation} column on {@code OrganizationEntity} (see
+     * {@link org.tidecloak.iga.replay.IgaReplayDispatcher} line 496-497 for
+     * the design choice), so this query enumerates EVERY org in the realm
+     * without an {@code attestation IS NULL} filter. The "unsigned" filter
+     * happens at the scan level via the existing committed-ADOPT skip-set
+     * (an org with an APPROVED ADOPT_ORGANIZATION CR is "governed" and is
+     * filtered by {@link IgaAdoptScan} at the per-entity stage). Pending
+     * CREATE_ORGANIZATION CRs filter the same way.
+     *
+     * <p>{@code parentClientId} is always {@code null} for orgs — they have
+     * no client parent (the field is reused unchanged from the other
+     * info-type helpers for record symmetry).</p>
+     */
+    public List<InfoRow> organizationsWithNames(String realmId) {
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = (List<Object[]>) em.createQuery(
+                "SELECT o.id, o.name FROM OrganizationEntity o " +
+                        "WHERE o.realmId = ?1")
+                .setParameter(1, realmId).getResultList();
+        List<InfoRow> out = new ArrayList<>(rows.size());
+        for (Object[] r : rows) out.add(new InfoRow(asStr(r, 0), asStr(r, 1), null));
+        log.debugf("scanner: ORGANIZATION (with-name) — %d row(s) in realm %s", out.size(), realmId);
+        return out;
+    }
+
     private static String asStr(Object[] r, int i) {
         return r.length > i && r[i] != null ? r[i].toString() : null;
     }

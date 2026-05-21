@@ -7,10 +7,12 @@ import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.OrganizationModel;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.utils.ModelToRepresentation;
+import org.keycloak.organization.OrganizationProvider;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaCommentEntity;
@@ -185,10 +187,36 @@ public class IgaChangeRequestService {
                         serializeRep(ModelToRepresentation.toRepresentation(cs)));
                 break;
             }
+            case IgaReplayExtension.ENTITY_TYPE_ORGANIZATION: {
+                // Phase 7b — resolve through the OrganizationProvider SPI
+                // (federation + cache layers honoured, same idiom as the
+                // other five entity-type lookups). The OrganizationProvider
+                // factory is loaded when the organizations feature is on for
+                // the realm; if it's not installed at all we surface
+                // IllegalArgumentException to keep the error class symmetric
+                // with the other branches.
+                OrganizationProvider orgs = session.getProvider(OrganizationProvider.class);
+                if (orgs == null) {
+                    throw new IllegalArgumentException(
+                            "createAdoptCr: ORGANIZATION " + entityId + " — OrganizationProvider not installed");
+                }
+                OrganizationModel o = orgs.getById(entityId);
+                if (o == null) {
+                    throw new IllegalArgumentException(
+                            "createAdoptCr: ORGANIZATION " + entityId + " not found in realm " + realm.getId());
+                }
+                actionType = IgaReplayExtension.ACTION_ADOPT_ORGANIZATION;
+                // briefRepresentation=false → include attributes (mirrors the
+                // CREATE/UPDATE_ORGANIZATION capture path in
+                // IgaOrganizationModel.setDomains — same serialization shape).
+                repRow = buildAdoptRow(entityId, o.getName(),
+                        serializeRep(ModelToRepresentation.toRepresentation(o, false)));
+                break;
+            }
             default:
                 throw new IllegalArgumentException(
                         "createAdoptCr: unsupported entityType '" + entityType
-                                + "' (expected USER | ROLE | GROUP | CLIENT | CLIENT_SCOPE)");
+                                + "' (expected USER | ROLE | GROUP | CLIENT | CLIENT_SCOPE | ORGANIZATION)");
         }
 
         IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
