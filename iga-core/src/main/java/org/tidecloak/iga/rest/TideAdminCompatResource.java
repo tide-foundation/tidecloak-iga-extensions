@@ -515,6 +515,14 @@ public class TideAdminCompatResource {
      * eviction is preferable to an aborted toggle.</p>
      */
     private static void evictRealmCache(KeycloakSession session, RealmModel realm) {
+        // NOTE (post-63f3bba): the IgaOrganizationProvider extends-Infinispan refactor
+        // makes FUTURE reads traverse the cache → IGA chain naturally, but it does NOT
+        // invalidate entries that were ALREADY cached before this toggle flipped. A
+        // CachedClient / CachedRole / CachedOrganization loaded pre-toggle still holds
+        // its snapshot until natural expiry, so its IGA-wrapped accessor is never
+        // re-consulted — the per-entity invalidations below remain load-bearing for
+        // the toggle's "flip applies to already-loaded entities" guarantee. Do not
+        // delete on the assumption that the architectural fix subsumed them.
         CacheRealmProvider cache;
         try {
             cache = session.getProvider(CacheRealmProvider.class);

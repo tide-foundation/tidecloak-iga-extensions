@@ -68,9 +68,8 @@
     - [Known gaps and follow-ups (organizations)](#known-gaps-and-follow-ups-organizations)
 14. [Phase 6: retroactive ADOPT and quarantine on IGA toggle](#phase-6-retroactive-adopt-and-quarantine-on-iga-toggle)
 15. [Bulk-authorizing pending change requests](#bulk-authorizing-pending-change-requests)
-16. [Operator runbook](#operator-runbook)
-17. [Known limitations](#known-limitations)
-18. [Internals](#internals)
+16. [Known limitations](#known-limitations)
+17. [Internals](#internals)
 
 ## Overview
 

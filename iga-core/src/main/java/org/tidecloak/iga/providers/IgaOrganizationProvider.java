@@ -57,8 +57,11 @@ import java.util.Map;
  * lookup — see "Factory presence" below — and that instance and ours share
  * the same {@code RealmCacheSession}). Reads after IGA-mediated writes return
  * fresh data without the per-org explicit eviction loop in
- * {@code evictRealmCache} (kept as belt-and-braces for one phase to verify the
- * architectural fix; can be removed in a follow-up).</p>
+ * {@code evictRealmCache} for the steady-state case. The eviction loop is still
+ * required for the IGA OFF→ON / ON→OFF toggle transition: entries cached BEFORE
+ * the toggle flipped hold a snapshot that the architectural fix cannot reach
+ * (the fix only governs future loads). The {@code evictRealmCache} comment on
+ * the toggle path documents this explicitly — do not remove that loop.</p>
  *
  * <h2>Factory presence</h2>
  * KC's {@code DefaultKeycloakSessionFactory#initializeProviders} runs
