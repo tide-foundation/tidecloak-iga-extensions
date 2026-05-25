@@ -375,6 +375,19 @@ public class IgaReplayDispatcher {
                     .setParameter("sig", sig)
                     .setParameter("id", id)
                     .executeUpdate();
+
+            // Stamp the composite-role edges created above for THIS parent role.
+            // RepresentationToModel applied each composite link via
+            // role.addCompositeRole(...) (a CompositeRoleEntity row keyed
+            // (parent,child)); the root RoleEntity stamp above leaves those
+            // edge rows unattested. Mirror the ADD_COMPOSITE edge stamp
+            // (e.parentRole.id) and cover every child of this parent.
+            if (sig != null && !sig.isEmpty()) {
+                em.createQuery("UPDATE CompositeRoleEntity e SET e.attestation = :sig WHERE e.parentRole.id = :id")
+                        .setParameter("sig", sig)
+                        .setParameter("id", id)
+                        .executeUpdate();
+            }
         }
     }
 
@@ -481,6 +494,19 @@ public class IgaReplayDispatcher {
                     .setParameter("sig", sig)
                     .setParameter("id", id)
                     .executeUpdate();
+
+            // Stamp the client's nested protocol mappers. RepresentationToModel
+            // .createClient persists each ProtocolMapperEntity (keyed by its own
+            // id, FK CLIENT_ID = this client's UUID) via addProtocolMapper(...);
+            // the root ClientEntity stamp above leaves those mapper rows
+            // unattested. Mirror ADD_PROTOCOL_MAPPER's client-owned stamp shape
+            // (e.client.id) and cover every mapper owned by this client.
+            if (sig != null && !sig.isEmpty()) {
+                em.createQuery("UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.client.id = :id")
+                        .setParameter("sig", sig)
+                        .setParameter("id", id)
+                        .executeUpdate();
+            }
         }
     }
 
@@ -1502,6 +1528,18 @@ public class IgaReplayDispatcher {
                 em.createQuery("UPDATE ClientScopeEntity e SET e.attestation = :sig WHERE e.id = :id")
                         .setParameter("sig", sig)
                         .setParameter("id", id)
+                        .executeUpdate();
+
+                // Stamp the scope's nested protocol mappers. RepresentationToModel
+                // .createClientScope persists each ProtocolMapperEntity (keyed by
+                // its own id, FK CLIENT_SCOPE_ID = this scope's UUID) via
+                // scope.addProtocolMapper(...); the root ClientScopeEntity stamp
+                // above leaves those mapper rows unattested. Mirror
+                // ADD_PROTOCOL_MAPPER's scope-owned stamp shape (e.clientScope.id)
+                // and cover every mapper owned by this scope.
+                em.createQuery("UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.clientScope.id = :scopeId")
+                        .setParameter("sig", sig)
+                        .setParameter("scopeId", id)
                         .executeUpdate();
             }
         }
