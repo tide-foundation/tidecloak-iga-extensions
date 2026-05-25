@@ -2,7 +2,6 @@ package org.tidecloak.iga.providers;
 
 import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
-import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.ProtocolMapperModel;
 import org.keycloak.models.RealmModel;
@@ -420,41 +419,20 @@ public class IgaClientAdapter extends ClientAdapter {
                 List.of(row), null);
     }
 
-    @Override
-    public void addClientScope(ClientScopeModel scope, boolean defaultScope) {
-        if (!isIgaActive()) {
-            super.addClientScope(scope, defaultScope);
-            return;
-        }
-        IgaChangeRequestService service = getService();
-        // getId() returns the client's UUID primary key — NOT the human
-        // clientId. rowsJson contract: CLIENT_UUID = uuid, CLIENT_ID = human.
-        String clientUuid = getId();
-        service.create(realm, "CLIENT", clientUuid, "ASSIGN_SCOPE",
-                List.of(Map.of(
-                        "CLIENT_UUID", clientUuid,
-                        "CLIENT_ID", getClientId(),
-                        "SCOPE_ID", scope.getId(),
-                        "DEFAULT_SCOPE", defaultScope
-                )),
-                null);
-    }
-
-    @Override
-    public void removeClientScope(ClientScopeModel scope) {
-        if (!isIgaActive()) {
-            super.removeClientScope(scope);
-            return;
-        }
-        IgaChangeRequestService service = getService();
-        String clientUuid = getId();
-        service.create(realm, "CLIENT", clientUuid, "REMOVE_SCOPE",
-                List.of(Map.of(
-                        "CLIENT_UUID", clientUuid,
-                        "CLIENT_ID", getClientId(),
-                        "SCOPE_ID", scope.getId())),
-                null);
-    }
+    // -------------------------------------------------------------------------
+    // Client-scope attach/detach capture has MOVED to the provider layer:
+    // org.tidecloak.iga.providers.IgaRealmProvider#addClientScopes /
+    // #removeClientScope. With the infinispan cache ON (production), the admin
+    // routes and KC's own create flow route scope attach/detach through
+    // CacheClientAdapter → RealmCacheSession.addClientScopes/removeClientScope →
+    // getClientDelegate() (== IgaRealmProvider), which BYPASSES this ClientModel
+    // adapter entirely. The former IgaClientAdapter#addClientScope /
+    // #removeClientScope overrides here were therefore dead code (never hit at
+    // runtime) and have been removed to avoid misleading a future maintainer
+    // into thinking scope-attach capture lives on the adapter. See
+    // IgaRealmProvider's "CLIENT-SCOPE ATTACH / DETACH" section for the live
+    // ASSIGN_SCOPE / REMOVE_SCOPE capture seam.
+    // -------------------------------------------------------------------------
 
     // -------------------------------------------------------------------------
     // Attribute interception (CLIENT_ATTRIBUTES).

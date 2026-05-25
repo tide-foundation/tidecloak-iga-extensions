@@ -19,8 +19,11 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.jboss.logging.Logger;
 
 import jakarta.persistence.EntityManager;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Extends JpaRealmProvider to intercept group/role/client creation and mutations
@@ -85,8 +88,16 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     /**
      * Persist the change request in a SEPARATE Keycloak session/transaction so it survives
-     * the rollback caused by the pending-approval exception we throw afterwards.
-     * Throws the exception to interrupt the original write flow.
+     * the rollback caused by the pending-approval exception we throw afterwards, mark the
+     * REQUEST transaction rollback-only so {@code DefaultKeycloakSession#close()} rolls back
+     * (rather than commits) the in-flight request tx, then throw the pending-approval signal
+     * (mapped to HTTP 202 + Location). Same draft-no-persist idiom as
+     * {@code IgaClientAdapter#updateClient}: mapping the exception to a 202 CONSUMES it, so
+     * without the explicit rollback-only the request tx would be committed at close(); for
+     * ASSIGN_SCOPE/REMOVE_SCOPE this is what guarantees the {@code CLIENT_SCOPE_CLIENT}
+     * linkage row is NOT written at draft time (we also never call super, so nothing is
+     * persisted by the capture path — the rollback-only is belt-and-braces and discards any
+     * incidental cache/JPA bookkeeping the admin write started before reaching this seam).
      */
     private void recordAndThrow(RealmModel realm, String entityType, String entityId,
                                  String actionType, List<Map<String, Object>> rows) {
@@ -97,6 +108,7 @@ public class IgaRealmProvider extends JpaRealmProvider {
             IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
             crIdHolder[0] = newService.create(newRealm, entityType, entityId, actionType, rows, null).getId();
         });
+        igaSession.getTransactionManager().setRollbackOnly();
         throw new IgaPendingApprovalException(crIdHolder[0], entityType, actionType);
     }
 
@@ -515,6 +527,186 @@ public class IgaRealmProvider extends JpaRealmProvider {
         ClientEntity entity = em.find(ClientEntity.class, base.getId());
         if (entity == null) return base;
         return new IgaClientAdapter(realm, em, igaSession, entity);
+    }
+
+    // -------------------------------------------------------------------------
+    // CLIENT-SCOPE ATTACH / DETACH (CLIENT_SCOPE_CLIENT linkage)
+    //
+    // The capture seam for "attach a client scope to a client" lives HERE, at
+    // the provider layer, NOT on IgaClientAdapter. With the infinispan cache ON
+    // (the production config), the admin route
+    //   PUT /admin/realms/{realm}/clients/{uuid}/default-client-scopes/{scopeId}
+    //     → ClientResource.addDefaultClientScope
+    //     → client.addClientScope(scope, defaultScope)   [CacheClientAdapter]
+    //     → cacheSession.addClientScopes(realm, client, singleton(scope), def)
+    //     → RealmCacheSession.addClientScopes
+    //     → getClientDelegate().addClientScopes(...)      [== this provider]
+    // bypasses the ClientModel delegate entirely, so the old
+    // IgaClientAdapter.addClientScope override is dead code (never hit at
+    // runtime under cache). The same routing applies to the singular cache
+    // adapter calls KC's own create flow makes (RepresentationToModel
+    // .updateClientScopes → client.addClientScope, ClientManager
+    // .enableServiceAccount → client.addClientScope) and the optional-scope and
+    // DELETE routes. So a single override of the provider-interface
+    // addClientScopes(Set)/removeClientScope on this class governs ALL of them.
+    //
+    // Design (approved):
+    //  * One addClientScopes(Set) call → ONE ASSIGN_SCOPE CR carrying ALL scopes
+    //    in the set, one row per scope (the admin REST route passes a singleton,
+    //    so it naturally becomes a 1-row CR; the batch matters for the Set model
+    //    path, e.g. AbstractLoginProtocolFactory.addDefaultClientScopes).
+    //  * removeClientScope(one) → ONE REMOVE_SCOPE CR, one row.
+    //  * Default scopes auto-attached DURING client creation are already folded
+    //    into the CREATE_CLIENT CR's REP_JSON (RepresentationToModel.createClient
+    //    serializes default/optional scope links), and the service-account-enable
+    //    path attaches scopes as part of client setup — so we SUPPRESS standalone
+    //    ASSIGN_SCOPE capture on those paths (pass straight through to super) and
+    //    only govern LATER, admin-initiated attach/detach on an already-existing
+    //    client. Suppression frames (StackWalker, see isOnClientCreationPath):
+    //    RepresentationToModel.{createClient,updateClientScopes,
+    //    addClientScopeToClient}, ClientManager.{createClient,enableServiceAccount}
+    //    and AbstractLoginProtocolFactory.addDefaultClientScopes.
+    //  * Replay: IgaReplayDispatcher already handles ASSIGN_SCOPE/REMOVE_SCOPE
+    //    by iterating ALL rows (replayRelationship/replayRevoke), so a multi-row
+    //    CR replays each scope link + stamps each ClientScopeClientMappingEntity
+    //    .attestation. No replay change was needed.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void addClientScopes(RealmModel realm, ClientModel client,
+                                Set<ClientScopeModel> clientScopes, boolean defaultScope) {
+        // Pass-through when IGA is not the governing authority for this write:
+        // IGA disabled, replay (IGA_REPLAY_ACTIVE), or a partialImport/import
+        // frame on the stack — the SAME gating the other IgaRealmProvider
+        // overrides use (isIgaActive + IgaImportMode.isImportMode).
+        if (!isIgaActive(realm) || IgaImportMode.isImportMode(igaSession, realm)) {
+            super.addClientScopes(realm, client, clientScopes, defaultScope);
+            return;
+        }
+        // Suppress standalone capture on the client-creation / service-account
+        // path: those scope links are already governed by the CREATE_CLIENT CR
+        // (default/optional scopes ride in its REP_JSON) and must not block or
+        // double-govern client creation.
+        if (isOnClientCreationPath()) {
+            log.debugf("IGA ASSIGN_SCOPE suppressed on client-creation path for "
+                    + "client uuid=%s (%d scope(s)) — governed by CREATE_CLIENT CR",
+                    client.getId(), clientScopes == null ? 0 : clientScopes.size());
+            super.addClientScopes(realm, client, clientScopes, defaultScope);
+            return;
+        }
+        if (clientScopes == null || clientScopes.isEmpty()) {
+            // Nothing to govern; let super no-op faithfully.
+            super.addClientScopes(realm, client, clientScopes, defaultScope);
+            return;
+        }
+
+        // Governed admin-initiated attach: emit ONE ASSIGN_SCOPE CR carrying all
+        // scopes as multiple rows, then defer persistence to commit/replay.
+        String clientUuid = client.getId();
+        String clientId = client.getClientId();
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (ClientScopeModel scope : clientScopes) {
+            // Row shape MUST match IgaReplayDispatcher ASSIGN_SCOPE consumption:
+            // CLIENT_UUID = client UUID (stamp key + resolveClient), CLIENT_ID =
+            // human clientId, SCOPE_ID = scope UUID, DEFAULT_SCOPE flag.
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("CLIENT_UUID", clientUuid);
+            row.put("CLIENT_ID", clientId);
+            row.put("SCOPE_ID", scope.getId());
+            row.put("DEFAULT_SCOPE", defaultScope);
+            rows.add(row);
+        }
+        log.debugf("IGA capture ASSIGN_SCOPE: client uuid=%s clientId=%s — %d scope(s) "
+                + "in one CR (defaultScope=%s)", clientUuid, clientId, rows.size(), defaultScope);
+        recordAndThrow(realm, "CLIENT", clientUuid, "ASSIGN_SCOPE", rows);
+    }
+
+    @Override
+    public void removeClientScope(RealmModel realm, ClientModel client, ClientScopeModel clientScope) {
+        if (!isIgaActive(realm) || IgaImportMode.isImportMode(igaSession, realm)) {
+            super.removeClientScope(realm, client, clientScope);
+            return;
+        }
+        // updateClientScopes (on the create path) can also call removeClientScope
+        // while reconciling default/optional sets; suppress those exactly like
+        // the attach side so client creation is never blocked/double-governed.
+        if (isOnClientCreationPath()) {
+            log.debugf("IGA REMOVE_SCOPE suppressed on client-creation path for "
+                    + "client uuid=%s scope=%s — governed by CREATE_CLIENT CR",
+                    client.getId(), clientScope == null ? null : clientScope.getId());
+            super.removeClientScope(realm, client, clientScope);
+            return;
+        }
+        if (clientScope == null) {
+            super.removeClientScope(realm, client, clientScope);
+            return;
+        }
+        String clientUuid = client.getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", client.getClientId());
+        row.put("SCOPE_ID", clientScope.getId());
+        log.debugf("IGA capture REMOVE_SCOPE: client uuid=%s scope=%s",
+                clientUuid, clientScope.getId());
+        recordAndThrow(realm, "CLIENT", clientUuid, "REMOVE_SCOPE", List.of(row));
+    }
+
+    /**
+     * StackWalker discriminator: are we executing inside Keycloak's
+     * client-creation (or service-account-enable) flow, where default/optional
+     * client scopes are auto-attached and are ALREADY governed by the
+     * CREATE_CLIENT change request? Mirrors the StackWalker idiom used by
+     * {@code IgaUserAdapter}/{@code IgaImportMode.inPartialImport} — matches if
+     * ANY of the create-path frames is present ANYWHERE on the current stack.
+     *
+     * <p>Suppression frames (KC 26.5.5):
+     * <ul>
+     *   <li>{@code RepresentationToModel.createClient} — POST {realm}/clients
+     *       and replay; its {@code updateClientScopes} →
+     *       {@code addClientScopeToClient} → {@code client.addClientScope}
+     *       lands here via the cache adapter.</li>
+     *   <li>{@code RepresentationToModel.updateClientScopes} /
+     *       {@code addClientScopeToClient} — the actual frames that call
+     *       {@code addClientScope}/{@code removeClientScope} during create.</li>
+     *   <li>{@code ClientManager.createClient} — the services-layer create
+     *       entry point.</li>
+     *   <li>{@code ClientManager.enableServiceAccount} — attaches the
+     *       service-account scope (ClientManager.java:198,
+     *       {@code client.addClientScope(serviceAccountScope, true)}).</li>
+     *   <li>{@code AbstractLoginProtocolFactory.addDefaultClientScopes}
+     *       (server-spi-private) — the protocol-factory hook that calls
+     *       {@code client.addClientScopes(Set, boolean)} directly via a
+     *       Consumer lambda (so the frame may be the synthetic
+     *       {@code lambda$addDefaultClientScopes$N}); matched by class-name
+     *       prefix so the lambda frame counts too.</li>
+     * </ul>
+     * The governed admin route ({@code ClientResource.addDefaultClientScope} /
+     * {@code addOptionalClientScope} on an already-existing client) carries NONE
+     * of these frames, so it is correctly NOT suppressed.
+     */
+    private boolean isOnClientCreationPath() {
+        return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
+                .walk(frames -> frames.anyMatch(f -> {
+                    String cn = f.getDeclaringClass().getName();
+                    String mn = f.getMethodName();
+                    if ("org.keycloak.models.utils.RepresentationToModel".equals(cn)
+                            && ("createClient".equals(mn)
+                                || "updateClientScopes".equals(mn)
+                                || "addClientScopeToClient".equals(mn))) {
+                        return true;
+                    }
+                    if ("org.keycloak.services.managers.ClientManager".equals(cn)
+                            && ("createClient".equals(mn)
+                                || "enableServiceAccount".equals(mn))) {
+                        return true;
+                    }
+                    // AbstractLoginProtocolFactory.addDefaultClientScopes calls
+                    // addClientScopes via a Consumer lambda, so the on-stack
+                    // frame may be a synthetic lambda$addDefaultClientScopes$N
+                    // on the same declaring class — match by class-name prefix.
+                    return cn.startsWith(
+                            "org.keycloak.protocol.AbstractLoginProtocolFactory");
+                }));
     }
 
     // -------------------------------------------------------------------------
