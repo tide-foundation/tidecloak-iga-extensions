@@ -185,6 +185,16 @@ public class IgaReplayDispatcher {
                     r -> scopeAddRoleDirect(session, realm, r));
             case "SCOPE_REMOVE_ROLE" -> replayRevoke(session, realm, rows, em,
                     r -> scopeRemoveRoleDirect(session, realm, r));
+            case "SCOPE_MAPPING_ADD" -> replayRelationship(session, realm, rows, finalAttestation, em,
+                    // SCOPE_MAPPING row keyed (CLIENT_ID, ROLE_ID). The CR row's
+                    // CLIENT_UUID holds the client's UUID, which IS the
+                    // SCOPE_MAPPING.CLIENT_ID column (FK to CLIENT.id). Stamp via
+                    // the standalone ScopeMappingEntity (e.clientId, e.roleId).
+                    "UPDATE ScopeMappingEntity e SET e.attestation = :sig WHERE e.clientId = :k1 AND e.roleId = :k2",
+                    "CLIENT_UUID", "ROLE_ID",
+                    r -> scopeMappingAddDirect(session, realm, r));
+            case "SCOPE_MAPPING_REMOVE" -> replayRevoke(session, realm, rows, em,
+                    r -> scopeMappingRemoveDirect(session, realm, r));
             case "REQUEST_SERVER_CERT" -> replayRequestServerCert(cr);
             case "INSTALL_LICENSE", "ROTATE_LICENSE" -> replayLicenseAction(cr);
 
@@ -1127,6 +1137,26 @@ public class IgaReplayDispatcher {
         ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
         RoleModel role = session.roles().getRoleById(realm, roleId);
         if (scope != null && role != null) scope.deleteScopeMapping(role);
+    }
+
+    // SCOPE_MAPPING_ADD/REMOVE — a CLIENT's scope->role allowlist
+    // (SCOPE_MAPPING row keyed CLIENT_ID, ROLE_ID). resolveClient prefers the
+    // CLIENT_UUID (which is the SCOPE_MAPPING.CLIENT_ID value). Applied under
+    // IGA_REPLAY_ACTIVE so IgaClientAdapter.addScopeMapping passes through to
+    // super and the row is actually written; the ADD path then stamps the
+    // ATTESTATION column via the ScopeMappingEntity JPQL in replayRelationship.
+    private static void scopeMappingAddDirect(KeycloakSession session, RealmModel realm, Map<String, Object> row) {
+        ClientModel client = resolveClient(session, realm, row);
+        String roleId = str(row, "ROLE_ID");
+        RoleModel role = session.roles().getRoleById(realm, roleId);
+        if (client != null && role != null) client.addScopeMapping(role);
+    }
+
+    private static void scopeMappingRemoveDirect(KeycloakSession session, RealmModel realm, Map<String, Object> row) {
+        ClientModel client = resolveClient(session, realm, row);
+        String roleId = str(row, "ROLE_ID");
+        RoleModel role = session.roles().getRoleById(realm, roleId);
+        if (client != null && role != null) client.deleteScopeMapping(role);
     }
 
     // -------------------------------------------------------------------------

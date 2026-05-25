@@ -308,6 +308,13 @@ public class IgaChangeRequestService {
                 row.put("REALM_ID", key1);
                 row.put("SCOPE_ID", key2);
                 break;
+            case IgaReplayExtension.ENTITY_TYPE_SCOPE_MAPPING:
+                // SCOPE_MAPPING row keyed (CLIENT_ID, ROLE_ID). key1 is the
+                // client UUID (== SCOPE_MAPPING.CLIENT_ID), key2 the role id —
+                // the stamp keys on ScopeMappingEntity.clientId + .roleId.
+                row.put("CLIENT_UUID", key1);
+                row.put("ROLE_ID", key2);
+                break;
             default:
                 throw new IllegalArgumentException(
                         "createAdoptEdgeCr: unsupported edge entityType '" + entityType + "'");

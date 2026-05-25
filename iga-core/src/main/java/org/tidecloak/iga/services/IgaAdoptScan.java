@@ -264,6 +264,9 @@ public final class IgaAdoptScan {
         // Commit 3 — realm default-scope edge.
         committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_REALM_DEFAULT_SCOPE,
                 queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_DEFAULT_CLIENT_SCOPE, "APPROVED"));
+        // Commit 4 — client scope-mapping edge.
+        committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_SCOPE_MAPPING,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_SCOPE_MAPPING, "APPROVED"));
 
         // Build per-type "pending CREATE_*" race skip sets. CREATE actions
         // are literal strings (no central constants in the IgaReplayExtension
@@ -301,6 +304,9 @@ public final class IgaAdoptScan {
         // Commit 3 — realm default-scope edge counter (own key; existing
         // per-type ADOPT test counts are untouched).
         created.put(IgaReplayExtension.ENTITY_TYPE_REALM_DEFAULT_SCOPE, 0L);
+        // Commit 4 — client scope-mapping edge counter (own key; existing
+        // per-type ADOPT test counts are untouched).
+        created.put(IgaReplayExtension.ENTITY_TYPE_SCOPE_MAPPING, 0L);
 
         long[] counters = new long[5]; // total, sysSkip, committedSkip, pendingSkip, errors
         long[] alreadyAttestedCounter = new long[1];
@@ -419,6 +425,19 @@ public final class IgaAdoptScan {
         for (IgaUnsignedRowScanner.EdgeRow e : scanner.defaultClientScopeEdges(realm.getId())) {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_REALM_DEFAULT_SCOPE,
                     IgaReplayExtension.ACTION_ADOPT_DEFAULT_CLIENT_SCOPE, e,
+                    requestedBy, includeSystem, committedAdoptByType,
+                    created, counters, systemEdgesCounter);
+        }
+        // Commit 4 — client scope-mapping edges (SCOPE_MAPPING rows). The
+        // EdgeRow's ownerNodeType is CLIENT (the owning client decides built-in
+        // status), so a row on a KC bootstrap client (account / broker /
+        // realm-management / security-admin-console / ...) soft-skips via
+        // shouldSkipEdge exactly as that client node would; the CR/sidecar
+        // entity-type is SCOPE_MAPPING. Only admin-authored custom clients with
+        // a scope-mapping get adopted.
+        for (IgaUnsignedRowScanner.EdgeRow e : scanner.scopeMappingEdges(realm.getId())) {
+            processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_SCOPE_MAPPING,
+                    IgaReplayExtension.ACTION_ADOPT_SCOPE_MAPPING, e,
                     requestedBy, includeSystem, committedAdoptByType,
                     created, counters, systemEdgesCounter);
         }

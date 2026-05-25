@@ -5,6 +5,7 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.ProtocolMapperModel;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.RoleModel;
 import org.keycloak.models.jpa.ClientAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
@@ -548,6 +549,58 @@ public class IgaClientAdapter extends ClientAdapter {
         row.put("CLIENT_UUID", clientUuid);
         row.put("CLIENT_ID", getClientId());
         service.create(realm, "CLIENT", clientUuid, "REMOVE_PROTOCOL_MAPPER",
+                List.of(row), null);
+    }
+
+    // -------------------------------------------------------------------------
+    // SCOPE_MAPPING — the client's scope->role allowlist (CLIENT_ID, ROLE_ID).
+    //
+    // When the client has fullScopeAllowed=false this allowlist bounds which
+    // roles can land in the issued token, so it is a token-shaping input.
+    // Admin add/remove via POST/DELETE
+    // /admin/realms/{r}/clients/{id}/scope-mappings/realm routes
+    // ClientModel.addScopeMapping(role) -> the infinispan CacheClientAdapter
+    // calls getDelegateForUpdate() then updated.addScopeMapping(role); under
+    // IGA the model adapter == this IgaClientAdapter, so this override IS hit
+    // (verified empirically: model/infinispan ClientAdapter.addScopeMapping
+    // delegates to the model adapter, same as commit-3's realm default-scope
+    // seam). We emit SCOPE_MAPPING_ADD / SCOPE_MAPPING_REMOVE CRs keyed on the
+    // actual table columns {CLIENT_UUID(=CLIENT_ID), CLIENT_ID(clientId for
+    // display), ROLE_ID} and defer persistence to commit/replay (no
+    // super.addScopeMapping in capture). Bootstrap built-in clients are set up
+    // at realm-create before IGA is active, so isIgaActive() lets them pass
+    // straight through; pre-toggle rows are covered by the ADOPT scan.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void addScopeMapping(RoleModel role) {
+        if (!isIgaActive()) {
+            super.addScopeMapping(role);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientUuid = getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        row.put("ROLE_ID", role.getId());
+        service.create(realm, "CLIENT", clientUuid, "SCOPE_MAPPING_ADD",
+                List.of(row), null);
+    }
+
+    @Override
+    public void deleteScopeMapping(RoleModel role) {
+        if (!isIgaActive()) {
+            super.deleteScopeMapping(role);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientUuid = getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        row.put("ROLE_ID", role.getId());
+        service.create(realm, "CLIENT", clientUuid, "SCOPE_MAPPING_REMOVE",
                 List.of(row), null);
     }
 

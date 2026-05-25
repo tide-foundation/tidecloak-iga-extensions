@@ -466,6 +466,39 @@ public final class IgaUnsignedRowScanner {
                 "REALM_DEFAULT_SCOPE", realmId);
     }
 
+    /**
+     * SCOPE_MAPPING — a CLIENT's scope->role allowlist, keyed (CLIENT_ID,
+     * ROLE_ID). Commit 4. When the client has fullScopeAllowed=false this
+     * allowlist bounds which roles land in the issued token. The owning CLIENT
+     * decides built-in status: a SCOPE_MAPPING row on a KC bootstrap client
+     * (account / broker / realm-management / security-admin-console / ...) is
+     * realm bootstrap surface and is skipped via the owning-CLIENT built-in
+     * classification; only admin-authored custom clients are adopted.
+     *
+     * <p>key1 is the client UUID ({@code sm.clientId}, == SCOPE_MAPPING.CLIENT_ID
+     * and the FK to CLIENT.id — the replay stamp keys on {@code e.clientId});
+     * key2 is the role id ({@code sm.roleId}). ownerNodeName is the owning
+     * client's {@code clientId} string, classified as ENTITY_TYPE_CLIENT exactly
+     * like the client-owned protocol-mapper lane.</p>
+     */
+    public List<EdgeRow> scopeMappingEdges(String realmId) {
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = (List<Object[]>) em.createQuery(
+                "SELECT sm.clientId, sm.roleId, c.clientId " +
+                        "FROM ScopeMappingEntity sm " +
+                        "JOIN ClientEntity c ON c.id = sm.clientId " +
+                        "WHERE c.realmId = ?1 AND sm.attestation IS NULL")
+                .setParameter(1, realmId).getResultList();
+        List<EdgeRow> out = new ArrayList<>(rows.size());
+        for (Object[] r : rows) {
+            out.add(new EdgeRow(asStr(r, 0), asStr(r, 1), asStr(r, 2),
+                    org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_CLIENT, null));
+        }
+        log.debugf("scanner: SCOPE_MAPPING (edge) — %d unsigned row(s) in realm %s",
+                out.size(), realmId);
+        return out;
+    }
+
     private List<EdgeRow> toEdgeRows(List<Object[]> rows, String ownerNodeType,
                                      String label, String realmId) {
         List<EdgeRow> out = new ArrayList<>(rows.size());

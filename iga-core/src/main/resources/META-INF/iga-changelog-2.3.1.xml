@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.3.1: Add an ATTESTATION column to SCOPE_MAPPING.
+
+      SCOPE_MAPPING rows are a client's scope->role allowlist (keyed
+      CLIENT_ID + ROLE_ID). When a client has fullScopeAllowed=false this
+      allowlist bounds which roles can land in its issued token — a token-
+      shaping input. The table previously had no attestation column. This
+      column brings the per-client scope-mapping under the current-attested-
+      state model: live admin add/remove (POST/DELETE
+      /admin/realms/{r}/clients/{id}/scope-mappings/realm) is captured as
+      SCOPE_MAPPING_ADD / SCOPE_MAPPING_REMOVE and stamped on commit;
+      pre-toggle rows on admin-authored (non-built-in) clients are attested
+      via the toggle-on ADOPT_SCOPE_MAPPING scan. Mirrors the ATTESTATION
+      column carried by DEFAULT_CLIENT_SCOPE (2.3.0) and the 1.8.0-era edge
+      attestation columns, VARCHAR(2048).
+
+      SCOPE_MAPPING has no surrogate key (PK is CLIENT_ID + ROLE_ID); the
+      attestation is mapped by a standalone read/write ScopeMappingEntity
+      with an @IdClass, coexisting with ClientEntity's @ElementCollection
+      view of the same table.
+    -->
+
+    <changeSet id="iga-2.3.1-1" author="tidecloak-iga">
+        <addColumn tableName="SCOPE_MAPPING">
+            <column name="ATTESTATION" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>

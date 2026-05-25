@@ -72,13 +72,17 @@ import { kcEnv } from '../lib/env';
  *     assigned scope set, regardless of whether this login requested them.
  *   - The client's own scope-mappings / role allowlist (scope_mapping table,
  *     getScopeMappingsStream) — the allowlist consulted when
- *     fullScopeAllowed=false. NOTE: scope_mapping has NO attestation column →
- *     reported as a GAP.
+ *     fullScopeAllowed=false. NOTE: scope_mapping NOW carries an attestation
+ *     column (iga-changelog-2.3.1); admin add/remove is captured as
+ *     SCOPE_MAPPING_ADD/REMOVE and pre-toggle rows are adopted, so the bundle
+ *     shows its attestation when present (gap closed).
  *   - For each client scope in the set: its protocol mappers (protocol_mapper
  *     rows, each with its OWN attestation; built-in mappers null).
  *   - REALM-level scope assignments: default_client_scope(realm_id, scope_id,
  *     default_scope) — the default-default and default-optional templates every
- *     client inherits at create time. NO attestation column → GAP.
+ *     client inherits at create time. NOW carries an attestation column
+ *     (iga-changelog-2.3.0); captured as REALM_DEFAULT_SCOPE_ADD/REMOVE and
+ *     adopted on toggle-on, so the bundle shows its attestation (gap closed).
  *   - Realm-owned built-in client scopes + their mappers stay, now explicitly
  *     tagged realm-owned.
  * After building v4, a COVERAGE TABLE maps the skill's token inputs to bundle
@@ -1064,29 +1068,41 @@ test.describe('Tide-network login-row visualizer', () => {
     // --- 9e. CLIENT scope-mappings / role allowlist (getScopeMappingsStream) -
     // scope_mapping(client_id, role_id) is the CLIENT's OWN role allowlist —
     // the set intersected against the user's roles when fullScopeAllowed=false
-    // (scope-resolution.md: isClientScopePermittedForUser). It has NO
-    // attestation column → GAP. Bundle the rows so the verifier sees the
-    // allowlist, tagged as un-attestable.
+    // (scope-resolution.md: isClientScopePermittedForUser). It NOW carries an
+    // attestation column (iga-changelog-2.3.1): admin add/remove is captured as
+    // SCOPE_MAPPING_ADD/REMOVE and pre-toggle rows on custom clients are adopted
+    // (ADOPT_SCOPE_MAPPING). Bundle the rows with their attestation so the
+    // verifier sees the allowlist as attestable (gap closed).
     const clientScopeMappings = psql(
-      `SELECT role_id FROM scope_mapping WHERE client_id='${sql(clientUuidVal)}' ORDER BY role_id ASC`,
+      `SELECT role_id, COALESCE(attestation,'') FROM scope_mapping WHERE client_id='${sql(clientUuidVal)}' ORDER BY role_id ASC`,
     )
       .split('\n')
       .filter(Boolean);
-    for (const roleId of clientScopeMappings) {
+    let anyScopeMappingAttested = false;
+    for (const line of clientScopeMappings) {
+      const [roleId, att] = line.split('|').map((s) => s.trim());
+      const attested = att !== '';
+      if (attested) anyScopeMappingAttested = true;
+      // scope_mapping now has an attestation column → let pushLinkage read it
+      // (hasAttestationCol=true, the default). key stays the composite PK only.
       pushLinkage(
         'SCOPE_MAPPING',
         'scope_mapping',
         { client_id: clientUuidVal, role_id: roleId },
-        'client role-allowlist edge has no attestation column (GAP)',
-        false,
+        attested
+          ? 'client role-allowlist edge (attestation present)'
+          : 'client role-allowlist edge not yet attested (pre-toggle / built-in client)',
+        true,
       );
       // The allowlisted role also contributes to issuance — entity row.
       pushEntity('KEYCLOAK_ROLE', 'keycloak_role', ROLE_COLS, roleId);
     }
     coverage['CLIENT: scope-mappings / role allowlist'] = {
       inBundle: true,
-      attested: false,
-      gap: 'scope_mapping table has no attestation column',
+      attested: anyScopeMappingAttested,
+      gap: anyScopeMappingAttested
+        ? undefined
+        : 'scope_mapping rows present but not yet attested (no governed change / built-in client)',
     };
 
     // --- 9f. COMPLETE client scope set: default + optional ----------------
@@ -1256,9 +1272,12 @@ test.describe('Tide-network login-row visualizer', () => {
     // template: default_scope=true → default-default client scopes,
     // false → default-optional. Every client inherits these at create time
     // (scope-resolution.md "What client.getClientScopes(true) actually
-    // returns"). This table has NO attestation column → GAP. We bundle the
-    // assignment rows (each with the realm-owned CLIENT_SCOPE entity row) so the
-    // verifier sees the realm-level inheritance source, tagged un-attestable.
+    // returns"). This table NOW carries an attestation column
+    // (iga-changelog-2.3.0): admin add/remove is captured as
+    // REALM_DEFAULT_SCOPE_ADD/REMOVE and custom realm-default scopes are adopted
+    // (ADOPT_DEFAULT_CLIENT_SCOPE). We bundle the assignment rows (each with the
+    // realm-owned CLIENT_SCOPE entity row) with their attestation when present;
+    // built-in realm-default rows stay unattested by design.
     const realmDefaultScopes = psql(
       `SELECT dcs.scope_id, cs.name, dcs.default_scope
          FROM default_client_scope dcs
@@ -1293,8 +1312,8 @@ test.describe('Tide-network login-row visualizer', () => {
         'DEFAULT_CLIENT_SCOPE',
         'default_client_scope',
         { realm_id: realmUuid, scope_id: rs.scope_id },
-        `realm ${rs.isDefault ? 'default-default' : 'default-optional'} scope assignment — no attestation column (GAP)`,
-        false,
+        `realm ${rs.isDefault ? 'default-default' : 'default-optional'} scope assignment — attestation present when governed/adopted (built-ins unattested by design)`,
+        true,
       );
       // Realm-owned built-in scopes also carry mappers that fire on the token.
       const mapperIds = psql(
@@ -1323,7 +1342,7 @@ test.describe('Tide-network login-row visualizer', () => {
     coverage['REALM: default-default / default-optional scopes'] = {
       inBundle: anyRealmDefaultDefault || anyRealmDefaultOptional,
       attested: false,
-      gap: 'default_client_scope table has no attestation column',
+      gap: 'default_client_scope now has an attestation column (2.3.0); in a fresh realm all default-scope rows point at built-in scopes, unattested by design',
     };
     coverage['REALM: built-in scopes + mappers'] = {
       inBundle: true,
