@@ -5,6 +5,7 @@ import {
   deleteRealm,
   enableIga,
   igaStatus,
+  createClient,
   clientUuid,
   createClientScope,
   getClientScopeByName,
@@ -12,16 +13,17 @@ import {
   getRole,
   getChangeRequest,
   authorizeAndCommit,
+  listChangeRequests,
   locationHeader,
   safeJson,
   kcFetch,
 } from '../lib/kc';
 
 /**
- * Phase 9 — EDGE attestation coverage (COMMIT 1 only).
+ * Phase 9 — EDGE attestation coverage.
  *
- * Proves commit 1 closed the attestation-coverage gap for nested rows on a
- * GOVERNED create:
+ * Proves two commits closed the attestation-coverage gaps for admin-configured
+ * token-shaping EDGE inputs:
  *
  *  COMMIT 1 (stamp-only): a GOVERNED create that has nested rows now stamps the
  *  nested rows too, not just the root entity:
@@ -29,20 +31,26 @@ import {
  *    - CREATE_ROLE (composite)                     → COMPOSITE_ROLE.attestation non-null
  *    - CREATE_CLIENT with a protocol mapper        → PROTOCOL_MAPPER.attestation non-null
  *
- * COMMIT 2 (toggle-on ADOPT edge coverage) was reverted — it poisoned the
- * toggle-on scan transaction (edge CRs overflowed IGA_CHANGE_REQUEST.ENTITY_ID
- * varchar(36)). Its `commit2:` test has been dropped pending a redo; the parked
- * work lives at reflog SHA 58a827f.
+ *  COMMIT 2 (toggle-on ADOPT edge coverage + skip built-ins): an admin who
+ *  configured a composite role + a scope→client attach + a scope→role mapping +
+ *  a custom scope-owned mapper BEFORE enabling IGA gets ADOPT_* CRs for those
+ *  EDGES on toggle-on; bulk-authorize stamps the edge attestations. The stock
+ *  built-in scopes/mappers/edges get NO ADOPT CR (skip-built-ins invariant) —
+ *  asserted via the scan's skipped.systemEdges bucket plus a DB check that a
+ *  built-in scope's own protocol-mapper row stays unattested (no ADOPT emitted
+ *  for it).
  *
  * API E2E (no browser). Edge attestations are verified inline via
  * `docker exec postgresP psql`.
  *
- * Precondition gate: a governed CREATE_CLIENT_SCOPE must 202+Location. If it
- * does not, the phase9 jar (commit 1) is not loaded in the running container;
- * the test STOPS with an unambiguous PRECONDITION message (restart, re-run).
+ * Precondition gate: the toggle-on scan response MUST carry skipped.systemEdges
+ * (a commit-2 field) AND a governed CREATE_CLIENT_SCOPE must 202. Either
+ * missing => the phase9 jar is not loaded in the running container; the test
+ * STOPS with an unambiguous PRECONDITION message (restart, then re-run).
  */
 
 const C1_REALM = 'iga-phase9-c1';
+const C2_REALM = 'iga-phase9-c2';
 const PROBE_REALM = 'iga-phase9-precond-probe';
 
 const RERUN =
@@ -66,12 +74,47 @@ function sqlLit(v: string): string {
   return v.replace(/'/g, "''");
 }
 
+/** count||attestation for a PROTOCOL_MAPPER row by its id. */
+function readMapperAttestation(mapperId: string): string {
+  const out = psql(
+    `SELECT COUNT(*) || E'\\x1F' || COALESCE(MAX(attestation),'')
+       FROM protocol_mapper WHERE id='${sqlLit(mapperId)}'`,
+  );
+  const [count, att] = out.split('\x1F');
+  if (!count || count === '0') return 'MISSING';
+  return att ?? '';
+}
+
 /** count||attestation for a COMPOSITE_ROLE edge (composite, child_role). */
 function readCompositeAttestation(parentId: string, childId: string): string {
   const out = psql(
     `SELECT COUNT(*) || E'\\x1F' || COALESCE(MAX(attestation),'')
        FROM composite_role
       WHERE composite='${sqlLit(parentId)}' AND child_role='${sqlLit(childId)}'`,
+  );
+  const [count, att] = out.split('\x1F');
+  if (!count || count === '0') return 'MISSING';
+  return att ?? '';
+}
+
+/** count||attestation for a CLIENT_SCOPE_CLIENT edge (client_id, scope_id). */
+function readScopeClientAttestation(clientUuidVal: string, scopeId: string): string {
+  const out = psql(
+    `SELECT COUNT(*) || E'\\x1F' || COALESCE(MAX(attestation),'')
+       FROM client_scope_client
+      WHERE client_id='${sqlLit(clientUuidVal)}' AND scope_id='${sqlLit(scopeId)}'`,
+  );
+  const [count, att] = out.split('\x1F');
+  if (!count || count === '0') return 'MISSING';
+  return att ?? '';
+}
+
+/** count||attestation for a CLIENT_SCOPE_ROLE_MAPPING edge (scope_id, role_id). */
+function readScopeRoleAttestation(scopeId: string, roleId: string): string {
+  const out = psql(
+    `SELECT COUNT(*) || E'\\x1F' || COALESCE(MAX(attestation),'')
+       FROM client_scope_role_mapping
+      WHERE scope_id='${sqlLit(scopeId)}' AND role_id='${sqlLit(roleId)}'`,
   );
   const [count, att] = out.split('\x1F');
   if (!count || count === '0') return 'MISSING';
@@ -93,6 +136,31 @@ function mapperRowsForScope(scopeId: string): Array<{ id: string; att: string }>
       const [id, att] = l.split('\x1F');
       return { id, att: att ?? '' };
     });
+}
+
+/** POST toggle-iga, return {http, body}. */
+async function toggleIgaRaw(
+  request: APIRequestContext,
+  realm: string,
+): Promise<{ http: number; body: any }> {
+  const res = await kcFetch(request, `/admin/realms/${realm}/tide-admin/toggle-iga`, {
+    method: 'POST',
+  });
+  return { http: res.status(), body: await safeJson(res) };
+}
+
+/** POST bulk-authorize, return {http, body}. */
+async function bulkAuthorize(
+  request: APIRequestContext,
+  realm: string,
+  body: Record<string, unknown>,
+): Promise<{ http: number; body: any }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/iga/change-requests/bulk-authorize`,
+    { method: 'POST', json: body },
+  );
+  return { http: res.status(), body: await safeJson(res) };
 }
 
 /** Resolve a CR id from a 202 (body.changeRequestId or Location tail). */
@@ -118,6 +186,7 @@ const MAPPER_SPEC = {
 test.describe('IGA Phase 9: edge attestation coverage', () => {
   test.afterAll(async ({ request }) => {
     await deleteRealm(request, C1_REALM).catch(() => {});
+    await deleteRealm(request, C2_REALM).catch(() => {});
     await deleteRealm(request, PROBE_REALM).catch(() => {});
   });
 
@@ -274,5 +343,174 @@ test.describe('IGA Phase 9: edge attestation coverage', () => {
     }
 
     await deleteRealm(request, C1_REALM);
+  });
+
+  // -------------------------------------------------------------------------
+  // COMMIT 2 — toggle-on ADOPT for admin-configured edges + skip built-ins.
+  // -------------------------------------------------------------------------
+  test('commit2: toggle-on adopts admin edges, skips built-in edges', async ({ request }) => {
+    await createScratchRealm(request, C2_REALM);
+
+    // Build admin edges BEFORE enabling IGA (so they are ungoverned, then
+    // adopted on toggle-on):
+    //   - a custom client SCOPE with a custom (scope-owned) protocol mapper
+    //   - that scope attached to a custom CLIENT (CLIENT_SCOPE_CLIENT edge)
+    //   - a custom realm ROLE mapped to that scope (CLIENT_SCOPE_ROLE edge)
+    //   - a composite role (parent p9c2-parent → child p9c2-child)  (COMPOSITE_ROLE)
+    const customClientUuid = await createClient(request, C2_REALM, 'p9c2-client');
+
+    const scCreate = await createClientScope(request, C2_REALM, {
+      name: 'p9c2-scope',
+      protocol: 'openid-connect',
+      protocolMappers: [MAPPER_SPEC],
+    });
+    expect(scCreate.status(), 'pre-IGA scope create 201').toBe(201);
+    const customScope = await getClientScopeByName(request, C2_REALM, 'p9c2-scope');
+    const customScopeId = customScope.body?.id as string;
+    expect(customScopeId, 'custom scope id').toBeTruthy();
+
+    // scope→client attach (default-client-scope) — CLIENT_SCOPE_CLIENT edge.
+    const attach = await kcFetch(
+      request,
+      `/admin/realms/${C2_REALM}/clients/${customClientUuid}/default-client-scopes/${customScopeId}`,
+      { method: 'PUT' },
+    );
+    expect([204, 200].includes(attach.status()), `pre-IGA attach status ${attach.status()}`).toBeTruthy();
+
+    // realm role + scope→role mapping — CLIENT_SCOPE_ROLE edge.
+    const roleCreate = await createRole(request, C2_REALM, { name: 'p9c2-scoperole' });
+    expect(roleCreate.status(), 'pre-IGA role create 201').toBe(201);
+    const scoperole = await getRole(request, C2_REALM, 'p9c2-scoperole');
+    const scoperoleId = scoperole.body?.id as string;
+    const scopeRoleMap = await kcFetch(
+      request,
+      `/admin/realms/${C2_REALM}/client-scopes/${customScopeId}/scope-mappings/realm`,
+      { method: 'POST', json: [{ id: scoperoleId, name: 'p9c2-scoperole' }] },
+    );
+    expect(
+      [204, 200].includes(scopeRoleMap.status()),
+      `pre-IGA scope-role map status ${scopeRoleMap.status()}`,
+    ).toBeTruthy();
+
+    // composite role — COMPOSITE_ROLE edge.
+    expect((await createRole(request, C2_REALM, { name: 'p9c2-child' })).status()).toBe(201);
+    expect(
+      (await createRole(request, C2_REALM, { name: 'p9c2-parent', composite: true })).status(),
+    ).toBe(201);
+    const childRole = await getRole(request, C2_REALM, 'p9c2-child');
+    const parentRole = await getRole(request, C2_REALM, 'p9c2-parent');
+    const childRoleId = childRole.body?.id as string;
+    const parentRoleId = parentRole.body?.id as string;
+    const addComposite = await kcFetch(
+      request,
+      `/admin/realms/${C2_REALM}/roles-by-id/${parentRoleId}/composites`,
+      { method: 'POST', json: [{ id: childRoleId, name: 'p9c2-child' }] },
+    );
+    expect(
+      [204, 200].includes(addComposite.status()),
+      `pre-IGA composite add status ${addComposite.status()}`,
+    ).toBeTruthy();
+
+    // Capture a built-in scope's own mapper id (the 'profile' scope ships
+    // stock mappers) to assert it is NOT adopted (skip-built-ins).
+    const profileScope = await getClientScopeByName(request, C2_REALM, 'profile');
+    const profileScopeId = profileScope.body?.id as string;
+    expect(profileScopeId, 'built-in profile scope present pre-IGA').toBeTruthy();
+    const builtinMappersBefore = mapperRowsForScope(profileScopeId);
+    expect(
+      builtinMappersBefore.length,
+      'built-in profile scope must ship stock mappers',
+    ).toBeGreaterThan(0);
+
+    // -------------------------- TOGGLE ON -----------------------------------
+    const t = await toggleIgaRaw(request, C2_REALM);
+    expect(t.http, `toggle expected 200, got ${t.http}`).toBe(200);
+    expect(t.body?.enabled, 'IGA enabled after toggle').toBe(true);
+    expect(t.body?.scan, 'scan block present on OFF→ON').toBeTruthy();
+    const scan = t.body.scan;
+
+    // PRECONDITION (commit-2 field): skipped.systemEdges must exist.
+    expect(
+      scan.skipped && scan.skipped.systemEdges !== undefined,
+      `scan.skipped.systemEdges missing — phase9/commit2 jar not loaded in the running ` +
+        `container; restart then re-run: ${RERUN}. scan=${JSON.stringify(scan)}`,
+    ).toBeTruthy();
+
+    // The four admin edges each produced an ADOPT_* CR.
+    expect(scan.adoptCrsCreated?.COMPOSITE_ROLE, 'COMPOSITE_ROLE adopt CRs').toBeGreaterThanOrEqual(
+      1,
+    );
+    expect(
+      scan.adoptCrsCreated?.CLIENT_SCOPE_CLIENT,
+      'CLIENT_SCOPE_CLIENT adopt CRs',
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      scan.adoptCrsCreated?.CLIENT_SCOPE_ROLE,
+      'CLIENT_SCOPE_ROLE adopt CRs',
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      scan.adoptCrsCreated?.PROTOCOL_MAPPER,
+      'PROTOCOL_MAPPER adopt CRs (scope-owned custom mapper found)',
+    ).toBeGreaterThanOrEqual(1);
+
+    // skip-built-ins held: built-in edges were skipped (non-zero), and the
+    // built-in profile scope's stock mappers got NO ADOPT CR.
+    expect(scan.skipped.systemEdges, 'systemEdges skip count > 0').toBeGreaterThan(0);
+    const builtinMapperIds = new Set(builtinMappersBefore.map((m) => m.id));
+    const pendingAdoptMapper = (await listChangeRequests(request, C2_REALM)).filter(
+      (cr) => cr.actionType === 'ADOPT_PROTOCOL_MAPPER',
+    );
+    for (const cr of pendingAdoptMapper) {
+      const rows = Array.isArray((cr as any).rows) ? (cr as any).rows : [];
+      for (const r of rows) {
+        expect(
+          builtinMapperIds.has(r.ID),
+          `built-in mapper ${r.ID} must NOT have an ADOPT_PROTOCOL_MAPPER CR (skip-built-ins)`,
+        ).toBeFalsy();
+      }
+    }
+
+    // -------------------------- BULK AUTHORIZE ------------------------------
+    const bulk = await bulkAuthorize(request, C2_REALM, {
+      actionTypeIn: [
+        'ADOPT_COMPOSITE_ROLE',
+        'ADOPT_CLIENT_SCOPE_CLIENT',
+        'ADOPT_CLIENT_SCOPE_ROLE',
+        'ADOPT_PROTOCOL_MAPPER',
+      ],
+    });
+    expect(bulk.http, `bulk-authorize 200, got ${bulk.http} body=${JSON.stringify(bulk.body)}`).toBe(
+      200,
+    );
+
+    // The admin edge attestations are now stamped.
+    const compAtt = readCompositeAttestation(parentRoleId, childRoleId);
+    expect(compAtt !== 'MISSING' && compAtt.length > 0, `composite edge stamped, got '${compAtt}'`).toBeTruthy();
+
+    const scAtt = readScopeClientAttestation(customClientUuid, customScopeId);
+    expect(scAtt !== 'MISSING' && scAtt.length > 0, `scope→client edge stamped, got '${scAtt}'`).toBeTruthy();
+
+    const srAtt = readScopeRoleAttestation(customScopeId, scoperoleId);
+    expect(srAtt !== 'MISSING' && srAtt.length > 0, `scope→role edge stamped, got '${srAtt}'`).toBeTruthy();
+
+    const customMappers = mapperRowsForScope(customScopeId);
+    expect(customMappers.length, 'custom scope mapper present').toBeGreaterThan(0);
+    for (const m of customMappers) {
+      expect(m.att.length > 0, `custom scope mapper ${m.id} stamped, got '${m.att}'`).toBeTruthy();
+    }
+
+    // skip-built-ins still holds post-bulk: the built-in profile scope's stock
+    // mappers remain UNATTESTED (they were never enumerated/adopted).
+    const builtinMappersAfter = mapperRowsForScope(profileScopeId);
+    for (const m of builtinMappersAfter) {
+      expect(
+        m.att === '',
+        `built-in profile mapper ${m.id} must stay unattested (skip-built-ins), got '${m.att}'`,
+      ).toBeTruthy();
+    }
+
+    await deleteRealm(request, C2_REALM);
+    const gone = await igaStatus(request, C2_REALM);
+    expect(gone.http, 'scratch realm deleted (iga-status 404)').toBe(404);
   });
 });

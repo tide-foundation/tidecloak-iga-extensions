@@ -238,6 +238,114 @@ public class IgaChangeRequestService {
         return cr.getId();
     }
 
+    /**
+     * Commit 2 — create a per-EDGE ADOPT change request for an edge that
+     * already exists in the realm (admin-configured before IGA was enabled)
+     * but whose {@code attestation} column is still NULL.
+     *
+     * <p>Unlike {@link #createAdoptCr} (single-id nodes), an edge has a
+     * COMPOSITE key. We persist BOTH keys in the CR's rowsJson under the same
+     * key names the matching {@code IgaReplayDispatcher} edge stamp uses
+     * (COMPOSITE/CHILD_ROLE, CLIENT_UUID/SCOPE_ID, SCOPE_ID/ROLE_ID, or the
+     * mapper ID).
+     *
+     * <p><b>FIX (ENTITY_ID overflow):</b> the original attempt set
+     * {@code entityId = key1 + "|" + key2}. Two concatenated UUIDs are ~73
+     * chars and {@code IGA_CHANGE_REQUEST.ENTITY_ID} / {@code
+     * IGA_UNSIGNED_ENTITY.ENTITY_ID} are both {@code VARCHAR(36)} — the INSERT
+     * blew the column, aborted the toggle-on transaction, and emitted 0 ADOPT
+     * CRs. We now derive a <b>deterministic synthetic 36-char id</b> via
+     * {@link #edgeSyntheticId(String, String, String)}
+     * ({@code UUID.nameUUIDFromBytes(type|k1|k2)}). It is stable (same edge →
+     * same id, for re-toggle idempotency / sidecar PK uniqueness) and always
+     * fits 36 chars. The real edge endpoints live in {@code rowsJson} (which is
+     * {@code TEXT}); the replay already reads the keys from there, never from
+     * {@code entityId}.</p>
+     *
+     * <p>No REP_JSON / model rebuild — edge ADOPT only stamps.</p>
+     *
+     * @param entityType  COMPOSITE_ROLE | CLIENT_SCOPE_CLIENT | CLIENT_SCOPE_ROLE
+     *                    | PROTOCOL_MAPPER (the edge entity types)
+     * @param key1        first composite key (parent role id / client uuid /
+     *                    scope id / mapper id)
+     * @param key2        second composite key (child role id / scope id /
+     *                    role id / owning-node id for mapper; informational)
+     * @param actionType  the matching ADOPT_* edge action type
+     * @return the new CR's id
+     */
+    public String createAdoptEdgeCr(RealmModel realm, String entityType,
+                                    String key1, String key2,
+                                    String actionType, String requestedBy) {
+        if (realm == null || entityType == null || key1 == null || actionType == null) {
+            throw new IllegalArgumentException(
+                    "createAdoptEdgeCr requires non-null realm + entityType + key1 + actionType");
+        }
+        String syntheticEntityId = edgeSyntheticId(entityType, key1, key2);
+
+        Map<String, Object> row = new LinkedHashMap<>();
+        switch (entityType) {
+            case IgaReplayExtension.ENTITY_TYPE_COMPOSITE_ROLE:
+                row.put("COMPOSITE", key1);
+                row.put("CHILD_ROLE", key2);
+                break;
+            case IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_CLIENT:
+                row.put("CLIENT_UUID", key1);
+                row.put("SCOPE_ID", key2);
+                break;
+            case IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_ROLE:
+                row.put("SCOPE_ID", key1);
+                row.put("ROLE_ID", key2);
+                break;
+            case IgaReplayExtension.ENTITY_TYPE_PROTOCOL_MAPPER:
+                // Mapper stamp keys by its own id (key1); key2 is the owning
+                // node id, kept for audit/debug only.
+                row.put("ID", key1);
+                if (key2 != null) row.put("OWNER_NODE_ID", key2);
+                break;
+            default:
+                throw new IllegalArgumentException(
+                        "createAdoptEdgeCr: unsupported edge entityType '" + entityType + "'");
+        }
+
+        IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
+        cr.setId(UUID.randomUUID().toString());
+        cr.setRealmId(realm.getId());
+        cr.setEntityType(entityType);
+        cr.setEntityId(syntheticEntityId);
+        cr.setActionType(actionType);
+        cr.setRowsJson(serializeRows(List.of(row)));
+        cr.setStatus("PENDING");
+        cr.setRequestedBy(requestedBy);
+        cr.setCreatedAt(System.currentTimeMillis());
+        em.persist(cr);
+
+        IgaUnsignedEntityService.markUnsigned(em, realm.getId(), entityType, syntheticEntityId, cr.getId());
+
+        em.flush();
+        return cr.getId();
+    }
+
+    /**
+     * Deterministic synthetic 36-char id for an edge ADOPT CR / sidecar row.
+     *
+     * <p>An edge has a COMPOSITE key (e.g. parent+child role id) that does not
+     * fit the {@code VARCHAR(36)} {@code ENTITY_ID} columns. We hash the edge's
+     * identity ({@code type|key1|key2}) into a name-based (v3) UUID — always a
+     * canonical 36-char string. The same edge always maps to the same id, which
+     * is what the re-toggle idempotency skip-set (already-committed ADOPT) and
+     * the sidecar PK {@code (realmId, entityType, entityId)} both rely on.</p>
+     *
+     * <p>Used by BOTH the CR/sidecar writer here and the toggle-on scan's
+     * already-committed-ADOPT skip lookup ({@code IgaAdoptScan.processOneEdge}),
+     * so the two sides agree byte-for-byte on the synthetic id. The real edge
+     * endpoints are persisted in {@code rowsJson} for the replay stamp.</p>
+     */
+    public static String edgeSyntheticId(String entityType, String key1, String key2) {
+        String seed = entityType + "|" + (key1 == null ? "" : key1)
+                + "|" + (key2 == null ? "" : key2);
+        return UUID.nameUUIDFromBytes(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
+    }
+
     private static Map<String, Object> buildAdoptRow(String entityId, String humanName, String repJson) {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("ID", entityId);

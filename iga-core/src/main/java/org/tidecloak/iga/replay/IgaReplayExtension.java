@@ -79,12 +79,30 @@ public final class IgaReplayExtension {
      */
     public static final String ACTION_ADOPT_ORGANIZATION = "ADOPT_ORGANIZATION";
 
+    // -------------------------------------------------------------------------
+    // Commit 2 — EDGE ADOPT actions. These attest admin-configured pre-existing
+    // EDGE rows (not nodes) on the toggle-on scan. Unlike the node ADOPTs, the
+    // stamp is keyed by the edge's composite keys (carried in rowsJson), not by
+    // a single entityId. They share the SAME threshold/approver bypass and the
+    // SAME no-model-write semantics as the node ADOPTs.
+    // -------------------------------------------------------------------------
+    public static final String ACTION_ADOPT_COMPOSITE_ROLE = "ADOPT_COMPOSITE_ROLE";
+    public static final String ACTION_ADOPT_CLIENT_SCOPE_CLIENT = "ADOPT_CLIENT_SCOPE_CLIENT";
+    public static final String ACTION_ADOPT_CLIENT_SCOPE_ROLE = "ADOPT_CLIENT_SCOPE_ROLE";
+    public static final String ACTION_ADOPT_PROTOCOL_MAPPER = "ADOPT_PROTOCOL_MAPPER";
+
     public static final String ENTITY_TYPE_USER = "USER";
     public static final String ENTITY_TYPE_ROLE = "ROLE";
     public static final String ENTITY_TYPE_GROUP = "GROUP";
     public static final String ENTITY_TYPE_CLIENT = "CLIENT";
     public static final String ENTITY_TYPE_CLIENT_SCOPE = "CLIENT_SCOPE";
     public static final String ENTITY_TYPE_ORGANIZATION = "ORGANIZATION";
+
+    // Commit 2 — edge entity types (sidecar entity_type + CR entityType).
+    public static final String ENTITY_TYPE_COMPOSITE_ROLE = "COMPOSITE_ROLE";
+    public static final String ENTITY_TYPE_CLIENT_SCOPE_CLIENT = "CLIENT_SCOPE_CLIENT";
+    public static final String ENTITY_TYPE_CLIENT_SCOPE_ROLE = "CLIENT_SCOPE_ROLE";
+    public static final String ENTITY_TYPE_PROTOCOL_MAPPER = "PROTOCOL_MAPPER";
 
     private IgaReplayExtension() {
     }
@@ -110,7 +128,15 @@ public final class IgaReplayExtension {
                 || ACTION_ADOPT_GROUP.equals(actionType)
                 || ACTION_ADOPT_CLIENT.equals(actionType)
                 || ACTION_ADOPT_CLIENT_SCOPE.equals(actionType)
-                || ACTION_ADOPT_ORGANIZATION.equals(actionType);
+                || ACTION_ADOPT_ORGANIZATION.equals(actionType)
+                // Commit 2 — edge ADOPTs share the same bootstrap-onramp
+                // bypass: an edge admin-configured pre-IGA cannot be subjected
+                // to the realm threshold/approver gate without the same
+                // chicken-and-egg deadlock the node ADOPTs avoid.
+                || ACTION_ADOPT_COMPOSITE_ROLE.equals(actionType)
+                || ACTION_ADOPT_CLIENT_SCOPE_CLIENT.equals(actionType)
+                || ACTION_ADOPT_CLIENT_SCOPE_ROLE.equals(actionType)
+                || ACTION_ADOPT_PROTOCOL_MAPPER.equals(actionType);
     }
 
     /**
@@ -130,6 +156,17 @@ public final class IgaReplayExtension {
                 session.setAttribute("IGA_REPLAY_ACTIVE", "true");
                 try {
                     replayAdopt(session, cr, finalAttestation);
+                } finally {
+                    session.removeAttribute("IGA_REPLAY_ACTIVE");
+                }
+                return true;
+            case ACTION_ADOPT_COMPOSITE_ROLE:
+            case ACTION_ADOPT_CLIENT_SCOPE_CLIENT:
+            case ACTION_ADOPT_CLIENT_SCOPE_ROLE:
+            case ACTION_ADOPT_PROTOCOL_MAPPER:
+                session.setAttribute("IGA_REPLAY_ACTIVE", "true");
+                try {
+                    replayAdoptEdge(session, cr, finalAttestation);
                 } finally {
                     session.removeAttribute("IGA_REPLAY_ACTIVE");
                 }
@@ -218,6 +255,138 @@ public final class IgaReplayExtension {
             managed.setStatus("APPROVED");
             managed.setResolvedAt(System.currentTimeMillis());
         }
+    }
+
+    /**
+     * Replay an edge ADOPT (commit 2). Like {@link #replayAdopt} this performs
+     * NO model write — the edge already exists. It stamps the attestation onto
+     * the edge row(s) via JPQL keyed on the edge's COMPOSITE keys (carried in
+     * the CR's rowsJson, NOT the single entityId), then clears the sidecar and
+     * marks the CR APPROVED. The stamp JPQL mirrors the existing edge stamps in
+     * {@link IgaReplayDispatcher} exactly:
+     * <ul>
+     *   <li>COMPOSITE_ROLE keyed (parent, child) — like ADD_COMPOSITE;</li>
+     *   <li>CLIENT_SCOPE_CLIENT keyed (client, scope) — like ASSIGN_SCOPE;</li>
+     *   <li>CLIENT_SCOPE_ROLE_MAPPING keyed (scope, role) — like SCOPE_ADD_ROLE;</li>
+     *   <li>PROTOCOL_MAPPER keyed (id) — like ADD_PROTOCOL_MAPPER's stamp.</li>
+     * </ul>
+     * Each row carries an {@code AND e.attestation IS NULL} guard so a re-toggle
+     * never re-stamps an already-attested edge.
+     */
+    private static void replayAdoptEdge(KeycloakSession session, IgaChangeRequestEntity cr,
+                                        String finalAttestation) {
+        RealmModel realm = session.realms().getRealm(cr.getRealmId());
+        if (realm == null) {
+            throw new IllegalStateException(
+                    "ADOPT edge replay: realm " + cr.getRealmId() + " no longer exists");
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        String actionType = cr.getActionType();
+        java.util.List<java.util.Map<String, Object>> rows = parseRows(cr.getRowsJson());
+
+        if (finalAttestation != null && !finalAttestation.isEmpty()) {
+            for (java.util.Map<String, Object> row : rows) {
+                int updated = stampEdgeRow(em, actionType, row, finalAttestation);
+                log.debugf("ADOPT edge replay: stamped %d row(s) in %s (row=%s)",
+                        updated, actionType, row);
+            }
+        }
+
+        // Clear the sidecar row(s) for this CR and mark APPROVED — identical
+        // tail to replayAdopt. No per-edge cache eviction: edge attestation is
+        // not part of the node-quarantine isEnabled snapshot (the node ADOPTs
+        // own that), and KC's edge-backed caches (scope/role mapping sets)
+        // converge on their own TTL — matching the best-effort eviction policy
+        // for the auxiliary entries in the node path.
+        IgaUnsignedEntityService.clearByAdoptCr(em, cr.getId());
+
+        IgaChangeRequestEntity managed = em.find(IgaChangeRequestEntity.class, cr.getId());
+        if (managed != null) {
+            managed.setStatus("APPROVED");
+            managed.setResolvedAt(System.currentTimeMillis());
+        }
+    }
+
+    /**
+     * Stamp a single edge row's attestation by its composite keys. Returns the
+     * number of rows updated (0 if the edge vanished out-of-band between ADOPT
+     * create and commit — logged at WARN by the caller's debug line; we do NOT
+     * throw, mirroring the node path's tolerance plus the IS NULL guard).
+     */
+    private static int stampEdgeRow(EntityManager em, String actionType,
+                                    java.util.Map<String, Object> row, String sig) {
+        switch (actionType) {
+            case ACTION_ADOPT_COMPOSITE_ROLE: {
+                String parentId = str(row, "COMPOSITE");
+                String childId = str(row, "CHILD_ROLE");
+                if (parentId == null || childId == null) return 0;
+                return em.createQuery(
+                        "UPDATE CompositeRoleEntity e SET e.attestation = :sig " +
+                                "WHERE e.parentRole.id = :k1 AND e.childRole.id = :k2 " +
+                                "AND e.attestation IS NULL")
+                        .setParameter("sig", sig)
+                        .setParameter("k1", parentId)
+                        .setParameter("k2", childId)
+                        .executeUpdate();
+            }
+            case ACTION_ADOPT_CLIENT_SCOPE_CLIENT: {
+                String clientUuid = str(row, "CLIENT_UUID");
+                String scopeId = str(row, "SCOPE_ID");
+                if (clientUuid == null || scopeId == null) return 0;
+                return em.createQuery(
+                        "UPDATE ClientScopeClientMappingEntity e SET e.attestation = :sig " +
+                                "WHERE e.clientId = :k1 AND e.clientScopeId = :k2 " +
+                                "AND e.attestation IS NULL")
+                        .setParameter("sig", sig)
+                        .setParameter("k1", clientUuid)
+                        .setParameter("k2", scopeId)
+                        .executeUpdate();
+            }
+            case ACTION_ADOPT_CLIENT_SCOPE_ROLE: {
+                String scopeId = str(row, "SCOPE_ID");
+                String roleId = str(row, "ROLE_ID");
+                if (scopeId == null || roleId == null) return 0;
+                return em.createQuery(
+                        "UPDATE ClientScopeRoleMappingEntity e SET e.attestation = :sig " +
+                                "WHERE e.clientScope.id = :k1 AND e.role.id = :k2 " +
+                                "AND e.attestation IS NULL")
+                        .setParameter("sig", sig)
+                        .setParameter("k1", scopeId)
+                        .setParameter("k2", roleId)
+                        .executeUpdate();
+            }
+            case ACTION_ADOPT_PROTOCOL_MAPPER: {
+                String mapperId = str(row, "ID");
+                if (mapperId == null) return 0;
+                return em.createQuery(
+                        "UPDATE ProtocolMapperEntity e SET e.attestation = :sig " +
+                                "WHERE e.id = :id AND e.attestation IS NULL")
+                        .setParameter("sig", sig)
+                        .setParameter("id", mapperId)
+                        .executeUpdate();
+            }
+            default:
+                throw new IllegalStateException("ADOPT edge replay: no stamp JPQL for action " + actionType);
+        }
+    }
+
+    private static final com.fasterxml.jackson.databind.ObjectMapper EDGE_MAPPER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
+    private static final com.fasterxml.jackson.core.type.TypeReference<
+            java.util.List<java.util.Map<String, Object>>> EDGE_LIST_MAP_REF =
+            new com.fasterxml.jackson.core.type.TypeReference<>() {};
+
+    private static java.util.List<java.util.Map<String, Object>> parseRows(String rowsJson) {
+        try {
+            return EDGE_MAPPER.readValue(rowsJson, EDGE_LIST_MAP_REF);
+        } catch (Exception e) {
+            throw new RuntimeException("ADOPT edge replay: failed to parse rowsJson", e);
+        }
+    }
+
+    private static String str(java.util.Map<String, Object> row, String key) {
+        Object v = row.get(key);
+        return v != null ? v.toString() : null;
     }
 
     /**

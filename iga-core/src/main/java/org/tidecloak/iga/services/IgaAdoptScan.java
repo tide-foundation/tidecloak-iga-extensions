@@ -5,6 +5,7 @@ import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.replay.IgaReplayExtension;
 import org.tidecloak.iga.replay.SidecarCapExceededException;
@@ -113,12 +114,21 @@ public final class IgaAdoptScan {
          * {@link org.tidecloak.iga.rest.TideAdminCompatResource#toggleIga}).
          */
         public final long sessionsInvalidated;
+        /**
+         * Commit 2 — count of EDGE rows (composite-role / scope↔client /
+         * scope→role / protocol-mapper) skipped because their owning NODE is a
+         * built-in (KC default scope, built-in admin client, or the
+         * {@code default-roles-<realm>} composite). Surfaced under
+         * {@code skipped.systemEdges} so an operator can confirm the
+         * skip-built-ins invariant held on toggle-on.
+         */
+        public final long skippedSystemEdges;
 
         ScanResult(String realmId, long durationMs, long totalEntitiesScanned,
                    Map<String, Long> adoptCrsCreated, long skippedSystemFilter,
                    long skippedAlreadyCommittedAdopt, long skippedPendingCreateCr,
                    long skippedAlreadyAttested, long errors,
-                   long sessionsInvalidated) {
+                   long sessionsInvalidated, long skippedSystemEdges) {
             this.realmId = realmId;
             this.durationMs = durationMs;
             this.totalEntitiesScanned = totalEntitiesScanned;
@@ -129,6 +139,7 @@ public final class IgaAdoptScan {
             this.skippedAlreadyAttested = skippedAlreadyAttested;
             this.errors = errors;
             this.sessionsInvalidated = sessionsInvalidated;
+            this.skippedSystemEdges = skippedSystemEdges;
         }
 
         /**
@@ -141,7 +152,7 @@ public final class IgaAdoptScan {
             return new ScanResult(realmId, durationMs, totalEntitiesScanned,
                     adoptCrsCreated, skippedSystemFilter,
                     skippedAlreadyCommittedAdopt, skippedPendingCreateCr,
-                    skippedAlreadyAttested, errors, count);
+                    skippedAlreadyAttested, errors, count, skippedSystemEdges);
         }
 
         /** Map shape for the toggle response body — matches the locked contract. */
@@ -156,6 +167,7 @@ public final class IgaAdoptScan {
             skipped.put("alreadyCommittedAdopt", skippedAlreadyCommittedAdopt);
             skipped.put("pendingCreateCr", skippedPendingCreateCr);
             skipped.put("alreadyAttested", skippedAlreadyAttested);
+            skipped.put("systemEdges", skippedSystemEdges);
             m.put("skipped", skipped);
             m.put("errors", errors);
             m.put("sessionsInvalidated", sessionsInvalidated);
@@ -238,6 +250,17 @@ public final class IgaAdoptScan {
                 queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE, "APPROVED"));
         committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_ORGANIZATION,
                 queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_ORGANIZATION, "APPROVED"));
+        // Commit 2 — edge entity types. The synthetic entityId (key1|key2) is
+        // the same value stored on both the CR and the sidecar, so the
+        // already-committed-ADOPT skip-set keys match across re-toggles.
+        committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_COMPOSITE_ROLE,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_COMPOSITE_ROLE, "APPROVED"));
+        committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_CLIENT,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE_CLIENT, "APPROVED"));
+        committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_ROLE,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE_ROLE, "APPROVED"));
+        committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_PROTOCOL_MAPPER,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_PROTOCOL_MAPPER, "APPROVED"));
 
         // Build per-type "pending CREATE_*" race skip sets. CREATE actions
         // are literal strings (no central constants in the IgaReplayExtension
@@ -267,9 +290,15 @@ public final class IgaAdoptScan {
         created.put(IgaReplayExtension.ENTITY_TYPE_CLIENT, 0L);
         created.put(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, 0L);
         created.put(IgaReplayExtension.ENTITY_TYPE_ORGANIZATION, 0L);
+        // Commit 2 — edge entity-type counters (always present, zero by default).
+        created.put(IgaReplayExtension.ENTITY_TYPE_COMPOSITE_ROLE, 0L);
+        created.put(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_CLIENT, 0L);
+        created.put(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_ROLE, 0L);
+        created.put(IgaReplayExtension.ENTITY_TYPE_PROTOCOL_MAPPER, 0L);
 
         long[] counters = new long[5]; // total, sysSkip, committedSkip, pendingSkip, errors
         long[] alreadyAttestedCounter = new long[1];
+        long[] systemEdgesCounter = new long[1]; // commit 2 — built-in edges skipped
 
         // The committed-ADOPT skip set is the contract's idempotent-re-toggle
         // key: every entity in this realm that already has an APPROVED
@@ -337,6 +366,44 @@ public final class IgaAdoptScan {
                     created, counters, alreadyAttestedCounter);
         }
 
+        // ---------------------------------------------------------------------
+        // Commit 2 — EDGE enumeration. Admin-configured composite-role links,
+        // scope↔client attaches, scope→role mappings, and custom protocol-
+        // mappers that pre-date the toggle-on are attested here. Built-in
+        // edges (owned by a KC default scope / built-in admin client / the
+        // default-roles-<realm> composite) are SKIPPED via the SAME node rules
+        // the node scan uses (IgaSystemEntityFilter.shouldSkipEdge) and counted
+        // under systemEdgesCounter — never enumerated.
+        // ---------------------------------------------------------------------
+        // Edge emits run in their OWN child transactions (see processOneEdge),
+        // so enumerate them only AFTER all node-ADOPT inserts are staged on the
+        // parent transaction. A child-txn edge failure can no longer roll back
+        // the node work.
+        for (IgaUnsignedRowScanner.EdgeRow e : scanner.compositeRoleEdges(realm.getId())) {
+            processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_COMPOSITE_ROLE,
+                    IgaReplayExtension.ACTION_ADOPT_COMPOSITE_ROLE, e,
+                    requestedBy, includeSystem, committedAdoptByType,
+                    created, counters, systemEdgesCounter);
+        }
+        for (IgaUnsignedRowScanner.EdgeRow e : scanner.clientScopeClientEdges(realm.getId())) {
+            processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_CLIENT,
+                    IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE_CLIENT, e,
+                    requestedBy, includeSystem, committedAdoptByType,
+                    created, counters, systemEdgesCounter);
+        }
+        for (IgaUnsignedRowScanner.EdgeRow e : scanner.clientScopeRoleEdges(realm.getId())) {
+            processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_ROLE,
+                    IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE_ROLE, e,
+                    requestedBy, includeSystem, committedAdoptByType,
+                    created, counters, systemEdgesCounter);
+        }
+        for (IgaUnsignedRowScanner.EdgeRow e : scanner.protocolMapperEdges(realm.getId())) {
+            processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_PROTOCOL_MAPPER,
+                    IgaReplayExtension.ACTION_ADOPT_PROTOCOL_MAPPER, e,
+                    requestedBy, includeSystem, committedAdoptByType,
+                    created, counters, systemEdgesCounter);
+        }
+
         long durationMs = System.currentTimeMillis() - t0;
         // sessionsInvalidated is populated by the toggle-on caller AFTER this
         // scan returns — see ScanResult.withSessionsInvalidated. The scan
@@ -353,13 +420,14 @@ public final class IgaAdoptScan {
                 counters[3],
                 alreadyAttestedCounter[0],
                 counters[4],
-                0L
+                0L,
+                systemEdgesCounter[0]
         );
         log.infof("IGA toggle-on scan: realm=%s durationMs=%d scanned=%d created=%s "
                         + "skippedSystem=%d skippedCommittedAdopt=%d skippedPendingCreate=%d "
-                        + "skippedAlreadyAttested=%d errors=%d",
+                        + "skippedAlreadyAttested=%d skippedSystemEdges=%d errors=%d",
                 realm.getName(), durationMs, counters[0], created, counters[1], counters[2],
-                counters[3], alreadyAttestedCounter[0], counters[4]);
+                counters[3], alreadyAttestedCounter[0], systemEdgesCounter[0], counters[4]);
         return result;
     }
 
@@ -427,6 +495,102 @@ public final class IgaAdoptScan {
             log.warnf(ex,
                     "IGA scan ERROR on realm=%s type=%s id=%s name=%s — continuing",
                     realm.getName(), entityType, row.entityId(), row.entityName());
+        }
+    }
+
+    /**
+     * Commit 2 — per-EDGE processing. Mirrors {@link #processOne} but:
+     * <ul>
+     *   <li>built-in classification goes through
+     *       {@link IgaSystemEntityFilter#shouldSkipEdge} (owning-node rules),
+     *       counted under {@code systemEdgesCounter} (surfaced as
+     *       {@code skipped.systemEdges});</li>
+     *   <li>the already-committed-ADOPT skip keys on the synthetic
+     *       {@code key1|key2} entityId (same value the CR + sidecar store);</li>
+     *   <li>there is no pending-CREATE race lane for edges (an edge has no
+     *       CREATE_* CR of its own — it is created as part of a node CREATE or
+     *       a relationship action whose own commit stamps it);</li>
+     *   <li>emission goes through {@link IgaChangeRequestService#createAdoptEdgeCr}.</li>
+     * </ul>
+     * The {@code total scanned} counter (counters[0]) is incremented for edges
+     * too, so the response's {@code totalEntitiesScanned} reflects all rows the
+     * scan considered (nodes + edges).
+     */
+    private static void processOneEdge(KeycloakSession scanSession,
+                                       RealmModel realm,
+                                       String entityType,
+                                       String actionType,
+                                       IgaUnsignedRowScanner.EdgeRow edge,
+                                       String requestedBy,
+                                       boolean includeSystem,
+                                       Map<String, Set<String>> committedAdoptByType,
+                                       Map<String, Long> created,
+                                       long[] counters,
+                                       long[] systemEdgesCounter) {
+        counters[0]++; // total scanned (nodes + edges)
+        // FIX (ENTITY_ID overflow): the skip-key MUST be the same deterministic
+        // 36-char synthetic id the CR + sidecar store (NOT key1|key2, which is
+        // ~73 chars and overflowed VARCHAR(36)). Compute it via the shared
+        // helper so this skip lookup matches what createAdoptEdgeCr wrote.
+        String syntheticEntityId =
+                IgaChangeRequestService.edgeSyntheticId(entityType, edge.key1(), edge.key2());
+        // 1. Built-in skip — owning-node classification (NOT a parallel
+        //    filter). A composite whose parent is default-roles-<realm>, an
+        //    edge owned by a KC default scope, or a mapper on a built-in
+        //    admin client is skipped exactly as its node would be.
+        if (IgaSystemEntityFilter.shouldSkipEdge(realm, edge.ownerNodeType(),
+                edge.ownerNodeName(), edge.ownerParentClientId(), includeSystem)) {
+            systemEdgesCounter[0]++;
+            log.debugf("IGA scan skip(systemEdge): realm=%s type=%s key1=%s key2=%s ownerType=%s ownerName=%s",
+                    realm.getName(), entityType, edge.key1(), edge.key2(),
+                    edge.ownerNodeType(), edge.ownerNodeName());
+            return;
+        }
+        // 2. Already-committed ADOPT skip (re-toggle idempotency). Pre-
+        //    tallied into counters[2] at scan start (the skip-set size loop
+        //    already includes the edge types), so we only short-circuit
+        //    here without re-incrementing — matching the node path.
+        Set<String> committed = committedAdoptByType.get(entityType);
+        if (committed != null && committed.contains(syntheticEntityId)) {
+            log.debugf("IGA scan skip(alreadyCommittedAdopt edge): realm=%s type=%s id=%s",
+                    realm.getName(), entityType, syntheticEntityId);
+            return;
+        }
+        // 3. Emit the edge ADOPT CR — in its OWN child transaction.
+        //
+        // FIX (transaction isolation): the node-ADOPT inserts are pending on
+        // the parent scan transaction. If an edge INSERT throws (constraint
+        // violation, vanished endpoint, …) inside that SAME transaction, the
+        // whole transaction — including every node-ADOPT insert — rolls back
+        // (the original 11-test regression). We run each edge emit in its own
+        // KeycloakModelUtils.runJobInTransaction: a child failure rolls back
+        // ONLY that child, the parent node-ADOPT work is untouched. Invariant:
+        // node ADOPT behavior is byte-for-byte unchanged whether edges succeed
+        // or fail.
+        try {
+            KeycloakModelUtils.runJobInTransaction(
+                    scanSession.getKeycloakSessionFactory(),
+                    edgeSession -> {
+                        RealmModel edgeRealm = edgeSession.realms().getRealm(realm.getId());
+                        if (edgeRealm == null) {
+                            throw new IllegalStateException(
+                                    "edge ADOPT: realm " + realm.getId() + " not loadable in edge session");
+                        }
+                        edgeSession.getContext().setRealm(edgeRealm);
+                        EntityManager edgeEm =
+                                edgeSession.getProvider(JpaConnectionProvider.class).getEntityManager();
+                        IgaChangeRequestService edgeCrService =
+                                new IgaChangeRequestService(edgeEm, edgeSession);
+                        edgeCrService.createAdoptEdgeCr(edgeRealm, entityType,
+                                edge.key1(), edge.key2(), actionType, requestedBy);
+                    });
+            created.merge(entityType, 1L, Long::sum);
+        } catch (RuntimeException ex) {
+            counters[4]++;
+            log.warnf(ex,
+                    "IGA scan ERROR on edge realm=%s type=%s key1=%s key2=%s — child txn rolled "
+                            + "back, node-ADOPT work preserved; continuing",
+                    realm.getName(), entityType, edge.key1(), edge.key2());
         }
     }
 

@@ -247,12 +247,206 @@ public final class IgaUnsignedRowScanner {
     /**
      * PROTOCOL_MAPPER: (mapper id, owning client id) pairs where
      * {@code attestation IS NULL}, scoped via the parent client's realm.
+     *
+     * <p>NOTE: this id-only/stream variant historically only found
+     * CLIENT-owned mappers. The edge ADOPT scan uses the richer
+     * {@link #protocolMapperEdges(String)} which ALSO covers scope-owned
+     * mappers ({@code pm.clientScope.id}) — see the fix documented there. This
+     * client-only stream is left byte-unchanged for the existing quarantine
+     * cross-check callers that key on the parent client UUID.</p>
      */
     public Stream<UnsignedEntityRef> protocolMappers(String realmId) {
         return pairStream("PROTOCOL_MAPPER",
                 "SELECT pm.id, pm.client.id FROM ProtocolMapperEntity pm " +
                         "WHERE pm.client.realmId = ?1 AND pm.attestation IS NULL",
                 realmId);
+    }
+
+    // -------------------------------------------------------------------------
+    // EDGE projections for the toggle-on ADOPT scan (commit 2). Each EdgeRow
+    // carries BOTH composite keys (the replay stamp needs both) PLUS the
+    // human name(s) of the owning NODE so IgaSystemEntityFilter can classify
+    // the edge as built-in (and SKIP it) using the SAME node rules the node
+    // scan applies. We never invent a parallel built-in list.
+    // -------------------------------------------------------------------------
+
+    /**
+     * One unattested EDGE row.
+     *
+     * @param key1            first composite key (parent role id / scope id /
+     *                        owning node id depending on edge type).
+     * @param key2            second composite key (child role id / client id /
+     *                        role id / mapper id).
+     * @param ownerNodeName   human name of the NODE that owns/anchors this edge
+     *                        and decides its built-in status:
+     *                        <ul>
+     *                          <li>COMPOSITE_ROLE → the PARENT role's name
+     *                              (so {@code default-roles-<realm>} is caught
+     *                              by the hard-pin).</li>
+     *                          <li>CLIENT_SCOPE_CLIENT / CLIENT_SCOPE_ROLE /
+     *                              PROTOCOL_MAPPER(scope-owned) → the owning
+     *                              client-SCOPE's name (so KC default scopes
+     *                              are soft-skipped).</li>
+     *                          <li>PROTOCOL_MAPPER(client-owned) → the owning
+     *                              CLIENT's clientId (so built-in admin clients
+     *                              are soft-skipped).</li>
+     *                        </ul>
+     * @param ownerNodeType   the entity-type the {@code ownerNodeName} should be
+     *                        classified as by {@link IgaSystemEntityFilter}
+     *                        (ROLE / CLIENT_SCOPE / CLIENT).
+     */
+    /**
+     * @param ownerParentClientId for a COMPOSITE_ROLE whose PARENT is a
+     *        client-role, the owning client's {@code clientId} (so built-in
+     *        admin clients' composite client-roles soft-skip as a unit with
+     *        their client). {@code null} for realm-role parents and every
+     *        non-composite edge type.
+     */
+    public record EdgeRow(String key1, String key2, String ownerNodeName,
+                          String ownerNodeType, String ownerParentClientId) { }
+
+    /**
+     * COMPOSITE_ROLE — (parentRoleId, childRoleId) + parent role name + (when
+     * the parent is a client-role) the parent's owning {@code clientId}.
+     *
+     * <p>The parent role classifies the edge. Two built-in composite sources
+     * exist in a stock realm and BOTH must skip:
+     * <ul>
+     *   <li>the realm composite {@code default-roles-<realm>} (realm-role
+     *       parent, hard-pinned by name);</li>
+     *   <li>built-in admin clients' composite client-roles — {@code
+     *       realm-management}'s {@code admin}/{@code realm-admin}, {@code
+     *       account}'s {@code manage-account}, etc. Their parent is a
+     *       CLIENT-role, so we surface the owning client's {@code clientId}
+     *       and route it through the {@code parentClientId} soft-skip lane.
+     *       (Without this they leaked ~23 ADOPT_COMPOSITE_ROLE CRs per stock
+     *       realm — the self-verify regression.)</li>
+     * </ul>
+     */
+    public List<EdgeRow> compositeRoleEdges(String realmId) {
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = (List<Object[]>) em.createQuery(
+                "SELECT cr.parentRole.id, cr.childRole.id, cr.parentRole.name, " +
+                        "cr.parentRole.clientRole, cr.parentRole.clientId " +
+                        "FROM CompositeRoleEntity cr " +
+                        "WHERE cr.parentRole.realmId = ?1 AND cr.attestation IS NULL")
+                .setParameter(1, realmId).getResultList();
+        List<EdgeRow> out = new ArrayList<>(rows.size());
+        for (Object[] r : rows) {
+            boolean clientRole = Boolean.TRUE.equals(r[3]);
+            String parentClientId = null;
+            if (clientRole) {
+                // r[4] is the owning client's UUID (KEYCLOAK_ROLE.CLIENT);
+                // resolve it to the clientId string the built-in-client set
+                // keys on.
+                parentClientId = clientIdForClientUuid(asStr(r, 4));
+            }
+            out.add(new EdgeRow(asStr(r, 0), asStr(r, 1), asStr(r, 2),
+                    org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_ROLE,
+                    parentClientId));
+        }
+        log.debugf("scanner: COMPOSITE_ROLE (edge) — %d unsigned row(s) in realm %s",
+                out.size(), realmId);
+        return out;
+    }
+
+    /** Resolve a client's UUID to its {@code clientId} string (or null). */
+    private String clientIdForClientUuid(String clientUuid) {
+        if (clientUuid == null) {
+            return null;
+        }
+        @SuppressWarnings("unchecked")
+        List<String> ids = (List<String>) em.createQuery(
+                "SELECT c.clientId FROM ClientEntity c WHERE c.id = ?1")
+                .setParameter(1, clientUuid).getResultList();
+        return ids.isEmpty() ? null : ids.get(0);
+    }
+
+    /**
+     * CLIENT_SCOPE_CLIENT — (clientId, scopeId) + owning client-scope name. The
+     * SCOPE decides built-in status (a default scope attached to any client is
+     * part of the realm bootstrap surface), so we surface the scope name.
+     */
+    public List<EdgeRow> clientScopeClientEdges(String realmId) {
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = (List<Object[]>) em.createQuery(
+                "SELECT csc.clientId, csc.clientScopeId, cs.name " +
+                        "FROM ClientScopeClientMappingEntity csc " +
+                        "JOIN ClientEntity c ON c.id = csc.clientId " +
+                        "JOIN ClientScopeEntity cs ON cs.id = csc.clientScopeId " +
+                        "WHERE c.realmId = ?1 AND csc.attestation IS NULL")
+                .setParameter(1, realmId).getResultList();
+        return toEdgeRows(rows, org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, "CLIENT_SCOPE_CLIENT", realmId);
+    }
+
+    /**
+     * CLIENT_SCOPE_ROLE_MAPPING — (scopeId, roleId) + owning client-scope name.
+     * The owning SCOPE decides built-in status.
+     */
+    public List<EdgeRow> clientScopeRoleEdges(String realmId) {
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = (List<Object[]>) em.createQuery(
+                "SELECT csrm.clientScope.id, csrm.role.id, csrm.clientScope.name " +
+                        "FROM ClientScopeRoleMappingEntity csrm " +
+                        "WHERE csrm.clientScope.realmId = ?1 AND csrm.attestation IS NULL")
+                .setParameter(1, realmId).getResultList();
+        return toEdgeRows(rows, org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, "CLIENT_SCOPE_ROLE", realmId);
+    }
+
+    /**
+     * PROTOCOL_MAPPER edges — FIX: the legacy {@link #protocolMappers(String)}
+     * stream only found client-owned mappers ({@code pm.client.realmId}). An
+     * admin can configure a mapper on a CLIENT-SCOPE too; those have
+     * {@code pm.client IS NULL} and {@code pm.clientScope} set and were NEVER
+     * enumerated. This method covers BOTH:
+     * <ul>
+     *   <li>client-owned: keyed (mapperId, ownerClientId), classified by the
+     *       owning CLIENT's clientId;</li>
+     *   <li>scope-owned: keyed (mapperId, ownerScopeId), classified by the
+     *       owning client-SCOPE's name.</li>
+     * </ul>
+     * key1 is always the mapper id (the replay stamp keys by id). key2 is the
+     * owning node id (informational / sidecar uniqueness).
+     */
+    public List<EdgeRow> protocolMapperEdges(String realmId) {
+        List<EdgeRow> out = new ArrayList<>();
+        // client-owned
+        @SuppressWarnings("unchecked")
+        List<Object[]> clientOwned = (List<Object[]>) em.createQuery(
+                "SELECT pm.id, pm.client.id, pm.client.clientId " +
+                        "FROM ProtocolMapperEntity pm " +
+                        "WHERE pm.client.realmId = ?1 AND pm.attestation IS NULL")
+                .setParameter(1, realmId).getResultList();
+        for (Object[] r : clientOwned) {
+            // client-owned mapper: ownerNodeName IS the owning client's
+            // clientId, classified as CLIENT — no separate parentClientId.
+            out.add(new EdgeRow(asStr(r, 0), asStr(r, 1), asStr(r, 2),
+                    org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_CLIENT, null));
+        }
+        // scope-owned (the previously-missed lane)
+        @SuppressWarnings("unchecked")
+        List<Object[]> scopeOwned = (List<Object[]>) em.createQuery(
+                "SELECT pm.id, pm.clientScope.id, pm.clientScope.name " +
+                        "FROM ProtocolMapperEntity pm " +
+                        "WHERE pm.clientScope.realmId = ?1 AND pm.attestation IS NULL")
+                .setParameter(1, realmId).getResultList();
+        for (Object[] r : scopeOwned) {
+            out.add(new EdgeRow(asStr(r, 0), asStr(r, 1), asStr(r, 2),
+                    org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, null));
+        }
+        log.debugf("scanner: PROTOCOL_MAPPER (edge) — %d unsigned row(s) (client+scope owned) in realm %s",
+                out.size(), realmId);
+        return out;
+    }
+
+    private List<EdgeRow> toEdgeRows(List<Object[]> rows, String ownerNodeType,
+                                     String label, String realmId) {
+        List<EdgeRow> out = new ArrayList<>(rows.size());
+        for (Object[] r : rows) {
+            out.add(new EdgeRow(asStr(r, 0), asStr(r, 1), asStr(r, 2), ownerNodeType, null));
+        }
+        log.debugf("scanner: %s (edge) — %d unsigned row(s) in realm %s", label, out.size(), realmId);
+        return out;
     }
 
     // -------------------------------------------------------------------------

@@ -223,4 +223,56 @@ public final class IgaSystemEntityFilter {
         }
         return false;
     }
+
+    /**
+     * EDGE built-in classification (commit 2 — edge ADOPT coverage). An edge
+     * (composite-role link, scope↔client attach, scope→role mapping,
+     * protocol-mapper) is built-in when the NODE that owns/anchors it is
+     * built-in. We do NOT invent a parallel edge filter: we reuse the EXACT
+     * node rules in {@link #shouldSkip} by classifying the edge through its
+     * owning node's (type, name).
+     *
+     * <ul>
+     *   <li>COMPOSITE_ROLE → owner = the PARENT role. Skip when the parent is
+     *       the hard-pinned {@code default-roles-<realm>} composite, a default
+     *       realm role, OR — crucially — a CLIENT-ROLE of a built-in admin
+     *       client (e.g. {@code realm-management}'s {@code admin} /
+     *       {@code realm-admin} composites, {@code account}'s
+     *       {@code manage-account}). Those built-in admin clients ship dozens
+     *       of composite client-roles; they MUST soft-skip exactly as their
+     *       parent client does — hence {@code ownerParentClientId} is threaded
+     *       through to {@link #shouldSkip}'s {@code parentClientId} lane.</li>
+     *   <li>CLIENT_SCOPE_CLIENT / CLIENT_SCOPE_ROLE / scope-owned
+     *       PROTOCOL_MAPPER → owner = the client-SCOPE. Skip when the scope is
+     *       a KC default scope (profile/email/roles/...).</li>
+     *   <li>client-owned PROTOCOL_MAPPER → owner = the CLIENT. Skip when the
+     *       client is a built-in admin client (realm-management/account/...).</li>
+     * </ul>
+     *
+     * @param realm          the realm being scanned.
+     * @param ownerNodeType  the owning node's entity-type
+     *                       (ROLE | CLIENT_SCOPE | CLIENT).
+     * @param ownerNodeName  the owning node's human name (role name / scope
+     *                       name / client {@code clientId}).
+     * @param ownerParentClientId  for a COMPOSITE_ROLE whose PARENT is a
+     *                       client-role, the owning client's {@code clientId}
+     *                       (so a built-in admin client's composites soft-skip
+     *                       as a unit); {@code null} for realm-role parents and
+     *                       non-ROLE owners.
+     * @param includeSystem  if {@code true}, soft-skip rules are lifted; the
+     *                       {@code default-roles-<realm>} hard-pin is preserved.
+     * @return {@code true} when the edge must be skipped by the scan.
+     */
+    public static boolean shouldSkipEdge(RealmModel realm,
+                                         String ownerNodeType,
+                                         String ownerNodeName,
+                                         String ownerParentClientId,
+                                         boolean includeSystem) {
+        // Delegate to the node classifier so edge built-in status tracks node
+        // built-in status with zero rule duplication. For a client-role parent
+        // we pass its owning clientId so the parentClientId soft-skip lane
+        // catches built-in admin clients' composite client-roles.
+        return shouldSkip(realm, ownerNodeType, /*entityId*/ null,
+                ownerNodeName, ownerParentClientId, includeSystem);
+    }
 }
