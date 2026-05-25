@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.3.0: Add an ATTESTATION column to DEFAULT_CLIENT_SCOPE.
+
+      DEFAULT_CLIENT_SCOPE rows are the realm-level default-default / default-
+      optional client-scope templates every new client inherits — a token-
+      shaping input. They previously had no attestation column. This column
+      lets the realm default-scope assignment be brought under the current-
+      attested-state model: live admin add/remove is captured as
+      REALM_DEFAULT_SCOPE_ADD / REMOVE and stamped on commit; pre-toggle rows
+      pointing at admin-authored custom scopes are attested via the toggle-on
+      ADOPT_DEFAULT_CLIENT_SCOPE scan. Mirrors the ATTESTATION column already
+      carried by CLIENT_SCOPE_CLIENT / CLIENT_SCOPE_ROLE_MAPPING (1.8.0-era
+      edge attestation), VARCHAR(2048).
+    -->
+
+    <changeSet id="iga-2.3.0-1" author="tidecloak-iga">
+        <addColumn tableName="DEFAULT_CLIENT_SCOPE">
+            <column name="ATTESTATION" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>

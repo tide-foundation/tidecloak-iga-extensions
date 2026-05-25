@@ -439,6 +439,33 @@ public final class IgaUnsignedRowScanner {
         return out;
     }
 
+    /**
+     * REALM DEFAULT_CLIENT_SCOPE — (realmId, scopeId) + owning client-scope
+     * name. Commit 3. These are the realm-level default-default / default-
+     * optional client-scope templates. The owning SCOPE decides built-in status
+     * (a DEFAULT_CLIENT_SCOPE row pointing at a KC default scope —
+     * profile/email/roles/... — is realm bootstrap surface and is skipped; only
+     * admin-authored custom scopes set as realm defaults are adopted). key1 is
+     * the realm id (the replay stamp keys on {@code e.realm.id}); key2 is the
+     * scope id ({@code e.clientScopeId}).
+     *
+     * <p>Entity field names: {@code DefaultClientScopeRealmMappingEntity.realm}
+     * (RealmEntity, column REALM_ID) and {@code .clientScopeId} (String, column
+     * SCOPE_ID). We join ClientScopeEntity by id for the owning-scope name.</p>
+     */
+    public List<EdgeRow> defaultClientScopeEdges(String realmId) {
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = (List<Object[]>) em.createQuery(
+                "SELECT dcs.realm.id, dcs.clientScopeId, cs.name " +
+                        "FROM DefaultClientScopeRealmMappingEntity dcs " +
+                        "JOIN ClientScopeEntity cs ON cs.id = dcs.clientScopeId " +
+                        "WHERE dcs.realm.id = ?1 AND dcs.attestation IS NULL")
+                .setParameter(1, realmId).getResultList();
+        return toEdgeRows(rows,
+                org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE,
+                "REALM_DEFAULT_SCOPE", realmId);
+    }
+
     private List<EdgeRow> toEdgeRows(List<Object[]> rows, String ownerNodeType,
                                      String label, String realmId) {
         List<EdgeRow> out = new ArrayList<>(rows.size());

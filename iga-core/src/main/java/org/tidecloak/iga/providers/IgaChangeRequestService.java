@@ -302,6 +302,12 @@ public class IgaChangeRequestService {
                 row.put("ID", key1);
                 if (key2 != null) row.put("OWNER_NODE_ID", key2);
                 break;
+            case IgaReplayExtension.ENTITY_TYPE_REALM_DEFAULT_SCOPE:
+                // DEFAULT_CLIENT_SCOPE row keyed (REALM_ID, SCOPE_ID) — the
+                // replay stamp keys on the entity's realm.id + clientScopeId.
+                row.put("REALM_ID", key1);
+                row.put("SCOPE_ID", key2);
+                break;
             default:
                 throw new IllegalArgumentException(
                         "createAdoptEdgeCr: unsupported edge entityType '" + entityType + "'");

@@ -261,6 +261,9 @@ public final class IgaAdoptScan {
                 queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE_ROLE, "APPROVED"));
         committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_PROTOCOL_MAPPER,
                 queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_PROTOCOL_MAPPER, "APPROVED"));
+        // Commit 3 — realm default-scope edge.
+        committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_REALM_DEFAULT_SCOPE,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_DEFAULT_CLIENT_SCOPE, "APPROVED"));
 
         // Build per-type "pending CREATE_*" race skip sets. CREATE actions
         // are literal strings (no central constants in the IgaReplayExtension
@@ -295,6 +298,9 @@ public final class IgaAdoptScan {
         created.put(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_CLIENT, 0L);
         created.put(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_ROLE, 0L);
         created.put(IgaReplayExtension.ENTITY_TYPE_PROTOCOL_MAPPER, 0L);
+        // Commit 3 — realm default-scope edge counter (own key; existing
+        // per-type ADOPT test counts are untouched).
+        created.put(IgaReplayExtension.ENTITY_TYPE_REALM_DEFAULT_SCOPE, 0L);
 
         long[] counters = new long[5]; // total, sysSkip, committedSkip, pendingSkip, errors
         long[] alreadyAttestedCounter = new long[1];
@@ -400,6 +406,19 @@ public final class IgaAdoptScan {
         for (IgaUnsignedRowScanner.EdgeRow e : scanner.protocolMapperEdges(realm.getId())) {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_PROTOCOL_MAPPER,
                     IgaReplayExtension.ACTION_ADOPT_PROTOCOL_MAPPER, e,
+                    requestedBy, includeSystem, committedAdoptByType,
+                    created, counters, systemEdgesCounter);
+        }
+        // Commit 3 — realm default-scope edges (DEFAULT_CLIENT_SCOPE rows). The
+        // EdgeRow's ownerNodeType is CLIENT_SCOPE (the scope decides built-in
+        // status), so a row pointing at a KC default scope soft-skips via
+        // shouldSkipEdge exactly as the scope node would; the CR/sidecar
+        // entity-type is REALM_DEFAULT_SCOPE. In a fresh realm ALL default-scope
+        // rows point at built-in scopes → the scan skips ~all of them (expected;
+        // only admin-created custom scopes set as realm defaults get adopted).
+        for (IgaUnsignedRowScanner.EdgeRow e : scanner.defaultClientScopeEdges(realm.getId())) {
+            processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_REALM_DEFAULT_SCOPE,
+                    IgaReplayExtension.ACTION_ADOPT_DEFAULT_CLIENT_SCOPE, e,
                     requestedBy, includeSystem, committedAdoptByType,
                     created, counters, systemEdgesCounter);
         }

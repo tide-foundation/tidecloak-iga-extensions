@@ -90,6 +90,16 @@ public final class IgaReplayExtension {
     public static final String ACTION_ADOPT_CLIENT_SCOPE_CLIENT = "ADOPT_CLIENT_SCOPE_CLIENT";
     public static final String ACTION_ADOPT_CLIENT_SCOPE_ROLE = "ADOPT_CLIENT_SCOPE_ROLE";
     public static final String ACTION_ADOPT_PROTOCOL_MAPPER = "ADOPT_PROTOCOL_MAPPER";
+    /**
+     * Commit 3 — retroactive ADOPT for realm default-default / default-optional
+     * client-scope assignments ({@code DEFAULT_CLIENT_SCOPE} rows). An edge
+     * keyed (realmId, scopeId), stamped on the {@code ATTESTATION} column added
+     * by iga-changelog-2.3.0. Built-in default-scope rows (those pointing at a
+     * KC default scope — profile/email/roles/...) are SKIPPED by the scan's
+     * owning-SCOPE built-in classification; only admin-authored custom scopes
+     * set as realm defaults are adopted.
+     */
+    public static final String ACTION_ADOPT_DEFAULT_CLIENT_SCOPE = "ADOPT_DEFAULT_CLIENT_SCOPE";
 
     public static final String ENTITY_TYPE_USER = "USER";
     public static final String ENTITY_TYPE_ROLE = "ROLE";
@@ -103,6 +113,9 @@ public final class IgaReplayExtension {
     public static final String ENTITY_TYPE_CLIENT_SCOPE_CLIENT = "CLIENT_SCOPE_CLIENT";
     public static final String ENTITY_TYPE_CLIENT_SCOPE_ROLE = "CLIENT_SCOPE_ROLE";
     public static final String ENTITY_TYPE_PROTOCOL_MAPPER = "PROTOCOL_MAPPER";
+    // Commit 3 — realm default-scope edge (DEFAULT_CLIENT_SCOPE row, keyed
+    // realmId+scopeId; owning node is the client-SCOPE for built-in skip).
+    public static final String ENTITY_TYPE_REALM_DEFAULT_SCOPE = "REALM_DEFAULT_SCOPE";
 
     private IgaReplayExtension() {
     }
@@ -136,7 +149,8 @@ public final class IgaReplayExtension {
                 || ACTION_ADOPT_COMPOSITE_ROLE.equals(actionType)
                 || ACTION_ADOPT_CLIENT_SCOPE_CLIENT.equals(actionType)
                 || ACTION_ADOPT_CLIENT_SCOPE_ROLE.equals(actionType)
-                || ACTION_ADOPT_PROTOCOL_MAPPER.equals(actionType);
+                || ACTION_ADOPT_PROTOCOL_MAPPER.equals(actionType)
+                || ACTION_ADOPT_DEFAULT_CLIENT_SCOPE.equals(actionType);
     }
 
     /**
@@ -164,6 +178,7 @@ public final class IgaReplayExtension {
             case ACTION_ADOPT_CLIENT_SCOPE_CLIENT:
             case ACTION_ADOPT_CLIENT_SCOPE_ROLE:
             case ACTION_ADOPT_PROTOCOL_MAPPER:
+            case ACTION_ADOPT_DEFAULT_CLIENT_SCOPE:
                 session.setAttribute("IGA_REPLAY_ACTIVE", "true");
                 try {
                     replayAdoptEdge(session, cr, finalAttestation);
@@ -363,6 +378,23 @@ public final class IgaReplayExtension {
                                 "WHERE e.id = :id AND e.attestation IS NULL")
                         .setParameter("sig", sig)
                         .setParameter("id", mapperId)
+                        .executeUpdate();
+            }
+            case ACTION_ADOPT_DEFAULT_CLIENT_SCOPE: {
+                // DEFAULT_CLIENT_SCOPE row keyed (REALM_ID, SCOPE_ID). The entity
+                // fields are DefaultClientScopeRealmMappingEntity.realm
+                // (RealmEntity, column REALM_ID) and .clientScopeId (String,
+                // column SCOPE_ID) — NOT a clientScope association.
+                String realmId = str(row, "REALM_ID");
+                String scopeId = str(row, "SCOPE_ID");
+                if (realmId == null || scopeId == null) return 0;
+                return em.createQuery(
+                        "UPDATE DefaultClientScopeRealmMappingEntity e SET e.attestation = :sig " +
+                                "WHERE e.realm.id = :k1 AND e.clientScopeId = :k2 " +
+                                "AND e.attestation IS NULL")
+                        .setParameter("sig", sig)
+                        .setParameter("k1", realmId)
+                        .setParameter("k2", scopeId)
                         .executeUpdate();
             }
             default:

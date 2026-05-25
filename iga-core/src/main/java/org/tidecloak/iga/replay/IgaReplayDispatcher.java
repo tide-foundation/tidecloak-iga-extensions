@@ -208,6 +208,8 @@ public class IgaReplayDispatcher {
             case "UPDATE_CLIENT_REDIRECT_URIS" -> replayUpdateClientRedirectUris(session, realm, rows);
             case "ADD_REALM_DEFAULT_GROUP" -> replayAddRealmDefaultGroup(session, realm, rows);
             case "REMOVE_REALM_DEFAULT_GROUP" -> replayRemoveRealmDefaultGroup(session, realm, rows);
+            case "REALM_DEFAULT_SCOPE_ADD" -> replayAddRealmDefaultScope(session, realm, rows, finalAttestation, em);
+            case "REALM_DEFAULT_SCOPE_REMOVE" -> replayRemoveRealmDefaultScope(session, realm, rows);
             case "CREATE_CLIENT_SCOPE" -> replayCreateClientScope(session, realm, rows, finalAttestation, em);
             case "UPDATE_PROTOCOL_MAPPER" -> replayUpdateProtocolMapper(session, realm, rows, finalAttestation, em);
             case "REMOVE_PROTOCOL_MAPPER" -> replayRemoveProtocolMapper(session, realm, rows);
@@ -1476,6 +1478,58 @@ public class IgaReplayDispatcher {
             GroupModel group = session.groups().getGroupById(realm, groupId);
             if (group == null) continue;
             realm.removeDefaultGroup(group);
+        }
+    }
+
+    /**
+     * Replay REALM_DEFAULT_SCOPE_ADD: apply realm.addDefaultClientScope under
+     * IGA_REPLAY_ACTIVE (so IgaRealmAdapter passes straight through to super and
+     * the DEFAULT_CLIENT_SCOPE row is actually written), then stamp the
+     * ATTESTATION column on that row via JPQL keyed on the entity's real field
+     * names: {@code DefaultClientScopeRealmMappingEntity.realm} (RealmEntity,
+     * column REALM_ID) and {@code .clientScopeId} (String, column SCOPE_ID).
+     * Requires the KC-core entity change + the iga-changelog-2.3.0 column.
+     */
+    private static void replayAddRealmDefaultScope(KeycloakSession session, RealmModel realm,
+                                                   List<Map<String, Object>> rows, String sig,
+                                                   EntityManager em) {
+        for (Map<String, Object> row : rows) {
+            String scopeId = str(row, "SCOPE_ID");
+            if (scopeId == null) continue;
+            boolean defaultScope = Boolean.TRUE.equals(row.get("DEFAULT_SCOPE"));
+            ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
+            if (scope == null) {
+                log.warnf("REALM_DEFAULT_SCOPE_ADD replay: scope %s no longer exists in realm %s; skipping",
+                        scopeId, realm.getId());
+                continue;
+            }
+            realm.addDefaultClientScope(scope, defaultScope);
+            if (sig != null && !sig.isEmpty()) {
+                em.createQuery(
+                        "UPDATE DefaultClientScopeRealmMappingEntity e SET e.attestation = :sig " +
+                                "WHERE e.realm.id = :k1 AND e.clientScopeId = :k2")
+                        .setParameter("sig", sig)
+                        .setParameter("k1", realm.getId())
+                        .setParameter("k2", scopeId)
+                        .executeUpdate();
+            }
+        }
+    }
+
+    /**
+     * Replay REALM_DEFAULT_SCOPE_REMOVE: apply realm.removeDefaultClientScope
+     * under IGA_REPLAY_ACTIVE. No attestation stamp — the DEFAULT_CLIENT_SCOPE
+     * row is deleted, so there is nothing to stamp (mirrors the LEAVE_GROUPS /
+     * REMOVE_SCOPE revoke replays which also do not stamp).
+     */
+    private static void replayRemoveRealmDefaultScope(KeycloakSession session, RealmModel realm,
+                                                      List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String scopeId = str(row, "SCOPE_ID");
+            if (scopeId == null) continue;
+            ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
+            if (scope == null) continue;
+            realm.removeDefaultClientScope(scope);
         }
     }
 

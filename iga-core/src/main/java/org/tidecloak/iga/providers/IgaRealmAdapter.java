@@ -3,6 +3,7 @@ package org.tidecloak.iga.providers;
 import org.keycloak.common.enums.SslRequired;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.AuthenticationFlowModel;
+import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.OTPPolicy;
@@ -323,5 +324,119 @@ public class IgaRealmAdapter extends RealmAdapter {
                         "REALM_ID", realmId,
                         "GROUP_ID", group.getId()
                 )), null);
+    }
+
+    // -------------------------------------------------------------------------
+    // Realm DEFAULT client scopes (DEFAULT_CLIENT_SCOPE table)
+    //
+    // The realm-level default-default / default-optional client-scope templates
+    // every new client inherits — a token-shaping input. Captured here, at the
+    // model adapter, NOT at the provider: with the infinispan cache ON the admin
+    // route
+    //   PUT /admin/realms/{realm}/default-default-client-scopes/{scopeId}
+    //     → RealmAdminResource.addDefaultClientScope
+    //     → realm.addDefaultClientScope(scope, defaultScope)   [CacheRealmAdapter]
+    //     → cacheRealmAdapter.getDelegateForUpdate()           [== modelSupplier.get()
+    //                                                              == IgaRealmProvider.getRealm
+    //                                                              == THIS adapter]
+    //     → updated.addDefaultClientScope(scope, defaultScope) [THIS override]
+    // i.e. the cache adapter (model/infinispan RealmAdapter:1647-1655) DELEGATES
+    // to the model adapter via getDelegateForUpdate(), so unlike the
+    // CLIENT_SCOPE_CLIENT attach (which the cache ClientAdapter routes straight
+    // to the provider, bypassing the model adapter — see IgaRealmProvider
+    // .addClientScopes), the realm default-scope path DOES hit this override.
+    // Same layer as the existing addDefaultGroup capture above.
+    //
+    // Each add/remove is captured as a REALM_DEFAULT_SCOPE_ADD / REMOVE CR
+    // carrying {REALM_ID, SCOPE_ID, DEFAULT_SCOPE}; persistence of the
+    // DEFAULT_CLIENT_SCOPE row is deferred to commit/replay (we never call
+    // super on the governed path), where IgaReplayDispatcher applies
+    // realm.addDefaultClientScope and stamps the ATTESTATION column.
+    //
+    // Bootstrap suppression: realm-creation drives realm.addDefaultClientScope
+    // through the OIDC/SAML/OID4VC protocol factories + DefaultClientScopes
+    // (offline_access). During genuine realm creation IGA is OFF (the toggle
+    // attribute is not yet set) so isIgaActive() is already false and we pass
+    // through; the StackWalker guard additionally suppresses the case where a
+    // protocol factory re-runs createDefaultClientScopes on an already-IGA realm
+    // (RealmManager feature re-init) — those bootstrap defaults are attested via
+    // the toggle-on ADOPT scan, not live capture. Same idiom as
+    // IgaRealmProvider.isOnClientCreationPath.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void addDefaultClientScope(ClientScopeModel clientScope, boolean defaultScope) {
+        if (!isIgaActive() || isOnRealmBootstrapPath()) {
+            super.addDefaultClientScope(clientScope, defaultScope);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String realmId = getId();
+        checkNoPendingCr(service, realmId);
+        Map<String, Object> row = new HashMap<>();
+        row.put("REALM_ID", realmId);
+        row.put("SCOPE_ID", clientScope.getId());
+        row.put("DEFAULT_SCOPE", defaultScope);
+        service.create(this, "REALM", realmId, "REALM_DEFAULT_SCOPE_ADD",
+                List.of(row), null);
+    }
+
+    @Override
+    public void removeDefaultClientScope(ClientScopeModel clientScope) {
+        if (!isIgaActive() || isOnRealmBootstrapPath()) {
+            super.removeDefaultClientScope(clientScope);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String realmId = getId();
+        checkNoPendingCr(service, realmId);
+        Map<String, Object> row = new HashMap<>();
+        row.put("REALM_ID", realmId);
+        row.put("SCOPE_ID", clientScope.getId());
+        service.create(this, "REALM", realmId, "REALM_DEFAULT_SCOPE_REMOVE",
+                List.of(row), null);
+    }
+
+    /**
+     * StackWalker discriminator: are we inside Keycloak's realm-bootstrap
+     * default-scope setup, where the realm's default-default / default-optional
+     * scope templates are auto-created and must NOT be live-governed (they are
+     * attested via the toggle-on ADOPT scan instead)? Matches if ANY of the
+     * bootstrap frames is present on the current stack (KC 26.5.5):
+     * <ul>
+     *   <li>{@code OIDCLoginProtocolFactory.createDefaultClientScopesImpl} —
+     *       profile/email/address/phone/roles/web-origins/microprofile-jwt/acr/
+     *       basic/organization.</li>
+     *   <li>{@code SamlProtocolFactory.createDefaultClientScopesImpl} —
+     *       role_list / saml_organization.</li>
+     *   <li>{@code OID4VCLoginProtocolFactory.createDefaultClientScopesImpl} —
+     *       oid4vc_natural_person.</li>
+     *   <li>{@code DefaultClientScopes.createOfflineAccessClientScope} /
+     *       {@code createDefaultClientScopes} — offline_access (server-spi-private
+     *       {@code models.utils.DefaultClientScopes}).</li>
+     *   <li>{@code RealmManager.createDefaultClientScopes} — the services-layer
+     *       entry point (covers any future factory).</li>
+     * </ul>
+     * The governed admin route ({@code RealmAdminResource.addDefaultClientScope}
+     * on an already-existing realm) carries NONE of these frames, so it is
+     * correctly NOT suppressed. Class-name prefix match on the protocol factories
+     * so any subclass / synthetic lambda frame counts too.
+     */
+    private boolean isOnRealmBootstrapPath() {
+        return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
+                .walk(frames -> frames.anyMatch(f -> {
+                    String cn = f.getDeclaringClass().getName();
+                    String mn = f.getMethodName();
+                    if (cn.startsWith("org.keycloak.protocol.oidc.OIDCLoginProtocolFactory")
+                            || cn.startsWith("org.keycloak.protocol.saml.SamlProtocolFactory")
+                            || cn.startsWith("org.keycloak.protocol.oid4vc.OID4VCLoginProtocolFactory")) {
+                        return "createDefaultClientScopesImpl".equals(mn);
+                    }
+                    if ("org.keycloak.models.utils.DefaultClientScopes".equals(cn)) {
+                        return true;
+                    }
+                    return "org.keycloak.services.managers.RealmManager".equals(cn)
+                            && "createDefaultClientScopes".equals(mn);
+                }));
     }
 }
