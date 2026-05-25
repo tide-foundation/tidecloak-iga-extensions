@@ -53,4 +53,20 @@ public interface IgaAttestor extends Provider {
      * attribute {@code iga.threshold}.
      */
     int getThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr);
+
+    /**
+     * Whether this attestor uses the per-(table, owner) SET-SIGNING model for
+     * LINKAGE tables. When {@code true}, the replay dispatcher fans the final
+     * attestation out across the WHOLE owner set (every row sharing the owner
+     * key) rather than stamping only the single changed row. When {@code false}
+     * (the default), the dispatcher keeps today's exact per-row / per-entity
+     * stamp — Tideless ({@code simple}) realms MUST observe byte-identical
+     * behaviour to before this SPI method existed.
+     *
+     * <p>This gating is the contract that lets a set-signing attestor coexist
+     * with the per-row attestors without changing the per-row code path.
+     */
+    default boolean isSetSigned() {
+        return false;
+    }
 }

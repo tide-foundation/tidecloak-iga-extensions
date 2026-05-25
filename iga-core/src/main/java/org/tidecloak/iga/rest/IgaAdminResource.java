@@ -370,7 +370,10 @@ public class IgaAdminResource {
         // The CR remains PENDING (the flip never executed; JPA tx rolls back).
         try {
             if (!IgaReplayExtension.tryReplay(session, cr, finalAttestation)) {
-                IgaReplayDispatcher.replay(session, cr, finalAttestation);
+                // Gate set-fan-out on the resolved attestor: tide → fan the set
+                // signature across the whole owner set; simple → per-row (today's
+                // exact behaviour, unchanged).
+                IgaReplayDispatcher.replay(session, cr, finalAttestation, attestor.isSetSigned());
             }
         } catch (EntityVanishedException ev) {
             log.infof("IGA ADOPT commit refused: entity %s/%s no longer exists in realm %s (CR %s) — returning 404 ENTITY_VANISHED",
@@ -701,7 +704,7 @@ public class IgaAdminResource {
             String finalAttestation = attestor.combineFinal(session, cr, all);
             try {
                 if (!IgaReplayExtension.tryReplay(session, cr, finalAttestation)) {
-                    IgaReplayDispatcher.replay(session, cr, finalAttestation);
+                    IgaReplayDispatcher.replay(session, cr, finalAttestation, attestor.isSetSigned());
                 }
             } catch (EntityVanishedException ev) {
                 outcome.put("status", "REJECTED");

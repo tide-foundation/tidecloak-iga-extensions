@@ -125,16 +125,39 @@ public class IgaReplayDispatcher {
     private static final TypeReference<List<Map<String, Object>>> LIST_MAP_REF =
             new TypeReference<List<Map<String, Object>>>() {};
 
+    /**
+     * Back-compat entry point: per-row stamping (the {@code simple} attestor's
+     * behaviour). Equivalent to {@code replay(session, cr, finalAttestation,
+     * false)}. Retained so any caller that does not resolve an attestor keeps
+     * today's exact byte-identical per-row behaviour.
+     */
     public static void replay(KeycloakSession session, IgaChangeRequestEntity cr, String finalAttestation) {
+        replay(session, cr, finalAttestation, false);
+    }
+
+    /**
+     * Replay a CR and stamp the final attestation.
+     *
+     * @param setSigned when {@code true} (the {@code tide} set-signing attestor)
+     *                  the stamp for a LINKAGE table fans the ONE set signature
+     *                  out across the WHOLE owner set (every row sharing the
+     *                  owner key); when {@code false} (the {@code simple}
+     *                  attestor) the stamp is per-row / per-entity, EXACTLY as
+     *                  before this parameter existed. NODE entities are always
+     *                  per-entity regardless of this flag.
+     */
+    public static void replay(KeycloakSession session, IgaChangeRequestEntity cr, String finalAttestation,
+                              boolean setSigned) {
         session.setAttribute("IGA_REPLAY_ACTIVE", "true");
         try {
-            doReplay(session, cr, finalAttestation);
+            doReplay(session, cr, finalAttestation, setSigned);
         } finally {
             session.removeAttribute("IGA_REPLAY_ACTIVE");
         }
     }
 
-    private static void doReplay(KeycloakSession session, IgaChangeRequestEntity cr, String finalAttestation) {
+    private static void doReplay(KeycloakSession session, IgaChangeRequestEntity cr, String finalAttestation,
+                                 boolean setSigned) {
         RealmModel realm = session.realms().getRealm(cr.getRealmId());
         EntityManager em = getEm(session);
 
@@ -145,46 +168,46 @@ public class IgaReplayDispatcher {
             case "CREATE_ROLE" -> replayCreateRole(session, realm, rows, finalAttestation, em);
             case "CREATE_GROUP" -> replayCreateGroup(session, realm, rows, finalAttestation, em);
             case "CREATE_CLIENT" -> replayCreateClient(session, realm, rows, finalAttestation, em);
-            case "ADD_PROTOCOL_MAPPER" -> replayAddProtocolMapper(session, realm, cr, rows, finalAttestation, em);
+            case "ADD_PROTOCOL_MAPPER" -> replayAddProtocolMapper(session, realm, cr, rows, finalAttestation, em, setSigned);
             case "GRANT_ROLES" -> replayRelationship(session, realm, rows, finalAttestation, em,
                     "UPDATE UserRoleMappingEntity e SET e.attestation = :sig WHERE e.user.id = :k1 AND e.roleId = :k2",
                     "USER_ID", "ROLE_ID",
-                    r -> grantRoleDirect(session, realm, r));
-            case "REVOKE_ROLES" -> replayRevoke(session, realm, rows, em,
-                    r -> revokeRoleDirect(session, realm, r));
+                    r -> grantRoleDirect(session, realm, r), setSigned, "GRANT_ROLES");
+            case "REVOKE_ROLES" -> replayRevoke(session, realm, rows, finalAttestation, em,
+                    r -> revokeRoleDirect(session, realm, r), setSigned, "REVOKE_ROLES");
             case "JOIN_GROUPS" -> replayRelationship(session, realm, rows, finalAttestation, em,
                     "UPDATE UserGroupMembershipEntity e SET e.attestation = :sig WHERE e.user.id = :k1 AND e.groupId = :k2",
                     "USER", "GROUP",
-                    r -> joinGroupDirect(session, realm, r));
-            case "LEAVE_GROUPS" -> replayRevoke(session, realm, rows, em,
-                    r -> leaveGroupDirect(session, realm, r));
+                    r -> joinGroupDirect(session, realm, r), setSigned, "JOIN_GROUPS");
+            case "LEAVE_GROUPS" -> replayRevoke(session, realm, rows, finalAttestation, em,
+                    r -> leaveGroupDirect(session, realm, r), setSigned, "LEAVE_GROUPS");
             case "GROUP_GRANT_ROLES" -> replayRelationship(session, realm, rows, finalAttestation, em,
                     "UPDATE GroupRoleMappingEntity e SET e.attestation = :sig WHERE e.group.id = :k1 AND e.roleId = :k2",
                     "GROUP", "ROLE",
-                    r -> groupGrantRoleDirect(session, realm, r));
-            case "GROUP_REVOKE_ROLES" -> replayRevoke(session, realm, rows, em,
-                    r -> groupRevokeRoleDirect(session, realm, r));
+                    r -> groupGrantRoleDirect(session, realm, r), setSigned, "GROUP_GRANT_ROLES");
+            case "GROUP_REVOKE_ROLES" -> replayRevoke(session, realm, rows, finalAttestation, em,
+                    r -> groupRevokeRoleDirect(session, realm, r), setSigned, "GROUP_REVOKE_ROLES");
             case "ADD_COMPOSITE" -> replayRelationship(session, realm, rows, finalAttestation, em,
                     "UPDATE CompositeRoleEntity e SET e.attestation = :sig WHERE e.parentRole.id = :k1 AND e.childRole.id = :k2",
                     "COMPOSITE", "CHILD_ROLE",
-                    r -> addCompositeDirect(session, realm, r));
-            case "REMOVE_COMPOSITE" -> replayRevoke(session, realm, rows, em,
-                    r -> removeCompositeDirect(session, realm, r));
+                    r -> addCompositeDirect(session, realm, r), setSigned, "ADD_COMPOSITE");
+            case "REMOVE_COMPOSITE" -> replayRevoke(session, realm, rows, finalAttestation, em,
+                    r -> removeCompositeDirect(session, realm, r), setSigned, "REMOVE_COMPOSITE");
             case "ASSIGN_SCOPE" -> replayRelationship(session, realm, rows, finalAttestation, em,
                     // e.clientId is the ClientScopeClientMappingEntity column
                     // holding the client's UUID, so the stamp key is CLIENT_UUID
                     // (contract), not the human CLIENT_ID.
                     "UPDATE ClientScopeClientMappingEntity e SET e.attestation = :sig WHERE e.clientId = :k1 AND e.clientScopeId = :k2",
                     "CLIENT_UUID", "SCOPE_ID",
-                    r -> assignScopeDirect(session, realm, r));
-            case "REMOVE_SCOPE" -> replayRevoke(session, realm, rows, em,
-                    r -> removeScopeDirect(session, realm, r));
+                    r -> assignScopeDirect(session, realm, r), setSigned, "ASSIGN_SCOPE");
+            case "REMOVE_SCOPE" -> replayRevoke(session, realm, rows, finalAttestation, em,
+                    r -> removeScopeDirect(session, realm, r), setSigned, "REMOVE_SCOPE");
             case "SCOPE_ADD_ROLE" -> replayRelationship(session, realm, rows, finalAttestation, em,
                     "UPDATE ClientScopeRoleMappingEntity e SET e.attestation = :sig WHERE e.clientScope.id = :k1 AND e.role.id = :k2",
                     "SCOPE_ID", "ROLE_ID",
-                    r -> scopeAddRoleDirect(session, realm, r));
-            case "SCOPE_REMOVE_ROLE" -> replayRevoke(session, realm, rows, em,
-                    r -> scopeRemoveRoleDirect(session, realm, r));
+                    r -> scopeAddRoleDirect(session, realm, r), setSigned, "SCOPE_ADD_ROLE");
+            case "SCOPE_REMOVE_ROLE" -> replayRevoke(session, realm, rows, finalAttestation, em,
+                    r -> scopeRemoveRoleDirect(session, realm, r), setSigned, "SCOPE_REMOVE_ROLE");
             case "SCOPE_MAPPING_ADD" -> replayRelationship(session, realm, rows, finalAttestation, em,
                     // SCOPE_MAPPING row keyed (CLIENT_ID, ROLE_ID). The CR row's
                     // CLIENT_UUID holds the client's UUID, which IS the
@@ -192,9 +215,9 @@ public class IgaReplayDispatcher {
                     // the standalone ScopeMappingEntity (e.clientId, e.roleId).
                     "UPDATE ScopeMappingEntity e SET e.attestation = :sig WHERE e.clientId = :k1 AND e.roleId = :k2",
                     "CLIENT_UUID", "ROLE_ID",
-                    r -> scopeMappingAddDirect(session, realm, r));
-            case "SCOPE_MAPPING_REMOVE" -> replayRevoke(session, realm, rows, em,
-                    r -> scopeMappingRemoveDirect(session, realm, r));
+                    r -> scopeMappingAddDirect(session, realm, r), setSigned, "SCOPE_MAPPING_ADD");
+            case "SCOPE_MAPPING_REMOVE" -> replayRevoke(session, realm, rows, finalAttestation, em,
+                    r -> scopeMappingRemoveDirect(session, realm, r), setSigned, "SCOPE_MAPPING_REMOVE");
             case "REQUEST_SERVER_CERT" -> replayRequestServerCert(cr);
             case "INSTALL_LICENSE", "ROTATE_LICENSE" -> replayLicenseAction(cr);
 
@@ -218,8 +241,8 @@ public class IgaReplayDispatcher {
             case "UPDATE_CLIENT_REDIRECT_URIS" -> replayUpdateClientRedirectUris(session, realm, rows);
             case "ADD_REALM_DEFAULT_GROUP" -> replayAddRealmDefaultGroup(session, realm, rows);
             case "REMOVE_REALM_DEFAULT_GROUP" -> replayRemoveRealmDefaultGroup(session, realm, rows);
-            case "REALM_DEFAULT_SCOPE_ADD" -> replayAddRealmDefaultScope(session, realm, rows, finalAttestation, em);
-            case "REALM_DEFAULT_SCOPE_REMOVE" -> replayRemoveRealmDefaultScope(session, realm, rows);
+            case "REALM_DEFAULT_SCOPE_ADD" -> replayAddRealmDefaultScope(session, realm, rows, finalAttestation, em, setSigned);
+            case "REALM_DEFAULT_SCOPE_REMOVE" -> replayRemoveRealmDefaultScope(session, realm, rows, finalAttestation, em, setSigned);
             case "CREATE_CLIENT_SCOPE" -> replayCreateClientScope(session, realm, rows, finalAttestation, em);
             case "UPDATE_PROTOCOL_MAPPER" -> replayUpdateProtocolMapper(session, realm, rows, finalAttestation, em);
             case "REMOVE_PROTOCOL_MAPPER" -> replayRemoveProtocolMapper(session, realm, rows);
@@ -917,7 +940,7 @@ public class IgaReplayDispatcher {
 
     private static void replayAddProtocolMapper(KeycloakSession session, RealmModel realm,
                                                  IgaChangeRequestEntity cr, List<Map<String, Object>> rows,
-                                                 String sig, EntityManager em) {
+                                                 String sig, EntityManager em, boolean setSigned) {
         for (Map<String, Object> row : rows) {
             String mapperId = str(row, "ID");
             // Parent may be a CLIENT (CLIENT_UUID, from IgaClientAdapter) or a
@@ -966,6 +989,15 @@ public class IgaReplayDispatcher {
             }
 
             if (added) {
+                // SET-SIGNING (tide): fan the set signature out across every
+                // mapper owned by the same parent (client OR client_scope). The
+                // per-(table, owner) set for protocol_mapper is "all mappers of
+                // this parent". simple attestor keeps the per-row (e.id) stamp.
+                if (setSigned && sig != null && !sig.isEmpty()
+                        && stampOwnerSetFanOut(em, "ADD_PROTOCOL_MAPPER",
+                                java.util.List.of(row), sig)) {
+                    continue;
+                }
                 em.createQuery("UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.id = :id")
                         .setParameter("sig", sig)
                         .setParameter("id", mapperId)
@@ -1014,12 +1046,22 @@ public class IgaReplayDispatcher {
     private static void replayRelationship(KeycloakSession session, RealmModel realm,
                                             List<Map<String, Object>> rows, String sig, EntityManager em,
                                             String updateJpql, String rowKey1, String rowKey2,
-                                            Consumer<Map<String, Object>> addOp) {
+                                            Consumer<Map<String, Object>> addOp,
+                                            boolean setSigned, String actionType) {
         for (Map<String, Object> row : rows) {
             addOp.accept(row);
         }
-        // Stamp the attestation onto each row using the explicit row-key pair.
         if (sig == null || sig.isEmpty()) return;
+
+        // SET-SIGNING fan-out (tide attestor only): stamp the ONE set signature
+        // onto the WHOLE owner set (every row sharing the owner key), NOT just
+        // the changed row. Owner mapping comes from the SAME TideSetResolver the
+        // attestor used to compute the set signature.
+        if (setSigned && stampOwnerSetFanOut(em, actionType, rows, sig)) {
+            return;
+        }
+
+        // PER-ROW stamp (simple attestor / non-linkage) — UNCHANGED behaviour.
         for (Map<String, Object> row : rows) {
             String k1 = str(row, rowKey1);
             String k2 = str(row, rowKey2);
@@ -1033,11 +1075,71 @@ public class IgaReplayDispatcher {
     }
 
     private static void replayRevoke(KeycloakSession session, RealmModel realm,
-                                      List<Map<String, Object>> rows, EntityManager em,
-                                      Consumer<Map<String, Object>> removeOp) {
+                                      List<Map<String, Object>> rows, String sig, EntityManager em,
+                                      Consumer<Map<String, Object>> removeOp,
+                                      boolean setSigned, String actionType) {
         for (Map<String, Object> row : rows) {
             removeOp.accept(row);
         }
+        // SET-SIGNING re-sign-on-remove (tide attestor only): the removed row is
+        // gone, but the SURVIVING rows of the owner set must be re-stamped with
+        // the new (shrunken-set) signature. The simple attestor never stamps on
+        // a revoke — that per-row no-stamp behaviour is preserved when
+        // !setSigned (sig is ignored, exactly as the old 4-arg replayRevoke).
+        if (setSigned && sig != null && !sig.isEmpty()) {
+            stampOwnerSetFanOut(em, actionType, rows, sig);
+        }
+    }
+
+    /**
+     * Fan the set signature out across the WHOLE owner set for a LINKAGE action,
+     * keyed by the owner column only (no member predicate). Returns {@code true}
+     * iff the action maps to a linkage table (and the fan-out ran); {@code false}
+     * for non-linkage actions so the caller falls back to its per-row stamp.
+     *
+     * <p>protocol_mapper owners can be a client OR a client_scope; the owner
+     * value+field are resolved per row (CLIENT_UUID/CLIENT_ID → client.id, else
+     * CLIENT_SCOPE_ID → clientScope.id). All other linkages use the descriptor's
+     * single owner field.
+     */
+    private static boolean stampOwnerSetFanOut(EntityManager em, String actionType,
+                                               List<Map<String, Object>> rows, String sig) {
+        org.tidecloak.iga.attestors.TideSetResolver.Linkage linkage =
+                org.tidecloak.iga.attestors.TideSetResolver.linkageFor(actionType);
+        if (linkage == null) return false;
+
+        // De-dup owners across the CR's rows so we issue one UPDATE per owner.
+        java.util.LinkedHashMap<String, String> ownerToField = new java.util.LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            String owner;
+            String ownerField;
+            if ("protocol_mapper".equals(linkage.table())) {
+                String clientUuid = str(row, "CLIENT_UUID");
+                String clientId = str(row, "CLIENT_ID");
+                if (clientUuid != null) {
+                    owner = clientUuid;
+                    ownerField = linkage.ownerField(); // client.id
+                } else if (clientId != null) {
+                    owner = clientId;
+                    ownerField = linkage.ownerField();
+                } else {
+                    owner = str(row, "CLIENT_SCOPE_ID");
+                    ownerField = org.tidecloak.iga.attestors.TideSetResolver.PROTOCOL_MAPPER_SCOPE_OWNER_FIELD;
+                }
+            } else {
+                owner = str(row, linkage.ownerRowKey());
+                ownerField = linkage.ownerField();
+            }
+            if (owner != null) ownerToField.putIfAbsent(owner, ownerField);
+        }
+        for (Map.Entry<String, String> e : ownerToField.entrySet()) {
+            em.createQuery("UPDATE " + linkage.entityName() + " e SET e.attestation = :sig WHERE e."
+                            + e.getValue() + " = :owner")
+                    .setParameter("sig", sig)
+                    .setParameter("owner", e.getKey())
+                    .executeUpdate();
+        }
+        return true;
     }
 
     // -------------------------------------------------------------------------
@@ -1522,7 +1624,7 @@ public class IgaReplayDispatcher {
      */
     private static void replayAddRealmDefaultScope(KeycloakSession session, RealmModel realm,
                                                    List<Map<String, Object>> rows, String sig,
-                                                   EntityManager em) {
+                                                   EntityManager em, boolean setSigned) {
         for (Map<String, Object> row : rows) {
             String scopeId = str(row, "SCOPE_ID");
             if (scopeId == null) continue;
@@ -1534,15 +1636,26 @@ public class IgaReplayDispatcher {
                 continue;
             }
             realm.addDefaultClientScope(scope, defaultScope);
-            if (sig != null && !sig.isEmpty()) {
-                em.createQuery(
-                        "UPDATE DefaultClientScopeRealmMappingEntity e SET e.attestation = :sig " +
-                                "WHERE e.realm.id = :k1 AND e.clientScopeId = :k2")
-                        .setParameter("sig", sig)
-                        .setParameter("k1", realm.getId())
-                        .setParameter("k2", scopeId)
-                        .executeUpdate();
+            if (sig == null || sig.isEmpty()) continue;
+            // SET-SIGNING (tide): fan across the realm's whole default-scope set
+            // (owner = realm_id). The row carries SCOPE_ID but NOT REALM_ID, so
+            // inject it for the resolver's owner key. simple keeps the per-row
+            // (realm.id, clientScopeId) stamp.
+            if (setSigned) {
+                java.util.Map<String, Object> ownerRow = new java.util.LinkedHashMap<>(row);
+                ownerRow.put("REALM_ID", realm.getId());
+                if (stampOwnerSetFanOut(em, "REALM_DEFAULT_SCOPE_ADD",
+                        java.util.List.of(ownerRow), sig)) {
+                    continue;
+                }
             }
+            em.createQuery(
+                    "UPDATE DefaultClientScopeRealmMappingEntity e SET e.attestation = :sig " +
+                            "WHERE e.realm.id = :k1 AND e.clientScopeId = :k2")
+                    .setParameter("sig", sig)
+                    .setParameter("k1", realm.getId())
+                    .setParameter("k2", scopeId)
+                    .executeUpdate();
         }
     }
 
@@ -1553,13 +1666,23 @@ public class IgaReplayDispatcher {
      * REMOVE_SCOPE revoke replays which also do not stamp).
      */
     private static void replayRemoveRealmDefaultScope(KeycloakSession session, RealmModel realm,
-                                                      List<Map<String, Object>> rows) {
+                                                      List<Map<String, Object>> rows, String sig,
+                                                      EntityManager em, boolean setSigned) {
         for (Map<String, Object> row : rows) {
             String scopeId = str(row, "SCOPE_ID");
             if (scopeId == null) continue;
             ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
             if (scope == null) continue;
             realm.removeDefaultClientScope(scope);
+            // SET-SIGNING re-sign-on-remove (tide): re-stamp the realm's
+            // surviving default-scope set. simple keeps its no-stamp-on-remove
+            // behaviour (the row is deleted; nothing to stamp).
+            if (setSigned && sig != null && !sig.isEmpty()) {
+                java.util.Map<String, Object> ownerRow = new java.util.LinkedHashMap<>(row);
+                ownerRow.put("REALM_ID", realm.getId());
+                stampOwnerSetFanOut(em, "REALM_DEFAULT_SCOPE_REMOVE",
+                        java.util.List.of(ownerRow), sig);
+            }
         }
     }
 
