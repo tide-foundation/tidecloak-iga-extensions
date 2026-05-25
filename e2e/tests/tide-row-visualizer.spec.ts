@@ -7,29 +7,20 @@ import {
   enableIga,
   igaStatus,
   createRole,
-  createClient,
   createClientRole,
   createClientScope,
   createGroup,
   createUser,
   getRole,
-  getClientRole,
-  getRoleComposites,
   getGroupByName,
-  getGroupById,
   getUserByUsername,
-  getUserGroups,
-  getUserRealmRoleMappings,
   getClientByClientId,
-  getClientScopeById,
   getClientScopeByName,
-  getClientScopeProtocolMappers,
   clientUuid,
   assignRealmRoleMapping,
   assignGroupRealmRoleMapping,
   listChangeRequests,
   findChangeRequest,
-  getChangeRequest,
   authorizeAndCommit,
   locationHeader,
   safeJson,
@@ -38,53 +29,65 @@ import {
 import { kcEnv } from '../lib/env';
 
 /**
- * Tide-network login-row visualizer — bundle v2.
+ * Tide-network login-row visualizer — bundle v3.
  *
- * A Tide-network verifier signs/verifies BYTES. The bundle therefore MUST
- * carry the exact bytes that were signed at commit time — nothing
- * reconstructed from the live entity state afterwards. Otherwise signatures
- * would not verify.
+ * VERIFICATION MODEL: CURRENT ATTESTED STATE ONLY.
+ *
+ * The Tide network verifies, per contributor row, that its CURRENT attestation
+ * matches its CURRENT state. It does NOT replay per-historical-CR commit
+ * payloads. The bundle therefore enumerates the CURRENT contributor rows that
+ * constitute alice's effective login at tide-viz-client — entity rows AND
+ * linkage (edge) rows — each carrying:
+ *   - `signed_state`: the canonical bytes the Tide attestor would sign over
+ *     this row's CURRENT state (a deterministic, sorted-key JSON projection of
+ *     the row's business columns, EXCLUDING the attestation column itself).
+ *   - `attestation`: the CURRENT value of THIS row's own ATTESTATION column,
+ *     read from THIS row's own table.
+ *
+ * This supersedes v2 (which keyed entries by cr_id and used
+ * IGA_CHANGE_REQUEST.rows_json as the signed payload — the per-CR-history
+ * model). v2 also had a read bug: relationship CRs (GRANT_ROLES, JOIN_GROUPS,
+ * GROUP_GRANT_ROLES, SCOPE_ADD_ROLE) read the attestation off the PRINCIPAL
+ * ENTITY row (e.g. USER_ENTITY.attestation), so all of alice's GRANT_ROLES
+ * showed the same timestamp. v3 reads each linkage row's OWN attestation from
+ * the correct linkage table (USER_ROLE_MAPPING(uid,rid).attestation, etc.).
  *
  * Bundle shape:
  *   {
- *     version: "2",
+ *     version: "3",
  *     context: { realm_id, client_id, user_id },   // routing header, NOT signed
- *     attested_operations: [
+ *     attested_state: [
  *       {
- *         cr_id:         "<uuid>",
- *         action_type:   "CREATE_USER" | "GRANT_ROLES" | ...,
- *         entity_type:   "USER" | "ROLE" | ...,
- *         entity_id:     "<uuid or composite-id>",
- *         signed_payload: <verbatim from iga_change_request.rows_json>,
- *         attestation:    "<finalAttestation string from the entity row>"
+ *         table:        "USER_ENTITY" | "USER_ROLE_MAPPING" | ...,
+ *         key:          { id: "..." } | { user_id: "...", role_id: "..." } | ...,
+ *         signed_state: "<canonical sorted-key JSON of current business cols>",
+ *         attestation:  "<current ATTESTATION on THIS row>",
+ *         note?:        "built-in — no IGA capture" | "attachment not IGA-captured ..."
  *       },
  *       ...
  *     ]
  *   }
  *
- * - `context` is the bundle's routing header — NOT part of any signed
- *   payload. The signed bytes live inside each attested_operations[i].
- * - `signed_payload` is the CR's stored data as a verbatim string. We do NOT
- *   JSON.parse + re-emit it — that would change the bytes-on-wire (Postgres
- *   column ordering, escaping, whitespace, etc). Embedded as a JSON string
- *   literal so size measurements match what would actually go on the wire.
- * - Built-in KC entities (the stock client scopes, their built-in mappers,
- *   default-roles-<realm>) have NO CR. They're included as sentinel
- *   `attested_operations` entries with cr_id:null, signed_payload:null,
- *   attestation:"", note:"built-in — no IGA capture" so the Tide-side
- *   reader knows they contribute to token issuance but are not (yet)
- *   IGA-attested. Treat as "well-known unsigned" pending a Tide-side
- *   design decision.
+ * - `context` is the bundle's routing header — NOT part of any signed state.
+ * - `signed_state` canonical form is a DEFENSIBLE PLACEHOLDER pending the real
+ *   Tide attestor's serialization contract. It is a stable, sorted-key JSON
+ *   serialization of the row's business columns read from its REAL table. Keys
+ *   are uppercased column names matching the IGA pipeline's row projection.
+ *   Deterministic so the size is reproducible.
+ * - Built-in entities (KC's stock client scopes, their mappers, the
+ *   default-roles composite, and any built-in linkage rows) have a null/empty
+ *   ATTESTATION. They stay in attested_state with attestation:"" and a note,
+ *   so the verifier sees what's contributing but knows it is not IGA-attested.
  *
  * Two variants are emitted:
  *   1. REAL Tideless — actual SimpleNameAttestor stamps read from Postgres.
  *   2. SIMULATED Tide-sized — every non-empty attestation replaced with
- *      "A".repeat(88) (one base64 Ed25519 sig shape). `signed_payload`
- *      is UNCHANGED — Tide attestor doesn't change the signed bytes.
+ *      "A".repeat(88) (one base64 Ed25519 sig shape). `signed_state` is
+ *      UNCHANGED — the Tide attestor doesn't change the signed bytes.
  *
- * AFTER the bundle, a debug block prints the issued access + id token claims
- * — for the human reader to cross-check what the runtime produced. The
- * debug block is NOT part of the bundle.
+ * AFTER the bundle, a debug block prints the issued access + id token claims —
+ * for the human reader to cross-check what the runtime produced. The debug
+ * block is NOT part of the bundle.
  */
 
 const REALM = 'iga-tide-row-viz';
@@ -115,47 +118,81 @@ const PG_DB = 'dauthme';
 
 const ATTEST_PLACEHOLDER = 'A'.repeat(88); // Tide-sized ed25519 b64 placeholder
 
-// Map an IGA entity_type to the Postgres table that owns the attestation
-// column for that entity. Relationship CRs (GRANT_ROLES, JOIN_GROUPS,
-// ADD_COMPOSITE, ASSIGN_SCOPE, SCOPE_ADD_ROLE, GROUP_GRANT_ROLES) carry the
-// principal entity_type (e.g. GRANT_ROLES.entityType=USER) and the
-// finalAttestation is then propagated to the relationship row(s) at replay
-// time. For visualizer purposes we report the attestation off the principal
-// entity's row — same string IgaSimpleAttestor.record stamps both places.
-const ENTITY_TABLE: Record<string, string> = {
-  USER: 'user_entity',
-  ROLE: 'keycloak_role',
-  CLIENT: 'client',
-  CLIENT_SCOPE: 'client_scope',
-  GROUP: 'keycloak_group',
-  PROTOCOL_MAPPER: 'protocol_mapper',
-};
-
 // ---------------------------------------------------------------------------
 // Inline helpers (do not add to e2e/tests/helpers/, per task constraints).
 // ---------------------------------------------------------------------------
 
 /** Run `docker exec postgresP psql -tAc "<sql>"` and return trimmed stdout. */
 function psql(sql: string): string {
+  // Collapse any incidental whitespace/newlines to single spaces — psql -tAc
+  // takes a single-line statement and embedded newlines break the shell arg.
+  const oneLine = sql.replace(/\s+/g, ' ').trim();
   const out = execSync(
-    `docker exec ${PG_CONTAINER} psql -U ${PG_USER} -d ${PG_DB} -tAc ${JSON.stringify(sql)}`,
+    `docker exec ${PG_CONTAINER} psql -U ${PG_USER} -d ${PG_DB} -tAc ${JSON.stringify(oneLine)}`,
     { encoding: 'utf8' },
   );
   return out.trim();
 }
 
-/** Read a single ATTESTATION cell. Returns "" when row missing OR null. */
+/**
+ * Read a single ATTESTATION cell. Returns "" when row missing OR null.
+ * `where` keys the row by its OWN primary/foreign-key columns — this is the
+ * v2-bug fix: linkage rows are read from THEIR table, not the principal
+ * entity's table.
+ */
 function readAttestation(table: string, where: string): string {
   const sql = `SELECT COALESCE(attestation, '') FROM ${table} WHERE ${where} LIMIT 1`;
   return psql(sql);
 }
 
+/** SQL-escape a value for embedding in a single-quoted literal. */
+function sql(v: string): string {
+  return v.replace(/'/g, "''");
+}
+
 /**
- * Resolve a realm's UUID from its name (lookup KC's `realm` table). Needed
- * because the IGA CRs key off `realm_id` (UUID), not the realm name.
+ * Read a row's selected business columns and return them keyed by UPPERCASE
+ * column name with values as strings ("" for NULL). Columns are read in the
+ * order requested but the canonical serialization (below) re-sorts the keys,
+ * so order here does not affect signed_state bytes.
  */
+function readRow(
+  table: string,
+  cols: string[],
+  where: string,
+): Record<string, string> {
+  // Emit columns delimited by the ASCII Unit-Separator so values containing
+  // '|' or whitespace round-trip through psql -tA cleanly.
+  const projection = cols
+    .map((c) => `COALESCE(${c}::text, '')`)
+    .join(` || E'\\x1F' || `);
+  const out = psql(
+    `SELECT ${projection} FROM ${table} WHERE ${where} LIMIT 1`,
+  );
+  const parts = out === '' ? [] : out.split('\x1F');
+  const row: Record<string, string> = {};
+  cols.forEach((c, i) => {
+    row[c.toUpperCase()] = parts[i] ?? '';
+  });
+  return row;
+}
+
+/**
+ * Canonicalize a row projection into the bytes the Tide attestor would sign.
+ *
+ * PLACEHOLDER canonical form pending the real Tide attestor's serialization
+ * contract: a deterministic JSON object with sorted keys. We never include the
+ * attestation column (you don't sign the signature).
+ */
+function canonicalSignedState(row: Record<string, string>): string {
+  const sorted: Record<string, string> = {};
+  for (const k of Object.keys(row).sort()) sorted[k] = row[k];
+  return JSON.stringify(sorted);
+}
+
+/** Resolve a realm's UUID from its name. */
 function realmIdByName(name: string): string {
-  return psql(`SELECT id FROM realm WHERE name='${name}' LIMIT 1`);
+  return psql(`SELECT id FROM realm WHERE name='${sql(name)}' LIMIT 1`);
 }
 
 /** Drive a governed POST to a committed entity, returning the CR id. */
@@ -248,99 +285,42 @@ async function drainAllPending(
   return drained;
 }
 
-/**
- * Fetch every COMMITTED CR for a realm, ordered by created_at. Returns
- * structured rows including the verbatim rows_json (signed_payload).
- *
- * `rows_json` is emitted as single-line base64 (`translate(..., '\n','')`)
- * so embedded newlines + the ASCII Unit-Separator (`\x1F`) column delimiter
- * survive `psql -tA` round-tripping. Decoded byte-for-byte on the JS side
- * — no JSON.parse + re-stringify (that would change canonical bytes).
- */
-function fetchCommittedCRs(realmId: string): Array<{
-  id: string;
-  action_type: string;
-  entity_type: string;
-  entity_id: string;
-  rows_json: string;
-  created_at: string;
-}> {
-  // Committed CRs are flagged status='APPROVED' (see
-  // IgaReplayDispatcher#commitChangeRequest: managed.setStatus("APPROVED")).
-  // The Tideless gate doesn't have a distinct "COMMITTED" terminal state —
-  // APPROVED == replay applied + entity rows + attestations populated.
-  const sql = [
-    "SELECT id || E'\\x1F'",
-    "    || action_type || E'\\x1F'",
-    "    || entity_type || E'\\x1F'",
-    "    || entity_id || E'\\x1F'",
-    "    || translate(encode(convert_to(rows_json, 'UTF8'), 'base64'), E'\\n', '') || E'\\x1F'",
-    "    || created_at::text",
-    `  FROM iga_change_request`,
-    `  WHERE realm_id = '${realmId}' AND status = 'APPROVED'`,
-    `  ORDER BY created_at ASC, id ASC`,
-  ].join(' ');
-  const raw = psql(sql);
-  if (!raw) return [];
-  const out: Array<{
-    id: string;
-    action_type: string;
-    entity_type: string;
-    entity_id: string;
-    rows_json: string;
-    created_at: string;
-  }> = [];
-  for (const line of raw.split('\n')) {
-    if (!line) continue;
-    const parts = line.split('\x1F');
-    if (parts.length !== 6) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `[fetchCommittedCRs] skipping malformed row (parts=${parts.length}): ${line.slice(0, 80)}...`,
-      );
-      continue;
-    }
-    const [id, action_type, entity_type, entity_id, rows_b64, created_at] =
-      parts;
-    const rows_json = Buffer.from(rows_b64, 'base64').toString('utf8');
-    out.push({ id, action_type, entity_type, entity_id, rows_json, created_at });
-  }
-  return out;
-}
+// ---------------------------------------------------------------------------
+// Bundle v3 model
+// ---------------------------------------------------------------------------
 
-interface AttestedOperation {
-  cr_id: string | null;
-  action_type: string;
-  entity_type: string;
-  entity_id: string;
-  // `signed_payload` is the verbatim CR rows_json string. Embedded as a
-  // JSON string literal so it preserves byte-for-byte canonical fidelity.
-  // null for built-in (no-CR) entries.
-  signed_payload: string | null;
+interface AttestedRow {
+  table: string;
+  key: Record<string, string>;
+  // Canonical bytes the Tide attestor would sign over this row's CURRENT state.
+  // null only for built-in rows where we judge "no current state to sign" is
+  // cleaner than projecting one — but by default we still populate it so the
+  // verifier sees the contributing row.
+  signed_state: string | null;
   attestation: string;
   note?: string;
 }
 
-interface BundleV2 {
-  version: '2';
+interface BundleV3 {
+  version: '3';
   context: {
     realm_id: string;
     client_id: string;
     user_id: string;
   };
-  attested_operations: AttestedOperation[];
+  attested_state: AttestedRow[];
 }
 
 /**
  * Substitute every non-empty `attestation` slot with the 88-char placeholder.
- * `signed_payload` is left UNCHANGED (Tide attestor doesn't change the bytes
- * the verifier signs — it only changes the trailing signature byte string).
+ * `signed_state` is left UNCHANGED (Tide attestor doesn't change the bytes the
+ * verifier signs — it only changes the trailing signature byte string).
  */
-function withSimulatedAttestations(b: BundleV2): BundleV2 {
-  const clone: BundleV2 = JSON.parse(JSON.stringify(b));
-  for (const op of clone.attested_operations) {
-    if (op.attestation && op.attestation.length > 0) {
-      op.attestation = ATTEST_PLACEHOLDER;
+function withSimulatedAttestations(b: BundleV3): BundleV3 {
+  const clone: BundleV3 = JSON.parse(JSON.stringify(b));
+  for (const row of clone.attested_state) {
+    if (row.attestation && row.attestation.length > 0) {
+      row.attestation = ATTEST_PLACEHOLDER;
     }
   }
   return clone;
@@ -356,41 +336,54 @@ function sizeOf(b: object): { pretty: number; minified: number; gzip: number } {
   };
 }
 
-/**
- * Sum the byte length of every signed_payload string in the bundle.
- * Built-in (no-CR) entries contribute 0 because their payload is null.
- */
-function sumSignedPayloadBytes(b: BundleV2): number {
+/** Sum the byte length of every signed_state string in the bundle. */
+function sumSignedStateBytes(b: BundleV3): number {
   let total = 0;
-  for (const op of b.attested_operations) {
-    if (typeof op.signed_payload === 'string') {
-      total += Buffer.byteLength(op.signed_payload, 'utf8');
+  for (const row of b.attested_state) {
+    if (typeof row.signed_state === 'string') {
+      total += Buffer.byteLength(row.signed_state, 'utf8');
     }
   }
   return total;
 }
 
-/**
- * Sum the byte length of every attestation string. Used to make the
- * Tideless-vs-Tide-sized comparison concrete.
- */
-function sumAttestationBytes(b: BundleV2): number {
+/** Sum the byte length of every attestation string. */
+function sumAttestationBytes(b: BundleV3): number {
   let total = 0;
-  for (const op of b.attested_operations) {
-    total += Buffer.byteLength(op.attestation, 'utf8');
+  for (const row of b.attested_state) {
+    total += Buffer.byteLength(row.attestation, 'utf8');
   }
   return total;
 }
 
-/** Count operations partitioned by IGA-captured vs built-in sentinel. */
-function partitionOps(b: BundleV2): { withCR: number; builtIn: number } {
-  let withCR = 0;
-  let builtIn = 0;
-  for (const op of b.attested_operations) {
-    if (op.cr_id !== null) withCR++;
-    else builtIn++;
+/**
+ * Partition rows by category for the size summary:
+ *   - entity rows (table without a 2-col composite key)
+ *   - linkage rows (composite-key edge rows)
+ *   - built-in / unattested sentinels (note present)
+ */
+function partitionRows(b: BundleV3): {
+  entity: number;
+  linkage: number;
+  sentinel: number;
+} {
+  const LINKAGE_TABLES = new Set([
+    'USER_ROLE_MAPPING',
+    'USER_GROUP_MEMBERSHIP',
+    'GROUP_ROLE_MAPPING',
+    'COMPOSITE_ROLE',
+    'CLIENT_SCOPE_CLIENT',
+    'CLIENT_SCOPE_ROLE_MAPPING',
+  ]);
+  let entity = 0;
+  let linkage = 0;
+  let sentinel = 0;
+  for (const row of b.attested_state) {
+    if (row.note) sentinel++;
+    else if (LINKAGE_TABLES.has(row.table)) linkage++;
+    else entity++;
   }
-  return { withCR, builtIn };
+  return { entity, linkage, sentinel };
 }
 
 /**
@@ -411,15 +404,13 @@ test.describe('Tide-network login-row visualizer', () => {
     await deleteRealm(request, REALM).catch(() => {});
   });
 
-  test('build a representative login row, print v2 bundle (REAL + SIMULATED) + debug token claims', async ({
+  test('build a representative login row, print v3 bundle (REAL + SIMULATED) + debug token claims', async ({
     request,
   }) => {
     // -----------------------------------------------------------------------
     // 1. Scratch realm, enable IGA on the EMPTY realm so the toggle-on scan
-    //    finds nothing new to ADOPT (the default realm-management client +
-    //    built-in roles are filtered by the system-entity rules — see Phase 6b
-    //    coverage), then build the contributor graph as a sequence of
-    //    governed CRs.
+    //    finds nothing new to ADOPT, then build the contributor graph as a
+    //    sequence of governed CRs.
     // -----------------------------------------------------------------------
     await createScratchRealm(request, REALM);
     await enableIga(request, REALM);
@@ -642,8 +633,10 @@ test.describe('Tide-network login-row visualizer', () => {
       );
     }
 
-    // Attach scopes to the client — ASSIGN_SCOPE CRs (governed by IGA
-    // ClientAdapter wrapping).
+    // Attach scopes to the client — PUT default/optional-client-scopes.
+    // NOTE: this PUT produces no IGA CR (CLIENT_SCOPE_ATTACH bypass) — the
+    // resulting client_scope_client rows carry a NULL attestation even though
+    // they are not built-ins. The bundle distinguishes these below.
     for (const s of scopeSpecs) {
       const scope = await getClientScopeByName(request, REALM, s.name);
       expect(scope.body?.id, `scope ${s.name} id`).toBeTruthy();
@@ -756,173 +749,309 @@ test.describe('Tide-network login-row visualizer', () => {
     expect(clientLookup.body?.id, 'client id').toBeTruthy();
     const clientUuidVal = clientLookup.body.id as string;
 
-    // -----------------------------------------------------------------------
-    // 9. Bundle v2 assembly — pull every COMMITTED CR for this realm
-    //    verbatim from Postgres. Each CR contributes one attested_operation
-    //    with signed_payload = rows_json (verbatim string, byte-preserved).
-    // -----------------------------------------------------------------------
     const realmUuidDb = realmIdByName(REALM);
     expect(realmUuidDb, 'realm UUID from DB').toBe(realmUuid);
 
-    const committed = fetchCommittedCRs(realmUuidDb);
-    expect(committed.length, 'at least one COMMITTED CR').toBeGreaterThan(0);
+    // =======================================================================
+    // 9. Bundle v3 assembly — enumerate the CURRENT contributor rows that
+    //    constitute alice's effective login at tide-viz-client. Each row reads
+    //    its OWN attestation column from its OWN table (the v2-bug fix), and a
+    //    canonical signed_state from the row's current business columns.
+    // =======================================================================
+    const attested: AttestedRow[] = [];
 
-    const attestedOps: AttestedOperation[] = committed.map((cr) => {
-      const table = ENTITY_TABLE[cr.entity_type];
-      let attestation = '';
-      if (table) {
-        attestation = readAttestation(table, `id='${cr.entity_id}'`);
-      }
-      // SCOPE_ADD_ROLE is governed under entity_type=CLIENT with
-      // entity_id=<scope_id>, which doesn't exist in the `client` table.
-      // The attestation actually lives on the client_scope_role_mapping
-      // edge row stamped at replay. Look it up by (scope_id, role_id)
-      // parsed from the verbatim rows_json.
-      if (attestation === '' && cr.action_type === 'SCOPE_ADD_ROLE') {
-        const m = /"SCOPE_ID":"([^"]+)"[^}]*"ROLE_ID":"([^"]+)"/.exec(
-          cr.rows_json,
-        );
-        if (m) {
-          attestation = readAttestation(
-            'client_scope_role_mapping',
-            `scope_id='${m[1]}' AND role_id='${m[2]}'`,
-          );
-        }
-      }
-      // signed_payload must be the verbatim rows_json string. We DO NOT
-      // JSON.parse + re-emit it.
-      return {
-        cr_id: cr.id,
-        action_type: cr.action_type,
-        entity_type: cr.entity_type,
-        entity_id: cr.entity_id,
-        signed_payload: cr.rows_json,
+    // Track which entity ids we've already emitted (dedupe across the effective
+    // role/group/scope sets).
+    const seenEntity = new Set<string>(); // `${table}:${id}`
+
+    /** Append an entity row read from its real table (id-keyed). */
+    function pushEntity(
+      tableUpper: string,
+      tableLower: string,
+      cols: string[],
+      id: string,
+      note?: string,
+    ) {
+      const k = `${tableUpper}:${id}`;
+      if (seenEntity.has(k)) return;
+      seenEntity.add(k);
+      const row = readRow(tableLower, cols, `id='${sql(id)}'`);
+      const attestation = readAttestation(tableLower, `id='${sql(id)}'`);
+      const entry: AttestedRow = {
+        table: tableUpper,
+        key: { id },
+        signed_state: canonicalSignedState(row),
         attestation,
       };
-    });
-
-    // -----------------------------------------------------------------------
-    // 9b. Built-in (no-CR) sentinel entries.
-    //
-    // The realm carries built-in entities the Tide network needs to know
-    // about because they contribute to token issuance — but they were never
-    // IGA-captured (no CR exists, no attestation was stamped). The verifier
-    // will treat these as "well-known unsigned" until a Tide-side design
-    // decision changes that. We emit them as sentinel attested_operations
-    // with cr_id:null and signed_payload:null so the gap is visible.
-    //
-    // Conservatively included:
-    //   - The realm's `default-roles-<realm>` composite role (assigned to
-    //     every user implicitly via the realm's defaultRole reference).
-    //   - The 11 built-in OIDC client scopes that are attached as default
-    //     scopes to every new client (profile, email, address, phone,
-    //     offline_access, microprofile-jwt, roles, web-origins, acr,
-    //     basic, organization — varies by KC build).
-    //   - The protocol-mappers KC pre-installs on those built-in scopes.
-    //
-    // We discover them by querying the DB for entities in this realm whose
-    // id was NOT mentioned in any committed CR's entity_id.
-    // -----------------------------------------------------------------------
-    // Entity-id coverage for built-in sentinel detection. We MUST include
-    // not just each CR's entity_id, but every entity id mentioned inside
-    // any CR's rows_json — because some CRs capture multiple entities
-    // inline (e.g. CREATE_CLIENT_SCOPE.REP_JSON nests a protocolMappers[]
-    // array with mapper ids; those mappers ARE attested via the parent
-    // CR's signed payload, NOT built-ins).
-    const crEntityIds = new Set<string>(committed.map((c) => c.entity_id));
-    // Match UUIDs anywhere in the raw rows_json — works for both the outer
-    // "ID":"..." columns and the inner escaped REP_JSON ("id":"...","
-    // becomes "\"id\":\"...\"" after JSON-stringification). A raw UUID-
-    // shaped scan is cheaper than properly un-escaping every nested level.
-    const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
-    for (const cr of committed) {
-      for (const m of cr.rows_json.matchAll(UUID_RE)) {
-        crEntityIds.add(m[0]);
+      if (note) entry.note = note;
+      else if (attestation === '') {
+        entry.note = 'built-in — no IGA capture';
       }
+      attested.push(entry);
     }
 
-    // Built-in client scopes attached to the realm (the realm spawns the
-    // standard set when created; they are realm-scoped, not client-scoped).
-    const builtinScopeRows = psql(
-      `SELECT id, name FROM client_scope WHERE realm_id='${realmUuid}'`,
+    /** Append a linkage row, reading its OWN attestation from its OWN table. */
+    function pushLinkage(
+      tableUpper: string,
+      tableLower: string,
+      key: Record<string, string>,
+      note?: string,
+    ) {
+      const where = Object.entries(key)
+        .map(([col, val]) => `${col}='${sql(val)}'`)
+        .join(' AND ');
+      const cols = Object.keys(key);
+      const row = readRow(tableLower, cols, where);
+      const attestation = readAttestation(tableLower, where);
+      const entry: AttestedRow = {
+        table: tableUpper,
+        key,
+        signed_state: canonicalSignedState(row),
+        attestation,
+      };
+      if (note) entry.note = note;
+      attested.push(entry);
+    }
+
+    // --- 9a. USER_ENTITY (alice) ------------------------------------------
+    const USER_COLS = [
+      'id',
+      'username',
+      'email',
+      'email_verified',
+      'enabled',
+      'first_name',
+      'last_name',
+      'realm_id',
+    ];
+    pushEntity('USER_ENTITY', 'user_entity', USER_COLS, aliceId);
+
+    // --- 9b. Alice's effective realm-role set -----------------------------
+    // Direct realm-role grants (USER_ROLE_MAPPING) — read each linkage row's
+    // own attestation. Then expand composites and group-inherited roles for
+    // the entity-row set.
+    const ROLE_COLS = [
+      'id',
+      'name',
+      'client_role',
+      'realm_id',
+      'client',
+      'description',
+    ];
+
+    // Direct realm-role grants on alice (USER_ROLE_MAPPING). We list them from
+    // the DB joined to keycloak_role so we only pick up REALM roles alice was
+    // directly granted (composite-parent + the 2 realm roles). The
+    // default-roles composite is also a direct mapping (KC auto-assigns it).
+    const directRoleRows = psql(
+      `SELECT urm.role_id, kr.name, kr.client_role
+         FROM user_role_mapping urm
+         JOIN keycloak_role kr ON kr.id = urm.role_id
+        WHERE urm.user_id='${sql(aliceId)}'
+        ORDER BY kr.name ASC`,
     )
       .split('\n')
-      .filter(Boolean);
-    for (const line of builtinScopeRows) {
-      const [id, name] = line.split('|');
-      if (crEntityIds.has(id)) continue; // CR already covered this scope
-      attestedOps.push({
-        cr_id: null,
-        action_type: 'BUILTIN_CLIENT_SCOPE',
-        entity_type: 'CLIENT_SCOPE',
-        entity_id: id,
-        signed_payload: null,
-        attestation: '',
-        note: `built-in — no IGA capture (name=${name})`,
+      .filter(Boolean)
+      .map((l) => {
+        const [role_id, name, client_role] = l.split('|');
+        return { role_id, name, client_role };
       });
+
+    // Effective role-id set for entity-row emission (direct + composite
+    // children + group roles). Seeded with the direct grants.
+    const effectiveRoleIds = new Set<string>();
+
+    for (const dr of directRoleRows) {
+      // Linkage row: USER_ROLE_MAPPING(user_id, role_id) — OWN attestation.
+      pushLinkage('USER_ROLE_MAPPING', 'user_role_mapping', {
+        user_id: aliceId,
+        role_id: dr.role_id,
+      });
+      effectiveRoleIds.add(dr.role_id);
     }
 
-    // Built-in default-roles-<realm> composite role.
-    const defaultRolesRow = psql(
-      `SELECT id, name FROM keycloak_role WHERE realm_id='${realmUuid}' AND name LIKE 'default-roles-%' LIMIT 1`,
-    );
-    if (defaultRolesRow) {
-      const [id, name] = defaultRolesRow.split('|');
-      if (!crEntityIds.has(id)) {
-        attestedOps.push({
-          cr_id: null,
-          action_type: 'BUILTIN_REALM_DEFAULT_ROLE',
-          entity_type: 'ROLE',
-          entity_id: id,
-          signed_payload: null,
-          attestation: '',
-          note: `built-in — no IGA capture (name=${name})`,
-        });
-      }
-    }
-
-    // Built-in protocol-mappers on the built-in scopes attached to our
-    // client (each built-in scope ships a handful of mappers — they
-    // contribute claims at token issuance, so the verifier needs to know).
-    const ourClientScopeIds = psql(
-      `SELECT scope_id FROM client_scope_client WHERE client_id='${clientUuidVal}'`,
-    )
-      .split('\n')
-      .filter(Boolean);
-    if (ourClientScopeIds.length > 0) {
-      const ids = ourClientScopeIds.map((s) => `'${s}'`).join(',');
-      const mapperRows = psql(
-        `SELECT id, name FROM protocol_mapper WHERE client_scope_id IN (${ids}) OR client_id='${clientUuidVal}'`,
+    // Composite expansion: for each direct composite role, enumerate its
+    // children via COMPOSITE_ROLE(composite, child_role) — each edge its OWN
+    // attestation — and add the child role ids to the effective set.
+    for (const dr of directRoleRows) {
+      const children = psql(
+        `SELECT child_role FROM composite_role WHERE composite='${sql(dr.role_id)}' ORDER BY child_role ASC`,
       )
         .split('\n')
         .filter(Boolean);
-      for (const line of mapperRows) {
-        const [id, name] = line.split('|');
-        if (crEntityIds.has(id)) continue;
-        attestedOps.push({
-          cr_id: null,
-          action_type: 'BUILTIN_PROTOCOL_MAPPER',
-          entity_type: 'PROTOCOL_MAPPER',
-          entity_id: id,
-          signed_payload: null,
-          attestation: '',
-          note: `built-in — no IGA capture (name=${name})`,
+      for (const childId of children) {
+        pushLinkage('COMPOSITE_ROLE', 'composite_role', {
+          composite: dr.role_id,
+          child_role: childId,
         });
+        effectiveRoleIds.add(childId);
+      }
+    }
+
+    // --- 9c. Group membership path + group-inherited roles ----------------
+    // alice → platform (child of engineering). USER_GROUP_MEMBERSHIP edge.
+    pushLinkage('USER_GROUP_MEMBERSHIP', 'user_group_membership', {
+      user_id: aliceId,
+      group_id: childGroup.id,
+    });
+
+    // Membership path groups: platform + its ancestors (engineering).
+    const GROUP_COLS = ['id', 'name', 'parent_group', 'realm_id', 'type'];
+    const groupPathIds: string[] = [];
+    {
+      let gid: string | null = childGroup.id as string;
+      const guard = new Set<string>();
+      while (gid && !guard.has(gid)) {
+        guard.add(gid);
+        groupPathIds.push(gid);
+        const parent = psql(
+          `SELECT COALESCE(parent_group, '') FROM keycloak_group WHERE id='${sql(gid)}' LIMIT 1`,
+        );
+        gid = parent ? parent : null;
+      }
+    }
+    for (const gid of groupPathIds) {
+      pushEntity('KEYCLOAK_GROUP', 'keycloak_group', GROUP_COLS, gid);
+    }
+
+    // Group-inherited role grants: for each group on the path, its
+    // GROUP_ROLE_MAPPING edges (each OWN attestation), and add the granted
+    // role ids to the effective set.
+    for (const gid of groupPathIds) {
+      const grm = psql(
+        `SELECT role_id FROM group_role_mapping WHERE group_id='${sql(gid)}' ORDER BY role_id ASC`,
+      )
+        .split('\n')
+        .filter(Boolean);
+      for (const roleId of grm) {
+        pushLinkage('GROUP_ROLE_MAPPING', 'group_role_mapping', {
+          group_id: gid,
+          role_id: roleId,
+        });
+        effectiveRoleIds.add(roleId);
+        // Group-inherited roles can themselves be composite — expand.
+        const children = psql(
+          `SELECT child_role FROM composite_role WHERE composite='${sql(roleId)}' ORDER BY child_role ASC`,
+        )
+          .split('\n')
+          .filter(Boolean);
+        for (const childId of children) {
+          pushLinkage('COMPOSITE_ROLE', 'composite_role', {
+            composite: roleId,
+            child_role: childId,
+          });
+          effectiveRoleIds.add(childId);
+        }
+      }
+    }
+
+    // Emit a KEYCLOAK_ROLE entity row for every role in the effective set.
+    for (const roleId of effectiveRoleIds) {
+      pushEntity('KEYCLOAK_ROLE', 'keycloak_role', ROLE_COLS, roleId);
+    }
+
+    // --- 9d. CLIENT (tide-viz-client) -------------------------------------
+    const CLIENT_COLS = [
+      'id',
+      'client_id',
+      'enabled',
+      'protocol',
+      'public_client',
+      'standard_flow_enabled',
+      'direct_access_grants_enabled',
+      'realm_id',
+    ];
+    pushEntity('CLIENT', 'client', CLIENT_COLS, clientUuidVal);
+
+    // --- 9e. CLIENT_SCOPE entity rows + CLIENT_SCOPE_CLIENT attach edges ---
+    // Every scope attached to the client (the 3 viz scopes + KC built-ins).
+    const SCOPE_COLS = ['id', 'name', 'realm_id', 'protocol', 'description'];
+    const vizScopeNames = new Set([
+      SCOPE_DEFAULT_A,
+      SCOPE_DEFAULT_B,
+      SCOPE_OPTIONAL,
+    ]);
+    const attachRows = psql(
+      `SELECT csc.scope_id, cs.name, COALESCE(csc.attestation,'')
+         FROM client_scope_client csc
+         JOIN client_scope cs ON cs.id = csc.scope_id
+        WHERE csc.client_id='${sql(clientUuidVal)}'
+        ORDER BY cs.name ASC`,
+    )
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => {
+        const [scope_id, name, attestation] = l.split('|');
+        return { scope_id, name, attestation: attestation ?? '' };
+      });
+
+    for (const ar of attachRows) {
+      const isViz = vizScopeNames.has(ar.name);
+      // Entity row for the scope. Viz scopes were governed (CREATE_CLIENT_SCOPE)
+      // so carry an attestation; built-ins do not (pushEntity notes that).
+      pushEntity(
+        'CLIENT_SCOPE',
+        'client_scope',
+        SCOPE_COLS,
+        ar.scope_id,
+        isViz ? undefined : 'built-in — no IGA capture',
+      );
+      // Attach edge: CLIENT_SCOPE_CLIENT(client_id, scope_id) — OWN attestation.
+      // The PUT default/optional-client-scopes attach is NOT IGA-captured
+      // (CLIENT_SCOPE_ATTACH bypass), so even viz-scope attach rows have a
+      // NULL attestation. Distinguish from true built-ins via the note.
+      let note: string | undefined;
+      if (ar.attestation === '') {
+        note = isViz
+          ? 'attachment not IGA-captured (CLIENT_SCOPE_ATTACH bypass)'
+          : 'built-in — no IGA capture';
+      }
+      pushLinkage(
+        'CLIENT_SCOPE_CLIENT',
+        'client_scope_client',
+        { client_id: clientUuidVal, scope_id: ar.scope_id },
+        note,
+      );
+    }
+
+    // --- 9f. CLIENT_SCOPE_ROLE_MAPPING (scope→role) -----------------------
+    // The SCOPE_ADD_ROLE we created (SCOPE_DEFAULT_B → REALM_ROLES[1]) plus
+    // any others on the attached scopes. Each edge its OWN attestation.
+    const scopeIds = attachRows.map((a) => a.scope_id);
+    if (scopeIds.length > 0) {
+      const idList = scopeIds.map((s) => `'${sql(s)}'`).join(',');
+      const csrm = psql(
+        `SELECT scope_id, role_id FROM client_scope_role_mapping WHERE scope_id IN (${idList}) ORDER BY scope_id, role_id ASC`,
+      )
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => {
+          const [scope_id, role_id] = l.split('|');
+          return { scope_id, role_id };
+        });
+      for (const m of csrm) {
+        pushLinkage('CLIENT_SCOPE_ROLE_MAPPING', 'client_scope_role_mapping', {
+          scope_id: m.scope_id,
+          role_id: m.role_id,
+        });
+        // The role referenced by a scope→role mapping also contributes to
+        // token issuance — include its entity row if not already present.
+        pushEntity('KEYCLOAK_ROLE', 'keycloak_role', ROLE_COLS, m.role_id);
       }
     }
 
     // -----------------------------------------------------------------------
     // 10. Final bundle (REAL + SIMULATED).
     // -----------------------------------------------------------------------
-    const bundleReal: BundleV2 = {
-      version: '2',
-      // context is the bundle's routing header, NOT part of any signed payload
+    const bundleReal: BundleV3 = {
+      version: '3',
+      // context is the bundle's routing header, NOT part of any signed state
       context: {
         realm_id: realmUuid,
         client_id: clientUuidVal,
         user_id: aliceId,
       },
-      attested_operations: attestedOps,
+      attested_state: attested,
     };
     const bundleSimulated = withSimulatedAttestations(bundleReal);
 
@@ -931,27 +1060,19 @@ test.describe('Tide-network login-row visualizer', () => {
     expect(bundleReal.context.client_id, 'context.client_id non-empty').toBeTruthy();
     expect(bundleReal.context.realm_id, 'context.realm_id non-empty').toBeTruthy();
     expect(
-      bundleReal.attested_operations.length,
-      'attested_operations ≥ 10 (CRs + built-in sentinels)',
+      bundleReal.attested_state.length,
+      'attested_state ≥ 10 (entity + linkage + sentinel rows)',
     ).toBeGreaterThanOrEqual(10);
-    // Every CR-backed op must have a non-null signed_payload that is a
-    // non-empty string (rows_json is NOT NULL in schema).
-    for (const op of bundleReal.attested_operations) {
-      if (op.cr_id !== null) {
-        expect(
-          typeof op.signed_payload,
-          `cr_id=${op.cr_id} signed_payload type`,
-        ).toBe('string');
-        expect(
-          (op.signed_payload as string).length,
-          `cr_id=${op.cr_id} signed_payload non-empty`,
-        ).toBeGreaterThan(0);
-      } else {
-        expect(
-          op.signed_payload,
-          `built-in sentinel ${op.entity_id} signed_payload null`,
-        ).toBeNull();
-      }
+    // Every row has a key and a (possibly empty) attestation string.
+    for (const row of bundleReal.attested_state) {
+      expect(
+        Object.keys(row.key).length,
+        `${row.table} key non-empty`,
+      ).toBeGreaterThan(0);
+      expect(
+        typeof row.attestation,
+        `${row.table} attestation is string`,
+      ).toBe('string');
     }
 
     // -----------------------------------------------------------------------
@@ -959,15 +1080,13 @@ test.describe('Tide-network login-row visualizer', () => {
     // -----------------------------------------------------------------------
     const sReal = sizeOf(bundleReal);
     const sSim = sizeOf(bundleSimulated);
-    const partition = partitionOps(bundleReal);
-    const sumSignedReal = sumSignedPayloadBytes(bundleReal);
+    const part = partitionRows(bundleReal);
+    const sumSignedReal = sumSignedStateBytes(bundleReal);
     const sumAttestReal = sumAttestationBytes(bundleReal);
     const sumAttestSim = sumAttestationBytes(bundleSimulated);
 
     // eslint-disable-next-line no-console
-    console.log(
-      `\n=== Bundle v2: per-CR signed payloads + final attestations (REAL Tideless) ===`,
-    );
+    console.log(`\n=== Bundle v3: current attested state (REAL Tideless) ===`);
     // eslint-disable-next-line no-console
     console.log(JSON.stringify(bundleReal, null, 2));
     // eslint-disable-next-line no-console
@@ -980,16 +1099,16 @@ test.describe('Tide-network login-row visualizer', () => {
     console.log(`Gzip:           ${sReal.gzip} bytes`);
     // eslint-disable-next-line no-console
     console.log(
-      `Operations: ${bundleReal.attested_operations.length} total (${partition.withCR} with IGA CR + signed_payload, ${partition.builtIn} built-in/no-CR sentinels)`,
+      `Rows: ${bundleReal.attested_state.length} total (${part.entity} entity + ${part.linkage} linkage + ${part.sentinel} built-in/unattested sentinels)`,
     );
     // eslint-disable-next-line no-console
-    console.log(`Sum of signed_payload bytes: ${sumSignedReal}`);
+    console.log(`Sum of signed_state bytes: ${sumSignedReal}`);
     // eslint-disable-next-line no-console
-    console.log(`Sum of attestation bytes:    ${sumAttestReal}`);
+    console.log(`Sum of attestation bytes:  ${sumAttestReal}`);
 
     // eslint-disable-next-line no-console
     console.log(
-      `\n=== Bundle v2: per-CR signed payloads + final attestations (SIMULATED Tide-sized) ===`,
+      `\n=== Bundle v3: current attested state (SIMULATED Tide-sized) ===`,
     );
     // eslint-disable-next-line no-console
     console.log(JSON.stringify(bundleSimulated, null, 2));
@@ -1003,7 +1122,7 @@ test.describe('Tide-network login-row visualizer', () => {
     console.log(`Gzip:           ${sSim.gzip} bytes`);
     // eslint-disable-next-line no-console
     console.log(
-      `Sum of attestation bytes: ${sumAttestSim} (88-char placeholder per IGA-attested op)`,
+      `Sum of attestation bytes: ${sumAttestSim} (88-char placeholder per attested row)`,
     );
 
     // -----------------------------------------------------------------------
@@ -1035,8 +1154,7 @@ test.describe('Tide-network login-row visualizer', () => {
     // eslint-disable-next-line no-console
     console.log(JSON.stringify(debugExtract, null, 2));
 
-    // Sanity assertions on debug content (these confirm the run produced
-    // semantically correct output, not bundle correctness).
+    // Sanity assertions on debug content.
     expect(
       (accessClaims as any).preferred_username,
       'access.preferred_username == alice',
@@ -1047,11 +1165,11 @@ test.describe('Tide-network login-row visualizer', () => {
     expect(Object.keys(bundleSimulated).sort()).toEqual(
       Object.keys(bundleReal).sort(),
     );
-    expect(bundleSimulated.attested_operations.length).toBe(
-      bundleReal.attested_operations.length,
+    expect(bundleSimulated.attested_state.length).toBe(
+      bundleReal.attested_state.length,
     );
-    // signed_payload bytes are IDENTICAL between REAL and SIMULATED (the
-    // Tide attestor doesn't change what we sign over — only the signature).
-    expect(sumSignedPayloadBytes(bundleSimulated)).toBe(sumSignedReal);
+    // signed_state bytes are IDENTICAL between REAL and SIMULATED (the Tide
+    // attestor doesn't change what we sign over — only the signature).
+    expect(sumSignedStateBytes(bundleSimulated)).toBe(sumSignedReal);
   });
 });
