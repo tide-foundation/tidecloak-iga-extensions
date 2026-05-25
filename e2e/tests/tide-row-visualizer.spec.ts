@@ -29,7 +29,7 @@ import {
 import { kcEnv } from '../lib/env';
 
 /**
- * Tide-network login-row visualizer — bundle v3.
+ * Tide-network login-row visualizer — bundle v4.
  *
  * VERIFICATION MODEL: CURRENT ATTESTED STATE ONLY.
  *
@@ -52,9 +52,43 @@ import { kcEnv } from '../lib/env';
  * showed the same timestamp. v3 reads each linkage row's OWN attestation from
  * the correct linkage table (USER_ROLE_MAPPING(uid,rid).attestation, etc.).
  *
+ * v4 (this version) closes the CLIENT-CONFIG and REALM-CONFIG gaps. A Keycloak
+ * token is a pure function of FIVE inputs (per the keycloak-token-construction
+ * skill, references/inputs-and-outputs.md): user, client, scopeParam, surface,
+ * sessionCtxAttrs. v3's bundle was user-complete but client-config-incomplete
+ * and realm-config-incomplete: it carried only the scopes/mappers the user's
+ * claims happened to surface, not the client's COMPLETE assigned scope set, the
+ * client's own role allowlist (scope_mapping / fullScopeAllowed gate), the
+ * per-scope protocol mappers, or the realm-level scope assignments that every
+ * client inherits. The Tide network therefore could not reproduce WHY a given
+ * claim is in the token from what we send. v4 adds, for
+ * (alice, tide-viz-client, iga-tide-row-viz):
+ *   - FULL CLIENT object: full_scope_allowed / consent_required /
+ *     service_accounts_enabled + token-shape client attributes
+ *     (use.lightweight.access.token.enabled, access.token.lifespan) read from
+ *     client_attributes (which DOES carry an attestation column).
+ *   - ALL default client scopes (client_scope_client.default_scope=true) AND
+ *     ALL optional client scopes (default_scope=false) — the client's complete
+ *     assigned scope set, regardless of whether this login requested them.
+ *   - The client's own scope-mappings / role allowlist (scope_mapping table,
+ *     getScopeMappingsStream) — the allowlist consulted when
+ *     fullScopeAllowed=false. NOTE: scope_mapping has NO attestation column →
+ *     reported as a GAP.
+ *   - For each client scope in the set: its protocol mappers (protocol_mapper
+ *     rows, each with its OWN attestation; built-in mappers null).
+ *   - REALM-level scope assignments: default_client_scope(realm_id, scope_id,
+ *     default_scope) — the default-default and default-optional templates every
+ *     client inherits at create time. NO attestation column → GAP.
+ *   - Realm-owned built-in client scopes + their mappers stay, now explicitly
+ *     tagged realm-owned.
+ * After building v4, a COVERAGE TABLE maps the skill's token inputs to bundle
+ * presence + attestation, flagging the rows that have no IGA capture column as
+ * GAPs. The realm signing key and realm name (iss) are out of the skill's
+ * claim-shape scope and are NOT bundled (realm id + name stay in `context`).
+ *
  * Bundle shape:
  *   {
- *     version: "3",
+ *     version: "4",
  *     context: { realm_id, client_id, user_id },   // routing header, NOT signed
  *     attested_state: [
  *       {
@@ -301,8 +335,8 @@ interface AttestedRow {
   note?: string;
 }
 
-interface BundleV3 {
-  version: '3';
+interface BundleV4 {
+  version: '4';
   context: {
     realm_id: string;
     client_id: string;
@@ -316,8 +350,8 @@ interface BundleV3 {
  * `signed_state` is left UNCHANGED (Tide attestor doesn't change the bytes the
  * verifier signs — it only changes the trailing signature byte string).
  */
-function withSimulatedAttestations(b: BundleV3): BundleV3 {
-  const clone: BundleV3 = JSON.parse(JSON.stringify(b));
+function withSimulatedAttestations(b: BundleV4): BundleV4 {
+  const clone: BundleV4 = JSON.parse(JSON.stringify(b));
   for (const row of clone.attested_state) {
     if (row.attestation && row.attestation.length > 0) {
       row.attestation = ATTEST_PLACEHOLDER;
@@ -337,7 +371,7 @@ function sizeOf(b: object): { pretty: number; minified: number; gzip: number } {
 }
 
 /** Sum the byte length of every signed_state string in the bundle. */
-function sumSignedStateBytes(b: BundleV3): number {
+function sumSignedStateBytes(b: BundleV4): number {
   let total = 0;
   for (const row of b.attested_state) {
     if (typeof row.signed_state === 'string') {
@@ -348,7 +382,7 @@ function sumSignedStateBytes(b: BundleV3): number {
 }
 
 /** Sum the byte length of every attestation string. */
-function sumAttestationBytes(b: BundleV3): number {
+function sumAttestationBytes(b: BundleV4): number {
   let total = 0;
   for (const row of b.attested_state) {
     total += Buffer.byteLength(row.attestation, 'utf8');
@@ -362,7 +396,7 @@ function sumAttestationBytes(b: BundleV3): number {
  *   - linkage rows (composite-key edge rows)
  *   - built-in / unattested sentinels (note present)
  */
-function partitionRows(b: BundleV3): {
+function partitionRows(b: BundleV4): {
   entity: number;
   linkage: number;
   sentinel: number;
@@ -374,6 +408,9 @@ function partitionRows(b: BundleV3): {
     'COMPOSITE_ROLE',
     'CLIENT_SCOPE_CLIENT',
     'CLIENT_SCOPE_ROLE_MAPPING',
+    'CLIENT_ATTRIBUTES',
+    'SCOPE_MAPPING',
+    'DEFAULT_CLIENT_SCOPE',
   ]);
   let entity = 0;
   let linkage = 0;
@@ -790,19 +827,27 @@ test.describe('Tide-network login-row visualizer', () => {
       attested.push(entry);
     }
 
-    /** Append a linkage row, reading its OWN attestation from its OWN table. */
+    /**
+     * Append a linkage row, reading its OWN attestation from its OWN table.
+     * `hasAttestationCol=false` for tables that have NO attestation column
+     * (scope_mapping, default_client_scope) — these are bundled as GAP rows
+     * with attestation:"" and SELECT must NOT reference the missing column.
+     */
     function pushLinkage(
       tableUpper: string,
       tableLower: string,
       key: Record<string, string>,
       note?: string,
+      hasAttestationCol: boolean = true,
     ) {
       const where = Object.entries(key)
         .map(([col, val]) => `${col}='${sql(val)}'`)
         .join(' AND ');
       const cols = Object.keys(key);
       const row = readRow(tableLower, cols, where);
-      const attestation = readAttestation(tableLower, where);
+      const attestation = hasAttestationCol
+        ? readAttestation(tableLower, where)
+        : '';
       const entry: AttestedRow = {
         table: tableUpper,
         key,
@@ -950,7 +995,24 @@ test.describe('Tide-network login-row visualizer', () => {
       pushEntity('KEYCLOAK_ROLE', 'keycloak_role', ROLE_COLS, roleId);
     }
 
-    // --- 9d. CLIENT (tide-viz-client) -------------------------------------
+    // -----------------------------------------------------------------------
+    // Coverage tracking — set as each token input is bundled. Drives the
+    // COVERAGE TABLE printed in §11. `inBundle` = a row carrying this input is
+    // present; `attested` = at least one such row has a non-empty attestation
+    // OR the input lives in a table with an attestation column we read.
+    // -----------------------------------------------------------------------
+    const coverage: Record<
+      string,
+      { inBundle: boolean; attested: boolean; gap?: string }
+    > = {};
+
+    // --- 9d. FULL CLIENT object (tide-viz-client) -------------------------
+    // The client row carries the token-shape config fields read straight from
+    // the `client` table: full_scope_allowed (gates role intersection — skill
+    // invariant 6), consent_required (gates verifyConsentStillAvailable),
+    // service_accounts_enabled (auto-attaches the service_account scope),
+    // standard/direct flow, protocol, public_client. CLIENT row carries an
+    // attestation (governed CREATE_CLIENT).
     const CLIENT_COLS = [
       'id',
       'client_id',
@@ -959,12 +1021,81 @@ test.describe('Tide-network login-row visualizer', () => {
       'public_client',
       'standard_flow_enabled',
       'direct_access_grants_enabled',
+      'full_scope_allowed',
+      'consent_required',
+      'service_accounts_enabled',
       'realm_id',
     ];
     pushEntity('CLIENT', 'client', CLIENT_COLS, clientUuidVal);
+    coverage['CLIENT: fullScopeAllowed / consentRequired / attrs'] = {
+      inBundle: true,
+      attested: readAttestation('client', `id='${sql(clientUuidVal)}'`) !== '',
+    };
 
-    // --- 9e. CLIENT_SCOPE entity rows + CLIENT_SCOPE_CLIENT attach edges ---
-    // Every scope attached to the client (the 3 viz scopes + KC built-ins).
+    // Client attributes that shape the token (lightweight access-token toggle,
+    // access-token lifespan). client_attributes(client_id,name,value) carries
+    // an attestation column, so governed attribute writes ARE attestable. A
+    // missing attribute row → that toggle is at its KC default (not bundled,
+    // noted in coverage).
+    const TOKEN_SHAPE_CLIENT_ATTRS = [
+      'use.lightweight.access.token.enabled',
+      'access.token.lifespan',
+    ];
+    let anyClientAttrPresent = false;
+    let anyClientAttrAttested = false;
+    for (const attrName of TOKEN_SHAPE_CLIENT_ATTRS) {
+      const where = `client_id='${sql(clientUuidVal)}' AND name='${sql(attrName)}'`;
+      const present =
+        psql(
+          `SELECT 1 FROM client_attributes WHERE ${where} LIMIT 1`,
+        ) !== '';
+      if (!present) continue;
+      anyClientAttrPresent = true;
+      const att = readAttestation('client_attributes', where);
+      if (att !== '') anyClientAttrAttested = true;
+      pushLinkage(
+        'CLIENT_ATTRIBUTES',
+        'client_attributes',
+        { client_id: clientUuidVal, name: attrName },
+        att === '' ? 'client attribute not IGA-governed (no attestation)' : undefined,
+      );
+    }
+
+    // --- 9e. CLIENT scope-mappings / role allowlist (getScopeMappingsStream) -
+    // scope_mapping(client_id, role_id) is the CLIENT's OWN role allowlist —
+    // the set intersected against the user's roles when fullScopeAllowed=false
+    // (scope-resolution.md: isClientScopePermittedForUser). It has NO
+    // attestation column → GAP. Bundle the rows so the verifier sees the
+    // allowlist, tagged as un-attestable.
+    const clientScopeMappings = psql(
+      `SELECT role_id FROM scope_mapping WHERE client_id='${sql(clientUuidVal)}' ORDER BY role_id ASC`,
+    )
+      .split('\n')
+      .filter(Boolean);
+    for (const roleId of clientScopeMappings) {
+      pushLinkage(
+        'SCOPE_MAPPING',
+        'scope_mapping',
+        { client_id: clientUuidVal, role_id: roleId },
+        'client role-allowlist edge has no attestation column (GAP)',
+        false,
+      );
+      // The allowlisted role also contributes to issuance — entity row.
+      pushEntity('KEYCLOAK_ROLE', 'keycloak_role', ROLE_COLS, roleId);
+    }
+    coverage['CLIENT: scope-mappings / role allowlist'] = {
+      inBundle: true,
+      attested: false,
+      gap: 'scope_mapping table has no attestation column',
+    };
+
+    // --- 9f. COMPLETE client scope set: default + optional ----------------
+    // client_scope_client.default_scope distinguishes default (true) from
+    // optional (false). We enumerate the client's COMPLETE assigned scope set
+    // regardless of whether this login's scope param requested them (v3 only
+    // surfaced scopes the claims happened to touch). Each scope's CLIENT_SCOPE
+    // entity row + its CLIENT_SCOPE_CLIENT attach edge + ALL its protocol
+    // mappers are bundled.
     const SCOPE_COLS = ['id', 'name', 'realm_id', 'protocol', 'description'];
     const vizScopeNames = new Set([
       SCOPE_DEFAULT_A,
@@ -972,7 +1103,7 @@ test.describe('Tide-network login-row visualizer', () => {
       SCOPE_OPTIONAL,
     ]);
     const attachRows = psql(
-      `SELECT csc.scope_id, cs.name, COALESCE(csc.attestation,'')
+      `SELECT csc.scope_id, cs.name, COALESCE(csc.attestation,''), csc.default_scope
          FROM client_scope_client csc
          JOIN client_scope cs ON cs.id = csc.scope_id
         WHERE csc.client_id='${sql(clientUuidVal)}'
@@ -981,30 +1112,52 @@ test.describe('Tide-network login-row visualizer', () => {
       .split('\n')
       .filter(Boolean)
       .map((l) => {
-        const [scope_id, name, attestation] = l.split('|');
-        return { scope_id, name, attestation: attestation ?? '' };
+        const [scope_id, name, attestation, default_scope] = l.split('|');
+        return {
+          scope_id,
+          name,
+          attestation: attestation ?? '',
+          isDefault: default_scope === 't' || default_scope === 'true',
+        };
       });
 
+    let anyDefaultScope = false;
+    let anyOptionalScope = false;
+    let anyScopeMapperAttested = false;
+    let anyScopeMapperPresent = false;
+    const PMAPPER_COLS = [
+      'id',
+      'name',
+      'protocol',
+      'protocol_mapper_name',
+      'client_scope_id',
+    ];
     for (const ar of attachRows) {
       const isViz = vizScopeNames.has(ar.name);
+      if (ar.isDefault) anyDefaultScope = true;
+      else anyOptionalScope = true;
       // Entity row for the scope. Viz scopes were governed (CREATE_CLIENT_SCOPE)
-      // so carry an attestation; built-ins do not (pushEntity notes that).
+      // so carry an attestation; KC built-ins are realm-owned, no IGA capture.
       pushEntity(
         'CLIENT_SCOPE',
         'client_scope',
         SCOPE_COLS,
         ar.scope_id,
-        isViz ? undefined : 'built-in — no IGA capture',
+        isViz ? undefined : 'realm-owned built-in scope — no IGA capture',
       );
       // Attach edge: CLIENT_SCOPE_CLIENT(client_id, scope_id) — OWN attestation.
       // The PUT default/optional-client-scopes attach is NOT IGA-captured
       // (CLIENT_SCOPE_ATTACH bypass), so even viz-scope attach rows have a
-      // NULL attestation. Distinguish from true built-ins via the note.
-      let note: string | undefined;
+      // NULL attestation. Distinguish from true built-ins via the note. We also
+      // surface whether the edge is a default or optional assignment.
+      const assignKind = ar.isDefault ? 'default' : 'optional';
+      let note: string;
       if (ar.attestation === '') {
         note = isViz
-          ? 'attachment not IGA-captured (CLIENT_SCOPE_ATTACH bypass)'
-          : 'built-in — no IGA capture';
+          ? `attachment (${assignKind}) not IGA-captured (CLIENT_SCOPE_ATTACH bypass)`
+          : `realm-owned built-in (${assignKind}) — no IGA capture`;
+      } else {
+        note = `${assignKind} client-scope attachment`;
       }
       pushLinkage(
         'CLIENT_SCOPE_CLIENT',
@@ -1012,11 +1165,42 @@ test.describe('Tide-network login-row visualizer', () => {
         { client_id: clientUuidVal, scope_id: ar.scope_id },
         note,
       );
+
+      // Every protocol mapper on this scope (mapper-set-assembly.md: the mapper
+      // set is the union over allowed scopes). protocol_mapper carries its OWN
+      // attestation; built-in mappers are null.
+      const mapperIds = psql(
+        `SELECT id FROM protocol_mapper WHERE client_scope_id='${sql(ar.scope_id)}' ORDER BY id ASC`,
+      )
+        .split('\n')
+        .filter(Boolean);
+      for (const mid of mapperIds) {
+        anyScopeMapperPresent = true;
+        const k = `PROTOCOL_MAPPER:${mid}`;
+        if (seenEntity.has(k)) continue;
+        seenEntity.add(k);
+        const row = readRow('protocol_mapper', PMAPPER_COLS, `id='${sql(mid)}'`);
+        const att = readAttestation('protocol_mapper', `id='${sql(mid)}'`);
+        if (att !== '') anyScopeMapperAttested = true;
+        const entry: AttestedRow = {
+          table: 'PROTOCOL_MAPPER',
+          key: { id: mid },
+          signed_state: canonicalSignedState(row),
+          attestation: att,
+        };
+        if (att === '') {
+          entry.note = isViz
+            ? 'mapper on governed scope but not IGA-attested'
+            : 'realm-owned built-in mapper — no IGA capture';
+        }
+        attested.push(entry);
+      }
     }
 
-    // --- 9f. CLIENT_SCOPE_ROLE_MAPPING (scope→role) -----------------------
+    // --- 9g. CLIENT_SCOPE_ROLE_MAPPING (scope→role) -----------------------
     // The SCOPE_ADD_ROLE we created (SCOPE_DEFAULT_B → REALM_ROLES[1]) plus
-    // any others on the attached scopes. Each edge its OWN attestation.
+    // any others on the attached scopes. Each edge its OWN attestation
+    // (client_scope_role_mapping DOES carry an attestation column).
     const scopeIds = attachRows.map((a) => a.scope_id);
     if (scopeIds.length > 0) {
       const idList = scopeIds.map((s) => `'${sql(s)}'`).join(',');
@@ -1040,11 +1224,129 @@ test.describe('Tide-network login-row visualizer', () => {
       }
     }
 
+    coverage['CLIENT: default client scopes (getClientScopes T)'] = {
+      inBundle: anyDefaultScope,
+      attested: false,
+      gap: 'client_scope_client attach has no attestation (CLIENT_SCOPE_ATTACH bypass)',
+    };
+    coverage['CLIENT: optional client scopes (getClientScopes F)'] = {
+      inBundle: anyOptionalScope,
+      attested: false,
+      gap: 'client_scope_client attach has no attestation (CLIENT_SCOPE_ATTACH bypass)',
+    };
+    coverage['CLIENT SCOPES: protocol mappers'] = {
+      inBundle: anyScopeMapperPresent,
+      attested: anyScopeMapperAttested,
+      gap: anyScopeMapperAttested
+        ? undefined
+        : 'protocol_mapper has an attestation column, but neither realm-owned ' +
+          'built-in mappers NOR mappers created nested inside a governed ' +
+          'CREATE_CLIENT_SCOPE CR are individually stamped (observed null)',
+    };
+    coverage['CLIENT: client attributes (lightweight / lifespan)'] = {
+      inBundle: anyClientAttrPresent,
+      attested: anyClientAttrAttested,
+      gap: anyClientAttrPresent
+        ? undefined
+        : 'no token-shape client attribute set (KC defaults; nothing to bundle)',
+    };
+
+    // --- 9h. REALM-level scope assignments (inherited by every client) ----
+    // default_client_scope(realm_id, scope_id, default_scope) is the realm-level
+    // template: default_scope=true → default-default client scopes,
+    // false → default-optional. Every client inherits these at create time
+    // (scope-resolution.md "What client.getClientScopes(true) actually
+    // returns"). This table has NO attestation column → GAP. We bundle the
+    // assignment rows (each with the realm-owned CLIENT_SCOPE entity row) so the
+    // verifier sees the realm-level inheritance source, tagged un-attestable.
+    const realmDefaultScopes = psql(
+      `SELECT dcs.scope_id, cs.name, dcs.default_scope
+         FROM default_client_scope dcs
+         JOIN client_scope cs ON cs.id = dcs.scope_id
+        WHERE dcs.realm_id='${sql(realmUuid)}'
+        ORDER BY cs.name ASC`,
+    )
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => {
+        const [scope_id, name, default_scope] = l.split('|');
+        return {
+          scope_id,
+          name,
+          isDefault: default_scope === 't' || default_scope === 'true',
+        };
+      });
+    let anyRealmDefaultDefault = false;
+    let anyRealmDefaultOptional = false;
+    for (const rs of realmDefaultScopes) {
+      if (rs.isDefault) anyRealmDefaultDefault = true;
+      else anyRealmDefaultOptional = true;
+      // Realm-owned built-in scope entity row (no IGA capture).
+      pushEntity(
+        'CLIENT_SCOPE',
+        'client_scope',
+        SCOPE_COLS,
+        rs.scope_id,
+        'realm-owned built-in scope — no IGA capture',
+      );
+      pushLinkage(
+        'DEFAULT_CLIENT_SCOPE',
+        'default_client_scope',
+        { realm_id: realmUuid, scope_id: rs.scope_id },
+        `realm ${rs.isDefault ? 'default-default' : 'default-optional'} scope assignment — no attestation column (GAP)`,
+        false,
+      );
+      // Realm-owned built-in scopes also carry mappers that fire on the token.
+      const mapperIds = psql(
+        `SELECT id FROM protocol_mapper WHERE client_scope_id='${sql(rs.scope_id)}' ORDER BY id ASC`,
+      )
+        .split('\n')
+        .filter(Boolean);
+      for (const mid of mapperIds) {
+        const k = `PROTOCOL_MAPPER:${mid}`;
+        if (seenEntity.has(k)) continue;
+        seenEntity.add(k);
+        const row = readRow('protocol_mapper', PMAPPER_COLS, `id='${sql(mid)}'`);
+        const att = readAttestation('protocol_mapper', `id='${sql(mid)}'`);
+        const entry: AttestedRow = {
+          table: 'PROTOCOL_MAPPER',
+          key: { id: mid },
+          signed_state: canonicalSignedState(row),
+          attestation: att,
+        };
+        if (att === '') {
+          entry.note = 'realm-owned built-in mapper — no IGA capture';
+        }
+        attested.push(entry);
+      }
+    }
+    coverage['REALM: default-default / default-optional scopes'] = {
+      inBundle: anyRealmDefaultDefault || anyRealmDefaultOptional,
+      attested: false,
+      gap: 'default_client_scope table has no attestation column',
+    };
+    coverage['REALM: built-in scopes + mappers'] = {
+      inBundle: true,
+      attested: false,
+      gap: 'realm-owned built-in scopes/mappers carry no attestation',
+    };
+
+    // USER + REALM-role coverage (carried since v3).
+    coverage['USER: id/roles/attributes'] = {
+      inBundle: true,
+      attested: readAttestation('user_entity', `id='${sql(aliceId)}'`) !== '',
+    };
+    coverage['REALM: realm roles (realm_access)'] = {
+      inBundle: effectiveRoleIds.size > 0,
+      // realm roles' direct USER_ROLE_MAPPING grants carry per-edge attestation.
+      attested: true,
+    };
+
     // -----------------------------------------------------------------------
     // 10. Final bundle (REAL + SIMULATED).
     // -----------------------------------------------------------------------
-    const bundleReal: BundleV3 = {
-      version: '3',
+    const bundleReal: BundleV4 = {
+      version: '4',
       // context is the bundle's routing header, NOT part of any signed state
       context: {
         realm_id: realmUuid,
@@ -1085,8 +1387,12 @@ test.describe('Tide-network login-row visualizer', () => {
     const sumAttestReal = sumAttestationBytes(bundleReal);
     const sumAttestSim = sumAttestationBytes(bundleSimulated);
 
+    // v3 REAL baseline (from the prior version, for the delta line):
+    //   ~16.4 KB minified / 2.2 KB gzip.
+    const V3_BASELINE = { minified: 16400, gzip: 2200 };
+
     // eslint-disable-next-line no-console
-    console.log(`\n=== Bundle v3: current attested state (REAL Tideless) ===`);
+    console.log(`\n=== Bundle v4: current attested state (REAL Tideless) ===`);
     // eslint-disable-next-line no-console
     console.log(JSON.stringify(bundleReal, null, 2));
     // eslint-disable-next-line no-console
@@ -1105,10 +1411,15 @@ test.describe('Tide-network login-row visualizer', () => {
     console.log(`Sum of signed_state bytes: ${sumSignedReal}`);
     // eslint-disable-next-line no-console
     console.log(`Sum of attestation bytes:  ${sumAttestReal}`);
+    // eslint-disable-next-line no-console
+    console.log(
+      `Delta vs v3 (REAL): minified ${sReal.minified - V3_BASELINE.minified >= 0 ? '+' : ''}${sReal.minified - V3_BASELINE.minified} B (${sReal.minified} vs ~${V3_BASELINE.minified}), ` +
+        `gzip ${sReal.gzip - V3_BASELINE.gzip >= 0 ? '+' : ''}${sReal.gzip - V3_BASELINE.gzip} B (${sReal.gzip} vs ~${V3_BASELINE.gzip})`,
+    );
 
     // eslint-disable-next-line no-console
     console.log(
-      `\n=== Bundle v3: current attested state (SIMULATED Tide-sized) ===`,
+      `\n=== Bundle v4: current attested state (SIMULATED Tide-sized) ===`,
     );
     // eslint-disable-next-line no-console
     console.log(JSON.stringify(bundleSimulated, null, 2));
@@ -1124,6 +1435,75 @@ test.describe('Tide-network login-row visualizer', () => {
     console.log(
       `Sum of attestation bytes: ${sumAttestSim} (88-char placeholder per attested row)`,
     );
+
+    // -----------------------------------------------------------------------
+    // 11b. COVERAGE TABLE — map the token-construction skill's inputs
+    //      (references/inputs-and-outputs.md) to bundle presence + attestation.
+    //      GAP = the input is bundled but the source table/row has no IGA
+    //      attestation column, so the Tide network sees it but can't verify a
+    //      signed stamp over it.
+    // -----------------------------------------------------------------------
+    const COVERAGE_ORDER = [
+      'USER: id/roles/attributes',
+      'CLIENT: default client scopes (getClientScopes T)',
+      'CLIENT: optional client scopes (getClientScopes F)',
+      'CLIENT: scope-mappings / role allowlist',
+      'CLIENT: fullScopeAllowed / consentRequired / attrs',
+      'CLIENT: client attributes (lightweight / lifespan)',
+      'CLIENT SCOPES: protocol mappers',
+      'REALM: default-default / default-optional scopes',
+      'REALM: built-in scopes + mappers',
+      'REALM: realm roles (realm_access)',
+    ];
+    const yn = (b: boolean) => (b ? 'yes' : 'no');
+    const col = (s: string, w: number) =>
+      s.length >= w ? s : s + ' '.repeat(w - s.length);
+    // eslint-disable-next-line no-console
+    console.log(`\n=== Coverage vs token-construction skill inputs ===`);
+    // eslint-disable-next-line no-console
+    console.log(
+      `${col('token input (from inputs-and-outputs.md)', 50)}| ${col('in bundle?', 11)}| attested?`,
+    );
+    const gaps: string[] = [];
+    for (const key of COVERAGE_ORDER) {
+      const c = coverage[key];
+      if (!c) {
+        // eslint-disable-next-line no-console
+        console.log(`${col(key, 50)}| ${col('MISSING', 11)}| MISSING`);
+        continue;
+      }
+      // eslint-disable-next-line no-console
+      console.log(
+        `${col(key, 50)}| ${col(yn(c.inBundle), 11)}| ${yn(c.attested)}${c.gap ? '  (GAP)' : ''}`,
+      );
+      if (c.gap) gaps.push(`${key} — ${c.gap}`);
+    }
+    // eslint-disable-next-line no-console
+    console.log(`\n=== GAPs (in bundle, but no IGA attestation column) ===`);
+    if (gaps.length === 0) {
+      // eslint-disable-next-line no-console
+      console.log('(none)');
+    } else {
+      for (const g of gaps) {
+        // eslint-disable-next-line no-console
+        console.log(`- ${g}`);
+      }
+    }
+
+    // Coverage assertions — every skill input must have a coverage entry, and
+    // every REQUIRED input must be represented in the bundle. The fine-grained
+    // 'client attributes (lightweight / lifespan)' sub-entry is legitimately
+    // absent when neither toggle is set (KC defaults), so it is not required to
+    // be in-bundle — only present in the table.
+    const NOT_REQUIRED_IN_BUNDLE = new Set([
+      'CLIENT: client attributes (lightweight / lifespan)',
+    ]);
+    for (const key of COVERAGE_ORDER) {
+      expect(coverage[key], `coverage entry present: ${key}`).toBeTruthy();
+      if (!NOT_REQUIRED_IN_BUNDLE.has(key)) {
+        expect(coverage[key].inBundle, `bundled: ${key}`).toBe(true);
+      }
+    }
 
     // -----------------------------------------------------------------------
     // 12. Debug block — issued token claims. NOT part of the bundle.
