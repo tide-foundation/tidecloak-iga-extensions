@@ -48,28 +48,29 @@
 ## Table of contents
 
 1. [Overview](#overview)
-2. [Modes: Tideless vs Tide](#modes-tideless-vs-tide)
-3. [Concepts and attributes](#concepts-and-attributes)
-4. [Enabling and disabling IGA](#enabling-and-disabling-iga)
-5. [Configuring thresholds](#configuring-thresholds)
-6. [Restricting who can approve](#restricting-who-can-approve)
-7. [Ordering: configure governance before enabling IGA](#ordering-configure-governance-before-enabling-iga)
-8. [The approval workflow: authorize then commit](#the-approval-workflow-authorize-then-commit)
-9. [What gets captured (per entity type)](#what-gets-captured-per-entity-type)
-10. [Multi-entity governance: `partialImport`](#multi-entity-governance-partialimport)
-11. [Failure responses an operator will see](#failure-responses-an-operator-will-see)
-12. [Default behavior when nothing is configured](#default-behavior-when-nothing-is-configured)
-13. [Governing Keycloak Organizations](#governing-keycloak-organizations)
+2. [Governance scope (what IGA does NOT govern)](#governance-scope-what-iga-does-not-govern)
+3. [Modes: Tideless vs Tide](#modes-tideless-vs-tide)
+4. [Concepts and attributes](#concepts-and-attributes)
+5. [Enabling and disabling IGA](#enabling-and-disabling-iga)
+6. [Configuring thresholds](#configuring-thresholds)
+7. [Restricting who can approve](#restricting-who-can-approve)
+8. [Ordering: configure governance before enabling IGA](#ordering-configure-governance-before-enabling-iga)
+9. [The approval workflow: authorize then commit](#the-approval-workflow-authorize-then-commit)
+10. [What gets captured (per entity type)](#what-gets-captured-per-entity-type)
+11. [Multi-entity governance: `partialImport`](#multi-entity-governance-partialimport)
+12. [Failure responses an operator will see](#failure-responses-an-operator-will-see)
+13. [Default behavior when nothing is configured](#default-behavior-when-nothing-is-configured)
+14. [Governing Keycloak Organizations](#governing-keycloak-organizations)
     - [Bootstrap: retroactive ADOPT_ORGANIZATION on IGA toggle (Phase 7b)](#bootstrap-retroactive-adopt_organization-on-iga-toggle-phase-7b)
     - [Quarantine: the org `isEnabled` override and its cascade (Phase 7c)](#quarantine-the-org-isenabled-override-and-its-cascade-phase-7c)
     - [IdP-aware scope for ORG_ADD_IDP / ORG_REMOVE_IDP (Phase 7d)](#idp-aware-scope-for-org_add_idp--org_remove_idp-phase-7d)
     - [Bootstrap-safety and escape hatches (organizations)](#bootstrap-safety-and-escape-hatches-organizations)
     - [SMTP-tolerance on invitation replay](#smtp-tolerance-on-invitation-replay)
     - [Known gaps and follow-ups (organizations)](#known-gaps-and-follow-ups-organizations)
-14. [Phase 6: retroactive ADOPT and quarantine on IGA toggle](#phase-6-retroactive-adopt-and-quarantine-on-iga-toggle)
-15. [Bulk-authorizing pending change requests](#bulk-authorizing-pending-change-requests)
-16. [Known limitations](#known-limitations)
-17. [Internals](#internals)
+15. [Phase 6: retroactive ADOPT and quarantine on IGA toggle](#phase-6-retroactive-adopt-and-quarantine-on-iga-toggle)
+16. [Bulk-authorizing pending change requests](#bulk-authorizing-pending-change-requests)
+17. [Known limitations](#known-limitations)
+18. [Internals](#internals)
 
 ## Overview
 
@@ -116,6 +117,50 @@ A change request can hold the statuses `PENDING`, `APPROVED` (after a
 successful commit/replay), and `DENIED` (via
 `POST .../iga/change-requests/{id}/deny`). All `iga/*` endpoints are mounted
 under the realm admin base, that is `/admin/realms/{realm}/iga/...`.
+
+## Governance scope (what IGA does NOT govern)
+
+IGA's surface is deliberately bounded to the **token-shaping** Keycloak
+objects — the entities and relationships that decide what lands in an issued
+OIDC token. Several Keycloak surfaces are **intentionally out of scope**.
+Each exclusion below is a deliberate design decision, not an oversight; the
+rationale and any caveat are recorded so operators know exactly what is — and
+is not — behind the approval gate.
+
+- **Federated-storage users are NOT governed.** Users backed by a user
+  storage provider (LDAP / Kerberos federation) live in the `fed_user_*`
+  tables and carry ids of the form `f:<provider-id>:<external-id>`. The
+  quarantine and the toggle-on ADOPT scan key on `user_entity` **only**, so a
+  federated user is never seen as unsigned — it is treated as
+  not-unsigned (**fail-open**). *By design:* Tide realms use Tide-native
+  identities, not LDAP/Kerberos federation, so there is nothing to govern in
+  practice. **If federation is ever enabled on a realm, this must be
+  revisited — it would become a security hole** (a federated user would
+  bypass the quarantine entirely). Note that `FED_USER_ATTRIBUTE.attestation`
+  exists as a column but is **unused/dead** today; it is not read or written
+  by any IGA path.
+- **UMA / Authorization Services are NOT governed.** The
+  `resource_server`, `resource_server_resource`, `resource_server_scope`,
+  `resource_server_policy`, and related tables are not intercepted. *Rationale:*
+  authorization-services policies are evaluated at the **UMA permission
+  endpoint**, not in the OIDC token-construction pipeline, so they fall
+  outside IGA's token-shaping surface. **Caveat:** an admin who grants access
+  by editing a `user`- or `role`-based authorization policy is therefore
+  acting outside IGA governance.
+- **IdP claim/role mappers are NOT governed as entities.** Rows in
+  `identity_provider_mapper` are referenced only by IdP alias when an org
+  adds or removes an IdP (`ORG_ADD_IDP` / `ORG_REMOVE_IDP`); they are never
+  ADOPT-able entities in their own right. **Caveat:** an IdP mapper **can**
+  inject claims and roles into an issued token, so this is an **ungoverned
+  token-shaping surface** — flagged for a future phase (it ties to the
+  "IdPs as an ADOPT-able entity" roadmap item; see
+  [IdP-aware scope](#idp-aware-scope-for-org_add_idp--org_remove_idp-phase-7d)).
+- **Authentication flows are NOT governed.** The `authentication_flow`,
+  `authentication_execution`, and `authenticator_config` tables are not
+  intercepted. *Rationale:* authentication flows are a security-relevant
+  admin surface, but they shape **how a user authenticates**, not the
+  **claims placed in the issued token**, so they are outside IGA's
+  token-claim-shaping scope.
 
 ## Modes: Tideless vs Tide
 

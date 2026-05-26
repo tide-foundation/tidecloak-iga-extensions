@@ -10,6 +10,8 @@ import {
   safeJson,
   createOrganization,
   findOrganizationByName,
+  createGroup,
+  getGroupByName,
   kcFetch,
 } from '../lib/kc';
 import { checkPrecondition, rerunCommand } from '../lib/precondition';
@@ -162,6 +164,29 @@ test.describe('IGA Phase 7b: retroactive ADOPT for organizations', () => {
       orgIds[name] = lookup.body.id as string;
     }
 
+    // GROUP/ORGANIZATION partition fixture (the L1 fix under test): create a
+    // REGULAR group (KEYCLOAK_GROUP.type=0) with IGA still OFF. Each of the 3
+    // orgs above also creates an org-backing group (KEYCLOAK_GROUP.type=1, via
+    // JpaOrganizationProvider.createOrganizationGroup). After toggle-on the
+    // ADOPT scan must emit an ADOPT_GROUP CR for the regular group ONLY — the
+    // org-backing groups are governed via the ORGANIZATION path (sidecar-only
+    // ADOPT_ORGANIZATION) and must NOT be double-governed by a GROUP node ADOPT.
+    // Before the fix, groupsWithNames() omitted the `g.type = 0` filter and the
+    // scan emitted 4 ADOPT_GROUP CRs (1 regular + 3 org-backing).
+    const REGULAR_GROUP = 'p7b-happy-regular-group';
+    const grpCreate = await createGroup(request, HAPPY, REGULAR_GROUP);
+    expect(
+      [201, 204].includes(grpCreate.status()),
+      `IGA-OFF regular group create expected 201/204, got ${grpCreate.status()} ${await grpCreate.text()}`,
+    ).toBe(true);
+    const regularGroupLookup = await getGroupByName(
+      request,
+      HAPPY,
+      REGULAR_GROUP,
+    );
+    expect(regularGroupLookup.body, 'regular group resolves').toBeTruthy();
+    const regularGroupId = regularGroupLookup.body.id as string;
+
     // Toggle IGA on — the scan must emit 3 ADOPT_ORGANIZATION CRs.
     const t = await toggleIgaRaw(request, HAPPY);
     expect(t.http, `toggle expected 200, got ${t.http}`).toBe(200);
@@ -191,6 +216,36 @@ test.describe('IGA Phase 7b: retroactive ADOPT for organizations', () => {
         `${name} (${orgIds[name]}) has ADOPT_ORGANIZATION CR`,
       ).toBe(true);
     }
+
+    // GROUP/ORGANIZATION partition assertion (the L1 fix under test).
+    // The toggle-on ADOPT scan must produce an ADOPT_GROUP CR for the regular
+    // group and for NO org-backing group. With the `g.type = 0` filter in
+    // IgaUnsignedRowScanner.groupsWithNames, exactly ONE ADOPT_GROUP CR exists
+    // and its entityId is the regular group's id; none of the org-backing
+    // groups (the entities the ORGANIZATION path owns sidecar-only) appear.
+    const happyGroupAdopts = happyPending.filter(
+      (cr) => cr.actionType === 'ADOPT_GROUP',
+    );
+    expect(
+      happyGroupAdopts.length,
+      `exactly 1 ADOPT_GROUP CR (regular group only; org-backing groups are ` +
+        `governed via ADOPT_ORGANIZATION, not ADOPT_GROUP). Got ${happyGroupAdopts.length}: ` +
+        JSON.stringify(happyGroupAdopts.map((cr) => cr.entityId)),
+    ).toBe(1);
+    expect(
+      happyGroupAdopts[0]?.entityId,
+      'the single ADOPT_GROUP CR is for the regular group',
+    ).toBe(regularGroupId);
+    // No ADOPT_GROUP CR may target an org-backing group. The org-backing group
+    // ids are not directly exposed by the org rep, but the partition is proven
+    // by the count==1 + id-match above; additionally assert the scan reported
+    // exactly one GROUP adopt so the org-backing groups did not leak into the
+    // GROUP node lane.
+    expect(
+      scan.adoptCrsCreated?.GROUP,
+      `scan.adoptCrsCreated.GROUP == 1 (regular group only; ` +
+        `org-backing type=1 groups filtered out)`,
+    ).toBe(1);
 
     // Commit one — single master-admin signature suffices (ADOPT bypass).
     const firstName = orgNames[0];

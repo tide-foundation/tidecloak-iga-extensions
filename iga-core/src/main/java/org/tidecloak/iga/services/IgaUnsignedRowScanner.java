@@ -78,10 +78,22 @@ public final class IgaUnsignedRowScanner {
     }
 
     /** KEYCLOAK_GROUP: id where attestation IS NULL, scoped to the realm.
-     *  Note GroupEntity's realm field is named {@code realm} (column REALM_ID). */
+     *  Note GroupEntity's realm field is named {@code realm} (column REALM_ID).
+     *
+     *  <p>{@code g.type = 0} filters to REGULAR groups only. {@code KEYCLOAK_GROUP}
+     *  also holds org-backing groups ({@code type = 1}, {@code GroupModel.Type
+     *  .ORGANIZATION}) created by {@code JpaOrganizationProvider
+     *  .createOrganizationGroup}; those are governed separately via the
+     *  ORGANIZATION path ({@link #organizationsWithNames}) as sidecar-only
+     *  ADOPT_ORGANIZATION CRs. Without this filter an org-backing group would be
+     *  governed twice — once here (wrongly stamping an attestation on the row the
+     *  org path owns sidecar-only) and once via the org path. KC's own
+     *  {@code GroupEntity.getGroupIdsByParent} likewise filters {@code u.type = 0}.
+     *  Regular groups are {@code type = 0}, so non-org realms are unaffected
+     *  (the predicate is always-true there). */
     public Stream<UnsignedEntityRef> groups(String realmId) {
         return idStream("GROUP",
-                "SELECT g.id FROM GroupEntity g WHERE g.realm = ?1 AND g.attestation IS NULL",
+                "SELECT g.id FROM GroupEntity g WHERE g.realm = ?1 AND g.type = 0 AND g.attestation IS NULL",
                 realmId);
     }
 
@@ -167,11 +179,21 @@ public final class IgaUnsignedRowScanner {
         return out;
     }
 
+    /**
+     * (entityId, groupName) for unattested REGULAR groups in the realm.
+     *
+     * <p>Filters {@code g.type = 0} so org-backing groups ({@code type = 1})
+     * are excluded — they are governed via the ORGANIZATION path
+     * ({@link #organizationsWithNames}) only. See {@link #groups(String)} for
+     * the full rationale. This is the projection the toggle-on ADOPT scan
+     * ({@link IgaAdoptScan}) iterates for the GROUP node lane, so the filter
+     * here is what keeps the GROUP and ORGANIZATION partitions disjoint.
+     */
     public List<InfoRow> groupsWithNames(String realmId) {
         @SuppressWarnings("unchecked")
         List<Object[]> rows = (List<Object[]>) em.createQuery(
                 "SELECT g.id, g.name FROM GroupEntity g " +
-                        "WHERE g.realm = ?1 AND g.attestation IS NULL")
+                        "WHERE g.realm = ?1 AND g.type = 0 AND g.attestation IS NULL")
                 .setParameter(1, realmId).getResultList();
         List<InfoRow> out = new ArrayList<>(rows.size());
         for (Object[] r : rows) out.add(new InfoRow(asStr(r, 0), asStr(r, 1), null));
