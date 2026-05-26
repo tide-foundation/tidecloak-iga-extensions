@@ -165,9 +165,9 @@ public class IgaReplayDispatcher {
 
         switch (cr.getActionType()) {
             case "CREATE_USER" -> replayCreateUser(session, realm, rows, finalAttestation, em);
-            case "CREATE_ROLE" -> replayCreateRole(session, realm, rows, finalAttestation, em);
+            case "CREATE_ROLE" -> replayCreateRole(session, realm, rows, finalAttestation, em, setSigned);
             case "CREATE_GROUP" -> replayCreateGroup(session, realm, rows, finalAttestation, em);
-            case "CREATE_CLIENT" -> replayCreateClient(session, realm, rows, finalAttestation, em);
+            case "CREATE_CLIENT" -> replayCreateClient(session, realm, rows, finalAttestation, em, setSigned);
             case "ADD_PROTOCOL_MAPPER" -> replayAddProtocolMapper(session, realm, cr, rows, finalAttestation, em, setSigned);
             case "GRANT_ROLES" -> replayRelationship(session, realm, rows, finalAttestation, em,
                     "UPDATE UserRoleMappingEntity e SET e.attestation = :sig WHERE e.user.id = :k1 AND e.roleId = :k2",
@@ -243,7 +243,7 @@ public class IgaReplayDispatcher {
             case "REMOVE_REALM_DEFAULT_GROUP" -> replayRemoveRealmDefaultGroup(session, realm, rows);
             case "REALM_DEFAULT_SCOPE_ADD" -> replayAddRealmDefaultScope(session, realm, rows, finalAttestation, em, setSigned);
             case "REALM_DEFAULT_SCOPE_REMOVE" -> replayRemoveRealmDefaultScope(session, realm, rows, finalAttestation, em, setSigned);
-            case "CREATE_CLIENT_SCOPE" -> replayCreateClientScope(session, realm, rows, finalAttestation, em);
+            case "CREATE_CLIENT_SCOPE" -> replayCreateClientScope(session, realm, rows, finalAttestation, em, setSigned);
             case "UPDATE_PROTOCOL_MAPPER" -> replayUpdateProtocolMapper(session, realm, rows, finalAttestation, em);
             case "REMOVE_PROTOCOL_MAPPER" -> replayRemoveProtocolMapper(session, realm, rows);
 
@@ -322,7 +322,8 @@ public class IgaReplayDispatcher {
     }
 
     private static void replayCreateRole(KeycloakSession session, RealmModel realm,
-                                          List<Map<String, Object>> rows, String sig, EntityManager em) {
+                                          List<Map<String, Object>> rows, String sig, EntityManager em,
+                                          boolean setSigned) {
         for (Map<String, Object> row : rows) {
             String id = str(row, "ID");
             String name = str(row, "NAME");
@@ -415,13 +416,23 @@ public class IgaReplayDispatcher {
             // RepresentationToModel applied each composite link via
             // role.addCompositeRole(...) (a CompositeRoleEntity row keyed
             // (parent,child)); the root RoleEntity stamp above leaves those
-            // edge rows unattested. Mirror the ADD_COMPOSITE edge stamp
-            // (e.parentRole.id) and cover every child of this parent.
+            // edge rows unattested.
             if (sig != null && !sig.isEmpty()) {
-                em.createQuery("UPDATE CompositeRoleEntity e SET e.attestation = :sig WHERE e.parentRole.id = :id")
-                        .setParameter("sig", sig)
-                        .setParameter("id", id)
-                        .executeUpdate();
+                if (setSigned) {
+                    // SET-SIGNING (tide): the composite children form a per-
+                    // (composite_role, parent) SET. Sign that set independently
+                    // (owner = this parent role) so it is re-derivable exactly
+                    // like a dedicated ADD_COMPOSITE — NOT the node's per-entity
+                    // sig. No-op when the role has no composites.
+                    signNestedChildSet(session, em, "ADD_COMPOSITE", id, "parentRole.id");
+                } else {
+                    // simple attestor (UNCHANGED): stamp the node sig per-edge,
+                    // covering every child of this parent (e.parentRole.id).
+                    em.createQuery("UPDATE CompositeRoleEntity e SET e.attestation = :sig WHERE e.parentRole.id = :id")
+                            .setParameter("sig", sig)
+                            .setParameter("id", id)
+                            .executeUpdate();
+                }
             }
         }
     }
@@ -475,7 +486,8 @@ public class IgaReplayDispatcher {
     }
 
     private static void replayCreateClient(KeycloakSession session, RealmModel realm,
-                                            List<Map<String, Object>> rows, String sig, EntityManager em) {
+                                            List<Map<String, Object>> rows, String sig, EntityManager em,
+                                            boolean setSigned) {
         for (Map<String, Object> row : rows) {
             String id = str(row, "ID");
             // CLIENT_ID is the HUMAN client identifier (contract). The own PK
@@ -534,13 +546,28 @@ public class IgaReplayDispatcher {
             // .createClient persists each ProtocolMapperEntity (keyed by its own
             // id, FK CLIENT_ID = this client's UUID) via addProtocolMapper(...);
             // the root ClientEntity stamp above leaves those mapper rows
-            // unattested. Mirror ADD_PROTOCOL_MAPPER's client-owned stamp shape
-            // (e.client.id) and cover every mapper owned by this client.
+            // unattested. (Scope-mappings are NOT carried inline on a client
+            // create — ClientRepresentation has no scope-mapping field; they
+            // arrive via the separate /scope-mappings endpoint as SCOPE_MAPPING_ADD
+            // CRs, already set-signed by their own linkage path — so only the
+            // protocol_mapper child set needs covering here.)
             if (sig != null && !sig.isEmpty()) {
-                em.createQuery("UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.client.id = :id")
-                        .setParameter("sig", sig)
-                        .setParameter("id", id)
-                        .executeUpdate();
+                if (setSigned) {
+                    // SET-SIGNING (tide): the client's protocol mappers form a
+                    // per-(protocol_mapper, client) SET. Sign that set
+                    // independently (owner = this client) so it is re-derivable
+                    // like a dedicated ADD_PROTOCOL_MAPPER — NOT the node sig.
+                    // protocol_mapper owner field for a client-owned mapper is
+                    // client.id. No-op when the client has no mappers.
+                    signNestedChildSet(session, em, "ADD_PROTOCOL_MAPPER", id, "client.id");
+                } else {
+                    // simple attestor (UNCHANGED): node sig per-mapper, owner-
+                    // keyed (e.client.id), covering every mapper of this client.
+                    em.createQuery("UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.client.id = :id")
+                            .setParameter("sig", sig)
+                            .setParameter("id", id)
+                            .executeUpdate();
+                }
             }
         }
     }
@@ -1142,6 +1169,74 @@ public class IgaReplayDispatcher {
         return true;
     }
 
+    /**
+     * SET-SIGNING for the NESTED CHILDREN of a node-create (tide attestor only).
+     *
+     * <p>A node-create CR ({@code CREATE_ROLE}/{@code CREATE_CLIENT_SCOPE}/
+     * {@code CREATE_CLIENT}) carries the node's own per-entity signature. When it
+     * also created child/linkage rows inline (composites of the role; protocol
+     * mappers of the scope/client), those child rows must — under set-signing —
+     * carry their OWN per-(table, owner) SET signature with {@code owner = the
+     * just-created node}, NOT the node's per-entity sig. This makes the child set
+     * independently re-derivable exactly like the dedicated linkage actions
+     * ({@code ADD_COMPOSITE}, {@code ADD_PROTOCOL_MAPPER}, ...) produce.
+     *
+     * <p>Post-persist the children already exist, so we read the owner's member
+     * set straight off the DB (no PRE-change+delta reconstruction), compute the
+     * set sig via {@link org.tidecloak.iga.attestors.TideAttestor#signSet}, and
+     * fan it out across the WHOLE owner set via the linkage's owner-keyed UPDATE
+     * (the SAME {@link org.tidecloak.iga.attestors.TideSetResolver.Linkage}
+     * fan-out the dedicated linkage actions use). No-op (no UPDATE, no empty-set
+     * sig) when the node created no such children — e.g. a {@code CREATE_ROLE}
+     * with no composites.
+     *
+     * @param actionType the LINKAGE action whose descriptor maps the child set
+     *                   (e.g. {@code ADD_COMPOSITE} for composite_role,
+     *                   {@code ADD_PROTOCOL_MAPPER} for protocol_mapper).
+     * @param ownerId    the just-created node's id (composite=parent role id;
+     *                   protocol_mapper owner = scope id OR client id).
+     * @param ownerField the JPA owner field to group/fan-out by (composite_role:
+     *                   {@code parentRole.id}; protocol_mapper scope-owned:
+     *                   {@code clientScope.id}; protocol_mapper client-owned:
+     *                   {@code client.id}).
+     */
+    private static void signNestedChildSet(KeycloakSession session, EntityManager em,
+                                           String actionType, String ownerId, String ownerField) {
+        if (ownerId == null) return;
+        org.tidecloak.iga.attestors.TideSetResolver.Linkage linkage =
+                org.tidecloak.iga.attestors.TideSetResolver.linkageFor(actionType);
+        if (linkage == null) return;
+
+        // Read the owner's POST-change member set straight off the DB (children
+        // already persisted by the node-create's RepresentationToModel rebuild).
+        @SuppressWarnings("unchecked")
+        List<Object> members = em.createQuery(
+                        "SELECT e." + linkage.memberField() + " FROM " + linkage.entityName()
+                                + " e WHERE e." + ownerField + " = :owner")
+                .setParameter("owner", ownerId)
+                .getResultList();
+        if (members == null || members.isEmpty()) return; // no children → no set, no-op
+
+        java.util.List<String> memberIds = new java.util.ArrayList<>();
+        for (Object m : members) {
+            if (m != null) memberIds.add(m.toString());
+        }
+        if (memberIds.isEmpty()) return;
+
+        // Compute the set sig over the EXACT (table, owner, members) canonical the
+        // dedicated linkage actions sign — single crypto swap-point in TideAttestor.
+        org.tidecloak.iga.attestors.TideAttestor attestor =
+                new org.tidecloak.iga.attestors.TideAttestor(session);
+        String setSig = attestor.signSet(session, linkage.table(), ownerId, memberIds);
+
+        // Fan the set sig out across the WHOLE owner set (owner-keyed only).
+        em.createQuery("UPDATE " + linkage.entityName() + " e SET e.attestation = :sig WHERE e."
+                        + ownerField + " = :owner")
+                .setParameter("sig", setSig)
+                .setParameter("owner", ownerId)
+                .executeUpdate();
+    }
+
     // -------------------------------------------------------------------------
     // Direct model operations (called with IGA_REPLAY_ACTIVE = true)
     // -------------------------------------------------------------------------
@@ -1694,7 +1789,8 @@ public class IgaReplayDispatcher {
      * UPDATE will fail at runtime.
      */
     private static void replayCreateClientScope(KeycloakSession session, RealmModel realm,
-                                                  List<Map<String, Object>> rows, String sig, EntityManager em) {
+                                                  List<Map<String, Object>> rows, String sig, EntityManager em,
+                                                  boolean setSigned) {
         for (Map<String, Object> row : rows) {
             String id = str(row, "ID");
             String name = str(row, "NAME");
@@ -1741,13 +1837,24 @@ public class IgaReplayDispatcher {
                 // .createClientScope persists each ProtocolMapperEntity (keyed by
                 // its own id, FK CLIENT_SCOPE_ID = this scope's UUID) via
                 // scope.addProtocolMapper(...); the root ClientScopeEntity stamp
-                // above leaves those mapper rows unattested. Mirror
-                // ADD_PROTOCOL_MAPPER's scope-owned stamp shape (e.clientScope.id)
-                // and cover every mapper owned by this scope.
-                em.createQuery("UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.clientScope.id = :scopeId")
-                        .setParameter("sig", sig)
-                        .setParameter("scopeId", id)
-                        .executeUpdate();
+                // above leaves those mapper rows unattested.
+                if (setSigned) {
+                    // SET-SIGNING (tide): the scope's protocol mappers form a
+                    // per-(protocol_mapper, scope) SET. Sign that set
+                    // independently (owner = this scope) so it is re-derivable
+                    // like a dedicated ADD_PROTOCOL_MAPPER — NOT the node sig.
+                    // protocol_mapper owner field for a scope-owned mapper is
+                    // clientScope.id. No-op when the scope has no mappers.
+                    signNestedChildSet(session, em, "ADD_PROTOCOL_MAPPER", id,
+                            org.tidecloak.iga.attestors.TideSetResolver.PROTOCOL_MAPPER_SCOPE_OWNER_FIELD);
+                } else {
+                    // simple attestor (UNCHANGED): node sig per-mapper, owner-
+                    // keyed (e.clientScope.id), covering every mapper of this scope.
+                    em.createQuery("UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.clientScope.id = :scopeId")
+                            .setParameter("sig", sig)
+                            .setParameter("scopeId", id)
+                            .executeUpdate();
+                }
             }
         }
     }

@@ -276,6 +276,65 @@ public class TideAttestor implements IgaAttestor {
     }
 
     // -------------------------------------------------------------------------
+    // Reusable set-sign compute (shared with the dispatcher's nested-child path)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Build the EXACT single-owner canonical form a linkage set commits to and
+     * sign it via the single {@link #sign(byte[])} swap-point. This is the
+     * reusable counterpart to {@link #canonicalizeLinkageSet} for the case where
+     * the POST-change member set is already known (no PRE-change-plus-delta
+     * reconstruction needed) — used by {@code IgaReplayDispatcher} to sign the
+     * nested-child set of a node-create (e.g. a {@code CREATE_ROLE} that carried
+     * {@code composites} inline) so those child rows become independently
+     * re-derivable as a {@code (table, owner)} set, identical in form to the
+     * dedicated linkage actions ({@code ADD_COMPOSITE}, ...).
+     *
+     * <p>The canonical is byte-for-byte the same form
+     * {@link #canonicalizeLinkageSet} produces for a single owner:
+     * <pre>table=&lt;table&gt;\nowner=&lt;owner&gt;\nmembers=&lt;sorted,comma-joined&gt;\n</pre>
+     *
+     * @param tableEntityName the linkage's physical table name (the value written
+     *                        after {@code table=} — i.e. {@link TideSetResolver.Linkage#table()}).
+     * @param ownerId         the owner (group-by) value.
+     * @param memberIds       the POST-change member ids of the owner's set; sorted
+     *                        deterministically here (TreeSet), so call order is
+     *                        irrelevant.
+     * @return the {@code TIDE-DUMMY-v1:...} signature over the set's canonical.
+     */
+    public String signSet(KeycloakSession session, String tableEntityName,
+                          String ownerId, java.util.Collection<String> memberIds) {
+        return sign(canonicalSet(tableEntityName, ownerId, memberIds));
+    }
+
+    /**
+     * Deterministic single-owner canonical bytes for a linkage set — the EXACT
+     * form {@link #canonicalizeLinkageSet} emits per owner. Members are sorted
+     * (TreeSet) so call/insertion order never affects the signature.
+     */
+    private static byte[] canonicalSet(String table, String ownerId,
+                                       java.util.Collection<String> memberIds) {
+        TreeSet<String> set = new TreeSet<>();
+        if (memberIds != null) {
+            for (String m : memberIds) {
+                if (m != null) set.add(m);
+            }
+        }
+        StringBuilder canon = new StringBuilder();
+        canon.append("table=").append(table).append('\n');
+        canon.append("owner=").append(ownerId).append('\n');
+        canon.append("members=");
+        boolean first = true;
+        for (String m : set) {
+            if (!first) canon.append(',');
+            canon.append(m);
+            first = false;
+        }
+        canon.append('\n');
+        return canon.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    // -------------------------------------------------------------------------
     // The SINGLE crypto swap-point
     // -------------------------------------------------------------------------
 

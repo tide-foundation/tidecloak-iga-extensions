@@ -798,4 +798,188 @@ test.describe('Tide set-signed wire-bundle visualizer', () => {
     }
     /* eslint-enable no-console */
   });
+
+  // =========================================================================
+  // INLINE nested-child set-signing (the gap closed by
+  // IgaReplayDispatcher.signNestedChildSet + TideAttestor.signSet).
+  //
+  // The bundle test above deliberately creates the composite parent as a PLAIN
+  // role and attaches children via a SEPARATE ADD_COMPOSITE CR, because before
+  // the fix a CREATE_ROLE carrying `composites` INLINE stamped the resulting
+  // composite_role rows with the node's per-entity sig — NOT a re-derivable
+  // per-(table,owner) SET sig. This test proves the inline path now produces a
+  // re-derivable set, identical in form to ADD_COMPOSITE, for BOTH:
+  //   - CREATE_ROLE with inline composites  → composite_role set (owner=role)
+  //   - CREATE_CLIENT_SCOPE with ≥2 mappers  → protocol_mapper set (owner=scope)
+  // =========================================================================
+  const INLINE_REALM = 'iga-tide-inline-child';
+
+  test.afterAll(async ({ request }) => {
+    await deleteRealm(request, INLINE_REALM).catch(() => {});
+  });
+
+  test('inline node-create children are set-signed (re-derivable) under tide', async ({
+    request,
+  }) => {
+    await createScratchRealm(request, INLINE_REALM);
+    await setRealmIgaAttr(request, INLINE_REALM, 'iga.attestor', 'tide');
+    await enableIga(request, INLINE_REALM);
+    expect((await igaStatus(request, INLINE_REALM)).enabled).toBe(true);
+    await drainAdopts(request, INLINE_REALM);
+
+    // -----------------------------------------------------------------------
+    // A. composite_role via INLINE CREATE_ROLE composites.
+    //    Two child roles first, then ONE CREATE_ROLE that names them inline.
+    // -----------------------------------------------------------------------
+    const CHILD_A = 'inl-child-a';
+    const CHILD_B = 'inl-child-b';
+    const PARENT = 'inl-composite-parent';
+    for (const name of [CHILD_A, CHILD_B]) {
+      const r = await createRole(request, INLINE_REALM, { name });
+      await commitGoverned(request, INLINE_REALM, r, `CREATE_ROLE ${name}`);
+    }
+    // The KEY difference from the bundle test: composites are passed INLINE on
+    // the CREATE_ROLE payload, so the composite_role edges are produced by the
+    // node-create replay (replayCreateRole), NOT a separate ADD_COMPOSITE.
+    const parentRes = await createRole(request, INLINE_REALM, {
+      name: PARENT,
+      composite: true,
+      composites: { realm: [CHILD_A, CHILD_B] },
+    });
+    await commitGoverned(request, INLINE_REALM, parentRes, `CREATE_ROLE ${PARENT} (inline composites)`);
+    await drainAllPending(request, INLINE_REALM);
+
+    const parentId = (await getRole(request, INLINE_REALM, PARENT)).body.id as string;
+    const childAId = (await getRole(request, INLINE_REALM, CHILD_A)).body.id as string;
+    const childBId = (await getRole(request, INLINE_REALM, CHILD_B)).body.id as string;
+    expect(parentId && childAId && childBId, 'role ids resolvable').toBeTruthy();
+
+    // Read the composite_role edge rows for this parent. There must be 2 edges,
+    // and they must SHARE ONE sig (the set-sharing property) that is the
+    // re-derivable per-(table,owner) SET sig — NOT the parent role's NODE sig.
+    const compRows = psql(
+      `SELECT child_role || E'\\x1F' || COALESCE(attestation,'')
+         FROM composite_role WHERE composite='${sql(parentId)}'
+        ORDER BY child_role ASC`,
+    )
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => {
+        const [member, att] = l.split('\x1F');
+        return { member, att: att ?? '' };
+      });
+    expect(compRows.length, 'inline composite produced 2 composite_role edges').toBe(2);
+
+    const compSigs = new Set(compRows.map((r) => r.att));
+    expect(
+      compSigs.size,
+      `inline composite_role edges must SHARE ONE set sig, saw ${[...compSigs].join(' | ')}`,
+    ).toBe(1);
+    const compSig = compRows[0].att;
+    expect(compSig.startsWith(DUMMY_PREFIX), 'composite set sig has dummy prefix').toBeTruthy();
+
+    // Re-derivability: sha256→b64 of table=composite_role\nowner=<parent>\n
+    // members=<sorted children>\n must equal the stored set sig.
+    const compMembers = compRows.map((r) => r.member).sort();
+    const compCanonical = `table=composite_role\nowner=${parentId}\nmembers=${compMembers.join(',')}\n`;
+    expect(
+      dummySign(compCanonical),
+      `inline composite_role set is RE-DERIVABLE\n  canonical=${JSON.stringify(compCanonical)}`,
+    ).toBe(compSig);
+
+    // The set sig must DIFFER from the parent role's NODE sig (proves children
+    // are no longer stamped with the node sig — the bug this fix closes).
+    const parentNodeSig = readAttestation('keycloak_role', `id='${sql(parentId)}'`);
+    expect(parentNodeSig.startsWith(DUMMY_PREFIX), 'parent role node sig present').toBeTruthy();
+    expect(
+      compSig,
+      'composite_role set sig must DIFFER from the parent role NODE sig',
+    ).not.toBe(parentNodeSig);
+
+    // -----------------------------------------------------------------------
+    // B. protocol_mapper via INLINE CREATE_CLIENT_SCOPE protocolMappers (≥2).
+    // -----------------------------------------------------------------------
+    const SCOPE = 'inl-scope-with-mappers';
+    const scopeRes = await createClientScope(request, INLINE_REALM, {
+      name: SCOPE,
+      protocol: 'openid-connect',
+      protocolMappers: [
+        {
+          name: 'inl-mapper-1',
+          protocol: 'openid-connect',
+          protocolMapper: 'oidc-hardcoded-claim-mapper',
+          config: {
+            'claim.name': 'inl_claim_1',
+            'claim.value': 'v1',
+            'jsonType.label': 'String',
+            'id.token.claim': 'true',
+            'access.token.claim': 'true',
+          },
+        },
+        {
+          name: 'inl-mapper-2',
+          protocol: 'openid-connect',
+          protocolMapper: 'oidc-hardcoded-claim-mapper',
+          config: {
+            'claim.name': 'inl_claim_2',
+            'claim.value': 'v2',
+            'jsonType.label': 'String',
+            'id.token.claim': 'true',
+            'access.token.claim': 'true',
+          },
+        },
+      ],
+    });
+    await commitGoverned(request, INLINE_REALM, scopeRes, `CREATE_CLIENT_SCOPE ${SCOPE} (inline mappers)`);
+    await drainAllPending(request, INLINE_REALM);
+
+    const scopeId = (await getClientScopeByName(request, INLINE_REALM, SCOPE)).body.id as string;
+    expect(scopeId, 'scope id resolvable').toBeTruthy();
+
+    // protocol_mapper rows owned by this scope. The 2 admin-defined mappers must
+    // SHARE ONE re-derivable per-(protocol_mapper, scope) SET sig.
+    const pmRows = psql(
+      `SELECT id || E'\\x1F' || COALESCE(attestation,'')
+         FROM protocol_mapper WHERE client_scope_id='${sql(scopeId)}'
+        ORDER BY id ASC`,
+    )
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => {
+        const [member, att] = l.split('\x1F');
+        return { member, att: att ?? '' };
+      });
+    expect(pmRows.length, 'inline scope produced ≥2 protocol_mapper rows').toBeGreaterThanOrEqual(2);
+
+    const pmSigs = new Set(pmRows.map((r) => r.att));
+    expect(
+      pmSigs.size,
+      `inline protocol_mapper rows (scope) must SHARE ONE set sig, saw ${[...pmSigs].join(' | ')}`,
+    ).toBe(1);
+    const pmSig = pmRows[0].att;
+    expect(pmSig.startsWith(DUMMY_PREFIX), 'protocol_mapper set sig has dummy prefix').toBeTruthy();
+
+    const pmMembers = pmRows.map((r) => r.member).sort();
+    const pmCanonical = `table=protocol_mapper\nowner=${scopeId}\nmembers=${pmMembers.join(',')}\n`;
+    expect(
+      dummySign(pmCanonical),
+      `inline protocol_mapper set (owner=scope) is RE-DERIVABLE\n  canonical=${JSON.stringify(pmCanonical)}`,
+    ).toBe(pmSig);
+
+    // The mapper set sig must DIFFER from the scope's NODE sig.
+    const scopeNodeSig = readAttestation('client_scope', `id='${sql(scopeId)}'`);
+    expect(scopeNodeSig.startsWith(DUMMY_PREFIX), 'scope node sig present').toBeTruthy();
+    expect(
+      pmSig,
+      'protocol_mapper set sig must DIFFER from the scope NODE sig',
+    ).not.toBe(scopeNodeSig);
+
+    /* eslint-disable no-console */
+    console.log(`\n=== Inline nested-child set-signing (re-derivability proof) ===`);
+    console.log(`composite_role  owner=${parentId} members=${compMembers.length} canonical=${JSON.stringify(compCanonical)}`);
+    console.log(`  set sig=${compSig}  node sig=${parentNodeSig}  (differ: ${compSig !== parentNodeSig})`);
+    console.log(`protocol_mapper owner=${scopeId} members=${pmMembers.length} canonical=${JSON.stringify(pmCanonical)}`);
+    console.log(`  set sig=${pmSig}  node sig=${scopeNodeSig}  (differ: ${pmSig !== scopeNodeSig})`);
+    /* eslint-enable no-console */
+  });
 });
