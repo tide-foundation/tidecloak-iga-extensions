@@ -174,6 +174,20 @@ public final class IgaReplayExtension {
      * Returns {@code false} for any action type the extension does not own.
      */
     public static boolean tryReplay(KeycloakSession session, IgaChangeRequestEntity cr, String finalAttestation) {
+        // Back-compat overload: defaults to per-edge stamping (simple attestor).
+        return tryReplay(session, cr, finalAttestation, false);
+    }
+
+    /**
+     * {@code setSigned}-aware variant. When {@code setSigned} is {@code true}
+     * (the {@code tide} set-signing attestor) an edge ADOPT replay set-signs the
+     * owner's WHOLE current set — converging with the live edge path — instead
+     * of stamping the single adopted edge. When {@code false} (the {@code simple}
+     * attestor) the edge ADOPT keeps the EXACT per-edge composite-key stamp
+     * (byte-identical to today). Node ADOPTs are unaffected by the flag.
+     */
+    public static boolean tryReplay(KeycloakSession session, IgaChangeRequestEntity cr, String finalAttestation,
+                                    boolean setSigned) {
         if (cr == null || cr.getActionType() == null) return false;
         switch (cr.getActionType()) {
             case ACTION_ADOPT_USER:
@@ -197,7 +211,7 @@ public final class IgaReplayExtension {
             case ACTION_ADOPT_SCOPE_MAPPING:
                 session.setAttribute("IGA_REPLAY_ACTIVE", "true");
                 try {
-                    replayAdoptEdge(session, cr, finalAttestation);
+                    replayAdoptEdge(session, cr, finalAttestation, setSigned);
                 } finally {
                     session.removeAttribute("IGA_REPLAY_ACTIVE");
                 }
@@ -305,7 +319,7 @@ public final class IgaReplayExtension {
      * never re-stamps an already-attested edge.
      */
     private static void replayAdoptEdge(KeycloakSession session, IgaChangeRequestEntity cr,
-                                        String finalAttestation) {
+                                        String finalAttestation, boolean setSigned) {
         RealmModel realm = session.realms().getRealm(cr.getRealmId());
         if (realm == null) {
             throw new IllegalStateException(
@@ -316,10 +330,35 @@ public final class IgaReplayExtension {
         java.util.List<java.util.Map<String, Object>> rows = parseRows(cr.getRowsJson());
 
         if (finalAttestation != null && !finalAttestation.isEmpty()) {
-            for (java.util.Map<String, Object> row : rows) {
-                int updated = stampEdgeRow(em, actionType, row, finalAttestation);
-                log.debugf("ADOPT edge replay: stamped %d row(s) in %s (row=%s)",
-                        updated, actionType, row);
+            if (setSigned) {
+                // SET-SIGNING (tide attestor): the adopted edge already exists in
+                // the DB at toggle-on, so its owner's COMPLETE current set is
+                // present. Instead of stamping just this edge with the CR's
+                // per-edge node-canonical attestation, recompute the owner's
+                // whole-set signature — the SAME (table, owner, members)
+                // canonical the LIVE path signs (TideAttestor.signSet) — and fan
+                // it out across every row of the owner's set. This makes the
+                // adopted set BYTE-IDENTICAL to what the live edge path produces
+                // for the same membership, so adopted and live converge.
+                //
+                // Idempotent across the per-owner ADOPT-edge CRs: the FIRST CR
+                // for an owner already sees the complete set and set-signs it;
+                // each remaining CR for that owner recomputes the identical set
+                // and re-stamps the identical sig (harmless convergence). NO
+                // `attestation IS NULL` guard here — set-signing intentionally
+                // (re-)stamps the WHOLE owner set on every change, exactly as
+                // the live fan-out does.
+                for (java.util.Map<String, Object> row : rows) {
+                    int updated = setSignEdgeOwner(session, em, actionType, row);
+                    log.debugf("ADOPT edge replay (set-signed): re-signed %d owner-set row(s) in %s (row=%s)",
+                            updated, actionType, row);
+                }
+            } else {
+                for (java.util.Map<String, Object> row : rows) {
+                    int updated = stampEdgeRow(em, actionType, row, finalAttestation);
+                    log.debugf("ADOPT edge replay: stamped %d row(s) in %s (row=%s)",
+                            updated, actionType, row);
+                }
             }
         }
 
@@ -433,6 +472,123 @@ public final class IgaReplayExtension {
             default:
                 throw new IllegalStateException("ADOPT edge replay: no stamp JPQL for action " + actionType);
         }
+    }
+
+    /**
+     * SET-SIGNING counterpart of {@link #stampEdgeRow} for the {@code tide}
+     * attestor. Resolves the edge's {@code (table, owner)} via the SAME linkage
+     * descriptor the LIVE edge path uses
+     * ({@link org.tidecloak.iga.attestors.TideSetResolver#linkageForAdopt}),
+     * reads the owner's COMPLETE current member set straight off the DB (the
+     * adopted edges already exist at toggle-on), computes the whole-set signature
+     * via the SAME reusable helper the live path and the node-create nested-child
+     * path use ({@link org.tidecloak.iga.attestors.TideAttestor#signSet}), and
+     * fans it out across EVERY row of the owner's set (owner-keyed UPDATE, no
+     * member predicate, no IS NULL guard).
+     *
+     * <p>The membership definition is identical to the live path: the COMPLETE
+     * current DB set for the owner ({@code SELECT memberField WHERE ownerField =
+     * owner}). So for the same set, the adopted signature is BYTE-IDENTICAL to
+     * the live signature.
+     *
+     * <p>protocol_mapper owners can be a client OR a client_scope. The CR row
+     * carries only the mapper {@code ID} and {@code OWNER_NODE_ID} (the owner
+     * value) — not the owner TYPE — so we resolve the owner field by reading the
+     * persisted ProtocolMapperEntity's own parent association (client.id vs
+     * clientScope.id), then group/fan-out on that field. This mirrors the live
+     * {@code stampOwnerSetFanOut} owner resolution.
+     *
+     * @return the number of owner-set rows re-stamped (0 if the owner/member key
+     *         couldn't be resolved or the owner's set is empty — e.g. the edge
+     *         vanished out-of-band).
+     */
+    private static int setSignEdgeOwner(KeycloakSession session, EntityManager em,
+                                        String actionType, java.util.Map<String, Object> row) {
+        org.tidecloak.iga.attestors.TideSetResolver.Linkage linkage =
+                org.tidecloak.iga.attestors.TideSetResolver.linkageForAdopt(actionType);
+        if (linkage == null) {
+            throw new IllegalStateException(
+                    "ADOPT edge set-sign: no linkage mapping for action " + actionType);
+        }
+
+        // Resolve the owner VALUE + owner JPA FIELD for this edge row.
+        String owner;
+        String ownerField;
+        if (ACTION_ADOPT_PROTOCOL_MAPPER.equals(actionType)) {
+            // The protocol_mapper CR row carries ID (mapper id) + OWNER_NODE_ID
+            // (the owning client.id OR clientScope.id). The owner field depends
+            // on which parent the mapper actually has; resolve it off the
+            // persisted entity by its own id.
+            String mapperId = str(row, "ID");
+            if (mapperId == null) return 0;
+            Object[] parents = resolveProtocolMapperOwner(em, mapperId);
+            if (parents == null) return 0; // mapper vanished
+            owner = (String) parents[0];
+            ownerField = (String) parents[1];
+            if (owner == null) return 0;
+        } else {
+            owner = str(row, linkage.ownerRowKey());
+            ownerField = linkage.ownerField();
+            if (owner == null) return 0;
+        }
+
+        // Read the owner's COMPLETE current member set off the DB — identical
+        // membership definition to the live path (SELECT memberField WHERE
+        // ownerField = owner). No filtering: whatever rows exist for this owner
+        // are the set, exactly as combineFinal / signNestedChildSet see them.
+        @SuppressWarnings("unchecked")
+        java.util.List<Object> members = em.createQuery(
+                        "SELECT e." + linkage.memberField() + " FROM " + linkage.entityName()
+                                + " e WHERE e." + ownerField + " = :owner")
+                .setParameter("owner", owner)
+                .getResultList();
+        if (members == null || members.isEmpty()) return 0;
+
+        java.util.List<String> memberIds = new java.util.ArrayList<>();
+        for (Object m : members) {
+            if (m != null) memberIds.add(m.toString());
+        }
+        if (memberIds.isEmpty()) return 0;
+
+        // Compute the whole-set signature over the EXACT (table, owner, members)
+        // canonical the live path signs — single crypto swap-point in TideAttestor.
+        org.tidecloak.iga.attestors.TideAttestor attestor =
+                new org.tidecloak.iga.attestors.TideAttestor(session);
+        String setSig = attestor.signSet(session, linkage.table(), owner, memberIds);
+
+        // Fan the set sig out across the WHOLE owner set (owner-keyed only).
+        return em.createQuery("UPDATE " + linkage.entityName() + " e SET e.attestation = :sig WHERE e."
+                        + ownerField + " = :owner")
+                .setParameter("sig", setSig)
+                .setParameter("owner", owner)
+                .executeUpdate();
+    }
+
+    /**
+     * Resolve a protocol mapper's owner (value + JPA owner field) by reading the
+     * persisted ProtocolMapperEntity by its own id. A mapper is owned by EITHER
+     * a client (client.id) OR a client_scope (clientScope.id) — exactly one is
+     * non-null. Returns {@code [ownerValue, ownerField]} or {@code null} if the
+     * mapper row no longer exists.
+     */
+    private static Object[] resolveProtocolMapperOwner(EntityManager em, String mapperId) {
+        @SuppressWarnings("unchecked")
+        java.util.List<Object[]> rows = em.createQuery(
+                        "SELECT e.client.id, e.clientScope.id FROM ProtocolMapperEntity e WHERE e.id = :id")
+                .setParameter("id", mapperId)
+                .getResultList();
+        if (rows == null || rows.isEmpty()) return null;
+        Object[] r = rows.get(0);
+        String clientId = r[0] != null ? r[0].toString() : null;
+        String scopeId = r[1] != null ? r[1].toString() : null;
+        if (clientId != null) {
+            return new Object[]{clientId, "client.id"};
+        }
+        if (scopeId != null) {
+            return new Object[]{scopeId,
+                    org.tidecloak.iga.attestors.TideSetResolver.PROTOCOL_MAPPER_SCOPE_OWNER_FIELD};
+        }
+        return null;
     }
 
     private static final com.fasterxml.jackson.databind.ObjectMapper EDGE_MAPPER =

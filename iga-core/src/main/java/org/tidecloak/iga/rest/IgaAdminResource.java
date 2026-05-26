@@ -369,7 +369,7 @@ public class IgaAdminResource {
         // emit a full stack at ERROR severity and a generic 500 unknown_error.
         // The CR remains PENDING (the flip never executed; JPA tx rolls back).
         try {
-            if (!IgaReplayExtension.tryReplay(session, cr, finalAttestation)) {
+            if (!IgaReplayExtension.tryReplay(session, cr, finalAttestation, attestor.isSetSigned())) {
                 // Gate set-fan-out on the resolved attestor: tide → fan the set
                 // signature across the whole owner set; simple → per-row (today's
                 // exact behaviour, unchanged).
@@ -703,7 +703,7 @@ public class IgaAdminResource {
 
             String finalAttestation = attestor.combineFinal(session, cr, all);
             try {
-                if (!IgaReplayExtension.tryReplay(session, cr, finalAttestation)) {
+                if (!IgaReplayExtension.tryReplay(session, cr, finalAttestation, attestor.isSetSigned())) {
                     IgaReplayDispatcher.replay(session, cr, finalAttestation, attestor.isSetSigned());
                 }
             } catch (EntityVanishedException ev) {

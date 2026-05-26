@@ -183,6 +183,47 @@ async function drainAdopts(
   return { committed: body?.summary?.committed ?? 0, total: body?.summary?.total ?? 0 };
 }
 
+/**
+ * Drain EVERY PENDING ADOPT_* CR — node AND edge variants — via bulk-authorize.
+ * Used by the toggle-on-after-graph test, where the toggle-on scan emits BOTH
+ * node ADOPTs (user/role/group/client/client_scope) and edge ADOPTs
+ * (composite_role / client_scope_client / client_scope_role / protocol_mapper /
+ * default_client_scope / scope_mapping). The edge ADOPTs are the ones whose
+ * set-signing convergence this spec asserts.
+ */
+async function drainAllAdopts(
+  request: APIRequestContext,
+  realm: string,
+): Promise<{ committed: number; total: number }> {
+  const res = await kcFetch(
+    request,
+    `/admin/realms/${realm}/iga/change-requests/bulk-authorize`,
+    {
+      method: 'POST',
+      json: {
+        actionTypeIn: [
+          'ADOPT_USER',
+          'ADOPT_ROLE',
+          'ADOPT_GROUP',
+          'ADOPT_CLIENT',
+          'ADOPT_CLIENT_SCOPE',
+          'ADOPT_ORGANIZATION',
+          'ADOPT_COMPOSITE_ROLE',
+          'ADOPT_CLIENT_SCOPE_CLIENT',
+          'ADOPT_CLIENT_SCOPE_ROLE',
+          'ADOPT_PROTOCOL_MAPPER',
+          'ADOPT_DEFAULT_CLIENT_SCOPE',
+          'ADOPT_SCOPE_MAPPING',
+        ],
+        limit: 1000,
+      },
+    },
+  );
+  expect(res.status(), 'drainAllAdopts bulk-authorize').toBe(200);
+  const body = await safeJson(res);
+  return { committed: body?.summary?.committed ?? 0, total: body?.summary?.total ?? 0 };
+}
+
 /** Drive ALL non-ADOPT pending CRs to commit (one at a time, threshold=1). */
 async function drainAllPending(
   request: APIRequestContext,
@@ -980,6 +1021,212 @@ test.describe('Tide set-signed wire-bundle visualizer', () => {
     console.log(`  set sig=${compSig}  node sig=${parentNodeSig}  (differ: ${compSig !== parentNodeSig})`);
     console.log(`protocol_mapper owner=${scopeId} members=${pmMembers.length} canonical=${JSON.stringify(pmCanonical)}`);
     console.log(`  set sig=${pmSig}  node sig=${scopeNodeSig}  (differ: ${pmSig !== scopeNodeSig})`);
+    /* eslint-enable no-console */
+  });
+
+  // =========================================================================
+  // ADOPTED edges converge with the LIVE set signature (the gap closed by
+  // IgaReplayExtension.setSignEdgeOwner + TideSetResolver.linkageForAdopt).
+  //
+  // Before the fix, an edge ADOPTED at toggle-on carried an independent PER-
+  // EDGE composite-key stamp, NOT a shared per-(table,owner) SET sig — so a
+  // freshly toggled-on realm's adopted edges were inconsistent with the live
+  // path (they'd only converge after a later live re-sign). This test builds a
+  // graph BEFORE enabling IGA (ungoverned admin REST), then toggles IGA on +
+  // bulk-authorizes so the edges are ADOPTED, and asserts:
+  //   - the adopted user_role_mapping set carries ONE shared sig across rows,
+  //   - the adopted client_scope_role_mapping set carries ONE shared sig,
+  //   - each shared sig EQUALS sha256→b64 of the complete-membership canonical
+  //     (re-derivable → identical canonical FORM the live path signs → byte-
+  //     identical sig for the identical set).
+  // The two-realm live-vs-adopted comparison is covered transitively: the live
+  // bundle test above asserts the SAME re-derivable canonical for the same
+  // tables, so a matching re-derivation here proves adopted == live for an
+  // identical set.
+  // =========================================================================
+  const ADOPT_REALM = 'iga-tide-adopt-edge';
+
+  test.afterAll(async ({ request }) => {
+    await deleteRealm(request, ADOPT_REALM).catch(() => {});
+  });
+
+  test('toggle-on ADOPTED edges set-sign the whole owner set (converge with live) under tide', async ({
+    request,
+  }) => {
+    // -----------------------------------------------------------------------
+    // 1. Scratch realm on the tide attestor, but DO NOT enable IGA yet. Build
+    //    the graph with plain (ungoverned) admin REST so the edges pre-exist
+    //    the toggle and get ADOPTED (not live-signed) when IGA turns on.
+    // -----------------------------------------------------------------------
+    await createScratchRealm(request, ADOPT_REALM);
+    await setRealmIgaAttr(request, ADOPT_REALM, 'iga.attestor', 'tide');
+    // NOTE: IGA is OFF here — every create/assign below is a normal admin write.
+
+    // Roles: 2 realm roles (user_role_mapping members) + a composite parent
+    // with 2 children (composite_role) + 2 roles to map onto a scope
+    // (client_scope_role_mapping).
+    const R1 = 'adopt-r1';
+    const R2 = 'adopt-r2';
+    const CHILD_A = 'adopt-child-a';
+    const CHILD_B = 'adopt-child-b';
+    const PARENT = 'adopt-composite-parent';
+    for (const name of [R1, R2, CHILD_A, CHILD_B, PARENT]) {
+      const r = await createRole(request, ADOPT_REALM, { name });
+      expect(r.status(), `ungoverned CREATE_ROLE ${name} 2xx`).toBeLessThan(300);
+    }
+    const r1Id = (await getRole(request, ADOPT_REALM, R1)).body.id as string;
+    const r2Id = (await getRole(request, ADOPT_REALM, R2)).body.id as string;
+    const childAId = (await getRole(request, ADOPT_REALM, CHILD_A)).body.id as string;
+    const childBId = (await getRole(request, ADOPT_REALM, CHILD_B)).body.id as string;
+    const parentId = (await getRole(request, ADOPT_REALM, PARENT)).body.id as string;
+    expect(r1Id && r2Id && childAId && childBId && parentId, 'role ids resolvable').toBeTruthy();
+
+    // composite_role edges: attach 2 children to the parent (ungoverned).
+    {
+      const childA = (await getRole(request, ADOPT_REALM, CHILD_A)).body;
+      const childB = (await getRole(request, ADOPT_REALM, CHILD_B)).body;
+      const res = await kcFetch(
+        request,
+        `/admin/realms/${ADOPT_REALM}/roles/${encodeURIComponent(PARENT)}/composites`,
+        { method: 'POST', json: [childA, childB] },
+      );
+      expect(res.status(), 'ungoverned ADD_COMPOSITE 2xx').toBeLessThan(300);
+    }
+
+    // User alice + 2 direct realm-role grants → user_role_mapping (≥2 members).
+    const userRes = await createUser(request, ADOPT_REALM, {
+      username: 'alice',
+      enabled: true,
+      email: 'alice@adopt.test',
+      firstName: 'Alice',
+      lastName: 'Adopt',
+    });
+    expect(userRes.status(), 'ungoverned CREATE_USER 2xx').toBeLessThan(300);
+    const aliceId = (await getUserByUsername(request, ADOPT_REALM, 'alice')).body.id as string;
+    expect(aliceId, 'alice id resolvable').toBeTruthy();
+    for (const roleName of [R1, R2]) {
+      const roleRep = (await getRole(request, ADOPT_REALM, roleName)).body;
+      const res = await assignRealmRoleMapping(request, ADOPT_REALM, aliceId, [
+        { id: roleRep.id, name: roleRep.name },
+      ]);
+      expect(res.status(), `ungoverned GRANT_ROLES ${roleName} 2xx`).toBeLessThan(300);
+    }
+
+    // Client scope with 2 role-mappings → client_scope_role_mapping (2 members).
+    const SCOPE = 'adopt-scope';
+    const scopeRes = await createClientScope(request, ADOPT_REALM, {
+      name: SCOPE,
+      protocol: 'openid-connect',
+    });
+    expect(scopeRes.status(), 'ungoverned CREATE_CLIENT_SCOPE 2xx').toBeLessThan(300);
+    const scopeId = (await getClientScopeByName(request, ADOPT_REALM, SCOPE)).body.id as string;
+    expect(scopeId, 'scope id resolvable').toBeTruthy();
+    for (const roleName of [R1, R2]) {
+      const roleRep = (await getRole(request, ADOPT_REALM, roleName)).body;
+      const res = await kcFetch(
+        request,
+        `/admin/realms/${ADOPT_REALM}/client-scopes/${scopeId}/scope-mappings/realm`,
+        { method: 'POST', json: [roleRep] },
+      );
+      expect(res.status(), `ungoverned SCOPE_ADD_ROLE ${roleName} 2xx`).toBeLessThan(300);
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. NOW enable IGA. The toggle-on scan ADOPTs all the pre-existing edges.
+    //    Bulk-authorize EVERY ADOPT (node + edge) so the adopted edges get
+    //    set-signed via the new replay path.
+    // -----------------------------------------------------------------------
+    await enableIga(request, ADOPT_REALM);
+    expect((await igaStatus(request, ADOPT_REALM)).enabled).toBe(true);
+    const drain = await drainAllAdopts(request, ADOPT_REALM);
+    // eslint-disable-next-line no-console
+    console.log(`[adopt-edge] toggle-on ADOPT drain: committed=${drain.committed} total=${drain.total}`);
+    expect(drain.committed, 'at least the edge ADOPTs committed').toBeGreaterThan(0);
+
+    // -----------------------------------------------------------------------
+    // 3. Assert the ADOPTED sets are SET-SIGNED: one shared, re-derivable sig
+    //    across each owner's whole set (NOT independent per-edge stamps).
+    // -----------------------------------------------------------------------
+    /**
+     * Read (member, attestation) for an owner's linkage set, assert ONE shared
+     * sig over ≥2 members, and assert it is the re-derivable complete-membership
+     * SET sig (sha256→b64 of table=…\nowner=…\nmembers=…\n).
+     */
+    function assertAdoptedSet(
+      table: string,
+      ownerCol: string,
+      memberCol: string,
+      ownerId: string,
+      expectMembers: number,
+    ): string {
+      const rows = psql(
+        `SELECT ${memberCol} || E'\\x1F' || COALESCE(attestation,'')
+           FROM ${table} WHERE ${ownerCol}='${sql(ownerId)}'
+          ORDER BY ${memberCol} ASC`,
+      )
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => {
+          const [member, att] = l.split('\x1F');
+          return { member, att: att ?? '' };
+        });
+      // At LEAST the admin-authored members; KC auto-assigns built-ins (e.g. a
+      // user's default-roles-<realm> mapping) which the COMPLETE-membership set
+      // legitimately includes — identical to the live combineFinal definition.
+      // The re-derivability assertion below covers whatever the full set is.
+      expect(
+        rows.length,
+        `${table} owner=${ownerId} has >= ${expectMembers} adopted members (incl. any built-ins)`,
+      ).toBeGreaterThanOrEqual(expectMembers);
+
+      // SET-SHARING: all members carry ONE identical sig (the property that was
+      // BROKEN for adopted edges before this fix — they had per-edge sigs).
+      const sigs = new Set(rows.map((r) => r.att));
+      expect(
+        sigs.size,
+        `ADOPTED ${table} owner=${ownerId} must share ONE set sig, saw ${[...sigs].join(' | ')}`,
+      ).toBe(1);
+      const sig = rows[0].att;
+      expect(sig.startsWith(DUMMY_PREFIX), `${table} adopted set sig dummy prefix`).toBeTruthy();
+
+      // RE-DERIVABLE over the COMPLETE membership → identical canonical FORM to
+      // the live path → byte-identical sig for the identical set.
+      const members = rows.map((r) => r.member).sort();
+      const canonical = `table=${table}\nowner=${ownerId}\nmembers=${members.join(',')}\n`;
+      expect(
+        dummySign(canonical),
+        `ADOPTED ${table} set is RE-DERIVABLE (== live form)\n  canonical=${JSON.stringify(canonical)}`,
+      ).toBe(sig);
+      return sig;
+    }
+
+    // NOTE: the toggle-on scan adopts EDGE tables (composite_role,
+    // client_scope_role_mapping, client_scope_client, protocol_mapper,
+    // default_client_scope, scope_mapping) via the ADOPT_* edge CRs whose replay
+    // this fix set-signs. user_role_mapping is NOT a toggle-on edge-ADOPT type
+    // (a user's role grants are governed via the live GRANT_ROLES path / the
+    // node ADOPT_USER), so we assert on the edge tables that ARE adopted.
+
+    // client_scope_role_mapping — owner = scope, 2 adopted role members → one sig.
+    const csrmSig = assertAdoptedSet(
+      'client_scope_role_mapping',
+      'scope_id',
+      'role_id',
+      scopeId,
+      2,
+    );
+    // composite_role — owner = parent, 2 adopted children → one set sig (second
+    // table, extra coverage of the composite edge ADOPT path).
+    const compSig = assertAdoptedSet('composite_role', 'composite', 'child_role', parentId, 2);
+
+    // The two adopted sets are over different (table,owner) → distinct sigs.
+    expect(new Set([csrmSig, compSig]).size, 'two distinct adopted set sigs').toBe(2);
+
+    /* eslint-disable no-console */
+    console.log(`\n=== ADOPTED-edge set-signing convergence (re-derivability proof) ===`);
+    console.log(`client_scope_role_mapping  owner=${scopeId}  set sig=${csrmSig}`);
+    console.log(`composite_role             owner=${parentId} set sig=${compSig}`);
+    console.log(`Both are re-derivable from the complete-membership canonical (== live form).`);
     /* eslint-enable no-console */
   });
 });

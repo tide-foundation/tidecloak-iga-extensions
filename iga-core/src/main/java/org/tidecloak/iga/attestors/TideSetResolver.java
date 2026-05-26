@@ -162,6 +162,53 @@ public final class TideSetResolver {
     public static final String PROTOCOL_MAPPER_SCOPE_OWNER_FIELD = "clientScope.id";
 
     /**
+     * Resolve the SAME linkage descriptor a LIVE edge action uses, but keyed by
+     * the edge's toggle-on {@code ADOPT_*} action type. Under set-signing the
+     * adopted edges must converge to the BYTE-IDENTICAL per-(table, owner) set
+     * signature the live path produces, so each {@code ADOPT_*} edge type maps
+     * to its live counterpart's descriptor:
+     *
+     * <pre>
+     *   ADOPT_COMPOSITE_ROLE       → composite_role           (== ADD_COMPOSITE)
+     *   ADOPT_CLIENT_SCOPE_CLIENT  → client_scope_client       (== ASSIGN_SCOPE)
+     *   ADOPT_CLIENT_SCOPE_ROLE    → client_scope_role_mapping (== SCOPE_ADD_ROLE)
+     *   ADOPT_PROTOCOL_MAPPER      → protocol_mapper           (== ADD_PROTOCOL_MAPPER)
+     *   ADOPT_SCOPE_MAPPING        → scope_mapping             (== SCOPE_MAPPING_ADD)
+     *   ADOPT_DEFAULT_CLIENT_SCOPE → default_client_scope      (== REALM_DEFAULT_SCOPE_ADD)
+     * </pre>
+     *
+     * <p>The returned descriptor is the EXACT object {@link #linkageFor(String)}
+     * returns for the live ADD action — same entity, owner field, member field,
+     * and physical table name — so the canonical (and therefore the signature)
+     * is identical for the same set. Returns {@code null} for any non-edge
+     * ADOPT (node ADOPTs / ORGANIZATION) or unknown action.
+     *
+     * <p>NOTE: protocol_mapper's owner can be a client OR a client_scope; the
+     * descriptor returned is the CLIENT-owned shape ({@code client.id}). The
+     * caller resolves the actual owner field per row (see the ADOPT edge replay
+     * path), mirroring the live {@code stampOwnerSetFanOut} resolution.
+     */
+    public static Linkage linkageForAdopt(String actionType) {
+        if (actionType == null) return null;
+        switch (actionType) {
+            case "ADOPT_COMPOSITE_ROLE":
+                return linkageFor("ADD_COMPOSITE");
+            case "ADOPT_CLIENT_SCOPE_CLIENT":
+                return linkageFor("ASSIGN_SCOPE");
+            case "ADOPT_CLIENT_SCOPE_ROLE":
+                return linkageFor("SCOPE_ADD_ROLE");
+            case "ADOPT_PROTOCOL_MAPPER":
+                return linkageFor("ADD_PROTOCOL_MAPPER");
+            case "ADOPT_SCOPE_MAPPING":
+                return linkageFor("SCOPE_MAPPING_ADD");
+            case "ADOPT_DEFAULT_CLIENT_SCOPE":
+                return linkageFor("REALM_DEFAULT_SCOPE_ADD");
+            default:
+                return null;
+        }
+    }
+
+    /**
      * Resolve the owner VALUE from a CR row for the given linkage. Returns the
      * raw rowsJson value at the linkage's {@code ownerRowKey}, or {@code null}
      * if absent. For protocol_mapper the dispatcher resolves the owner itself
