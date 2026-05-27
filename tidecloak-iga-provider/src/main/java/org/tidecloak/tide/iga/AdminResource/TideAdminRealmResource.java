@@ -422,7 +422,9 @@ public class TideAdminRealmResource {
             String payerPublic = config.getFirst("payerPublic");
             String pendingVendorId = config.getFirst("pendingVendorId");
 
-            return Midgard.IsLicenseActive(homeOrkUrl, payerPublic, pendingVendorId);
+            // traceparent: tidecloak-errors-shared (TideTrace) is not a dependency of this
+            // module, so pass null (Midgard accepts a nullable traceparent).
+            return Midgard.IsLicenseActive(homeOrkUrl, payerPublic, pendingVendorId, null);
 
         } catch (Exception e) {
             logger.warn("Could not check if pending license is active", e);
