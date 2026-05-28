@@ -613,6 +613,9 @@ public class IgaChangeRequestService {
             case org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE:
                 jpql = "SELECT cs.attestation FROM ClientScopeEntity cs WHERE cs.id = :id";
                 break;
+            case org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_ORGANIZATION:
+                jpql = "SELECT o.attestation FROM OrganizationEntity o WHERE o.id = :id";
+                break;
             default:
                 // Unsupported types are rejected by the switch below; let the
                 // existing branch surface the more specific

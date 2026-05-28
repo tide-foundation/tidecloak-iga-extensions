@@ -69,13 +69,15 @@ public final class IgaReplayExtension {
     /**
      * Phase 7b — retroactive ADOPT for KC organizations.
      *
-     * <p>Sidecar-only governance: orgs reuse the existing
-     * {@code IGA_UNSIGNED_ENTITY} table with {@code entity_type='ORGANIZATION'}.
-     * Unlike the other five entity types, {@code OrganizationEntity} has NO
-     * {@code attestation} column (see {@link IgaReplayDispatcher} line 496-497
-     * for the design choice). Replay therefore performs NO JPQL stamp; the
-     * commit is signalled entirely by the sidecar-row deletion + the CR's
-     * {@code status=APPROVED} transition.</p>
+     * <p>Orgs reuse the existing {@code IGA_UNSIGNED_ENTITY} table with
+     * {@code entity_type='ORGANIZATION'} for the toggle-on sidecar onramp, AND
+     * the organization is a first-class NODE in the attested set:
+     * {@code OrganizationEntity} carries an {@code attestation} column (ORG
+     * table, added by iga-changelog-2.4.0 + the matching field in
+     * tidecloak-override). Replay stamps the org node per-entity (keyed on the
+     * org id, {@code attestation IS NULL} guard) exactly like the other five
+     * node ADOPTs, AND deletes the sidecar row + flips the CR to
+     * {@code status=APPROVED}.</p>
      */
     public static final String ACTION_ADOPT_ORGANIZATION = "ADOPT_ORGANIZATION";
 
@@ -253,14 +255,13 @@ public final class IgaReplayExtension {
         // step (which is being deleted in the same commit; the idiom lives on
         // here as the per-entity ADOPT stamp).
         //
-        // Phase 7b — ADOPT_ORGANIZATION SKIPS this step: OrganizationEntity
-        // has no `attestation` column (see IgaReplayDispatcher.java:496-497
-        // for the design choice — orgs are governed by the sidecar row alone
-        // because cross-repo schema changes were out of scope). The sidecar
-        // delete in step 4 + the APPROVED status in step 6 are the entire
-        // "signed" post-condition for an org.
-        if (finalAttestation != null && !finalAttestation.isEmpty()
-                && !ACTION_ADOPT_ORGANIZATION.equals(actionType)) {
+        // Phase 7b — ADOPT_ORGANIZATION stamps here like every other node
+        // ADOPT: OrganizationEntity now carries an `attestation` column (ORG
+        // table, iga-changelog-2.4.0 + the matching field in tidecloak-
+        // override), so the org node is stamped per-entity (keyed on the org
+        // id) in addition to the sidecar delete (step 4) + APPROVED status
+        // (step 6). The org is a first-class node in the attested set.
+        if (finalAttestation != null && !finalAttestation.isEmpty()) {
             String jpql = stampJpqlFor(actionType);
             int updated = em.createQuery(jpql)
                     .setParameter("sig", finalAttestation)
@@ -915,6 +916,8 @@ public final class IgaReplayExtension {
                 return "UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id = :id AND e.attestation IS NULL";
             case ACTION_ADOPT_CLIENT_SCOPE:
                 return "UPDATE ClientScopeEntity e SET e.attestation = :sig WHERE e.id = :id AND e.attestation IS NULL";
+            case ACTION_ADOPT_ORGANIZATION:
+                return "UPDATE OrganizationEntity e SET e.attestation = :sig WHERE e.id = :id AND e.attestation IS NULL";
             default:
                 throw new IllegalStateException("ADOPT replay: no stamp JPQL for action " + actionType);
         }

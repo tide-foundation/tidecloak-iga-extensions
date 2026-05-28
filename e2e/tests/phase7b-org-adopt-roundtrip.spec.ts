@@ -20,23 +20,26 @@ import { checkPrecondition, rerunCommand } from '../lib/precondition';
  * Phase 7b — retroactive ADOPT for KC organizations.
  *
  * Mirrors the Phase 6b toggle-on scan for the five existing entity types
- * (USER/ROLE/GROUP/CLIENT/CLIENT_SCOPE) but for ORGANIZATIONs. Orgs are
- * sidecar-only: {@code OrganizationEntity} has no {@code attestation} column
- * (design choice noted in {@code IgaReplayDispatcher.java:483-497}); the
- * sidecar row + the CR's {@code status=APPROVED} are the entire "signed"
- * post-condition. The ADOPT_* gate bypass already covers ADOPT_ORGANIZATION
- * via {@code IgaReplayExtension.isAdoptAction}, so a single master-admin
- * authorize+commit suffices regardless of realm threshold.
+ * (USER/ROLE/GROUP/CLIENT/CLIENT_SCOPE) but for ORGANIZATIONs. The org is now
+ * a first-class node: {@code OrganizationEntity} carries an {@code attestation}
+ * column (ORG.ATTESTATION, iga-changelog-2.4.0), so ADOPT_ORGANIZATION replay
+ * stamps the org row per-entity (in addition to deleting the sidecar row +
+ * flipping the CR to {@code status=APPROVED}). The ADOPT_* gate bypass already
+ * covers ADOPT_ORGANIZATION via {@code IgaReplayExtension.isAdoptAction}, so a
+ * single master-admin authorize+commit suffices regardless of realm threshold.
  *
  * Cases:
  *   A. Happy path — 3 orgs pre-created with IGA OFF, toggle ON, assert
  *      {@code scan.adoptCrsCreated.ORGANIZATION === 3} + 3 PENDING
  *      ADOPT_ORGANIZATION CRs; authorize+commit one and verify sidecar
  *      cleared (CR APPROVED).
- *   B. Idempotent re-toggle — after committing 1 ADOPT_ORGANIZATION,
- *      toggle off→on; assert the second-toggle's
- *      {@code scan.adoptCrsCreated.ORGANIZATION === 2} (the committed one
- *      skipped via {@code alreadyCommittedAdopt}).
+ *   B. ADOPT stamp + idempotent re-toggle — after committing 1
+ *      ADOPT_ORGANIZATION (which stamps ORG.ATTESTATION), toggle off→on;
+ *      assert the second-toggle's
+ *      {@code scan.adoptCrsCreated.ORGANIZATION === 2} and that the
+ *      committed+stamped org is NOT re-enumerated as a PENDING
+ *      ADOPT_ORGANIZATION (excluded by the scanner's attestation-IS-NULL
+ *      filter; also covered by {@code alreadyCommittedAdopt}).
  *   C. CREATE_ORGANIZATION race skip — create an org via the governed POST
  *      while IGA is on, toggle off then on; assert the scan SKIPS the
  *      pending-create org via {@code skipped.pendingCreateCr}.
@@ -264,9 +267,11 @@ test.describe('IGA Phase 7b: retroactive ADOPT for organizations', () => {
       `first commit expected 200, got ${firstAC.commit.http} ${JSON.stringify(firstAC.commit.body)}`,
     ).toBe(200);
 
-    // Post-commit: CR APPROVED + the org still resolves (no entity write on
-    // ADOPT replay — orgs have no attestation column so the model is
-    // untouched besides cache eviction).
+    // Post-commit: CR APPROVED + the org still resolves. ADOPT replay stamps
+    // the ORG.ATTESTATION column (the org node's signed bit) but performs NO
+    // entity-model write — the org's identity/domains/members are untouched
+    // (besides cache eviction). The stamp itself is verified behaviorally in
+    // CASE B (a stamped org is excluded from re-toggle ADOPT enumeration).
     const afterFirst = await getChangeRequest(
       request,
       HAPPY,
@@ -286,15 +291,22 @@ test.describe('IGA Phase 7b: retroactive ADOPT for organizations', () => {
     ).toBeTruthy();
 
     // -----------------------------------------------------------------------
-    // CASE B — Idempotent re-toggle: after committing 1 ADOPT_ORGANIZATION
-    // in CASE A, toggle off then on again. The committed one is skipped via
-    // alreadyCommittedAdopt (skip-set seeded at scan start from the
-    // IDX_IGA_CR_REALM_ACTION_STATUS lookup).
+    // CASE B — ADOPT_ORGANIZATION stamps the org node + a stamped org is NOT
+    // re-enumerated on re-toggle. After committing 1 ADOPT_ORGANIZATION in
+    // CASE A, the org node's ORG.ATTESTATION is now non-null (the org is a
+    // first-class node, iga-changelog-2.4.0 — ADOPT replay stamps it via
+    // IgaReplayExtension.stampJpqlFor(ADOPT_ORGANIZATION)). Toggle off then on
+    // again: the committed org must NOT reappear as an ADOPT_ORGANIZATION.
     //
-    // Reusing the HAPPY realm so we don't have to re-do the 3-org setup —
-    // commit is the only state-change between the toggle-on counts, and the
-    // skip-set semantics are the same.
+    // This is now defended TWICE: (1) the scanner's `attestation IS NULL`
+    // filter (the new column filter under test) excludes the stamped org at
+    // the SQL level, and (2) the CR-level alreadyCommittedAdopt skip-set. The
+    // admin REST surface can't read the raw attestation column, so we assert
+    // the stamp behaviorally — a stamped org is excluded from the re-toggle's
+    // ADOPT enumeration. Reusing the HAPPY realm (commit is the only
+    // state-change between the toggle-on counts).
     // -----------------------------------------------------------------------
+    const committedOrgId = orgIds[firstName];
     const tOff = await toggleIgaRaw(request, HAPPY);
     expect(tOff.http).toBe(200);
     expect(tOff.body?.enabled, 'toggle off').toBe(false);
@@ -306,12 +318,42 @@ test.describe('IGA Phase 7b: retroactive ADOPT for organizations', () => {
     const reScan = tReOn.body.scan;
     expect(
       reScan.adoptCrsCreated?.ORGANIZATION,
-      `re-toggle ORGANIZATION count == ${orgNames.length - 1} (one committed)`,
+      `re-toggle ORGANIZATION count == ${orgNames.length - 1} (the committed+` +
+        `stamped org is excluded by the scanner's attestation-IS-NULL filter)`,
     ).toBe(orgNames.length - 1);
     expect(
       reScan.skipped?.alreadyCommittedAdopt,
       `re-toggle skipped.alreadyCommittedAdopt >= 1 (committed org)`,
     ).toBeGreaterThanOrEqual(1);
+
+    // The committed+stamped org must NOT have a fresh PENDING ADOPT_ORGANIZATION
+    // after the re-toggle — it was stamped on the ADOPT commit, so the
+    // scanner's `attestation IS NULL` filter excludes it from re-enumeration.
+    const reTogglePending = await listChangeRequests(request, HAPPY);
+    const reAdoptForCommitted = reTogglePending.filter(
+      (cr) =>
+        cr.actionType === 'ADOPT_ORGANIZATION' &&
+        cr.entityId === committedOrgId &&
+        cr.status === 'PENDING',
+    );
+    expect(
+      reAdoptForCommitted.length,
+      `the stamped org (${committedOrgId}) must NOT be re-enumerated as a ` +
+        `PENDING ADOPT_ORGANIZATION (ORG.ATTESTATION non-null after ADOPT ` +
+        `commit → scanner attestation-IS-NULL filter excludes it). Got ` +
+        JSON.stringify(reAdoptForCommitted.map((cr) => cr.id)),
+    ).toBe(0);
+    // The other two (still-unsigned) orgs DO get fresh PENDING ADOPTs.
+    const reAdoptOther = reTogglePending.filter(
+      (cr) =>
+        cr.actionType === 'ADOPT_ORGANIZATION' &&
+        cr.status === 'PENDING' &&
+        cr.entityId !== committedOrgId,
+    );
+    expect(
+      reAdoptOther.length,
+      `the ${orgNames.length - 1} still-unsigned orgs are re-enumerated`,
+    ).toBe(orgNames.length - 1);
 
     // -----------------------------------------------------------------------
     // CASE C — CREATE_ORGANIZATION race skip. With IGA on, the governed POST

@@ -902,14 +902,18 @@ the existing USER / ROLE / GROUP / CLIENT / CLIENT_SCOPE counts (see
 [Toggle response shape](#toggle-response-shape) for the full body).
 
 > **Note**
-> The `OrganizationEntity` table has **no `attestation` column**. This is
-> a deliberate departure from the Phase 6 storage-on-the-entity pattern:
-> orgs are sidecar-only. The signed/unsigned state lives entirely in
-> `IGA_UNSIGNED_ENTITY` plus the CR row's `status=APPROVED` — there is no
-> per-org attestation byte. This avoided a schema migration on the stock
-> KC organization table and keeps the IGA provider a pure wrapper around
-> `JpaOrganizationProvider`
-> (`IgaReplayDispatcher.java:483-497`,
+> The `OrganizationEntity` table now carries an **`attestation` column**
+> (`ORG.ATTESTATION`, iga-changelog-2.4.0 + the matching field in
+> tidecloak-override). The org is a first-class node in the attested set:
+> `CREATE_ORGANIZATION` / `UPDATE_ORGANIZATION` / `ADOPT_ORGANIZATION`
+> replays stamp the org row per-entity (keyed on the org id), exactly like
+> USER/ROLE/GROUP/CLIENT/CLIENT_SCOPE. Domains are covered by the org-node
+> attestation (no separate `ORG_DOMAIN` column) and org membership stays
+> governed by the existing `user_group_membership` edge. The
+> `IGA_UNSIGNED_ENTITY` sidecar + the CR's `status=APPROVED` remain the
+> toggle-on ADOPT onramp; the `ATTESTATION` column is the per-row signed
+> bit the scanner's `attestation IS NULL` filter reads
+> (`IgaReplayDispatcher.java` `replayCreateOrganization`/`replayUpdateOrganization`,
 > `IgaOrganizationProvider.java`).
 
 The ADOPT_* gate bypass from Phase 6c

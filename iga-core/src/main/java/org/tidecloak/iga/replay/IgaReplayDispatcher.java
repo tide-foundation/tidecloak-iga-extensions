@@ -110,12 +110,21 @@ import java.util.function.Consumer;
  *             {@code setDomains} (KC 26.5.5 has no standalone org-domain
  *             endpoint, so domain changes ride inside the org rep).</li>
  *       </ul>
- *       NOTE: {@code OrganizationEntity}/{@code OrganizationDomainEntity} have
- *       NO {@code attestation} column, so org replays deliberately do NOT
- *       stamp one — governance is fully tracked by the IGA_CHANGE_REQUEST row
- *       + REP_JSON rebuild (the org does not exist / is unchanged until
- *       commit). This needs no tidecloak-override change and is consistent
- *       with the "nothing pre-exists until commit" create model.</li>
+ *       NOTE: the organization is a first-class NODE in the attested set.
+ *       {@code OrganizationEntity} carries an {@code attestation} column (ORG
+ *       table, added by iga-changelog-2.4.0 + the matching field in
+ *       tidecloak-override), so {@code CREATE_ORGANIZATION} /
+ *       {@code UPDATE_ORGANIZATION} replays stamp the org node per-entity
+ *       (keyed on the org id) exactly like USER/ROLE/GROUP/CLIENT/CLIENT_SCOPE.
+ *       Design calls (LOCKED): (a) the org is a NODE → per-entity stamp (no
+ *       TideSetResolver change); (b) org DOMAINS are covered by the org-node
+ *       attestation (no separate ORG_DOMAIN attestation column —
+ *       {@code OrganizationDomainEntity} stays unstamped); (c) org MEMBERSHIP
+ *       stays governed by the existing {@code user_group_membership} edge, so
+ *       the member actions ({@code ADD_ORG_MEMBER} / {@code REMOVE_ORG_MEMBER})
+ *       and the idp/invite actions do NOT re-stamp the org node; (d) changelog
+ *       version 2.4.0. DELETE removes the row outright, so it carries no
+ *       stamp.</li>
  * </ul>
  */
 public class IgaReplayDispatcher {
@@ -248,8 +257,8 @@ public class IgaReplayDispatcher {
             case "REMOVE_PROTOCOL_MAPPER" -> replayRemoveProtocolMapper(session, realm, rows);
 
             // ----- Organizations (KC 26.5.5 org SPI) -----
-            case "CREATE_ORGANIZATION" -> replayCreateOrganization(session, realm, rows);
-            case "UPDATE_ORGANIZATION" -> replayUpdateOrganization(session, realm, rows);
+            case "CREATE_ORGANIZATION" -> replayCreateOrganization(session, realm, rows, finalAttestation, em);
+            case "UPDATE_ORGANIZATION" -> replayUpdateOrganization(session, realm, rows, finalAttestation, em);
             case "DELETE_ORGANIZATION" -> replayDeleteOrganization(session, realm, rows);
             case "ADD_ORG_MEMBER" -> replayAddOrgMember(session, realm, rows);
             case "REMOVE_ORG_MEMBER" -> replayRemoveOrgMember(session, realm, rows);
@@ -581,12 +590,17 @@ public class IgaReplayDispatcher {
     // through to JpaOrganizationProvider WITHOUT re-interception — exactly the
     // same non-reinterception contract as IgaRealmProvider/IgaUserAdapter.
     //
-    // NOTE: OrganizationEntity / OrganizationDomainEntity have NO attestation
-    // column (unlike the 19 tidecloak-override entities). Org governance is
-    // tracked entirely by the IGA_CHANGE_REQUEST row + REP_JSON rebuild — the
-    // org simply does not exist (or is unchanged) until commit — so there is
-    // deliberately NO `UPDATE <orgEntity> SET attestation=...` stamp here and
-    // no cross-repo schema change is required. See the report.
+    // NOTE: the organization is a first-class NODE in the attested set.
+    // OrganizationEntity carries an `attestation` column (ORG table, added by
+    // iga-changelog-2.4.0 + the matching field in tidecloak-override), so
+    // CREATE_ORGANIZATION / UPDATE_ORGANIZATION stamp the org node per-entity
+    // (keyed on the org id) exactly like the other five node types. Design
+    // calls (LOCKED): (a) org is a NODE → per-entity stamp, no TideSetResolver
+    // change; (b) org DOMAINS are covered by the org-node attestation, so
+    // OrganizationDomainEntity stays unstamped; (c) org MEMBERSHIP stays
+    // governed by the existing user_group_membership edge — ADD/REMOVE member,
+    // idp and invite replays do NOT re-stamp the org node; DELETE removes the
+    // row outright (no stamp).
     // -------------------------------------------------------------------------
 
     private static org.keycloak.organization.OrganizationProvider orgProvider(KeycloakSession session) {
@@ -594,7 +608,7 @@ public class IgaReplayDispatcher {
     }
 
     private static void replayCreateOrganization(KeycloakSession session, RealmModel realm,
-                                                  List<Map<String, Object>> rows) {
+                                                  List<Map<String, Object>> rows, String sig, EntityManager em) {
         org.keycloak.organization.OrganizationProvider orgs = orgProvider(session);
         for (Map<String, Object> row : rows) {
             String name = str(row, "ORG_NAME");
@@ -627,13 +641,19 @@ public class IgaReplayDispatcher {
                                     + name + ")", e);
                 }
             }
-            // No attestation stamp: org entities have no attestation column;
-            // governance is the approved CR itself.
+            // Stamp the org NODE per-entity, keyed on the rebuilt model's id.
+            // The org is a first-class node (ORG.ATTESTATION, iga-changelog-
+            // 2.4.0); domains are covered by this node stamp (no ORG_DOMAIN
+            // stamp). Mirrors the per-entity CREATE_* node stamps above.
+            em.createQuery("UPDATE OrganizationEntity e SET e.attestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig)
+                    .setParameter("id", model.getId())
+                    .executeUpdate();
         }
     }
 
     private static void replayUpdateOrganization(KeycloakSession session, RealmModel realm,
-                                                  List<Map<String, Object>> rows) {
+                                                  List<Map<String, Object>> rows, String sig, EntityManager em) {
         org.keycloak.organization.OrganizationProvider orgs = orgProvider(session);
         for (Map<String, Object> row : rows) {
             String orgId = str(row, "ORG_ID");
@@ -656,6 +676,14 @@ public class IgaReplayDispatcher {
                                     + orgId + ")", e);
                 }
             }
+            // Re-stamp the org NODE per-entity on update (keyed on ORG_ID),
+            // refreshing the attestation to cover the post-update state
+            // (including any domain changes that ride inside the org rep —
+            // domains are covered by this node stamp, no ORG_DOMAIN stamp).
+            em.createQuery("UPDATE OrganizationEntity e SET e.attestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig)
+                    .setParameter("id", orgId)
+                    .executeUpdate();
         }
     }
 

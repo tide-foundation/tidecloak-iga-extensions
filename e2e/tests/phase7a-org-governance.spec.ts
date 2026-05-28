@@ -25,6 +25,7 @@ import {
   addOrgIdp,
   removeOrgIdp,
   getOrgIdps,
+  listChangeRequests,
   kcFetch,
 } from '../lib/kc';
 import { checkPrecondition, rerunCommand } from '../lib/precondition';
@@ -492,7 +493,85 @@ test.describe('IGA Phase 7a: organization governance wire-up + resend seam', () 
     }
 
     // ---------------------------------------------------------------------
-    // 11. Cleanup.
+    // 11. ATTESTATION STAMP — CREATE_ORGANIZATION + UPDATE_ORGANIZATION
+    //     commits stamp OrganizationEntity.attestation non-null (the org is
+    //     now a first-class node, ORG.ATTESTATION via iga-changelog-2.4.0).
+    //
+    //     The admin REST surface does not expose the raw attestation column,
+    //     so we assert the stamp BEHAVIORALLY through its sole observable
+    //     consequence: the toggle-on ADOPT scanner enumerates only UNSIGNED
+    //     orgs (IgaUnsignedRowScanner.organizationsWithNames carries
+    //     `AND o.attestation IS NULL`). A stamped org therefore does NOT get
+    //     an ADOPT_ORGANIZATION CR on a fresh off→on cycle; an UNstamped org
+    //     would. We exercise this on a freshly created+committed org so the
+    //     main 10-step flow above is untouched.
+    // ---------------------------------------------------------------------
+    const STAMP_NAME = 'stamp-check-org';
+    {
+      const c = await createOrganization(request, REALM, {
+        name: STAMP_NAME,
+        alias: 'stampcheck',
+        enabled: true,
+        domains: [{ name: 'stampcheck.example', verified: false }],
+      });
+      expect(c.status(), `CREATE_ORGANIZATION (stamp check) 202`).toBe(202);
+      const cBody = await safeJson(c);
+      const cCrId =
+        (cBody && cBody.changeRequestId) ||
+        (locationHeader(c) ? locationHeader(c)!.split('/').pop() : '');
+      const cAC = await authorizeAndCommit(request, REALM, cCrId);
+      expect(cAC.commit.http, 'CREATE (stamp check) commit').toBe(200);
+
+      // UPDATE it too so the UPDATE_ORGANIZATION stamp is exercised.
+      const stampOrg = await findOrganizationByName(request, REALM, STAMP_NAME);
+      expect(stampOrg.body, 'stamp-check org exists after create').toBeTruthy();
+      const stampOrgId = stampOrg.body.id as string;
+      const stampFull = await getOrganization(request, REALM, stampOrgId);
+      const uRep = { ...stampFull.body, description: 'stamped-on-update' };
+      const u = await updateOrganization(request, REALM, stampOrgId, uRep);
+      expect(u.status(), `UPDATE_ORGANIZATION (stamp check) 202`).toBe(202);
+      const uBody = await safeJson(u);
+      const uCrId =
+        (uBody && uBody.changeRequestId) ||
+        (locationHeader(u) ? locationHeader(u)!.split('/').pop() : '');
+      const uAC = await authorizeAndCommit(request, REALM, uCrId);
+      expect(uAC.commit.http, 'UPDATE (stamp check) commit').toBe(200);
+
+      // Toggle IGA off→on. The off cycle cancels PENDING ADOPT_* CRs; the on
+      // cycle re-scans. Because the org node was stamped by the CREATE+UPDATE
+      // commits, the scanner's `attestation IS NULL` filter EXCLUDES it — no
+      // ADOPT_ORGANIZATION CR is created for it.
+      const off = await kcFetch(
+        request,
+        `/admin/realms/${REALM}/tide-admin/toggle-iga`,
+        { method: 'POST' },
+      );
+      expect((await safeJson(off))?.enabled, 'toggled off').toBe(false);
+      const on = await kcFetch(
+        request,
+        `/admin/realms/${REALM}/tide-admin/toggle-iga`,
+        { method: 'POST' },
+      );
+      const onBody = await safeJson(on);
+      expect(onBody?.enabled, 're-toggled on').toBe(true);
+
+      const pending = await listChangeRequests(request, REALM);
+      const adoptForStamped = pending.filter(
+        (cr) =>
+          cr.actionType === 'ADOPT_ORGANIZATION' &&
+          cr.entityId === stampOrgId,
+      );
+      expect(
+        adoptForStamped.length,
+        `stamped org must NOT be re-enumerated as ADOPT_ORGANIZATION ` +
+          `(CREATE/UPDATE_ORGANIZATION commit set attestation non-null, so the ` +
+          `scanner's attestation-IS-NULL filter excludes it). Got ` +
+          JSON.stringify(adoptForStamped.map((cr) => cr.id)),
+      ).toBe(0);
+    }
+
+    // ---------------------------------------------------------------------
+    // 12. Cleanup.
     // ---------------------------------------------------------------------
     await deleteRealm(request, REALM);
   });

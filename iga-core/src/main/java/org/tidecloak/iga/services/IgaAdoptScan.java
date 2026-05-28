@@ -361,12 +361,15 @@ public final class IgaAdoptScan {
                     requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
                     created, counters, alreadyAttestedCounter);
         }
-        // Phase 7b — orgs. The scanner enumerates EVERY org in the realm
-        // (no attestation-IS-NULL filter; OrganizationEntity has no such
-        // column — see IgaUnsignedRowScanner.organizationsWithNames). The
-        // committedAdoptByType skip-set is the sole "already governed"
-        // filter; the pendingCreateByType skip-set covers a mid-flight
-        // CREATE_ORGANIZATION CR's target. IgaSystemEntityFilter has no
+        // Phase 7b — orgs. The org is now a first-class NODE in the attested
+        // set; the scanner enumerates only UNSIGNED orgs (the
+        // organizationsWithNames query carries the same `attestation IS NULL`
+        // filter as every other node lane, against the ORG.ATTESTATION column
+        // added by iga-changelog-2.4.0 — see
+        // IgaUnsignedRowScanner.organizationsWithNames). The
+        // committedAdoptByType skip-set is a second, CR-level "already
+        // governed" defence; the pendingCreateByType skip-set covers a
+        // mid-flight CREATE_ORGANIZATION CR's target. IgaSystemEntityFilter has no
         // ORGANIZATION rules today (no built-in/default orgs in stock KC),
         // so shouldSkip returns false for every entity-type-mismatched
         // branch — i.e. the filter is a no-op for orgs by design. If KC

@@ -84,10 +84,11 @@ public final class IgaUnsignedRowScanner {
      *  also holds org-backing groups ({@code type = 1}, {@code GroupModel.Type
      *  .ORGANIZATION}) created by {@code JpaOrganizationProvider
      *  .createOrganizationGroup}; those are governed separately via the
-     *  ORGANIZATION path ({@link #organizationsWithNames}) as sidecar-only
-     *  ADOPT_ORGANIZATION CRs. Without this filter an org-backing group would be
-     *  governed twice — once here (wrongly stamping an attestation on the row the
-     *  org path owns sidecar-only) and once via the org path. KC's own
+     *  ORGANIZATION path ({@link #organizationsWithNames}) as
+     *  ADOPT_ORGANIZATION CRs that stamp the ORG row's own attestation. Without
+     *  this filter an org-backing group would be governed twice — once here
+     *  (wrongly stamping the org-backing KEYCLOAK_GROUP row) and once via the
+     *  org path (which stamps the ORG row the org node owns). KC's own
      *  {@code GroupEntity.getGroupIdsByParent} likewise filters {@code u.type = 0}.
      *  Regular groups are {@code type = 0}, so non-org realms are unaffected
      *  (the predicate is always-true there). */
@@ -230,15 +231,16 @@ public final class IgaUnsignedRowScanner {
     }
 
     /**
-     * (entityId, orgName) for ORGANIZATIONs in the realm. Phase 7b — orgs
-     * have NO {@code attestation} column on {@code OrganizationEntity} (see
-     * {@link org.tidecloak.iga.replay.IgaReplayDispatcher} line 496-497 for
-     * the design choice), so this query enumerates EVERY org in the realm
-     * without an {@code attestation IS NULL} filter. The "unsigned" filter
-     * happens at the scan level via the existing committed-ADOPT skip-set
-     * (an org with an APPROVED ADOPT_ORGANIZATION CR is "governed" and is
-     * filtered by {@link IgaAdoptScan} at the per-entity stage). Pending
-     * CREATE_ORGANIZATION CRs filter the same way.
+     * (entityId, orgName) for UNSIGNED ORGANIZATIONs in the realm. The
+     * organization is now a first-class NODE in the attested set:
+     * {@code OrganizationEntity} carries an {@code attestation} column (ORG
+     * table, iga-changelog-2.4.0 + the matching field in tidecloak-override),
+     * so this query carries the same {@code AND o.attestation IS NULL} filter
+     * as every other node lane — an org whose node has already been stamped
+     * (by a committed CREATE/UPDATE/ADOPT_ORGANIZATION) is NOT re-enumerated.
+     * The committed-ADOPT skip-set + pending-CREATE skip-set in
+     * {@link IgaAdoptScan} remain as a second, CR-level defence (e.g. for the
+     * window between an ADOPT commit's stamp and cache eviction).
      *
      * <p>{@code parentClientId} is always {@code null} for orgs — they have
      * no client parent (the field is reused unchanged from the other
@@ -248,7 +250,7 @@ public final class IgaUnsignedRowScanner {
         @SuppressWarnings("unchecked")
         List<Object[]> rows = (List<Object[]>) em.createQuery(
                 "SELECT o.id, o.name FROM OrganizationEntity o " +
-                        "WHERE o.realmId = ?1")
+                        "WHERE o.realmId = ?1 AND o.attestation IS NULL")
                 .setParameter(1, realmId).getResultList();
         List<InfoRow> out = new ArrayList<>(rows.size());
         for (Object[] r : rows) out.add(new InfoRow(asStr(r, 0), asStr(r, 1), null));

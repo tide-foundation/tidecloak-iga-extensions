@@ -82,7 +82,7 @@ re-capture.
 15. [Recipe: add a new ADOPT-able entity type](#recipe-add-a-new-adopt-able-entity-type)
 16. [Phase 7: organization governance — contributor notes](#phase-7-organization-governance--contributor-notes)
     - [Wire-up lessons (the Phase 7a discoveries)](#wire-up-lessons-the-phase-7a-discoveries)
-    - [No `attestation` column on `OrganizationEntity`](#no-attestation-column-on-organizationentity)
+    - [`attestation` column on `OrganizationEntity`](#attestation-column-on-organizationentity)
     - [IdP-aware scope merge (Phase 7d)](#idp-aware-scope-merge-phase-7d)
     - [SMTP-tolerance pattern (Phase 7a/b)](#smtp-tolerance-pattern-phase-7ab)
     - [`getOrganizationsResource` REST sub-path conventions](#getorganizationsresource-rest-sub-path-conventions)
@@ -1023,7 +1023,7 @@ Current expected E2E count on this branch: **12 passed**.
 |------|-----------------------|---------------|-------|
 | client | `IgaClientAdapter.updateClient()` (`:181-234`); provider `IgaRealmProvider.addClient` | `IgaReplayDispatcher.replayCreateClient` | Clean unconditional terminal seam at `RepresentationToModel.createClient` line 404; replay re-runs `RepresentationToModel.createClient`. **EAGER harvest** since Phase 4 CME fix (`045ac7a`) — see [Lesson 3](#lesson-3-storefactorycachesession-enlistprepare-gotcha-phase-4-cme). |
 | group | `IgaGroupAdapter.setDescription(String)` (`:127-194`); provider `IgaRealmProvider.createGroup` | `IgaReplayDispatcher.replayCreateGroup` | Seam = `GroupResource.updateGroup`'s final `setDescription`; top-level vs child decided by `PARENT_GROUP` key; replay does NOT recurse subGroups. Phase 4 partialImport path uses deferred-harvest accumulator. |
-| org | `IgaOrganizationModel.setDomains(...)` (`:121-198`); provider `IgaOrganizationProvider.create` | `replayCreateOrganization` / `replayUpdateOrganization` | One seam serves CREATE and UPDATE; keyed by `ORG_NAME` on create (SPI can't pin id), `ORG_ID` on update; no attestation column (governed by CR row). |
+| org | `IgaOrganizationModel.setDomains(...)` (`:121-198`); provider `IgaOrganizationProvider.create` | `replayCreateOrganization` / `replayUpdateOrganization` | One seam serves CREATE and UPDATE; keyed by `ORG_NAME` on create (SPI can't pin id), `ORG_ID` on update; org node stamped per-entity on `ORG.ATTESTATION` (iga-changelog-2.4.0). |
 | role | `IgaRoleAdapter.getName()` (`:187-292`) + `addCompositeRole` (`:294-328`); provider `IgaRealmProvider.addRealmRole` / `addClientRole` | `IgaReplayDispatcher.replayCreateRole` | No unconditional last mutating call → seam is the provably-last unconditional getter `getName()` + fire-once guard. Composites LOSSY in `ModelToRepresentation` → recorded in `addCompositeRole`, merged at the seam. Phase 4 partialImport path uses deferred-harvest. |
 | user | `IgaUserAdapter.getId()` + StackWalker emit predicate; provider `IgaUserProvider.addUser` (1-arg single-entity, 5-arg partialImport import-mode short-circuit) | `IgaReplayDispatcher.replayCreateUser` | Governs **only the 8 token-affecting fields** (username/enabled/email/emailVerified/firstName/lastName/attributes/groups). Credentials, role mappings, requiredActions, federatedIdentities, createdTimestamp, federationLink are explicitly NOT in the CR. |
 | client scope | `IgaClientScopeAdapter.getId()`; provider `IgaRealmProvider.addClientScope` | `IgaReplayDispatcher.replayCreateClientScope` | partialImport branch is **defensive parity** — KC 26.5.5 has no `ClientScopesPartialImport`, so the import path is wired up but never reached today. |
@@ -1425,9 +1425,11 @@ differences worth a contributor's attention:
    `*CacheProviderFactory` like every other entity type). See
    [Wire-up lessons](#wire-up-lessons-the-phase-7a-discoveries) below
    for the priority pitfall.
-2. The `OrganizationEntity` schema has **no `attestation` column** —
-   governance state lives entirely on the sidecar table + CR row. See
-   [No `attestation` column on `OrganizationEntity`](#no-attestation-column-on-organizationentity).
+2. The `OrganizationEntity` schema now carries an **`attestation` column**
+   (`ORG.ATTESTATION`, iga-changelog-2.4.0) — the org is a first-class node,
+   stamped per-entity on commit; the sidecar table + CR row remain the
+   toggle-on ADOPT onramp. See
+   [`attestation` column on `OrganizationEntity`](#attestation-column-on-organizationentity).
 3. Two of the org action types (`ORG_ADD_IDP` / `ORG_REMOVE_IDP`) bind
    TWO entities — the org AND the linked IdP — so the scope resolver
    merges contributions from both. See
@@ -1506,7 +1508,7 @@ public int hashCode() {
 > not-found bugs that only surface when two distinct wrapper
 > instances of the same underlying entity exist in the same session.
 
-### No `attestation` column on `OrganizationEntity`
+### `attestation` column on `OrganizationEntity`
 
 The Phase 6 entity types (`UserEntity`, `KeycloakRoleEntity`,
 `KeycloakGroupEntity`, `ClientEntity`, `ClientScopeEntity`) all carry an
@@ -1515,27 +1517,40 @@ column gets stamped on commit and is what
 `IgaUnsignedRowScanner.usersWithNames` etc. read to identify
 unattested rows during the toggle-on scan.
 
-`OrganizationEntity` is **deliberately sidecar-only**: the IGA schema
-adds NO column to the stock KC organization table. Two design reasons:
+`OrganizationEntity` is now a **first-class node** in that same set:
+`iga-changelog-2.4.0` adds an `ATTESTATION VARCHAR(2048)` column to the
+stock KC `ORG` table (the matching `attestation` field on
+`OrganizationEntity` ships in `tidecloak-override`). This reverses the
+earlier "sidecar-only, no attestation by design" decision. The locked
+design calls are:
 
-1. **Schema-migration cost.** The KC organization table is part of the
-   stock 26.5.5 schema. Adding an IGA-side column would mean an
-   `ALTER TABLE` migration that ships with this jar — high-risk for
-   any deployment already running KC 26.5.5 with existing org data.
-2. **Sidecar suffices.** The signed/unsigned bit is fully captured by
-   `(IGA_UNSIGNED_ENTITY.entity_type='ORGANIZATION' AND entity_id=orgId)
-   ROW EXISTS` plus the corresponding `ADOPT_ORGANIZATION` CR row's
-   `status` field. No second bit of state is needed.
+1. **The org is a NODE → per-entity stamp.** `CREATE_ORGANIZATION`,
+   `UPDATE_ORGANIZATION` and `ADOPT_ORGANIZATION` replays stamp the org
+   row keyed on the org id, exactly like the other five node types — no
+   `TideSetResolver` change (orgs are nodes, not edges/sets).
+2. **Domains are covered by the org-node attestation.** There is no
+   separate `ORG_DOMAIN` attestation column; domain changes ride inside
+   the org rep and are covered by the node stamp.
+3. **Org membership stays on the edge.** Members are governed by the
+   existing `user_group_membership` edge, so `ADD_ORG_MEMBER` /
+   `REMOVE_ORG_MEMBER` (and the idp/invite actions) do NOT re-stamp the
+   org node.
+
+The sidecar (`IGA_UNSIGNED_ENTITY.entity_type='ORGANIZATION'`) is still
+used for the toggle-on ADOPT onramp; the `ATTESTATION` column is the
+per-row signed bit and is what the scanner's `attestation IS NULL`
+filter reads to avoid re-enumerating an already-signed org.
 
 Practical consequences for contributors:
 
-- **The toggle-on org scan iterates via `OrganizationProvider.getAllStream`,
-  not via raw JPA.** There is no `IgaUnsignedRowScanner.organizations`
-  method analogous to `usersWithNames` — the scan adds a separate code
-  path that streams every org and emits one `ADOPT_ORGANIZATION` CR
-  plus one `IGA_UNSIGNED_ENTITY` row per stream element (subject to
-  the same already-committed-ADOPT skip + pending-create-CR skip as
-  Phase 6b).
+- **The toggle-on org scan enumerates only UNSIGNED orgs.**
+  `IgaUnsignedRowScanner.organizationsWithNames` carries the same
+  `AND o.attestation IS NULL` filter as the other node lanes — a
+  stamped org is not re-enumerated. The scan still emits one
+  `ADOPT_ORGANIZATION` CR plus one `IGA_UNSIGNED_ENTITY` row per
+  unsigned org (subject to the same already-committed-ADOPT skip +
+  pending-create-CR skip as Phase 6b, which now act as a second
+  CR-level defence on top of the column filter).
 - **Per-org cache eviction uses `CacheRealmProvider.registerInvalidation(orgId)`.**
   KC's `InfinispanOrganizationProvider.registerOrganizationInvalidation`
   is package-private, but the cached `CachedOrganization` is keyed on
