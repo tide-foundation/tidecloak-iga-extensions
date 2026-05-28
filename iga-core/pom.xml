@@ -85,4 +85,34 @@
             <scope>provided</scope>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+              Embed a Jandex index in the produced jar so Quarkus ARC reliably
+              honours @Vetoed on the admin sub-resources (IgaTveBundleResource,
+              IgaAdminResource, TideAdminCompatResource) at re-augmentation time.
+              Without an in-jar index, Quarkus's CDI bean discovery has been
+              observed to fail to mark these classes as vetoed and then attempts
+              to inject their non-CDI constructor params (RealmModel,
+              AdminPermissionEvaluator), producing UnsatisfiedResolutionException
+              on every container restart that re-builds the augmentation cache.
+              Added to unblock the producer-extension redeploy; safe / inert for
+              the rest of the jar.
+            -->
+            <plugin>
+                <groupId>io.smallrye</groupId>
+                <artifactId>jandex-maven-plugin</artifactId>
+                <version>3.2.0</version>
+                <executions>
+                    <execution>
+                        <id>make-index</id>
+                        <goals>
+                            <goal>jandex</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>

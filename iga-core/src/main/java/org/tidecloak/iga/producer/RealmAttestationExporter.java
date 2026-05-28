@@ -5,11 +5,14 @@ import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientScopeModel;
+import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.OrganizationModel;
 import org.keycloak.models.ProtocolMapperModel;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.organization.OrganizationProvider;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -100,6 +103,9 @@ public final class RealmAttestationExporter {
     private static final String U_CLIENT_MAPPER_SET = "client_mapper_set";
     private static final String U_CLIENT_SCOPE_MAPPER_SET = "client_scope_mapper_set";
     private static final String U_SCOPE_ROLE_ALLOWLIST_SET = "scope_role_allowlist_set";
+    private static final String U_ORGANIZATION_DEFINITION = "organization_definition";
+    private static final String U_GROUP_DEFINITION = "group_definition";
+    private static final String U_USER_GROUP_MEMBERSHIP_SET = "user_group_membership_set";
 
     // realm_config attributes the ork preset carries (design §5 / RealmConfig preset).
     private static final List<String> REALM_CONFIG_ATTR_KEYS = List.of(
@@ -225,11 +231,187 @@ public final class RealmAttestationExporter {
         //     attested source.
         emitAllActiveMappers(client, assigned, req, realmId, out);
 
+        // 13) Organization closure for the org-membership claim mapper
+        //     (OrganizationMembershipClaimMapper). The mapper walks:
+        //     user_identity → user_group_membership_set → (per group_id)
+        //     group_definition (type=ORGANIZATION) → reverse FK
+        //     organization_definition.group_id → alias. Emitting these three unit
+        //     families gives the engine an attested source for the `organization`
+        //     claim. No-ops on a realm without organizations (and on a user with
+        //     zero memberships, no user_group_membership_set is emitted — the
+        //     mapper then returns an empty alias set and drops the claim, matching
+        //     KC's runtime behaviour).
+        int orgUnitsEmitted = emitOrganizationClosure(session, em, realm, user, realmId, out);
+
         log.infof("producer: full-closure export realm=%s client=%s user=%s scope=%s -> "
-                        + "%d envelope(s); roles=%d ownerClients=%d",
+                        + "%d envelope(s); roles=%d ownerClients=%d orgUnits=%d",
                 realm.getName(), req.clientId(), req.userId(), req.scope(),
-                out.size(), roleClosure.size(), ownerClientUuids.size());
+                out.size(), roleClosure.size(), ownerClientUuids.size(), orgUnitsEmitted);
         return out;
+    }
+
+    // -------------------------------------------------------------------------
+    // Organization closure (units 6 group_definition, 9 user_group_membership_set,
+    // 17 organization_definition) — backs the org-membership claim mapper.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Emit the org-closure trio backing the {@code organization} claim mapper:
+     * <ol>
+     *   <li>{@link #U_USER_GROUP_MEMBERSHIP_SET} (unit 9) — the user's RAW stored
+     *       USER_GROUP_MEMBERSHIP child set (group ids), exactly one envelope, target
+     *       = user id. Skipped when empty (and the engine's
+     *       {@code ResolveMemberAliases} then yields no aliases, dropping the
+     *       claim — matches KC runtime).</li>
+     *   <li>{@link #U_GROUP_DEFINITION} (unit 6) — one envelope per
+     *       ORGANIZATION-type backing group the user is in. {@code type=ORGANIZATION}
+     *       gates the org membership in the engine's WALK.group_to_org; without it
+     *       a joined regular (REALM-type) group would never resolve an org.
+     *       Top-level groups serialize {@code parent_group_id=null} (KC's literal
+     *       single-space sentinel is folded to null per the unit-6 spec gotcha).</li>
+     *   <li>{@link #U_ORGANIZATION_DEFINITION} (unit 17) — one envelope per org the
+     *       user is a MEMBER of, target = org id. Wire fields: {@code org_id},
+     *       {@code alias}, {@code enabled}, {@code group_id} (the reverse FK the
+     *       engine walks: {@code organization_definition.group_id == group.group_id}).</li>
+     * </ol>
+     *
+     * <p>Uses {@link OrganizationProvider#getByMember(UserModel)} to enumerate the
+     * orgs (the same surface the KC OrganizationMembershipMapper uses), then derives
+     * the backing-group id via JPQL against {@code OrganizationEntity.groupId} (the
+     * public {@code OrganizationModel} interface does not expose {@code getGroupId()}
+     * — only the JPA adapter does; JPQL keeps us interface-clean).</p>
+     *
+     * <p>Returns the count of envelopes added (for the producer log).</p>
+     */
+    private int emitOrganizationClosure(KeycloakSession session, EntityManager em,
+                                        RealmModel realm, UserModel user, String realmId,
+                                        List<AttestationEnvelope> out) {
+        // Resolve OrganizationProvider only when the realm has organizations enabled
+        // (and when the provider is registered at all). Failing soft keeps the
+        // producer working on a non-org realm — a regression-safe pre-check.
+        OrganizationProvider orgProvider;
+        try {
+            orgProvider = session.getProvider(OrganizationProvider.class);
+        } catch (RuntimeException re) {
+            log.debugf("producer: OrganizationProvider not available (%s); skipping org closure",
+                    re.getMessage());
+            return 0;
+        }
+        if (orgProvider == null) {
+            return 0;
+        }
+
+        // 1) user's full group-membership set (the RAW stored child set). One envelope
+        //    per user. Mirrors the user_role_mapping_set JPQL shape (and the
+        //    ResolveMemberAliases walk: U9 -> U6 -> U17).
+        List<String> groupIds = userGroupMembershipSet(em, user.getId());
+        int added = 0;
+        if (!groupIds.isEmpty()) {
+            out.add(setUnit(U_USER_GROUP_MEMBERSHIP_SET, realmId, user.getId(), p -> {
+                p.put("user_id", user.getId());
+                p.put("realm_id", realmId);
+                p.put("group_ids", groupIds);
+            }));
+            added++;
+        }
+
+        // 2) per-org closure: organization_definition + the ORGANIZATION-type backing
+        //    group_definition. Driven by the orgs the user is a MEMBER of (the engine
+        //    walks membership first, so this set is exact). Dedup the group ids so a
+        //    user in two orgs that (theoretically) share a backing group doesn't emit
+        //    twice — KC's data model is one-group-per-org but the guard costs nothing.
+        Set<String> emittedGroupIds = new LinkedHashSet<>();
+        List<OrganizationModel> memberOrgs = orgProvider.getByMember(user)
+                .collect(java.util.stream.Collectors.toList());
+        for (OrganizationModel org : memberOrgs) {
+            String orgId = org.getId();
+            String groupId = organizationBackingGroupId(em, orgId);
+            if (groupId == null) {
+                log.warnf("producer: organization %s has no backing group id; "
+                        + "skipping org closure for it (closure incomplete)", orgId);
+                continue;
+            }
+            // organization_definition (unit 17). Wire fields per
+            // OrganizationDefinitionAttestationUnit: org_id, realm_id, alias, enabled,
+            // group_id. realm_id hoisted from the envelope; payload mirrors the unit's
+            // BuildCanonicalPayload key-for-key.
+            final String alias = org.getAlias();
+            final boolean enabled = org.isEnabled();
+            out.add(setUnit(U_ORGANIZATION_DEFINITION, realmId, orgId, p -> {
+                p.put("org_id", orgId);
+                p.put("realm_id", realmId);
+                p.put("alias", alias);
+                p.put("enabled", enabled);
+                p.put("group_id", groupId);
+            }));
+            added++;
+
+            // group_definition (unit 6) for the ORGANIZATION-type backing group.
+            // Dedup (same group can theoretically back multiple orgs in a malformed
+            // data set; KC normally maintains a 1:1).
+            if (emittedGroupIds.add(groupId)) {
+                GroupModel backing = realm.getGroupById(groupId);
+                if (backing == null) {
+                    log.warnf("producer: org %s backing group %s not resolvable; "
+                            + "emitting group_definition with minimal payload may drop the claim",
+                            orgId, groupId);
+                    continue;
+                }
+                out.add(groupDefinition(backing, realmId));
+                added++;
+            }
+        }
+        return added;
+    }
+
+    /** Per-user RAW USER_GROUP_MEMBERSHIP child set (group ids). Mirrors the user_role_mapping_set JPQL. */
+    private List<String> userGroupMembershipSet(EntityManager em, String userId) {
+        String jpql = "SELECT m.groupId FROM UserGroupMembershipEntity m WHERE m.user.id = :owner";
+        if (onlyAttested) {
+            // UserGroupMembershipEntity does not currently carry an attestation column
+            // in the IGA model, so this discriminator is inert here — left in place to
+            // mirror the userRoleMappingSet pattern in case the column is added.
+            jpql += " AND m.attestation IS NOT NULL";
+        }
+        @SuppressWarnings("unchecked")
+        List<String> ids = em.createQuery(jpql).setParameter("owner", userId).getResultList();
+        return new ArrayList<>(ids);
+    }
+
+    /**
+     * The ORGANIZATION-type backing group's id for the given organization, looked
+     * up via {@code OrganizationEntity.groupId} (a column not exposed on the public
+     * {@code OrganizationModel} interface — only on the JPA adapter). JPQL keeps the
+     * producer interface-clean.
+     */
+    private String organizationBackingGroupId(EntityManager em, String orgId) {
+        @SuppressWarnings("unchecked")
+        List<String> rows = em.createQuery(
+                "SELECT o.groupId FROM OrganizationEntity o WHERE o.id = :oid")
+                .setParameter("oid", orgId).getResultList();
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    /**
+     * Build a {@code group_definition} envelope for a backing group. Wire fields per
+     * {@code GroupDefinitionAttestationUnit}: {@code group_id}, {@code name},
+     * {@code realm_id}, {@code parent_group_id}, {@code type}. {@code type} is the
+     * literal {@code "REALM"} or {@code "ORGANIZATION"} enum name (Type.toString()
+     * round-trips the wire value, per AttestationUnit.cs). KC's literal single-space
+     * sentinel for a top-level group's parent is NOT applied here: {@code getParentId()}
+     * already returns null for top-level groups; the engine's GetGroupParentId folds
+     * a literal {@code " "} to null defensively. ORGANIZATION-type backing groups are
+     * always top-level (the org schema does not nest them), so this is null in practice.
+     */
+    private AttestationEnvelope groupDefinition(GroupModel group, String realmId) {
+        Map<String, Object> p = new LinkedHashMap<>();
+        p.put("group_id", group.getId());
+        p.put("name", group.getName());
+        p.put("realm_id", realmId);
+        p.put("parent_group_id", group.getParentId()); // null for top-level (org backing)
+        GroupModel.Type t = group.getType();
+        p.put("type", (t == null ? GroupModel.Type.REALM : t).name());
+        return new AttestationEnvelope(U_GROUP_DEFINITION, realmId, group.getId(), p);
     }
 
     // -------------------------------------------------------------------------

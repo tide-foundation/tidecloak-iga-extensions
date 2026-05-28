@@ -903,7 +903,19 @@ public class IgaAdminResource {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
 
-        String comment = body != null ? (String) body.get("comment") : null;
+        // Accept either {"comment":"..."} or {"body":"..."} — the admin-client SDK
+        // (`Iga.addComment`) sends the text under the `body` key because it strips
+        // url-param keys (`id`) and serialises the remainder; legacy/manual callers
+        // may send `comment`. Either is honoured; `comment` wins if both are set.
+        String comment = null;
+        if (body != null) {
+            Object c = body.get("comment");
+            if (c instanceof String) comment = (String) c;
+            if (comment == null) {
+                Object b = body.get("body");
+                if (b instanceof String) comment = (String) b;
+            }
+        }
         Response validation = validateCommentText(comment);
         if (validation != null) return validation;
 
@@ -948,7 +960,16 @@ public class IgaAdminResource {
                     .build();
         }
 
-        String newText = body != null ? (String) body.get("comment") : null;
+        // Accept either {"comment":"..."} or {"body":"..."} — mirrors addComment.
+        String newText = null;
+        if (body != null) {
+            Object c = body.get("comment");
+            if (c instanceof String) newText = (String) c;
+            if (newText == null) {
+                Object b = body.get("body");
+                if (b instanceof String) newText = (String) b;
+            }
+        }
         Response validation = validateCommentText(newText);
         if (validation != null) return validation;
 
@@ -1743,6 +1764,9 @@ public class IgaAdminResource {
     private IgaCommentRepresentation toCommentRepresentation(IgaCommentEntity entity) {
         IgaCommentRepresentation rep = new IgaCommentRepresentation();
         rep.setId(entity.getId());
+        if (entity.getChangeRequest() != null) {
+            rep.setChangeRequestId(entity.getChangeRequest().getId());
+        }
         rep.setUserId(entity.getUserId());
         rep.setUsername(entity.getUsername());
         rep.setComment(entity.getComment());
