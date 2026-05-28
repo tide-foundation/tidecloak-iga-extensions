@@ -434,11 +434,16 @@ test.describe('IGA Phase 7b: retroactive ADOPT for organizations', () => {
     ).toBeTruthy();
 
     // Now commit the CREATE_ORGANIZATION so the org actually lands, then
-    // re-toggle to prove (a) the org exists, (b) the freshly-created org is
-    // adopted (no APPROVED ADOPT_ORGANIZATION exists for it yet — the
-    // CREATE_ORGANIZATION commit does NOT create an ADOPT CR), and (c)
-    // toggling again leaves the new org with at most ONE pending
-    // ADOPT_ORGANIZATION.
+    // re-toggle to prove (a) the org exists, and (b) the freshly-created org
+    // is NOT re-adopted. A committed CREATE_ORGANIZATION replay stamps the
+    // ORG.ATTESTATION column per-entity (IgaReplayDispatcher.replayCreate-
+    // Organization: `UPDATE OrganizationEntity SET attestation = :sig`), so
+    // the org is already an attested NODE. The toggle-on scanner enumerates
+    // only unattested orgs (organizationsWithNames carries `attestation IS
+    // NULL`), so a CREATEd-and-committed org is excluded → zero new
+    // ADOPT_ORGANIZATION CRs and zero PENDING ADOPT for it. This is the
+    // attestation-stamp doing its job: a node attested by CREATE is never
+    // re-adopted on a later toggle window.
     const createAC = await authorizeAndCommit(
       request,
       RACE,
@@ -455,9 +460,9 @@ test.describe('IGA Phase 7b: retroactive ADOPT for organizations', () => {
     expect(tRaceFinalOn.body?.scan).toBeTruthy();
     const finalScan = tRaceFinalOn.body.scan;
     expect(
-      finalScan.adoptCrsCreated?.ORGANIZATION,
-      'newly CREATEd-and-committed org gets exactly 1 ADOPT_ORGANIZATION',
-    ).toBe(1);
+      finalScan.adoptCrsCreated?.ORGANIZATION ?? 0,
+      'CREATEd-and-committed org is already attested (ORG.ATTESTATION stamped) → re-toggle scan emits 0 ADOPT_ORGANIZATION',
+    ).toBe(0);
     const racePending3 = await listChangeRequests(request, RACE);
     const racePendingAdopts = racePending3.filter(
       (cr) =>
@@ -467,8 +472,8 @@ test.describe('IGA Phase 7b: retroactive ADOPT for organizations', () => {
     );
     expect(
       racePendingAdopts.length,
-      'exactly 1 PENDING ADOPT_ORGANIZATION for the CREATEd org',
-    ).toBe(1);
+      'no PENDING ADOPT_ORGANIZATION for an already-attested (CREATEd) org',
+    ).toBe(0);
 
     // -----------------------------------------------------------------------
     // CASE D — Bulk-authorize compatibility: POST bulk-authorize with
