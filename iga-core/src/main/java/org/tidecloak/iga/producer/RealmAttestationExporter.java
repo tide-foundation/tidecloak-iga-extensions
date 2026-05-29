@@ -112,6 +112,45 @@ public final class RealmAttestationExporter {
             "frontendUrl", "acr.loa.map", "organizationsEnabled");
 
     /**
+     * Protocol-mapper factory ids whose mappers do NOT contribute to the JWT body
+     * and must therefore be filtered out of the producer's emit closure.
+     *
+     * <p><b>Engine contract.</b> The ork TVE {@code ClaimMapperRegistry} no longer
+     * registers {@code NoOpClaimMapper} for these factories — it deliberately
+     * REJECTS any {@code protocol_mapper} unit whose factory is session-note-only
+     * or base-claim-handled. Emitting them would cause the engine to fail the unit
+     * lookup; emitting them but referencing them from
+     * {@code client_mapper_set} / {@code client_scope_mapper_set} would dangle a
+     * member id without a matching unit. So the producer must:
+     * (1) skip emission of the {@code protocol_mapper} envelope for these factories,
+     * AND (2) remove the same id from the corresponding mapper-set membership list,
+     * so the set stays consistent with what's emitted.</p>
+     *
+     * <p>The six filtered factories and why each is JWT-body-irrelevant:
+     * <ul>
+     *   <li>{@code oidc-allowed-origins-mapper} — emits a SESSION NOTE
+     *       ({@code allowed-origins}), not a JWT claim;</li>
+     *   <li>{@code oidc-acr-mapper} — the {@code acr} claim is set by KC's
+     *       {@code initToken}, not by this mapper;</li>
+     *   <li>{@code oidc-sub-mapper} — {@code sub} is base-bound from
+     *       {@code user_identity}, not by this mapper;</li>
+     *   <li>{@code oidc-session-state-mapper} — {@code session_state} is runtime
+     *       (same family as {@code sid});</li>
+     *   <li>{@code oidc-amr-mapper} — {@code amr} is the runtime auth-method,
+     *       not reproducible from attested state;</li>
+     *   <li>{@code oidc-nonce-backwards-compatible-mapper} — {@code nonce} is
+     *       presence-accepted as a base claim.</li>
+     * </ul>
+     */
+    private static final Set<String> JWT_BODY_IRRELEVANT_FACTORIES = Set.of(
+            "oidc-allowed-origins-mapper",
+            "oidc-acr-mapper",
+            "oidc-sub-mapper",
+            "oidc-session-state-mapper",
+            "oidc-amr-mapper",
+            "oidc-nonce-backwards-compatible-mapper");
+
+    /**
      * When true, only rows whose IGA {@code attestation} column is non-null are
      * emitted (the design §7 "governed/committed" discriminator). Leaves this
      * false so the closure stays exact on a stock realm; flip on for the future
@@ -625,8 +664,16 @@ public final class RealmAttestationExporter {
                                       ExportRequest req, String realmId,
                                       List<AttestationEnvelope> out) {
         // Client-owned (dedicated) mappers — the client-as-scope participant.
+        // Filter out JWT-body-irrelevant factories (engine contract: the TVE
+        // ClaimMapperRegistry REJECTS these as session-note-only / base-claim-handled;
+        // see JWT_BODY_IRRELEVANT_FACTORIES). Skip emission AND set membership.
         List<String> clientMapperIds = new ArrayList<>();
         client.getProtocolMappersStream().forEach(pm -> {
+            if (JWT_BODY_IRRELEVANT_FACTORIES.contains(pm.getProtocolMapper())) {
+                log.debugf("producer: skipping JWT-body-irrelevant client mapper %s (factory=%s)",
+                        pm.getId(), pm.getProtocolMapper());
+                return;
+            }
             out.add(protocolMapper(pm, "client", client.getId(), realmId));
             clientMapperIds.add(pm.getId());
         });
@@ -638,11 +685,17 @@ public final class RealmAttestationExporter {
             }));
         }
         // Active scope mappers (default + requested-optional only — the engine never
-        // visits an unresolved optional scope's mapper set).
+        // visits an unresolved optional scope's mapper set). Same factory filter.
         Map<String, ClientScopeModel> active = resolveActiveScopes(client, req);
         for (ClientScopeModel scope : active.values()) {
             List<String> scopeMapperIds = new ArrayList<>();
             scope.getProtocolMappersStream().forEach(pm -> {
+                if (JWT_BODY_IRRELEVANT_FACTORIES.contains(pm.getProtocolMapper())) {
+                    log.debugf("producer: skipping JWT-body-irrelevant scope mapper %s "
+                            + "(scope=%s, factory=%s)", pm.getId(), scope.getName(),
+                            pm.getProtocolMapper());
+                    return;
+                }
                 out.add(protocolMapper(pm, "client_scope", scope.getId(), realmId));
                 scopeMapperIds.add(pm.getId());
             });
