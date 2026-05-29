@@ -81,7 +81,29 @@ for stable fixture diffs — a convenience, not a requirement.)
 
 ## 4. Envelope contract (what the producer must emit)
 
-Each envelope is a JSON object with **exactly 5 top-level keys** (`AttestationUnit.cs:143-162`):
+### 4.0 Wire encoding — CBOR by default, JSON on opt-in
+
+The bundle is serialized as **CBOR by default**. JSON is emitted only when the client opts in
+with `Accept: application/json`.
+
+- Default (`Accept: application/cbor`, `*/*`, missing, anything else) → `Content-Type:
+  application/cbor`, body is raw CBOR bytes.
+- `Accept: application/json` → `Content-Type: application/json`, body is pretty-printed JSON
+  (byte-identical to the prior JSON-only implementation).
+
+CBOR uses Jackson's default encoding (`new ObjectMapper(new CBORFactory())`): map keys as
+CBOR text strings, ints as CBOR uints, etc. — so the ork side decodes cleanly with C#
+`System.Formats.Cbor`. The bundle data structure (top-level keys `realm_id`, `schema_version`,
+`request{t,c,s,aud}`, `token`, `units[{u,t,p}]`) is unchanged; only the encoding differs.
+
+**No gzip.** Bundles are not compressed at the transport or application layer. If a future
+profile wants compression, it goes via HTTP `Content-Encoding` (transport-level), not via the
+application format. This keeps the producer/consumer wire shape deterministic and avoids a
+second framing layer on top of CBOR.
+
+### 4.1 Envelope shape (within the bundle)
+
+Each envelope is an object with **exactly 5 top-level keys** (`AttestationUnit.cs:143-162`):
 
 | Key | Rule |
 |---|---|
