@@ -2,11 +2,14 @@ package org.tidecloak.iga.rest;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import jakarta.enterprise.inject.Vetoed;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
@@ -99,15 +102,23 @@ public class IgaTveBundleResource {
     // -------------------------------------------------------------------------
     // POST /iga-tve/tve-bundle — M1 prod-debug TVE-bundle producer.
     // -------------------------------------------------------------------------
+    /** Response media type for the CBOR encoding. */
+    public static final String APPLICATION_CBOR = "application/cbor";
+
     @POST
     @Path("tve-bundle")
     @Consumes(MediaType.APPLICATION_JSON)
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response tveBundle(Map<String, Object> body) {
+    @Produces({APPLICATION_CBOR, MediaType.APPLICATION_JSON})
+    public Response tveBundle(Map<String, Object> body,
+                              @HeaderParam(HttpHeaders.ACCEPT) String acceptHeader) {
         auth.realm().requireManageRealm();
+        // Content-negotiation: JSON only if the client explicitly asks for application/json;
+        // CBOR is the default for application/cbor, */*, missing header, or anything else.
+        // Resolved up-front so error responses honour Accept too.
+        BundleWriter.Format format = selectFormat(acceptHeader);
         if (body == null) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "Missing JSON body")).build();
+            return errorResponse(Response.Status.BAD_REQUEST, "MISSING_BODY",
+                    "Missing JSON body", format);
         }
         String mode = str(body.get("mode"));
         if (mode == null || mode.isEmpty()) {
@@ -119,28 +130,28 @@ public class IgaTveBundleResource {
         try {
             switch (mode) {
                 case "synthesize":
-                    return handleSynthesize(body, adminUserId);
+                    return handleSynthesize(body, adminUserId, format);
                 case "pasted":
-                    return handlePasted(body, adminUserId);
+                    return handlePasted(body, adminUserId, format);
                 default:
-                    return Response.status(Response.Status.BAD_REQUEST)
-                            .entity(Map.of("error",
-                                    "mode must be 'synthesize' or 'pasted' (got: " + mode + ")"))
-                            .build();
+                    return errorResponse(Response.Status.BAD_REQUEST, "INVALID_MODE",
+                            "mode must be 'synthesize' or 'pasted' (got: " + mode + ")",
+                            format);
             }
         } catch (IllegalArgumentException iae) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", iae.getMessage())).build();
+            return errorResponse(Response.Status.BAD_REQUEST, "INVALID_ARGUMENT",
+                    iae.getMessage(), format);
         } catch (RuntimeException re) {
             log.error("tve-bundle export failed", re);
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                    .entity(Map.of("error", re.getMessage())).build();
+            return errorResponse(Response.Status.INTERNAL_SERVER_ERROR, "INTERNAL",
+                    re.getMessage(), format);
         }
     }
 
     // ---- Mode 1: synthesize ------------------------------------------------
 
-    private Response handleSynthesize(Map<String, Object> body, String adminUserId) {
+    private Response handleSynthesize(Map<String, Object> body, String adminUserId,
+                                       BundleWriter.Format format) {
         String clientId = str(body.get("clientId"));
         String userId = str(body.get("userId"));
         String scope = str(body.get("scope"));
@@ -149,31 +160,31 @@ public class IgaTveBundleResource {
             tokenTypeStr = "access";
         }
         if (clientId == null || userId == null) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "synthesize mode requires: clientId, userId (scope, tokenType optional)"))
-                    .build();
+            return errorResponse(Response.Status.BAD_REQUEST, "MISSING_PARAMETERS",
+                    "synthesize mode requires: clientId, userId (scope, tokenType optional)",
+                    format);
         }
         TokenType tokenType;
         try {
             tokenType = TokenType.valueOf(tokenTypeStr);
         } catch (IllegalArgumentException iae) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "tokenType must be 'access' or 'id'")).build();
+            return errorResponse(Response.Status.BAD_REQUEST, "INVALID_TOKEN_TYPE",
+                    "tokenType must be 'access' or 'id'", format);
         }
 
         ClientModel client = realm.getClientByClientId(clientId);
         if (client == null) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "client not found: " + clientId)).build();
+            return errorResponse(Response.Status.BAD_REQUEST, "CLIENT_NOT_FOUND",
+                    "client not found: " + clientId, format);
         }
         UserModel user = session.users().getUserById(realm, userId);
         if (user == null) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "user not found: " + userId)).build();
+            return errorResponse(Response.Status.BAD_REQUEST, "USER_NOT_FOUND",
+                    "user not found: " + userId, format);
         }
 
-        log.infof("iga-tve tve-bundle: admin=%s realm=%s mode=synthesize userId=%s clientId=%s",
-                adminUserId, realm.getName(), userId, clientId);
+        log.infof("iga-tve tve-bundle: admin=%s realm=%s mode=synthesize userId=%s clientId=%s format=%s",
+                adminUserId, realm.getName(), userId, clientId, formatLabel(format));
 
         // Build a TRANSIENT user+client session and ClientSessionContext mirroring
         // the ClientCredentialsGrantType pattern (services/.../grants/ClientCredentialsGrantType.java).
@@ -253,11 +264,9 @@ public class IgaTveBundleResource {
                     new RealmAttestationExporter().export(session, realm, req);
 
             byte[] bundle = new BundleWriter()
-                    .write(realm.getId(), req, unsignedToken, envelopes);
+                    .write(realm.getId(), req, unsignedToken, envelopes, format);
 
-            return Response.ok(new String(bundle, StandardCharsets.UTF_8))
-                    .type(MediaType.APPLICATION_JSON)
-                    .build();
+            return buildBundleResponse(bundle, format);
         } finally {
             // Tear down the transient session.
             try {
@@ -277,19 +286,19 @@ public class IgaTveBundleResource {
 
     // ---- Mode 2: pasted ----------------------------------------------------
 
-    private Response handlePasted(Map<String, Object> body, String adminUserId) {
+    private Response handlePasted(Map<String, Object> body, String adminUserId,
+                                   BundleWriter.Format format) {
         String token = str(body.get("token"));
         if (token == null || token.isEmpty()) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "pasted mode requires: token (compact JWS)"))
-                    .build();
+            return errorResponse(Response.Status.BAD_REQUEST, "MISSING_TOKEN",
+                    "pasted mode requires: token (compact JWS)", format);
         }
         String[] segments = token.split("\\.", -1);
         if (segments.length != 3 && segments.length != 2) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "token is not a compact JWS (expected 3 segments, got "
-                            + segments.length + ")"))
-                    .build();
+            return errorResponse(Response.Status.BAD_REQUEST, "INVALID_TOKEN",
+                    "token is not a compact JWS (expected 3 segments, got "
+                            + segments.length + ")",
+                    format);
         }
         // Decode payload (no signature verification — this is debug capture).
         JsonNode payload;
@@ -297,9 +306,8 @@ public class IgaTveBundleResource {
             byte[] payloadBytes = Base64.getUrlDecoder().decode(padBase64(segments[1]));
             payload = MAPPER.readTree(payloadBytes);
         } catch (Exception ex) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "failed to decode token payload: " + ex.getMessage()))
-                    .build();
+            return errorResponse(Response.Status.BAD_REQUEST, "INVALID_TOKEN_PAYLOAD",
+                    "failed to decode token payload: " + ex.getMessage(), format);
         }
 
         String typ = textOrNull(payload, "typ");
@@ -331,18 +339,16 @@ public class IgaTveBundleResource {
             }
         }
         if (azp == null || sub == null) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error",
-                            "pasted token must contain azp (or aud) and sub claims"))
-                    .build();
+            return errorResponse(Response.Status.BAD_REQUEST, "INVALID_TOKEN_CLAIMS",
+                    "pasted token must contain azp (or aud) and sub claims", format);
         }
 
         // ID-token surfaces typically carry "typ":"ID" or "JWT" with id_token usage; access tokens
         // carry "typ":"Bearer"/"JWT". Treat ID precisely; otherwise default to access.
         TokenType tokenType = "ID".equalsIgnoreCase(typ) ? TokenType.id : TokenType.access;
 
-        log.infof("iga-tve tve-bundle: admin=%s realm=%s mode=pasted userId=%s clientId=%s",
-                adminUserId, realm.getName(), sub, azp);
+        log.infof("iga-tve tve-bundle: admin=%s realm=%s mode=pasted userId=%s clientId=%s format=%s",
+                adminUserId, realm.getName(), sub, azp, formatLabel(format));
 
         ExportRequest req = new ExportRequest(azp, sub, scope, tokenType, aud, false);
 
@@ -351,10 +357,94 @@ public class IgaTveBundleResource {
 
         String unsignedToken = stripSignature(token, segments);
         byte[] bundle = new BundleWriter()
-                .write(realm.getId(), req, unsignedToken, envelopes);
-        return Response.ok(new String(bundle, StandardCharsets.UTF_8))
-                .type(MediaType.APPLICATION_JSON)
+                .write(realm.getId(), req, unsignedToken, envelopes, format);
+        return buildBundleResponse(bundle, format);
+    }
+
+    // ---- format negotiation ------------------------------------------------
+
+    /**
+     * Pick the bundle output format from the request's {@code Accept} header.
+     *
+     * <p>Rule: JSON only if the header explicitly names {@code application/json};
+     * CBOR is the default for {@code application/cbor}, {@code *&#47;*}, missing
+     * header, or anything else. This matches the design intent of "CBOR by
+     * default; JSON when client {@code Accept: application/json}".</p>
+     */
+    static BundleWriter.Format selectFormat(String acceptHeader) {
+        if (acceptHeader == null || acceptHeader.isEmpty()) {
+            return BundleWriter.Format.CBOR;
+        }
+        // Case-insensitive substring match — Accept may carry parameters like
+        // "application/json; q=0.9, */*; q=0.1". We deliberately do NOT parse
+        // q-values: the design says "Accept contains application/json -> JSON".
+        return acceptHeader.toLowerCase(java.util.Locale.ROOT).contains("application/json")
+                ? BundleWriter.Format.JSON
+                : BundleWriter.Format.CBOR;
+    }
+
+    private static String formatLabel(BundleWriter.Format f) {
+        return f == BundleWriter.Format.JSON ? "json" : "cbor";
+    }
+
+    private static Response buildBundleResponse(byte[] bundle, BundleWriter.Format format) {
+        if (format == BundleWriter.Format.JSON) {
+            return Response.ok(new String(bundle, StandardCharsets.UTF_8))
+                    .type(MediaType.APPLICATION_JSON)
+                    .build();
+        }
+        // CBOR: raw bytes with application/cbor.
+        return Response.ok(bundle)
+                .type(APPLICATION_CBOR)
                 .build();
+    }
+
+    // ---- error response (Accept-aware) -------------------------------------
+
+    /** Jackson mapper for JSON error bodies. */
+    private static final ObjectMapper ERROR_JSON_MAPPER = new ObjectMapper();
+    /** Jackson mapper for CBOR error bodies. */
+    private static final ObjectMapper ERROR_CBOR_MAPPER = new ObjectMapper(new CBORFactory());
+
+    /**
+     * Build an error response whose Content-Type matches the negotiated bundle
+     * {@code format}. The body is a small map {@code {"error": message, "code":
+     * code}} serialized through the same Jackson mapper family the success path
+     * uses, so the response round-trips through whichever encoding the client
+     * asked for (or CBOR by default).
+     *
+     * <p>Without this helper, Jakarta REST defaults to a writer chosen from the
+     * {@code @Produces} list and JAX-RS may pick {@code application/cbor} but
+     * then serialize a Java {@code Map.toString()} ({@code {error=...}}) — not
+     * valid JSON or CBOR. See live smoke notes in the M1 change request.</p>
+     */
+    private static Response errorResponse(Response.Status status, String code,
+                                          String message, BundleWriter.Format format) {
+        Map<String, String> body = new LinkedHashMap<>();
+        body.put("error", message == null ? "" : message);
+        body.put("code", code == null ? "UNKNOWN" : code);
+        try {
+            if (format == BundleWriter.Format.JSON) {
+                byte[] bytes = ERROR_JSON_MAPPER.writeValueAsBytes(body);
+                return Response.status(status)
+                        .type(MediaType.APPLICATION_JSON)
+                        .entity(bytes)
+                        .build();
+            }
+            byte[] bytes = ERROR_CBOR_MAPPER.writeValueAsBytes(body);
+            return Response.status(status)
+                    .type(APPLICATION_CBOR)
+                    .entity(bytes)
+                    .build();
+        } catch (com.fasterxml.jackson.core.JsonProcessingException jpe) {
+            // Last-resort: serialization of the error itself failed. Fall back to
+            // a plaintext message so the client still sees *something* sensible.
+            log.error("iga-tve errorResponse: failed to serialize error body", jpe);
+            return Response.status(status)
+                    .type(MediaType.TEXT_PLAIN)
+                    .entity("error: " + (message == null ? "" : message))
+                    .build();
+        }
     }
 
     // ---- helpers -----------------------------------------------------------
