@@ -1,5 +1,6 @@
 package org.tidecloak.iga.rest;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
@@ -27,11 +28,13 @@ import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.protocol.oidc.TokenManager;
 import org.keycloak.representations.AccessToken;
 import org.keycloak.representations.IDToken;
+import org.keycloak.services.Urls;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.sessions.RootAuthenticationSessionModel;
+import org.keycloak.services.managers.AuthenticationManager;
 import org.keycloak.services.managers.AuthenticationSessionManager;
-import org.keycloak.services.util.DefaultClientSessionContext;
+import org.keycloak.services.managers.UserSessionManager;
 import org.tidecloak.iga.producer.AttestationEnvelope;
 import org.tidecloak.iga.producer.BundleWriter;
 import org.tidecloak.iga.producer.ExportRequest;
@@ -88,6 +91,15 @@ public class IgaTveBundleResource {
                     "{\"alg\":\"none\",\"typ\":\"JWT\"}".getBytes(StandardCharsets.UTF_8));
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /**
+     * Dedicated mapper for serializing the unsigned token payload. Configured
+     * with {@code NON_NULL} so unset AccessToken/IDToken POJO slots are omitted,
+     * matching the byte shape of a real Keycloak-issued JWT payload (which only
+     * carries claims that were actually populated by mappers).
+     */
+    private static final ObjectMapper TOKEN_PAYLOAD_MAPPER =
+            new ObjectMapper().setSerializationInclusion(JsonInclude.Include.NON_NULL);
 
     private final KeycloakSession session;
     private final RealmModel realm;
@@ -187,20 +199,50 @@ public class IgaTveBundleResource {
                 adminUserId, realm.getName(), userId, clientId, formatLabel(format));
 
         // Build a TRANSIENT user+client session and ClientSessionContext mirroring
-        // the ClientCredentialsGrantType pattern (services/.../grants/ClientCredentialsGrantType.java).
+        // the ResourceOwnerPasswordCredentialsGrantType pattern
+        // (services/.../grants/ResourceOwnerPasswordCredentialsGrantType.java:94-100, 133-138).
+        // Hydration parity with the real password-grant flow is required so the
+        // mapper pipeline (transformAccessToken) sees the same inputs and the
+        // resulting unsigned token is byte-shape-equivalent to a real
+        // password-issued access token (modulo signature + iat/exp/jti).
         AuthenticationSessionManager asm = new AuthenticationSessionManager(session);
         RootAuthenticationSessionModel rootAuthSession = asm.createAuthenticationSession(realm, false);
         AuthenticationSessionModel authSession = rootAuthSession.createAuthenticationSession(client);
         authSession.setAuthenticatedUser(user);
         authSession.setProtocol(OIDCLoginProtocol.LOGIN_PROTOCOL);
-        if (scope != null && !scope.isEmpty()) {
-            authSession.setClientNote(OIDCLoginProtocol.SCOPE_PARAM, scope);
-        }
+        // Mirrors ResourceOwnerPasswordCredentialsGrantType.java:98 — the
+        // AUTHENTICATE action is what the auth processor sets at the start of
+        // the password flow. AcrStore reads no LOA note here so token.acr falls
+        // back to the non-step-up "1" branch in initToken (TokenManager.java:1014-1017).
+        authSession.setAction(AuthenticatedClientSessionModel.Action.AUTHENTICATE.name());
+        // CRITICAL — mirrors ResourceOwnerPasswordCredentialsGrantType.java:99.
+        // initToken (TokenManager.java:1009) reads `iss` solely from the client
+        // session's OIDCLoginProtocol.ISSUER note, which is transferred from the
+        // auth-session client-notes by attachAuthenticationSession
+        // (TokenManager.java:577-580). Without this note, the synthesized token
+        // emits iss=null.
+        authSession.setClientNote(OIDCLoginProtocol.ISSUER,
+                Urls.realmIssuer(session.getContext().getUri().getBaseUri(), realm.getName()));
+        // Mirrors ResourceOwnerPasswordCredentialsGrantType.java:100. Set the
+        // scope-param client-note unconditionally so attachAuthenticationSession's
+        // scope resolution (TokenManager.java:548) sees a consistent input.
+        // A null scope param resolves to "client default scopes + client itself"
+        // (TokenManager.java:660-662), matching what `password` grant with no
+        // explicit scope= form param produces. The real ROPC code at
+        // ResourceOwnerPasswordCredentialsGrantType.java:100 sets this note
+        // unconditionally (even with a null scope) — we mirror that exactly.
+        authSession.setClientNote(OIDCLoginProtocol.SCOPE_PARAM, scope);
 
-        UserSessionProvider sessions = session.sessions();
         UserSessionModel userSession = null;
+        UserSessionProvider sessions = session.sessions();
         try {
-            userSession = sessions.createUserSession(
+            // Use UserSessionManager (mirrors ClientCredentialsGrantType.java:116
+            // and ResourceOwnerPasswordCredentialsGrantType.java path through
+            // AuthenticationProcessor.attachSession:1161) rather than
+            // session.sessions().createUserSession(...) directly: it additionally
+            // attaches device-activity info, which keeps any DeviceActivityManager
+            // mappers happy.
+            userSession = new UserSessionManager(session).createUserSession(
                     authSession.getParentSession().getId(),
                     realm,
                     user,
@@ -210,20 +252,60 @@ public class IgaTveBundleResource {
                     false,                            // rememberMe
                     null, null,
                     UserSessionModel.SessionPersistenceState.TRANSIENT);
+            // Mirrors AuthenticationProcessor.java:1181. Without LOGGED_IN state
+            // some mapper guards short-circuit (e.g. session-status mappers,
+            // certain role-resolution edges). Keycloak's password-grant always
+            // reaches this state via AuthenticationProcessor.attachSession.
+            userSession.setState(UserSessionModel.State.LOGGED_IN);
+            session.getContext().setUserSession(userSession);
+            // Mirrors the implicit invariant of every token-issuing path: the
+            // KeycloakContext's "current client" is the token's target client
+            // (not the calling admin client). Mappers like
+            // AbstractOIDCProtocolMapper.getShouldUseLightweightToken read
+            // `session.getContext().getClient().getAttribute(USE_LIGHTWEIGHT_ACCESS_TOKEN_ENABLED)`
+            // — without this override they would read it from the admin UI
+            // client, which is unrelated to the synthesize target.
+            session.getContext().setClient(client);
+
+            // Mirrors ResourceOwnerPasswordCredentialsGrantType.java:133 and
+            // ClientCredentialsGrantType.java:120 — MUST be called BEFORE
+            // attachAuthenticationSession so the auth-session has its requested
+            // client-scope set computed, which downstream code can inspect.
+            // AuthenticationManager.setClientScopesInSession (line 1269) calls
+            // TokenManager.getRequestedClientScopes(...) using the SCOPE_PARAM
+            // client-note and stores the resulting scope ids on the auth-session
+            // via authSession.setClientScopes(...).
+            AuthenticationManager.setClientScopesInSession(session, authSession);
 
             // Attach the auth session as a client session and build the context.
+            // attachAuthenticationSession (TokenManager.java:545-593) does:
+            //   - creates the client session (transient, since userSession is transient)
+            //   - transfers all auth-session client-notes to the client session
+            //     (including OIDCLoginProtocol.ISSUER set above)
+            //   - transfers all auth-session user-session-notes to the user session
+            //   - resolves scopes from OAuth2Constants.SCOPE client-note (=SCOPE_PARAM)
+            //     via getRequestedClientScopes — defaults + optional-when-requested
+            //   - builds DefaultClientSessionContext with that resolved scope set
+            // So the resulting context already has the right scopes, mappers, and
+            // notes; we do NOT need to rebuild it via fromClientSessionAndScopeParameter.
             ClientSessionContext clientSessionCtx =
                     TokenManager.attachAuthenticationSession(session, userSession, authSession);
+            // Mirrors ResourceOwnerPasswordCredentialsGrantType.java:136. The
+            // GRANT_TYPE context attribute is consumed by some mappers (e.g.
+            // session-state mappers). We keep this as PASSWORD to match what
+            // the real password-grant pipeline reports to mappers. The JTI
+            // prefix (which the encoder would otherwise derive from this) is
+            // overridden below to the engine-supported "trrtcc:" — see the
+            // explanation there.
             clientSessionCtx.setAttribute(Constants.GRANT_TYPE, OAuth2Constants.PASSWORD);
-
-            // Rebuild the context against the (possibly explicit) scope param so
-            // requested optional scopes are honored, mirroring TokenManager's
-            // refresh-token branch (services/.../oidc/TokenManager.java:1181).
+            // Mirror SCOPE note on the client session for symmetry with the
+            // password-grant flow — attachAuthenticationSession already transferred
+            // it via the client-notes loop, but setting it directly is a safe no-op
+            // when scope is null (skip) and idempotent otherwise.
             AuthenticatedClientSessionModel acs = clientSessionCtx.getClientSession();
             if (scope != null) {
                 acs.setNote(OAuth2Constants.SCOPE, scope);
             }
-            clientSessionCtx = DefaultClientSessionContext.fromClientSessionAndScopeParameter(acs, scope, session);
 
             TokenManager tokenManager = new TokenManager();
             // services/src/main/java/org/keycloak/protocol/oidc/TokenManager.java:529
@@ -232,8 +314,48 @@ public class IgaTveBundleResource {
             // This is the claim-construction path (initToken + transformAccessToken) and does NOT
             // call session.tokens().encode(...), so the Tide-signed branch in DefaultTokenManager
             // is never reached.
+
+            // H4 diagnostic — DEBUG log just before the mapper pipeline runs.
+            // If mapperCount == 0 the cause is upstream (scope/user filtering
+            // in DefaultClientSessionContext.isAllowed). If it's non-zero but
+            // mapper-derived claims remain absent in the synth payload, the
+            // cause is in mapper execution (user adapter wrong,
+            // includeInAccessToken false, etc.). Gated behind isDebugEnabled()
+            // so the stream materialization + scope-name join cost is only
+            // paid when DEBUG is enabled. The underlying getProtocolMappersStream
+            // returns a fresh stream from a cached Set, so counting it does not
+            // affect the subsequent createClientAccessToken call.
+            if (log.isDebugEnabled()) {
+                try {
+                    long mapperCount = clientSessionCtx.getProtocolMappersStream().count();
+                    String resolvedScopes = clientSessionCtx.getClientScopesStream()
+                            .map(org.keycloak.models.ClientScopeModel::getName)
+                            .collect(java.util.stream.Collectors.joining(","));
+                    log.debugf("synthesize: protocol mappers loaded = %d", mapperCount);
+                    log.debugf("synthesize: resolved client scopes = %s", resolvedScopes);
+                } catch (RuntimeException diag) {
+                    log.warnf(diag, "synthesize: diagnostic logging failed (non-fatal)");
+                }
+            }
+
             AccessToken claims = tokenManager.createClientAccessToken(
                     session, realm, client, user, userSession, clientSessionCtx);
+
+            // Force engine-compatible jti prefix "trrtcc:" regardless of whether
+            // the resolved TokenContextEncoder chose lightweight (encoded "lt")
+            // or regular (encoded "rt"). The TokenValidationEngine only knows
+            // {trrtcc, onrtcc, oftcc}; any other prefix is rejected with
+            // ATTESTATION_INVALID. We keep the raw 16-char rawTokenId portion the
+            // encoder produced after the ':' so the underlying secure-random id
+            // is preserved (just the prefix is normalised).
+            String currentJti = claims.getId();
+            int colon = currentJti == null ? -1 : currentJti.indexOf(':');
+            String rawJtiId = (colon > 0) ? currentJti.substring(colon + 1) : currentJti;
+            if (rawJtiId == null || rawJtiId.isEmpty()) {
+                rawJtiId = org.keycloak.common.util.SecretGenerator.getInstance()
+                        .generateSecureID();
+            }
+            claims.id("trrtcc:" + rawJtiId);
 
             String unsignedToken;
             if (tokenType == TokenType.id) {
@@ -458,7 +580,11 @@ public class IgaTveBundleResource {
      */
     private static String serializeUnsigned(Object claims) {
         try {
-            byte[] payloadJson = MAPPER.writeValueAsBytes(claims);
+            // NON_NULL mapper — match the byte shape of a real password-grant
+            // token payload (only populated claims appear). Default Jackson
+            // serializes every AccessToken/IDToken POJO field including null,
+            // which adds ~30 keys not present in a real KC-issued token.
+            byte[] payloadJson = TOKEN_PAYLOAD_MAPPER.writeValueAsBytes(claims);
             String payloadB64 = Base64.getUrlEncoder().withoutPadding().encodeToString(payloadJson);
             return UNSIGNED_HEADER_B64URL + "." + payloadB64 + ".";
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
