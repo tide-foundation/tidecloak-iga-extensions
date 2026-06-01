@@ -14,7 +14,7 @@ import java.util.Map;
  * null-vs-empty-string conventions are the contract — preserved verbatim).
  *
  * <p>A unit is self-contained: it can {@link #serialize()} itself to a full
- * five-key CBOR envelope, and it can hand the writer that same envelope as an
+ * four-key CBOR envelope, and it can hand the writer that same envelope as an
  * ordered map via {@link #toEnvelopeMap()} so the bundle is assembled in one
  * pass. The two are byte-equivalent:
  * {@code serialize() == cborMapper().writeValueAsBytes(toEnvelopeMap())}.
@@ -23,14 +23,16 @@ import java.util.Map;
  * <pre>
  * { "unit_type":      "&lt;wire string&gt;",
  *   "schema_version": 1,
- *   "realm_id":       "&lt;realm UUID&gt;",
  *   "target_id":      "&lt;primary key of the parent entity&gt;",
  *   "payload":        { ... INCLUDES realm_id ... } }
  * </pre>
- * The payload INCLUDES {@code realm_id}: ork's base parser asserts
- * {@code envelope.realm_id == payload.realm_id}. Unlike the old compact
- * {@code {u,t,p}} bundle form, each unit now carries its OWN
- * {@code unit_type}/{@code schema_version}/{@code realm_id} so it is a
+ * The envelope-level {@code realm_id} was DROPPED (envelope is now 4 keys).
+ * The realm binding is carried by {@code payload.realm_id} — the payload still
+ * INCLUDES {@code realm_id} (built by each subclass's {@code payload()} /
+ * {@code BuildCanonicalPayload}). The ork side asserts the realm via
+ * {@code payload.realm_id} now; there is no envelope/payload {@code realm_id}
+ * equality check. Unlike the old compact {@code {u,t,p}} bundle form, each unit
+ * still carries its OWN {@code unit_type}/{@code schema_version} so it is a
  * self-describing envelope on the wire.
  */
 public abstract class AttestationUnit {
@@ -77,15 +79,15 @@ public abstract class AttestationUnit {
     public abstract Map<String, Object> payload();
 
     /**
-     * The full five-key envelope as an ordered {@link LinkedHashMap}
-     * ({@code unit_type, schema_version, realm_id, target_id, payload}). The
-     * bundle writer drops one of these per {@code units[]} entry.
+     * The full four-key envelope as an ordered {@link LinkedHashMap}
+     * ({@code unit_type, schema_version, target_id, payload}). The
+     * bundle writer drops one of these per {@code units[]} entry. The realm
+     * binding lives in {@code payload.realm_id}, not at the envelope level.
      */
     public final Map<String, Object> toEnvelopeMap() {
         Map<String, Object> env = new LinkedHashMap<>();
         env.put("unit_type", unitType());
         env.put("schema_version", SCHEMA_VERSION);
-        env.put("realm_id", realmId);
         env.put("target_id", targetId);
         env.put("payload", payload());
         return env;
