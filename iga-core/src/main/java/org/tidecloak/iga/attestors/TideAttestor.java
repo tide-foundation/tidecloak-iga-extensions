@@ -3,20 +3,26 @@ package org.tidecloak.iga.attestors;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
+import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.replay.IgaReplayExtension;
 
 import jakarta.persistence.EntityManager;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
 
@@ -54,6 +60,29 @@ public class TideAttestor implements IgaAttestor {
 
     /** Prefix marking the stubbed signature so it is unmistakably a dummy. */
     public static final String DUMMY_SIG_PREFIX = "TIDE-DUMMY-v1:";
+
+    /**
+     * Prefix marking a firstAdmin (single-signer, 1-of-1 admin quorum) bootstrap
+     * signature, distinct from the multiAdmin {@link #DUMMY_SIG_PREFIX}. In wave 1a
+     * {@link #sign(KeycloakSession, RealmModel, String, byte[])}'s firstAdmin branch
+     * still produces the SHA-256 stub under this prefix; wave 2 swaps in the real
+     * VRK → Midgard → ORK signature here (port plan §3.4, §6.4).
+     */
+    public static final String FIRSTADMIN_SIG_PREFIX = "TIDE-FIRSTADMIN-v1:";
+
+    /** Mode column values on {@link IgaAuthorizerEntity} (port plan §3.1, §4). */
+    public static final String MODE_FIRST_ADMIN = "firstAdmin";
+    public static final String MODE_MULTI_ADMIN = "multiAdmin";
+
+    /** Realm attribute discriminating Tide vs Tideless (IgaAttestors.java:21-35). */
+    private static final String ATTR_IGA_ATTESTOR = "iga.attestor";
+
+    /** Stock KC realm-management client + the legacy {@code Constants.TIDE_REALM_ADMIN} role name. */
+    private static final String REALM_MANAGEMENT_CLIENT_ID = "realm-management";
+    private static final String TIDE_REALM_ADMIN_ROLE = "tide-realm-admin";
+
+    /** Multiplier for the dynamic multiAdmin threshold floor (port plan §3.6). */
+    private static final double THRESHOLD_PERCENTAGE = 0.7;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<List<Map<String, Object>>> LIST_MAP_REF =
@@ -102,8 +131,118 @@ public class TideAttestor implements IgaAttestor {
 
     @Override
     public int getThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr) {
+        // firstAdmin is single-signer onboarding: ALWAYS 1, unconditionally — it
+        // does not consult per-scope overrides, the realm attribute, or the admin
+        // count (port plan §3.5; legacy FirstAdmin reads no threshold at all). The
+        // constant-first equals() is null-safe for resolveMode's null return.
+        if (MODE_FIRST_ADMIN.equals(resolveMode(session, realm))) {
+            return 1;
+        }
+        // multiAdmin: a per-scope iga.threshold (set WITH iga.approverRole on the
+        // same entity) or an ADOPT_* short-circuit still wins via the shared
+        // resolver; only the realm-level default flips from the static
+        // iga.threshold to the dynamic 0.7 floor. The shared IgaScopeResolver
+        // stays the Tideless-static path (port plan §3.5, §8, D9).
         IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
-        return IgaScopeResolver.resolveThreshold(session, realm, scope, cr);
+        if (scope != null && !scope.thresholds.isEmpty()) {
+            return IgaScopeResolver.resolveThreshold(session, realm, scope, cr);   // per-scope override wins
+        }
+        if (cr != null && IgaReplayExtension.isAdoptAction(cr.getActionType())) {
+            return 1;                                                              // ADOPT bypass wins
+        }
+        return Math.max(1, (int) (THRESHOLD_PERCENTAGE * countActiveTideRealmAdmins(realm, session))); // §3.6 / §3.7
+    }
+
+    // -------------------------------------------------------------------------
+    // Mode resolution + dynamic threshold count (port plan §3.1, §3.5–3.7)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Resolve the firstAdmin/multiAdmin mode for the realm (port plan §3.1).
+     *
+     * <p>If an {@link IgaAuthorizerEntity} row exists and its {@code mode} column
+     * is set, that column is authoritative. Otherwise (the dormant-entity default
+     * — {@code iga_authorizer} holds 0 rows for every realm today, §9.1) the mode
+     * is decided by the realm's Tide-vs-Tideless discriminator
+     * {@code iga.attestor} (IgaAttestors.java:21-35):
+     * <ul>
+     *   <li>{@code iga.attestor=="tide"} → {@code "firstAdmin"} — a Tide realm
+     *       that has not yet bootstrapped its admin policy. The first Tide-mode
+     *       {@link #record} lazily materialises this row seeded {@code firstAdmin}
+     *       (§9.3); until then this no-row branch reports {@code firstAdmin} so the
+     *       bootstrap branch runs.</li>
+     *   <li>otherwise → {@code null} (no-op). The authorizer entity is irrelevant
+     *       to Tideless; {@code SimpleNameAttestor} never consults it and never
+     *       calls this method, so this branch is reached only by a defensive stray
+     *       call and deliberately does not fabricate a mode for a non-Tide realm.</li>
+     * </ul>
+     */
+    private String resolveMode(KeycloakSession session, RealmModel realm) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaAuthorizerEntity row = em.createNamedQuery("IgaAuthorizer.findByRealm", IgaAuthorizerEntity.class)
+                .setParameter("realmId", realm.getId())
+                .getResultStream().findFirst().orElse(null);
+
+        // A row exists with a set mode column: it is authoritative.
+        if (row != null && row.getMode() != null) {
+            return row.getMode();
+        }
+
+        // No row (or a legacy row predating the MODE column): derive from the
+        // realm's Tide-vs-Tideless discriminator.
+        String attestor = realm.getAttribute(ATTR_IGA_ATTESTOR);              // IgaAttestors.java:22
+        if (ID.equals(attestor)) {
+            return MODE_FIRST_ADMIN;
+        }
+        return null;
+    }
+
+    /**
+     * Count the realm's ACTIVE tide-realm-admins for the dynamic multiAdmin
+     * threshold (port plan §3.6 / §3.7). A user counts iff it simultaneously
+     * (a) holds the {@code tide-realm-admin} realm-management role,
+     * (b) is enabled, and (c) has a COMMITTED Tide identity — operationalised as a
+     * {@code USER_ROLE_MAPPING} row for {@code (user, tide-realm-admin)} with
+     * {@code attestation IS NOT NULL} (the inverse of the unsigned-row scan
+     * {@code IgaUnsignedRowScanner.userRoleMappings}, IgaUnsignedRowScanner.java:541-547).
+     * A PENDING grant stamps nothing, so a committed grant is exactly a non-pending
+     * one and this single signal subsumes both the "committed" and "not pending"
+     * sub-predicates.
+     */
+    private static int countActiveTideRealmAdmins(RealmModel realm, KeycloakSession session) {
+        ClientModel rm = realm.getClientByClientId(REALM_MANAGEMENT_CLIENT_ID);
+        if (rm == null) return 0;
+        RoleModel tideAdmin = rm.getRole(TIDE_REALM_ADMIN_ROLE);
+        if (tideAdmin == null) return 0;
+
+        // (user id) set whose USER_ROLE_MAPPING.attestation IS NOT NULL for the
+        // tide-realm-admin role — the committed/stamped grants.
+        Set<String> committedAdminUserIds = committedTideAdminUserIds(session, realm, tideAdmin.getId());
+        if (committedAdminUserIds.isEmpty()) return 0;
+
+        return (int) session.users().getRoleMembersStream(realm, tideAdmin)
+                .filter(UserModel::isEnabled)
+                .filter(u -> committedAdminUserIds.contains(u.getId()))  // committed grant only (not PENDING)
+                .count();
+    }
+
+    /**
+     * Inverse of {@code IgaUnsignedRowScanner.userRoleMappings} (IgaUnsignedRowScanner.java:541-547):
+     * the user ids whose {@code (user, roleId)} USER_ROLE_MAPPING row is stamped
+     * ({@code attestation IS NOT NULL}) — i.e. the committed grants of {@code roleId}
+     * in the realm.
+     */
+    private static Set<String> committedTideAdminUserIds(KeycloakSession session, RealmModel realm, String roleId) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        @SuppressWarnings("unchecked")
+        List<String> ids = em.createQuery(
+                        "SELECT urm.user.id FROM UserRoleMappingEntity urm "
+                                + "WHERE urm.user.realmId = :realmId AND urm.roleId = :roleId "
+                                + "AND urm.attestation IS NOT NULL")
+                .setParameter("realmId", realm.getId())
+                .setParameter("roleId", roleId)
+                .getResultList();
+        return new HashSet<>(ids);
     }
 
     /**
