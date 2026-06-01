@@ -7,12 +7,38 @@ import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.OrganizationDomainModel;
 import org.keycloak.models.OrganizationModel;
 import org.keycloak.models.ProtocolMapperModel;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.organization.OrganizationProvider;
+import org.tidecloak.iga.producer.units.AttestationUnit;
+import org.tidecloak.iga.producer.units.ClientConfigUnit;
+import org.tidecloak.iga.producer.units.ClientMapperSetUnit;
+import org.tidecloak.iga.producer.units.ClientScopeAssignmentSetUnit;
+import org.tidecloak.iga.producer.units.ClientScopeConfigUnit;
+import org.tidecloak.iga.producer.units.ClientScopeMapperSetUnit;
+import org.tidecloak.iga.producer.units.GroupDefinitionUnit;
+import org.tidecloak.iga.producer.units.GroupRoleMappingSetUnit;
+import org.tidecloak.iga.producer.units.GroupType;
+import org.tidecloak.iga.producer.units.NameValue;
+import org.tidecloak.iga.producer.units.NameValues;
+import org.tidecloak.iga.producer.units.OrgDomain;
+import org.tidecloak.iga.producer.units.OrganizationDefinitionUnit;
+import org.tidecloak.iga.producer.units.OrganizationDomainSetUnit;
+import org.tidecloak.iga.producer.units.ParentType;
+import org.tidecloak.iga.producer.units.ProtocolMapperUnit;
+import org.tidecloak.iga.producer.units.RealmConfigUnit;
+import org.tidecloak.iga.producer.units.RealmDefaultGroupsSetUnit;
+import org.tidecloak.iga.producer.units.RoleCompositeChildrenSetUnit;
+import org.tidecloak.iga.producer.units.RoleDefinitionUnit;
+import org.tidecloak.iga.producer.units.ScopeAssignment;
+import org.tidecloak.iga.producer.units.ScopeRoleAllowlistSetUnit;
+import org.tidecloak.iga.producer.units.UserGroupMembershipSetUnit;
+import org.tidecloak.iga.producer.units.UserIdentityUnit;
+import org.tidecloak.iga.producer.units.UserRoleMappingSetUnit;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -24,10 +50,13 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Emits the closure of attestation-unit envelopes (plain JSON, no JCS / no
- * signature — design §2) for a {@code (realm, client, user, scope)}, so the ork
- * {@code TokenValidationEngine} can validate a real issued token against current
- * attested realm state.
+ * Emits the closure of typed {@link AttestationUnit} instances (plain CBOR/JSON,
+ * no JCS / no signature — design §2) for a {@code (realm, client, user, scope)},
+ * so the ork {@code TokenValidationEngine} can validate a real issued token
+ * against current attested realm state. Each unit mirrors its ork C# counterpart
+ * field-for-field and can {@code serialize()} itself to a self-contained
+ * full-envelope CBOR ({@code unit_type, schema_version, realm_id, target_id,
+ * payload}).
  *
  * <p><b>Full claim closure.</b> A real Keycloak access token (even
  * {@code scope=openid}) carries the claims of every DEFAULT client scope (and
@@ -40,38 +69,13 @@ import java.util.Set;
  * client roles. The engine validates the EXACT token: it rejects any claim with
  * no attested source AND any attested-but-suppressed claim. So the producer must
  * emit precisely the closure the requested {@code (client, user, scope)} would
- * issue — no more, no less:
- * <ul>
- *   <li>the 4-unit floor: {@code realm_config}, {@code client_config} (the
- *       request client), {@code client_scope_assignment_set}, {@code user_identity};</li>
- *   <li>a {@code client_scope_config} per assigned scope;</li>
- *   <li>the {@code protocol_mapper}s of EVERY active scope (the client's own
- *       dedicated mappers + each resolved scope's mappers) plus their
- *       {@code client_mapper_set} / {@code client_scope_mapper_set} membership
- *       — not just the role mappers, so the profile/email/roles/etc. claims all
- *       have an attested source;</li>
- *   <li>a {@code role_definition} + {@code role_composite_children_set} for the
- *       FULL TRANSITIVE role closure of the user's grants — INCLUDING built-ins
- *       ({@code offline_access}, {@code uma_authorization}, the
- *       {@code default-roles-<realm>} composite and its children). Every role id
- *       that can surface in the token gets a definition, even system roles;</li>
- *   <li>a {@code client_config} for every OWNING client of a client-role in that
- *       closure (e.g. {@code account}) — the engine's client-role mapper walks
- *       {@code role_definition.container_id → client_config} to name
- *       {@code resource_access.<clientId>}, so an unattested owner would drop the
- *       claim;</li>
- *   <li>{@code user_role_mapping_set} (the RAW stored child set) and the
- *       {@code scope_role_allowlist_set} for the client and any scope carrying a
- *       scope→role allowlist.</li>
- * </ul>
+ * issue — no more, no less.
  *
  * <p><b>Role-closure rule (built-ins included).</b> {@code includeSystem=false}
  * skips built-in CLIENTS / SCOPES from <i>independent</i> governance, but it must
  * NOT drop a {@code role_definition} for any role that surfaces in the token via
  * the {@code default-roles} composite expansion. The transitive walk therefore
- * ignores the system filter entirely — it mirrors, in reverse, the engine's
- * {@code MapperContext.GrantedRoles()} composite expansion
- * ({@code role_composite_children_set} recursion with a cycle/diamond guard).
+ * ignores the system filter entirely.
  *
  * <p>Payload field names / types mirror the ork unit schemas field-for-field
  * ({@code Ork/.../AttestationUnits/*.cs}). Every declared field is present;
@@ -89,23 +93,6 @@ import java.util.Set;
 public final class RealmAttestationExporter {
 
     private static final Logger log = Logger.getLogger(RealmAttestationExporter.class);
-
-    // ---- ork unit_type wire strings (snake_case, case-sensitive) ----
-    private static final String U_REALM_CONFIG = "realm_config";
-    private static final String U_CLIENT_CONFIG = "client_config";
-    private static final String U_CLIENT_SCOPE_CONFIG = "client_scope_config";
-    private static final String U_PROTOCOL_MAPPER = "protocol_mapper";
-    private static final String U_ROLE_DEFINITION = "role_definition";
-    private static final String U_USER_IDENTITY = "user_identity";
-    private static final String U_USER_ROLE_MAPPING_SET = "user_role_mapping_set";
-    private static final String U_ROLE_COMPOSITE_CHILDREN_SET = "role_composite_children_set";
-    private static final String U_CLIENT_SCOPE_ASSIGNMENT_SET = "client_scope_assignment_set";
-    private static final String U_CLIENT_MAPPER_SET = "client_mapper_set";
-    private static final String U_CLIENT_SCOPE_MAPPER_SET = "client_scope_mapper_set";
-    private static final String U_SCOPE_ROLE_ALLOWLIST_SET = "scope_role_allowlist_set";
-    private static final String U_ORGANIZATION_DEFINITION = "organization_definition";
-    private static final String U_GROUP_DEFINITION = "group_definition";
-    private static final String U_USER_GROUP_MEMBERSHIP_SET = "user_group_membership_set";
 
     // realm_config attributes the ork preset carries (design §5 / RealmConfig preset).
     private static final List<String> REALM_CONFIG_ATTR_KEYS = List.of(
@@ -165,12 +152,12 @@ public final class RealmAttestationExporter {
     }
 
     /**
-     * Emit the full-closure set of attestation-unit envelopes for the request.
+     * Emit the full-closure set of typed attestation units for the request.
      * Caller is responsible for binding the realm onto the session context if the
      * session is fresh (see {@code IgaAdoptScan}).
      */
-    public List<AttestationEnvelope> export(KeycloakSession session, RealmModel realm,
-                                            ExportRequest req) {
+    public List<AttestationUnit> export(KeycloakSession session, RealmModel realm,
+                                        ExportRequest req) {
         session.getContext().setRealm(realm);
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         String realmId = realm.getId();
@@ -186,7 +173,7 @@ public final class RealmAttestationExporter {
                     + "' not found in realm " + realm.getName());
         }
 
-        List<AttestationEnvelope> out = new ArrayList<>();
+        List<AttestationUnit> out = new ArrayList<>();
 
         // 1) realm_config (target = realm UUID).
         out.add(realmConfig(realm, realmId));
@@ -208,11 +195,7 @@ public final class RealmAttestationExporter {
         // 6) user_role_mapping_set — the RAW stored USER_ROLE_MAPPING child set
         //    (JPQL, not the effective set) so the hash matches the stored rows.
         List<String> seedRoleIds = userRoleMappingSet(em, req.userId());
-        out.add(setUnit(U_USER_ROLE_MAPPING_SET, realmId, req.userId(), payload -> {
-            payload.put("user_id", req.userId());
-            payload.put("realm_id", realmId);
-            payload.put("role_ids", seedRoleIds);
-        }));
+        out.add(new UserRoleMappingSetUnit(realmId, req.userId(), seedRoleIds));
 
         // 7) role_definition + 8) role_composite_children_set for the FULL TRANSITIVE
         //    role closure (mirrors the engine's GrantedRoles composite expansion).
@@ -254,13 +237,14 @@ public final class RealmAttestationExporter {
         //     empty (the ork distinguishes "no entries" from "missing"); only the
         //     parent_type=client one is consulted by the full-scope filter, but emitting
         //     it always keeps the closure honest.
-        out.add(scopeRoleAllowlistSet("client", client.getId(), realmId,
+        out.add(new ScopeRoleAllowlistSetUnit(realmId, ParentType.client, client.getId(),
                 scopeMappingRoleIds(client)));
         // Per assigned scope that carries its own scope→role mapping.
         for (ClientScopeModel scope : assigned.values()) {
             List<String> scopeAllow = scopeMappingRoleIds(scope);
             if (!scopeAllow.isEmpty()) {
-                out.add(scopeRoleAllowlistSet("client_scope", scope.getId(), realmId, scopeAllow));
+                out.add(new ScopeRoleAllowlistSetUnit(realmId, ParentType.client_scope,
+                        scope.getId(), scopeAllow));
             }
         }
 
@@ -270,20 +254,24 @@ public final class RealmAttestationExporter {
         //     attested source.
         emitAllActiveMappers(client, assigned, req, realmId, out);
 
-        // 13) Organization closure for the org-membership claim mapper
+        // 13) realm_default_groups_set (unit 16) — the realm's REALM_DEFAULT_GROUPS
+        //     set, target = realm UUID. Load-bearing only for user-creation flows but
+        //     emitted always to keep the closure honest. Empty group list still emits
+        //     (the ork distinguishes "no entries" from "missing").
+        out.add(realmDefaultGroupsSet(realm, realmId));
+
+        // 14) Organization closure for the org-membership claim mapper
         //     (OrganizationMembershipClaimMapper). The mapper walks:
         //     user_identity → user_group_membership_set → (per group_id)
-        //     group_definition (type=ORGANIZATION) → reverse FK
-        //     organization_definition.group_id → alias. Emitting these three unit
-        //     families gives the engine an attested source for the `organization`
-        //     claim. No-ops on a realm without organizations (and on a user with
-        //     zero memberships, no user_group_membership_set is emitted — the
-        //     mapper then returns an empty alias set and drops the claim, matching
-        //     KC's runtime behaviour).
+        //     group_definition (type=ORGANIZATION) + group_role_mapping_set (unit 10)
+        //     → reverse FK organization_definition.group_id → alias, plus the org's
+        //     organization_domain_set (unit 18). Emitting these unit families gives
+        //     the engine an attested source for the `organization` claim. No-ops on a
+        //     realm without organizations.
         int orgUnitsEmitted = emitOrganizationClosure(session, em, realm, user, realmId, out);
 
         log.infof("producer: full-closure export realm=%s client=%s user=%s scope=%s -> "
-                        + "%d envelope(s); roles=%d ownerClients=%d orgUnits=%d",
+                        + "%d unit(s); roles=%d ownerClients=%d orgUnits=%d",
                 realm.getName(), req.clientId(), req.userId(), req.scope(),
                 out.size(), roleClosure.size(), ownerClientUuids.size(), orgUnitsEmitted);
         return out;
@@ -291,43 +279,39 @@ public final class RealmAttestationExporter {
 
     // -------------------------------------------------------------------------
     // Organization closure (units 6 group_definition, 9 user_group_membership_set,
-    // 17 organization_definition) — backs the org-membership claim mapper.
+    // 10 group_role_mapping_set, 17 organization_definition, 18 organization_domain_set)
     // -------------------------------------------------------------------------
 
     /**
-     * Emit the org-closure trio backing the {@code organization} claim mapper:
+     * Emit the org-closure family backing the {@code organization} claim mapper:
      * <ol>
-     *   <li>{@link #U_USER_GROUP_MEMBERSHIP_SET} (unit 9) — the user's RAW stored
-     *       USER_GROUP_MEMBERSHIP child set (group ids), exactly one envelope, target
-     *       = user id. Skipped when empty (and the engine's
-     *       {@code ResolveMemberAliases} then yields no aliases, dropping the
-     *       claim — matches KC runtime).</li>
-     *   <li>{@link #U_GROUP_DEFINITION} (unit 6) — one envelope per
-     *       ORGANIZATION-type backing group the user is in. {@code type=ORGANIZATION}
-     *       gates the org membership in the engine's WALK.group_to_org; without it
-     *       a joined regular (REALM-type) group would never resolve an org.
-     *       Top-level groups serialize {@code parent_group_id=null} (KC's literal
-     *       single-space sentinel is folded to null per the unit-6 spec gotcha).</li>
-     *   <li>{@link #U_ORGANIZATION_DEFINITION} (unit 17) — one envelope per org the
-     *       user is a MEMBER of, target = org id. Wire fields: {@code org_id},
-     *       {@code alias}, {@code enabled}, {@code group_id} (the reverse FK the
-     *       engine walks: {@code organization_definition.group_id == group.group_id}).</li>
+     *   <li>{@code user_group_membership_set} (unit 9) — the user's RAW stored
+     *       USER_GROUP_MEMBERSHIP child set, one unit, target = user id. Skipped
+     *       when empty (the engine's {@code ResolveMemberAliases} then yields no
+     *       aliases, dropping the claim — matches KC runtime).</li>
+     *   <li>{@code group_definition} (unit 6) — one unit per ORGANIZATION-type
+     *       backing group the user is in. {@code type=ORGANIZATION} gates the org
+     *       membership in the engine's WALK.group_to_org.</li>
+     *   <li>{@code group_role_mapping_set} (unit 10) — the RAW stored
+     *       GROUP_ROLE_MAPPING child set for each visited backing group, so any
+     *       role inherited through the org group has an attested source.</li>
+     *   <li>{@code organization_definition} (unit 17) — one unit per org the user
+     *       is a MEMBER of, target = org id ({@code org_id, alias, enabled,
+     *       group_id}).</li>
+     *   <li>{@code organization_domain_set} (unit 18) — one unit per such org, the
+     *       complete {@code (name, verified)} ORG_DOMAIN set, target = org id.</li>
      * </ol>
      *
      * <p>Uses {@link OrganizationProvider#getByMember(UserModel)} to enumerate the
-     * orgs (the same surface the KC OrganizationMembershipMapper uses), then derives
-     * the backing-group id via JPQL against {@code OrganizationEntity.groupId} (the
-     * public {@code OrganizationModel} interface does not expose {@code getGroupId()}
-     * — only the JPA adapter does; JPQL keeps us interface-clean).</p>
+     * orgs, then derives the backing-group id via JPQL against
+     * {@code OrganizationEntity.groupId} (the public {@code OrganizationModel}
+     * interface does not expose {@code getGroupId()}; JPQL keeps us interface-clean).
      *
-     * <p>Returns the count of envelopes added (for the producer log).</p>
+     * <p>Returns the count of units added (for the producer log).</p>
      */
     private int emitOrganizationClosure(KeycloakSession session, EntityManager em,
                                         RealmModel realm, UserModel user, String realmId,
-                                        List<AttestationEnvelope> out) {
-        // Resolve OrganizationProvider only when the realm has organizations enabled
-        // (and when the provider is registered at all). Failing soft keeps the
-        // producer working on a non-org realm — a regression-safe pre-check.
+                                        List<AttestationUnit> out) {
         OrganizationProvider orgProvider;
         try {
             orgProvider = session.getProvider(OrganizationProvider.class);
@@ -340,25 +324,19 @@ public final class RealmAttestationExporter {
             return 0;
         }
 
-        // 1) user's full group-membership set (the RAW stored child set). One envelope
-        //    per user. Mirrors the user_role_mapping_set JPQL shape (and the
-        //    ResolveMemberAliases walk: U9 -> U6 -> U17).
+        // 1) user's full group-membership set (the RAW stored child set). One unit
+        //    per user. Mirrors the user_role_mapping_set JPQL shape.
         List<String> groupIds = userGroupMembershipSet(em, user.getId());
         int added = 0;
         if (!groupIds.isEmpty()) {
-            out.add(setUnit(U_USER_GROUP_MEMBERSHIP_SET, realmId, user.getId(), p -> {
-                p.put("user_id", user.getId());
-                p.put("realm_id", realmId);
-                p.put("group_ids", groupIds);
-            }));
+            out.add(new UserGroupMembershipSetUnit(realmId, user.getId(), groupIds));
             added++;
         }
 
-        // 2) per-org closure: organization_definition + the ORGANIZATION-type backing
-        //    group_definition. Driven by the orgs the user is a MEMBER of (the engine
-        //    walks membership first, so this set is exact). Dedup the group ids so a
-        //    user in two orgs that (theoretically) share a backing group doesn't emit
-        //    twice — KC's data model is one-group-per-org but the guard costs nothing.
+        // 2) per-org closure: organization_definition + organization_domain_set + the
+        //    ORGANIZATION-type backing group_definition + its group_role_mapping_set.
+        //    Driven by the orgs the user is a MEMBER of (the engine walks membership
+        //    first, so this set is exact). Dedup group ids.
         Set<String> emittedGroupIds = new LinkedHashSet<>();
         List<OrganizationModel> memberOrgs = orgProvider.getByMember(user)
                 .collect(java.util.stream.Collectors.toList());
@@ -370,40 +348,36 @@ public final class RealmAttestationExporter {
                         + "skipping org closure for it (closure incomplete)", orgId);
                 continue;
             }
-            // organization_definition (unit 17). Wire fields per
-            // OrganizationDefinitionAttestationUnit: org_id, realm_id, alias, enabled,
-            // group_id. realm_id hoisted from the envelope; payload mirrors the unit's
-            // BuildCanonicalPayload key-for-key.
-            final String alias = org.getAlias();
-            final boolean enabled = org.isEnabled();
-            out.add(setUnit(U_ORGANIZATION_DEFINITION, realmId, orgId, p -> {
-                p.put("org_id", orgId);
-                p.put("realm_id", realmId);
-                p.put("alias", alias);
-                p.put("enabled", enabled);
-                p.put("group_id", groupId);
-            }));
+            // organization_definition (unit 17).
+            out.add(new OrganizationDefinitionUnit(realmId, orgId, org.getAlias(),
+                    org.isEnabled(), groupId));
             added++;
 
-            // group_definition (unit 6) for the ORGANIZATION-type backing group.
-            // Dedup (same group can theoretically back multiple orgs in a malformed
-            // data set; KC normally maintains a 1:1).
+            // organization_domain_set (unit 18) — the complete (name, verified) set
+            // from ORG_DOMAIN via the public OrganizationModel.getDomains() surface.
+            out.add(organizationDomainSet(org, realmId));
+            added++;
+
+            // group_definition (unit 6) + group_role_mapping_set (unit 10) for the
+            // ORGANIZATION-type backing group (dedup across orgs).
             if (emittedGroupIds.add(groupId)) {
                 GroupModel backing = realm.getGroupById(groupId);
                 if (backing == null) {
                     log.warnf("producer: org %s backing group %s not resolvable; "
-                            + "emitting group_definition with minimal payload may drop the claim",
+                            + "skipping group_definition (may drop the claim)",
                             orgId, groupId);
                     continue;
                 }
                 out.add(groupDefinition(backing, realmId));
+                added++;
+                out.add(groupRoleMappingSet(em, groupId, realmId));
                 added++;
             }
         }
         return added;
     }
 
-    /** Per-user RAW USER_GROUP_MEMBERSHIP child set (group ids). Mirrors the user_role_mapping_set JPQL. */
+    /** Per-user RAW USER_GROUP_MEMBERSHIP child set (group ids). Mirrors userRoleMappingSet JPQL. */
     private List<String> userGroupMembershipSet(EntityManager em, String userId) {
         String jpql = "SELECT m.groupId FROM UserGroupMembershipEntity m WHERE m.user.id = :owner";
         if (onlyAttested) {
@@ -415,6 +389,15 @@ public final class RealmAttestationExporter {
         @SuppressWarnings("unchecked")
         List<String> ids = em.createQuery(jpql).setParameter("owner", userId).getResultList();
         return new ArrayList<>(ids);
+    }
+
+    /** Per-group RAW GROUP_ROLE_MAPPING child set (role ids). Mirrors userRoleMappingSet JPQL. */
+    private GroupRoleMappingSetUnit groupRoleMappingSet(EntityManager em, String groupId,
+                                                        String realmId) {
+        String jpql = "SELECT m.roleId FROM GroupRoleMappingEntity m WHERE m.group.id = :gid";
+        @SuppressWarnings("unchecked")
+        List<String> ids = em.createQuery(jpql).setParameter("gid", groupId).getResultList();
+        return new GroupRoleMappingSetUnit(realmId, groupId, new ArrayList<>(ids));
     }
 
     /**
@@ -432,25 +415,28 @@ public final class RealmAttestationExporter {
     }
 
     /**
-     * Build a {@code group_definition} envelope for a backing group. Wire fields per
-     * {@code GroupDefinitionAttestationUnit}: {@code group_id}, {@code name},
-     * {@code realm_id}, {@code parent_group_id}, {@code type}. {@code type} is the
-     * literal {@code "REALM"} or {@code "ORGANIZATION"} enum name (Type.toString()
-     * round-trips the wire value, per AttestationUnit.cs). KC's literal single-space
-     * sentinel for a top-level group's parent is NOT applied here: {@code getParentId()}
-     * already returns null for top-level groups; the engine's GetGroupParentId folds
-     * a literal {@code " "} to null defensively. ORGANIZATION-type backing groups are
-     * always top-level (the org schema does not nest them), so this is null in practice.
+     * Build the {@code organization_domain_set} (unit 18) from the public
+     * {@code OrganizationModel.getDomains()} surface — the complete
+     * {@code (name, verified)} ORG_DOMAIN set for the org, target = org id.
      */
-    private AttestationEnvelope groupDefinition(GroupModel group, String realmId) {
-        Map<String, Object> p = new LinkedHashMap<>();
-        p.put("group_id", group.getId());
-        p.put("name", group.getName());
-        p.put("realm_id", realmId);
-        p.put("parent_group_id", group.getParentId()); // null for top-level (org backing)
+    private OrganizationDomainSetUnit organizationDomainSet(OrganizationModel org, String realmId) {
+        List<OrgDomain> domains = new ArrayList<>();
+        org.getDomains().forEach((OrganizationDomainModel d) ->
+                domains.add(new OrgDomain(d.getName(), d.isVerified())));
+        return new OrganizationDomainSetUnit(realmId, org.getId(), domains);
+    }
+
+    /**
+     * Build a {@code group_definition} unit for a backing group. {@code type} is the
+     * literal {@code REALM}/{@code ORGANIZATION} enum name. KC's {@code getParentId()}
+     * returns null for top-level groups; ORGANIZATION-type backing groups are always
+     * top-level, so {@code parent_group_id} is null in practice.
+     */
+    private GroupDefinitionUnit groupDefinition(GroupModel group, String realmId) {
         GroupModel.Type t = group.getType();
-        p.put("type", (t == null ? GroupModel.Type.REALM : t).name());
-        return new AttestationEnvelope(U_GROUP_DEFINITION, realmId, group.getId(), p);
+        GroupType type = (t == GroupModel.Type.ORGANIZATION) ? GroupType.ORGANIZATION : GroupType.REALM;
+        return new GroupDefinitionUnit(realmId, group.getId(), group.getName(),
+                group.getParentId(), type);
     }
 
     // -------------------------------------------------------------------------
@@ -461,11 +447,8 @@ public final class RealmAttestationExporter {
      * The full transitive role closure of the user's stored grants: the seed role
      * ids, each COMPOSITE-EXPANDED via {@link RoleModel#getCompositesStream()}
      * recursively, with a {@code seen} set guarding cycles/diamonds. Built-in /
-     * system roles ({@code offline_access}, {@code uma_authorization}, the
-     * {@code default-roles-<realm>} composite and its children, the {@code account}
-     * client roles) are INCLUDED — every role id that can surface in the token must
-     * have a definition. This mirrors, in reverse, the engine's
-     * {@code MapperContext.GrantedRoles()} ({@code RoleUtils.expandCompositeRoles}).
+     * system roles are INCLUDED — every role id that can surface in the token must
+     * have a definition. Mirrors, in reverse, the engine's GrantedRoles.
      */
     private Set<RoleModel> transitiveRoleClosure(RealmModel realm, List<String> seedRoleIds,
                                                  String userId) {
@@ -492,138 +475,106 @@ public final class RealmAttestationExporter {
     }
 
     // -------------------------------------------------------------------------
-    // Node units
+    // Node units (definition bundles)
     // -------------------------------------------------------------------------
 
-    private AttestationEnvelope realmConfig(RealmModel realm, String realmId) {
-        Map<String, Object> p = new LinkedHashMap<>();
-        p.put("realm_id", realmId);
-        p.put("name", realm.getName());
-        p.put("access_token_lifespan_seconds", realm.getAccessTokenLifespan());
-        p.put("access_token_lifespan_for_implicit_flow_seconds",
-                realm.getAccessTokenLifespanForImplicitFlow());
-        p.put("sso_session_idle_timeout_seconds", realm.getSsoSessionIdleTimeout());
-        p.put("sso_session_max_lifespan_seconds", realm.getSsoSessionMaxLifespan());
-        p.put("client_session_idle_timeout_seconds", realm.getClientSessionIdleTimeout());
-        p.put("client_session_max_lifespan_seconds", realm.getClientSessionMaxLifespan());
-        p.put("offline_session_idle_timeout_seconds", realm.getOfflineSessionIdleTimeout());
-        p.put("offline_session_max_lifespan_enabled", realm.isOfflineSessionMaxLifespanEnabled());
-        p.put("offline_session_max_lifespan_seconds", realm.getOfflineSessionMaxLifespan());
-        p.put("attributes", realmConfigAttributes(realm));
-        return new AttestationEnvelope(U_REALM_CONFIG, realmId, realmId, p);
+    private RealmConfigUnit realmConfig(RealmModel realm, String realmId) {
+        return new RealmConfigUnit(realmId,
+                realm.getName(),
+                realm.getAccessTokenLifespan(),
+                realm.getAccessTokenLifespanForImplicitFlow(),
+                realm.getSsoSessionIdleTimeout(),
+                realm.getSsoSessionMaxLifespan(),
+                realm.getClientSessionIdleTimeout(),
+                realm.getClientSessionMaxLifespan(),
+                realm.getOfflineSessionIdleTimeout(),
+                realm.isOfflineSessionMaxLifespanEnabled(),
+                realm.getOfflineSessionMaxLifespan(),
+                realmConfigAttributes(realm));
     }
 
-    /** The producer-filtered realm attributes ({name,value} list). */
-    private List<Map<String, Object>> realmConfigAttributes(RealmModel realm) {
-        List<Map<String, Object>> attrs = new ArrayList<>();
+    /** The producer-filtered realm attributes ({name,value} list; null → ""). */
+    private List<NameValue> realmConfigAttributes(RealmModel realm) {
+        List<NameValue> attrs = new ArrayList<>();
         for (String key : REALM_CONFIG_ATTR_KEYS) {
             String val = realm.getAttribute(key);
-            attrs.add(nameValue(key, val == null ? "" : val));
+            attrs.add(new NameValue(key, val == null ? "" : val));
         }
         return attrs;
     }
 
-    private AttestationEnvelope clientConfig(ClientModel client, String realmId) {
-        Map<String, Object> p = new LinkedHashMap<>();
-        p.put("client_id_uuid", client.getId());
-        p.put("client_id", client.getClientId());
-        p.put("realm_id", realmId);
-        p.put("protocol", nullToEmpty(client.getProtocol()));
-        p.put("full_scope_allowed", client.isFullScopeAllowed());
-        p.put("service_accounts_enabled", client.isServiceAccountsEnabled());
-        p.put("web_origins", new ArrayList<>(orEmptySet(client.getWebOrigins())));
-        p.put("attributes", attributeNameValues(client.getAttributes()));
-        return new AttestationEnvelope(U_CLIENT_CONFIG, realmId, client.getId(), p);
+    private ClientConfigUnit clientConfig(ClientModel client, String realmId) {
+        return new ClientConfigUnit(realmId,
+                client.getId(),
+                client.getClientId(),
+                nullToEmpty(client.getProtocol()),
+                client.isFullScopeAllowed(),
+                client.isServiceAccountsEnabled(),
+                new ArrayList<>(orEmptySet(client.getWebOrigins())),
+                attributeNameValues(client.getAttributes()));
     }
 
-    private AttestationEnvelope clientScopeConfig(ClientScopeModel scope, String realmId) {
-        Map<String, Object> p = new LinkedHashMap<>();
-        p.put("client_scope_id", scope.getId());
-        p.put("name", scope.getName());
-        p.put("realm_id", realmId);
-        p.put("protocol", nullToEmpty(scope.getProtocol()));
-        p.put("attributes", attributeNameValues(scope.getAttributes()));
-        return new AttestationEnvelope(U_CLIENT_SCOPE_CONFIG, realmId, scope.getId(), p);
+    private ClientScopeConfigUnit clientScopeConfig(ClientScopeModel scope, String realmId) {
+        return new ClientScopeConfigUnit(realmId,
+                scope.getId(),
+                scope.getName(),
+                nullToEmpty(scope.getProtocol()),
+                attributeNameValues(scope.getAttributes()));
     }
 
-    private AttestationEnvelope userIdentity(UserModel user, String realmId) {
-        Map<String, Object> p = new LinkedHashMap<>();
-        p.put("user_id", user.getId());
-        p.put("username", user.getUsername());
-        p.put("realm_id", realmId);
-        p.put("email", user.getEmail());           // explicit null if absent
-        p.put("email_verified", user.isEmailVerified());
-        p.put("first_name", user.getFirstName());   // explicit null if absent
-        p.put("last_name", user.getLastName());     // explicit null if absent
-        p.put("attributes", userAttributeNameValues(user.getAttributes()));
-        return new AttestationEnvelope(U_USER_IDENTITY, realmId, user.getId(), p);
+    private UserIdentityUnit userIdentity(UserModel user, String realmId) {
+        return new UserIdentityUnit(realmId,
+                user.getId(),
+                user.getUsername(),
+                user.getEmail(),            // explicit null if absent
+                user.isEmailVerified(),
+                user.getFirstName(),        // explicit null if absent
+                user.getLastName(),         // explicit null if absent
+                userAttributeNameValues(user.getAttributes()));
     }
 
-    private AttestationEnvelope roleDefinition(RoleModel role, String realmId) {
-        Map<String, Object> p = new LinkedHashMap<>();
-        p.put("role_id", role.getId());
-        p.put("name", role.getName());
-        p.put("realm_id", realmId);
-        p.put("client_role", role.isClientRole());
+    private RoleDefinitionUnit roleDefinition(RoleModel role, String realmId) {
         // container_id = owning client UUID for client roles, else the realm id.
-        p.put("container_id", role.getContainerId());
-        return new AttestationEnvelope(U_ROLE_DEFINITION, realmId, role.getId(), p);
+        return new RoleDefinitionUnit(realmId, role.getId(), role.getName(),
+                role.isClientRole(), role.getContainerId());
     }
 
-    private AttestationEnvelope roleCompositeChildrenSet(RoleModel role, String realmId) {
+    private RoleCompositeChildrenSetUnit roleCompositeChildrenSet(RoleModel role, String realmId) {
         List<String> childIds = new ArrayList<>();
         if (role.isComposite()) {
             role.getCompositesStream().forEach(c -> childIds.add(c.getId()));
         }
-        return setUnit(U_ROLE_COMPOSITE_CHILDREN_SET, realmId, role.getId(), p -> {
-            p.put("composite_role_id", role.getId());
-            p.put("realm_id", realmId);
-            p.put("child_role_ids", childIds);
-        });
+        return new RoleCompositeChildrenSetUnit(realmId, role.getId(), childIds);
     }
 
     // -------------------------------------------------------------------------
     // Set units
     // -------------------------------------------------------------------------
 
-    private AttestationEnvelope clientScopeAssignmentSet(ClientModel client,
-                                                         Map<String, ClientScopeModel> assigned,
-                                                         String realmId) {
-        // default=true for default scopes, false for optional. Build the
-        // assignments list from the two KC scope maps.
+    private ClientScopeAssignmentSetUnit clientScopeAssignmentSet(
+            ClientModel client, Map<String, ClientScopeModel> assigned, String realmId) {
+        // default=true for default scopes, false for optional.
         Set<String> defaultIds = client.getClientScopes(true).values().stream()
                 .map(ClientScopeModel::getId).collect(java.util.stream.Collectors.toSet());
-        List<Map<String, Object>> assignments = new ArrayList<>();
+        List<ScopeAssignment> assignments = new ArrayList<>();
         for (ClientScopeModel scope : assigned.values()) {
-            Map<String, Object> a = new LinkedHashMap<>();
-            a.put("client_scope_id", scope.getId());
-            a.put("default", defaultIds.contains(scope.getId()));
-            assignments.add(a);
+            assignments.add(new ScopeAssignment(scope.getId(), defaultIds.contains(scope.getId())));
         }
-        return setUnit(U_CLIENT_SCOPE_ASSIGNMENT_SET, realmId, client.getId(), p -> {
-            p.put("client_id_uuid", client.getId());
-            p.put("realm_id", realmId);
-            p.put("assignments", assignments);
-        });
+        return new ClientScopeAssignmentSetUnit(realmId, client.getId(), assignments);
     }
 
-    private AttestationEnvelope scopeRoleAllowlistSet(String parentType, String parentId,
-                                                      String realmId, List<String> roleIds) {
-        return setUnit(U_SCOPE_ROLE_ALLOWLIST_SET, realmId, parentId, p -> {
-            p.put("parent_type", parentType);
-            p.put("parent_id", parentId);
-            p.put("realm_id", realmId);
-            p.put("role_ids", roleIds);
-        });
+    /** The realm's REALM_DEFAULT_GROUPS set (unit 16), target = realm UUID. */
+    private RealmDefaultGroupsSetUnit realmDefaultGroupsSet(RealmModel realm, String realmId) {
+        List<String> groupIds = new ArrayList<>();
+        realm.getDefaultGroupsStream().forEach(g -> groupIds.add(g.getId()));
+        return new RealmDefaultGroupsSetUnit(realmId, groupIds);
     }
 
     /**
      * The set of scopes whose mappers the token actually applies — mirrors the
      * engine's Stage 3 scope resolution: every DEFAULT scope (always applied) plus
      * every OPTIONAL scope whose name appears as a whitespace token in the request
-     * {@code scope} param. The engine only visits these scopes' mapper sets, so
-     * emitting mappers for an UNRESOLVED optional scope would be inert; emitting a
-     * mapper for a resolved scope is required to back its claims.
+     * {@code scope} param.
      */
     private Map<String, ClientScopeModel> resolveActiveScopes(ClientModel client,
                                                               ExportRequest req) {
@@ -655,14 +606,14 @@ public final class RealmAttestationExporter {
     /**
      * Emit a {@code protocol_mapper} for EVERY mapper on the client and on each
      * ACTIVE scope, plus the {@code client_mapper_set} / {@code client_scope_mapper_set}
-     * membership unit listing those ids. Generalizes the former role-only emit:
-     * the profile/email/roles/web-origins/etc. mappers are all emitted so each
-     * token claim has an attested source. (The engine resolves every id in a
-     * mapper-set to a protocol_mapper unit, so the set and the units stay in lockstep.)
+     * membership unit listing those ids. The profile/email/roles/web-origins/etc.
+     * mappers are all emitted so each token claim has an attested source. (The engine
+     * resolves every id in a mapper-set to a protocol_mapper unit, so the set and the
+     * units stay in lockstep.)
      */
     private void emitAllActiveMappers(ClientModel client, Map<String, ClientScopeModel> assigned,
                                       ExportRequest req, String realmId,
-                                      List<AttestationEnvelope> out) {
+                                      List<AttestationUnit> out) {
         // Client-owned (dedicated) mappers — the client-as-scope participant.
         // Filter out JWT-body-irrelevant factories (engine contract: the TVE
         // ClaimMapperRegistry REJECTS these as session-note-only / base-claim-handled;
@@ -674,15 +625,11 @@ public final class RealmAttestationExporter {
                         pm.getId(), pm.getProtocolMapper());
                 return;
             }
-            out.add(protocolMapper(pm, "client", client.getId(), realmId));
+            out.add(protocolMapper(pm, ParentType.client, client.getId(), realmId));
             clientMapperIds.add(pm.getId());
         });
         if (!clientMapperIds.isEmpty()) {
-            out.add(setUnit(U_CLIENT_MAPPER_SET, realmId, client.getId(), p -> {
-                p.put("client_id_uuid", client.getId());
-                p.put("realm_id", realmId);
-                p.put("protocol_mapper_ids", clientMapperIds);
-            }));
+            out.add(new ClientMapperSetUnit(realmId, client.getId(), clientMapperIds));
         }
         // Active scope mappers (default + requested-optional only — the engine never
         // visits an unresolved optional scope's mapper set). Same factory filter.
@@ -696,30 +643,24 @@ public final class RealmAttestationExporter {
                             pm.getProtocolMapper());
                     return;
                 }
-                out.add(protocolMapper(pm, "client_scope", scope.getId(), realmId));
+                out.add(protocolMapper(pm, ParentType.client_scope, scope.getId(), realmId));
                 scopeMapperIds.add(pm.getId());
             });
             if (!scopeMapperIds.isEmpty()) {
-                out.add(setUnit(U_CLIENT_SCOPE_MAPPER_SET, realmId, scope.getId(), p -> {
-                    p.put("client_scope_id", scope.getId());
-                    p.put("realm_id", realmId);
-                    p.put("protocol_mapper_ids", scopeMapperIds);
-                }));
+                out.add(new ClientScopeMapperSetUnit(realmId, scope.getId(), scopeMapperIds));
             }
         }
     }
 
-    private AttestationEnvelope protocolMapper(ProtocolMapperModel pm, String parentType,
-                                               String parentId, String realmId) {
-        Map<String, Object> p = new LinkedHashMap<>();
-        p.put("protocol_mapper_id", pm.getId());
-        p.put("realm_id", realmId);
-        p.put("parent_type", parentType);
-        p.put("parent_id", parentId);
-        p.put("protocol", nullToEmpty(pm.getProtocol()));
-        p.put("protocol_mapper", pm.getProtocolMapper());
-        p.put("config", attributeNameValues(pm.getConfig()));
-        return new AttestationEnvelope(U_PROTOCOL_MAPPER, realmId, pm.getId(), p);
+    private ProtocolMapperUnit protocolMapper(ProtocolMapperModel pm, ParentType parentType,
+                                              String parentId, String realmId) {
+        return new ProtocolMapperUnit(realmId,
+                pm.getId(),
+                parentType,
+                parentId,
+                nullToEmpty(pm.getProtocol()),
+                pm.getProtocolMapper(),
+                attributeNameValues(pm.getConfig()));
     }
 
     // -------------------------------------------------------------------------
@@ -767,47 +708,27 @@ public final class RealmAttestationExporter {
 
     // ---- name/value list helpers (ork {name,value} / {name,values}) ----
 
-    private static Map<String, Object> nameValue(String name, String value) {
-        Map<String, Object> nv = new LinkedHashMap<>();
-        nv.put("name", name);
-        nv.put("value", value);
-        return nv;
-    }
-
-    /** Single-valued attribute map -> [{name,value}]. */
-    private static List<Map<String, Object>> attributeNameValues(Map<String, String> attrs) {
-        List<Map<String, Object>> out = new ArrayList<>();
+    /** Single-valued attribute map -> [NameValue] (null value -> ""). */
+    private static List<NameValue> attributeNameValues(Map<String, String> attrs) {
+        List<NameValue> out = new ArrayList<>();
         if (attrs != null) {
             for (Map.Entry<String, String> e : attrs.entrySet()) {
-                out.add(nameValue(e.getKey(), e.getValue() == null ? "" : e.getValue()));
+                out.add(new NameValue(e.getKey(), e.getValue() == null ? "" : e.getValue()));
             }
         }
         return out;
     }
 
-    /** Multi-valued user attribute map -> [{name,values[]}] (ork unit 7). */
-    private static List<Map<String, Object>> userAttributeNameValues(Map<String, List<String>> attrs) {
-        List<Map<String, Object>> out = new ArrayList<>();
+    /** Multi-valued user attribute map -> [NameValues] (ork unit 7). */
+    private static List<NameValues> userAttributeNameValues(Map<String, List<String>> attrs) {
+        List<NameValues> out = new ArrayList<>();
         if (attrs != null) {
             for (Map.Entry<String, List<String>> e : attrs.entrySet()) {
-                Map<String, Object> nv = new LinkedHashMap<>();
-                nv.put("name", e.getKey());
-                nv.put("values", e.getValue() == null ? new ArrayList<>() : new ArrayList<>(e.getValue()));
-                out.add(nv);
+                out.add(new NameValues(e.getKey(),
+                        e.getValue() == null ? new ArrayList<>() : new ArrayList<>(e.getValue())));
             }
         }
         return out;
-    }
-
-    private interface PayloadBuilder {
-        void build(Map<String, Object> payload);
-    }
-
-    private static AttestationEnvelope setUnit(String unitType, String realmId, String targetId,
-                                               PayloadBuilder b) {
-        Map<String, Object> p = new LinkedHashMap<>();
-        b.build(p);
-        return new AttestationEnvelope(unitType, realmId, targetId, p);
     }
 
     private static String nullToEmpty(String s) {

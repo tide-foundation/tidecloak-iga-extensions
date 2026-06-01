@@ -35,7 +35,7 @@ import org.keycloak.sessions.RootAuthenticationSessionModel;
 import org.keycloak.services.managers.AuthenticationManager;
 import org.keycloak.services.managers.AuthenticationSessionManager;
 import org.keycloak.services.managers.UserSessionManager;
-import org.tidecloak.iga.producer.AttestationEnvelope;
+import org.tidecloak.iga.producer.units.AttestationUnit;
 import org.tidecloak.iga.producer.BundleWriter;
 import org.tidecloak.iga.producer.ExportRequest;
 import org.tidecloak.iga.producer.RealmAttestationExporter;
@@ -382,11 +382,11 @@ public class IgaTveBundleResource {
             ExportRequest req = new ExportRequest(
                     clientId, userId, scope, tokenType, null, false);
 
-            List<AttestationEnvelope> envelopes =
+            List<AttestationUnit> units =
                     new RealmAttestationExporter().export(session, realm, req);
 
             byte[] bundle = new BundleWriter()
-                    .write(realm.getId(), req, unsignedToken, envelopes, format);
+                    .write(realm.getId(), req, unsignedToken, units, format);
 
             return buildBundleResponse(bundle, format);
         } finally {
@@ -474,12 +474,12 @@ public class IgaTveBundleResource {
 
         ExportRequest req = new ExportRequest(azp, sub, scope, tokenType, aud, false);
 
-        List<AttestationEnvelope> envelopes =
+        List<AttestationUnit> units =
                 new RealmAttestationExporter().export(session, realm, req);
 
         String unsignedToken = stripSignature(token, segments);
         byte[] bundle = new BundleWriter()
-                .write(realm.getId(), req, unsignedToken, envelopes, format);
+                .write(realm.getId(), req, unsignedToken, units, format);
         return buildBundleResponse(bundle, format);
     }
 

@@ -2,6 +2,7 @@ package org.tidecloak.iga.producer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import org.tidecloak.iga.producer.units.AttestationUnit;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -9,34 +10,41 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Serializes the {@code (envelopes + token + TokenRequest)} bundle into the
- * LOCKED compact wire format the ork deserializer consumes:
+ * Serializes the {@code (units + token + TokenRequest)} bundle into the wire
+ * format the ork deserializer consumes. Each {@code units[]} entry is now a
+ * SELF-CONTAINED FULL ENVELOPE (the unit's own {@link AttestationUnit#toEnvelopeMap()}):
  *
  * <pre>
  * { "realm_id": "&lt;uuid&gt;", "schema_version": 1,
  *   "request": { "t": "access|id", "c": "&lt;clientId&gt;", "s": "&lt;raw scope&gt;", "aud": null|["..."] },
  *   "token": "&lt;compact JWS&gt;",
- *   "units": [ { "u": "&lt;unit_type&gt;", "t": "&lt;target_id&gt;", "p": { &lt;payload WITHOUT realm_id&gt; } } ] }
+ *   "units": [
+ *     { "unit_type": "&lt;wire&gt;", "schema_version": 1, "realm_id": "&lt;uuid&gt;",
+ *       "target_id": "&lt;pk&gt;", "payload": { ... INCLUDES realm_id ... } },
+ *     ...
+ *   ] }
  * </pre>
  *
- * <p>{@code realm_id} and {@code schema_version} are HOISTED to the bundle root
- * (every unit shares them); each unit's {@code p} object therefore OMITS
- * {@code realm_id}. The ork deserializer re-expands each {@code u/t/p} back into
- * the five-key envelope ({@code unit_type, schema_version, realm_id, target_id,
- * payload}), re-injecting the hoisted {@code realm_id}/{@code schema_version}
- * AND {@code payload.realm_id}, before {@code AttestationUnitFactory.Create}.
+ * <p><b>Full-envelope format (no more compact {@code {u,t,p}} hoisting).</b> The
+ * previous wire form hoisted {@code realm_id}/{@code schema_version} to the bundle
+ * root and stripped {@code realm_id} from each unit's {@code p}; the ork side then
+ * re-expanded. That hoisting is GONE: every unit now carries its own
+ * {@code unit_type, schema_version, realm_id, target_id, payload} (with
+ * {@code payload.realm_id}), so each entry deserializes directly into the ork
+ * five-key envelope and feeds {@code AttestationUnitFactory.Create} with no
+ * re-injection. The bundle root still carries {@code realm_id}/{@code schema_version}
+ * as bundle metadata; the per-unit copies are the self-contained design.
  *
- * <h2>Wire format</h2>
+ * <h2>Encoding</h2>
  * <p>The bundle data structure is unchanged regardless of encoding — only the
  * serialization differs. Two encodings are supported:
  * <ul>
  *   <li>{@link Format#CBOR} (default) — Jackson's default CBOR encoding
  *       ({@code new ObjectMapper(new CBORFactory())}). Keys are CBOR text
  *       strings, ints are CBOR uints, etc. — so the ork side can decode with
- *       {@code System.Formats.Cbor} cleanly. No gzip is applied; the bundle is
- *       not compressed at the transport or application layer.</li>
- *   <li>{@link Format#JSON} — pretty-printed Jackson JSON, byte-for-byte
- *       compatible with prior behavior; the ork parser is whitespace-agnostic.</li>
+ *       {@code System.Formats.Cbor} cleanly. No gzip is applied.</li>
+ *   <li>{@link Format#JSON} — pretty-printed Jackson JSON; the ork parser is
+ *       whitespace-agnostic.</li>
  * </ul>
  *
  * <p>The ork side trusts the parsed shape and verifies no signature (design §2),
@@ -66,17 +74,17 @@ public final class BundleWriter {
     /**
      * Build the bundle as a byte[] in the given format.
      *
-     * @param realmId   the hoisted realm UUID.
-     * @param req       the export request (supplies {@code request.t/c/s/aud}).
-     * @param token     the compact JWS access/ID token.
-     * @param envelopes the closure of attestation-unit envelopes.
-     * @param format    output encoding (CBOR or JSON).
+     * @param realmId the bundle-metadata realm UUID (each unit also carries its own).
+     * @param req     the export request (supplies {@code request.t/c/s/aud}).
+     * @param token   the compact JWS access/ID token.
+     * @param units   the closure of typed attestation units.
+     * @param format  output encoding (CBOR or JSON).
      */
     public byte[] write(String realmId, ExportRequest req, String token,
-                        List<AttestationEnvelope> envelopes, Format format) {
+                        List<AttestationUnit> units, Format format) {
         ObjectMapper mapper = (format == Format.JSON) ? jsonMapper : cborMapper;
         try {
-            return mapper.writeValueAsBytes(buildBundleMap(realmId, req, token, envelopes));
+            return mapper.writeValueAsBytes(buildBundleMap(realmId, req, token, units));
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new IllegalStateException(
                     "bundle serialization failed (" + format + "): " + e.getMessage(), e);
@@ -85,19 +93,19 @@ public final class BundleWriter {
 
     /**
      * Backwards-compatible JSON shortcut — equivalent to
-     * {@code write(realmId, req, token, envelopes, Format.JSON)}.
+     * {@code write(realmId, req, token, units, Format.JSON)}.
      */
     public byte[] write(String realmId, ExportRequest req, String token,
-                        List<AttestationEnvelope> envelopes) {
-        return write(realmId, req, token, envelopes, Format.JSON);
+                        List<AttestationUnit> units) {
+        return write(realmId, req, token, units, Format.JSON);
     }
 
     /** The bundle as an ordered map (exposed for tests / direct inspection). */
     public Map<String, Object> buildBundleMap(String realmId, ExportRequest req, String token,
-                                              List<AttestationEnvelope> envelopes) {
+                                              List<AttestationUnit> units) {
         Map<String, Object> bundle = new LinkedHashMap<>();
         bundle.put("realm_id", realmId);
-        bundle.put("schema_version", AttestationEnvelope.SCHEMA_VERSION);
+        bundle.put("schema_version", AttestationUnit.SCHEMA_VERSION);
 
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("t", req.tokenType().name());      // "access" | "id"
@@ -108,15 +116,12 @@ public final class BundleWriter {
 
         bundle.put("token", token);
 
-        List<Object> units = new ArrayList<>(envelopes.size());
-        for (AttestationEnvelope env : envelopes) {
-            Map<String, Object> u = new LinkedHashMap<>();
-            u.put("u", env.unitType());
-            u.put("t", env.targetId());
-            u.put("p", env.payloadWithoutRealmId());
-            units.add(u);
+        // Each units[] entry is the unit's FULL five-key envelope (self-contained).
+        List<Object> envelopes = new ArrayList<>(units.size());
+        for (AttestationUnit unit : units) {
+            envelopes.add(unit.toEnvelopeMap());
         }
-        bundle.put("units", units);
+        bundle.put("units", envelopes);
         return bundle;
     }
 }
