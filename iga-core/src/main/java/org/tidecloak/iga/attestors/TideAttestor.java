@@ -13,6 +13,7 @@ import org.keycloak.models.UserModel;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
 import org.tidecloak.iga.replay.IgaReplayExtension;
 
@@ -342,23 +343,155 @@ public class TideAttestor implements IgaAttestor {
     public String combineFinal(KeycloakSession session,
                                IgaChangeRequestEntity cr,
                                List<IgaAuthorizationEntity> authorizations) {
+        RealmModel realm = session.realms().getRealm(cr.getRealmId());
+        String mode = resolveMode(session, realm);   // "firstAdmin" (row or no-row tide) | "multiAdmin" | null
+
+        // The tide-realm-admin POLICY bootstrap is the only case whose payload
+        // differs: in firstAdmin mode a GRANT_ROLES of tide-realm-admin signs the
+        // realm's stored policy bytes verbatim (port plan §6.2); every other CR —
+        // in both modes — signs the regular set/node canonical (§6.3, unchanged).
+        boolean isPolicyBootstrap = MODE_FIRST_ADMIN.equals(mode)
+                && isTideRealmAdminAssignment(realm, cr);
+        byte[] canonical = isPolicyBootstrap
+                ? readTideRealmAdminPolicyBytes(session, realm, cr)
+                : canonicalForRegularCr(session, cr);
+
+        String sig = sign(session, realm, mode, canonical);
+
+        // Transition trigger (port plan §7): on a successful firstAdmin-mode sign
+        // of the tide-realm-admin policy CR, write back policySig AND flip the
+        // realm's authorizer mode to multiAdmin — in the SAME JPA transaction as
+        // the dispatcher's ATTESTATION write (§7.2/§7.3). Null-safe + idempotent:
+        // already-multiAdmin never reaches here (gated on firstAdmin), and a
+        // redundant flip is a harmless no-op (§7.4 / §12 Q6).
+        if (isPolicyBootstrap) {
+            writeBackPolicySig(session, realm, cr, sig);
+            flipModeToMultiAdmin(session, realm);
+        }
+        return sig;
+    }
+
+    /**
+     * The regular set/node canonical today's attestor produces — unchanged by the
+     * port (port plan §6.3, §3.3 multiAdmin row). LINKAGE actions sign the owner's
+     * POST-change member set; NODE / non-linkage actions sign the entity's own
+     * canonical state.
+     */
+    private byte[] canonicalForRegularCr(KeycloakSession session, IgaChangeRequestEntity cr) {
         String actionType = cr.getActionType();
         List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
-
         TideSetResolver.Linkage linkage = TideSetResolver.linkageFor(actionType);
-        byte[] canonical;
         if (linkage != null) {
             // LINKAGE: sign the owner's POST-change member set. (rows may span
             // more than one owner for a multi-row CR — we sign the union keyed
             // by owner so every affected owner's set commits to the same final
             // string; the dispatcher fans out per owner.)
-            canonical = canonicalizeLinkageSet(session, cr, linkage, rows, actionType);
-        } else {
-            // NODE / non-linkage: per-entity — sign the entity's own canonical
-            // state, exactly the single-row scope the per-row attestor stamps.
-            canonical = canonicalizeNode(cr, rows);
+            return canonicalizeLinkageSet(session, cr, linkage, rows, actionType);
         }
-        return sign(canonical);
+        // NODE / non-linkage: per-entity — sign the entity's own canonical state,
+        // exactly the single-row scope the per-row attestor stamps.
+        return canonicalizeNode(cr, rows);
+    }
+
+    // -------------------------------------------------------------------------
+    // firstAdmin policy-bootstrap detection + transition flip (port plan §6.2, §7)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Detect "this CR is the tide-realm-admin policy CR" (port plan §7.1) — the
+     * signal legacy used: a {@code GRANT_ROLES} CR whose row carries the
+     * realm-management {@code tide-realm-admin} role id
+     * ({@code FirstAdmin.isAssigningTideRealmAdminRole}, FirstAdmin.java:160-167).
+     * GRANT_ROLES rows carry USER_ID + ROLE_ID (IgaReplayDispatcher.java:181-184).
+     */
+    private boolean isTideRealmAdminAssignment(RealmModel realm, IgaChangeRequestEntity cr) {
+        if (cr == null || !"GRANT_ROLES".equals(cr.getActionType())) return false;
+        String tideRoleId = tideRealmAdminRoleId(realm);
+        if (tideRoleId == null) return false;
+        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+            if (tideRoleId.equals(str(row, "ROLE_ID"))) return true;
+        }
+        return false;
+    }
+
+    /** Resolve the realm-management {@code tide-realm-admin} role id, or null if absent. */
+    private static String tideRealmAdminRoleId(RealmModel realm) {
+        ClientModel rm = realm.getClientByClientId(REALM_MANAGEMENT_CLIENT_ID);
+        if (rm == null) return null;
+        RoleModel tideRole = rm.getRole(TIDE_REALM_ADMIN_ROLE);
+        return tideRole != null ? tideRole.getId() : null;
+    }
+
+    /**
+     * The bootstrap payload (port plan §6.2): the realm's tide-realm-admin
+     * {@code IgaRolePolicyEntity.policy} value, signed as UTF-8 bytes VERBATIM
+     * (no base64-decode — iga-core does not base64-encode the policy on the way
+     * in; §6.2 byte-shape resolution). If no policy row exists yet for the
+     * tide-realm-admin role (the policy may be upserted via the separate
+     * {@code POST /iga/role-policies} path, §7.1), fall back to the regular CR
+     * canonical so the role grant still receives a valid attestation and the
+     * transition still fires on the role-assignment signal. The policy write-back
+     * (§7.2) is then a no-op (there is no row to stamp).
+     */
+    private byte[] readTideRealmAdminPolicyBytes(KeycloakSession session, RealmModel realm,
+                                                 IgaChangeRequestEntity cr) {
+        IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
+        if (policy != null && policy.getPolicy() != null) {
+            return policy.getPolicy().getBytes(StandardCharsets.UTF_8);
+        }
+        log.infof("IGA firstAdmin policy bootstrap: realm %s has no tide-realm-admin role-policy row "
+                + "to sign; signing the grant's regular canonical and flipping to multiAdmin on the "
+                + "role-assignment signal (policySig write-back skipped).", realm.getName());
+        return canonicalForRegularCr(session, cr);
+    }
+
+    /** Look up the tide-realm-admin {@link IgaRolePolicyEntity} (realm + role id), or null. */
+    private static IgaRolePolicyEntity findTideRealmAdminPolicy(KeycloakSession session, RealmModel realm) {
+        String tideRoleId = tideRealmAdminRoleId(realm);
+        if (tideRoleId == null) return null;
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        return em.createNamedQuery("IgaRolePolicy.findByRealmAndRole", IgaRolePolicyEntity.class)
+                .setParameter("realmId", realm.getId())
+                .setParameter("roleId", tideRoleId)
+                .getResultStream().findFirst().orElse(null);
+    }
+
+    /**
+     * Write the firstAdmin bootstrap signature back to the tide-realm-admin
+     * {@code IgaRolePolicyEntity.policySig} (port plan §6.4, §7.2), in the same
+     * JPA transaction as the dispatcher's ATTESTATION write (§7.3 — the entity is
+     * managed, so the column update commits atomically with the replay). No-op
+     * when no policy row exists (see {@link #readTideRealmAdminPolicyBytes}).
+     */
+    private void writeBackPolicySig(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr,
+                                    String sig) {
+        IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
+        if (policy == null) return;
+        policy.setPolicySig(sig);
+        policy.setUpdatedAt(System.currentTimeMillis());
+        // managed entity — no explicit persist needed; flush keeps it in-tx.
+        session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
+    }
+
+    /**
+     * Transition flip (port plan §7.2): set the realm's authorizer
+     * {@code mode = "multiAdmin"} in the same JPA transaction as the ATTESTATION
+     * write. Null-safe + idempotent — a redundant flip is a harmless no-op
+     * (§7.4 / §12 Q6). The lazy seed (§9.3) guarantees the row exists by the time
+     * this runs (record() fires before combineFinal), but we guard defensively.
+     */
+    private void flipModeToMultiAdmin(KeycloakSession session, RealmModel realm) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaAuthorizerEntity row = em.createNamedQuery("IgaAuthorizer.findByRealm", IgaAuthorizerEntity.class)
+                .setParameter("realmId", realm.getId())
+                .getResultStream().findFirst().orElse(null);
+        if (row == null) return; // defensive: lazy seed should have created it.
+        if (MODE_FIRST_ADMIN.equals(row.getMode())) {
+            row.setMode(MODE_MULTI_ADMIN);
+            em.flush();
+            log.infof("IGA mode transition: realm %s flipped firstAdmin -> multiAdmin on tide-realm-admin "
+                    + "policy sign.", realm.getName());
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -565,19 +698,46 @@ public class TideAttestor implements IgaAttestor {
     // -------------------------------------------------------------------------
 
     /**
-     * Sign the canonical bytes of a set (or node state).
-     *
-     * <p>DUMMY: returns {@code "TIDE-DUMMY-v1:" + base64(sha256(canonical))} — a
-     * deterministic, clearly-marked stub so the full set-signing mechanism is
-     * runnable and testable end to end. Determinism (same set → same sig) is
-     * exactly what the set-signing model relies on.
+     * Mode-aware signing swap-point (port plan §3.4). WAVE 1a: both branches still
+     * produce the SHA-256 stub — sign() stays stubbed here. They differ ONLY in
+     * the prefix that marks the quorum + ceremony:
+     * <ul>
+     *   <li>{@code firstAdmin} → {@link #FIRSTADMIN_SIG_PREFIX}. Wave 2 swaps in the
+     *       real VRK → Midgard → ORK signature here (NOT a local key op; §5.1).</li>
+     *   <li>{@code multiAdmin} (and any non-firstAdmin mode) → {@link #DUMMY_SIG_PREFIX},
+     *       the existing enclave-threshold stub; wave 2 lands {@code Midgard.signClaims()}.</li>
+     * </ul>
+     * The distinction between modes is NOT local-vs-network — both ceremonies go
+     * Midgard → ORK in production (§3.4, §8); it is (a) admin quorum and (b) key /
+     * signing ceremony.
+     */
+    private String sign(KeycloakSession session, RealmModel realm, String mode, byte[] canonical) {
+        String prefix = MODE_FIRST_ADMIN.equals(mode) ? FIRSTADMIN_SIG_PREFIX : DUMMY_SIG_PREFIX;
+        return stubSign(prefix, canonical);
+    }
+
+    /**
+     * Sign the canonical bytes of a set (or node state) for the multiAdmin
+     * set-signing path used by {@code IgaReplayDispatcher}'s nested-child fan-out
+     * (see {@link #signSet}). Always the multiAdmin stub — the dispatcher's
+     * set-signing model predates modes and is mode-agnostic.
      *
      * <p>TODO: replace with Midgard signClaims() — single crypto swap-point.
      */
     private String sign(byte[] canonical) {
+        return stubSign(DUMMY_SIG_PREFIX, canonical);
+    }
+
+    /**
+     * The deterministic SHA-256 stub: {@code <prefix> + base64(sha256(canonical))}.
+     * Determinism (same set → same sig) is exactly what the set-signing model
+     * relies on. Shared by both {@link #sign} overloads so the byte-shape is
+     * identical across the mode branch and the dispatcher fan-out.
+     */
+    private static String stubSign(String prefix, byte[] canonical) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(canonical);
-            return DUMMY_SIG_PREFIX + java.util.Base64.getEncoder().encodeToString(digest);
+            return prefix + java.util.Base64.getEncoder().encodeToString(digest);
         } catch (NoSuchAlgorithmException e) {
             throw new RuntimeException("SHA-256 unavailable for TideAttestor dummy signing", e);
         }
