@@ -550,10 +550,13 @@ test.describe('IGA Phase 13: firstAdmin/multiAdmin two-mode attestor', () => {
     // floor(0.7*N) branch) and, since authCount(0) < threshold, returns HTTP 412
     // with body {threshold, authCount}. That body.threshold IS the dynamic value.
     //
-    // NOTE on observation choice: the CR-representation `threshold` field
-    // (IgaAdminResource.toRepresentation:1831) is the STATIC IgaScopeResolver
-    // path and would mislead (it reports 1 here). The enforced threshold lives in
-    // the commit gate (line 345), so we read it there — the authoritative source.
+    // PRIMARY observation: the commit-gate 412 body (line 345 path), the
+    // authoritative source of enforcement. As of the wave-1a follow-up fix, the
+    // CR-representation `threshold` field (IgaAdminResource.toRepresentation) ALSO
+    // calls attestor.getThreshold(...), so it now AGREES with the 412 (both report
+    // the dynamic floor(0.7*N)=2 here, not the old static 1). We assert BOTH below
+    // — belt and suspenders — so a future regression that desyncs the
+    // representation from enforcement fails this test.
     const probe = await assignRealmRoleMapping(request, REALM_13BC, admin1, [
       { id: (await getRole(request, REALM_13BC, 'probe-role')).body.id, name: 'probe-role' },
     ]);
@@ -595,11 +598,16 @@ test.describe('IGA Phase 13: firstAdmin/multiAdmin two-mode attestor', () => {
     // clamp, so this genuinely exercises floor(0.7*N) and not the fallback.
     expect(expectedThreshold, 'N=3 yields a non-trivial floor of 2 (not the min-1 clamp)').toBe(2);
 
-    // Belt-and-braces: readyToCommit in the CR representation also uses the
-    // dynamic attestor.getThreshold (toRepresentation:1818), so with 0 auths it
-    // must be false (authCount 0 < 2). This corroborates the 412 reading via a
-    // second code path.
+    // Belt-and-braces: the CR representation now derives BOTH `threshold` and
+    // `readyToCommit` from the same dynamic attestor.getThreshold the commit gate
+    // uses (toRepresentation), so the representation must agree with the 412 body.
     const rep = await getChangeRequest(request, REALM_13BC, (probeCr as any).id);
+    expect(
+      rep.body?.threshold,
+      `REPRESENTATION THRESHOLD: CR representation.threshold must equal the dynamic ` +
+        `max(1, floor(0.7*${N}))=${expectedThreshold} and agree with the commit-gate 412 ` +
+        `body.threshold (got rep=${JSON.stringify(rep.body?.threshold)} vs 412=${bareBody?.threshold})`,
+    ).toBe(expectedThreshold);
     expect(
       rep.body?.readyToCommit,
       `readyToCommit must be false at authCount 0 < threshold ${expectedThreshold}`,
