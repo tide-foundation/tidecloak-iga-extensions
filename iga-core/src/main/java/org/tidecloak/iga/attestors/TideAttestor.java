@@ -2,6 +2,8 @@ package org.tidecloak.iga.attestors;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.jboss.logging.Logger;
+import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
@@ -11,6 +13,7 @@ import org.keycloak.models.UserModel;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.providers.IgaAuthorizerService;
 import org.tidecloak.iga.replay.IgaReplayExtension;
 
 import jakarta.persistence.EntityManager;
@@ -56,6 +59,8 @@ import java.util.UUID;
  */
 public class TideAttestor implements IgaAttestor {
 
+    private static final Logger log = Logger.getLogger(TideAttestor.class);
+
     public static final String ID = "tide";
 
     /** Prefix marking the stubbed signature so it is unmistakably a dummy. */
@@ -83,6 +88,17 @@ public class TideAttestor implements IgaAttestor {
 
     /** Multiplier for the dynamic multiAdmin threshold floor (port plan §3.6). */
     private static final double THRESHOLD_PERCENTAGE = 0.7;
+
+    /**
+     * The realm's VRK key-provider component (port plan §5/§9.3). Its presence is
+     * the VRK-availability precondition for the firstAdmin lazy seed: absent → no
+     * VRK to sign with, so the seed is skipped and resolveMode's no-row branch
+     * keeps reporting firstAdmin (Decision 1).
+     */
+    private static final String TIDE_VENDOR_KEY_PROVIDER_ID = "tide-vendor-key";
+    /** Component config keys carrying the VRK authorizer material (legacy MultiAdmin.java:95-96). */
+    private static final String CFG_GVRK = "gVRK";
+    private static final String CFG_GVRK_CERTIFICATE = "gVRKCertificate";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<List<Map<String, Object>>> LIST_MAP_REF =
@@ -114,6 +130,16 @@ public class TideAttestor implements IgaAttestor {
                                          UserModel admin,
                                          String attestationPayload) {
         RealmModel realm = session.realms().getRealm(cr.getRealmId());
+
+        // Lazy firstAdmin seed (port plan §9.3 / Decision 2): the FIRST authorizer
+        // row is born here, on the first Tide-mode record(), seeded firstAdmin.
+        // Idempotent — only creates when absent. No mode-specific dedup difference:
+        // both firstAdmin and multiAdmin persist the same IgaAuthorizationEntity
+        // shape (partialSig = admin username), and the existing approver-role gate
+        // + the one-layer-up dedup (IgaAdminResource.authorize) are unchanged
+        // (port plan §3.2).
+        maybeSeedFirstAdminAuthorizer(session, realm);
+
         IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
         IgaScopeResolver.requireApprover(session, realm, admin, scope, cr);
 
@@ -243,6 +269,67 @@ public class TideAttestor implements IgaAttestor {
                 .setParameter("roleId", roleId)
                 .getResultList();
         return new HashSet<>(ids);
+    }
+
+    /**
+     * Lazy firstAdmin authorizer seed (port plan §9.3 / Decision 2). On the first
+     * Tide-mode {@link #record}, if the realm has NO {@link IgaAuthorizerEntity}
+     * row AND {@code iga.attestor=="tide"}, create exactly one seeded
+     * {@code mode="firstAdmin"} via the existing {@link IgaAuthorizerService#create}
+     * persist path. This is the ONLY place the first row is born (no eager
+     * toggle-on / realm-init seed); it is idempotent (the {@code !hasRow} guard
+     * skips re-seeding).
+     *
+     * <p>VRK-availability precondition (§9.3 / §Q4): the seed needs the realm's
+     * {@code tide-vendor-key} component for its NOT-NULL {@code providerId} /
+     * {@code authorizer} / {@code authorizerCertificate} fields (the VRK material).
+     * If that component is absent — or present but not yet VRK-provisioned — the
+     * seed is SKIPPED and {@link #resolveMode}'s no-row branch keeps reporting
+     * {@code firstAdmin} (Decision 1). A missing component means "VRK not
+     * provisioned", NOT "Tideless": the Tide discriminator is {@code iga.attestor},
+     * and this whole method runs only on the tide attestor's path.
+     *
+     * <p>Wave 1a note: this reads the component with plain KC model access only
+     * (no MidgardJava / no {@code SecretKeys} deserialization / no crypto). The
+     * gVRK / gVRKCertificate config values are carried verbatim into the row; the
+     * VRK signing that interprets them is wave 2 (§5).
+     */
+    private void maybeSeedFirstAdminAuthorizer(KeycloakSession session, RealmModel realm) {
+        if (!ID.equals(realm.getAttribute(ATTR_IGA_ATTESTOR))) {
+            return; // not a Tide realm — never seed (defensive; tide attestor only).
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaAuthorizerService authorizerService = new IgaAuthorizerService(em);
+        if (!authorizerService.listByRealm(realm.getId()).isEmpty()) {
+            return; // row already exists — idempotent, do not re-seed.
+        }
+
+        // VRK material from the realm's tide-vendor-key component (legacy
+        // MultiAdmin.java:95-96, 474-484). Absent component or unprovisioned
+        // material → defer the seed (the no-row branch reports firstAdmin).
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElse(null);
+        if (vendorKey == null) {
+            log.infof("IGA firstAdmin seed deferred: realm %s has no tide-vendor-key component "
+                    + "(VRK not provisioned); resolveMode reports firstAdmin via the no-row branch.",
+                    realm.getName());
+            return;
+        }
+        String gVrk = vendorKey.getConfig() != null ? vendorKey.getConfig().getFirst(CFG_GVRK) : null;
+        String gVrkCert = vendorKey.getConfig() != null ? vendorKey.getConfig().getFirst(CFG_GVRK_CERTIFICATE) : null;
+        if (gVrk == null || gVrk.isBlank() || gVrkCert == null || gVrkCert.isBlank()) {
+            log.infof("IGA firstAdmin seed deferred: realm %s tide-vendor-key component is missing "
+                    + "VRK authorizer material (gVRK/gVRKCertificate); resolveMode reports firstAdmin "
+                    + "via the no-row branch.", realm.getName());
+            return;
+        }
+
+        authorizerService.create(realm.getId(), vendorKey.getId(), MODE_FIRST_ADMIN,
+                gVrk, gVrkCert, MODE_FIRST_ADMIN);
+        log.infof("IGA firstAdmin authorizer lazily seeded for realm %s (mode=firstAdmin).",
+                realm.getName());
     }
 
     /**
