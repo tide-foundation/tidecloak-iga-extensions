@@ -20,5 +20,6 @@
     <include file="META-INF/iga-changelog-2.3.0.xml"/>
     <include file="META-INF/iga-changelog-2.3.1.xml"/>
     <include file="META-INF/iga-changelog-2.4.0.xml"/>
+    <include file="META-INF/iga-changelog-2.5.0.xml"/>
 
 </databaseChangeLog>
