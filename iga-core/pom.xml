@@ -61,6 +61,25 @@
             <scope>provided</scope>
         </dependency>
         <dependency>
+            <!--
+              Direct dependency on keycloak-common (carries
+              org.keycloak.common.util.MultivaluedHashMap, the return type of
+              ComponentModel.getConfig()). Previously only present transitively
+              via keycloak-model-jpa. The Eclipse compiler (ECJ) used by the
+              from-scratch tidecloak/Keycloak build path resolves the module path
+              more strictly than javac and reported MultivaluedHashMap as a
+              "missing type" the moment TideAttestor.maybeSeedFirstAdminAuthorizer
+              first called getConfig(), baking an "Unresolved compilation problems"
+              deferred error into the .class (a runtime java.lang.Error, while
+              mvn/javac stayed green). Declaring keycloak-common directly puts the
+              type on every compiler's classpath and removes the ECJ false-green.
+            -->
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-common</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
             <groupId>jakarta.ws.rs</groupId>
             <artifactId>jakarta.ws.rs-api</artifactId>
             <version>3.1.0</version>
