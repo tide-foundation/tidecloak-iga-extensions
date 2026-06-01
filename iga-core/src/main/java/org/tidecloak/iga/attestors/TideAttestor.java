@@ -1,11 +1,9 @@
 package org.tidecloak.iga.attestors;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jboss.logging.Logger;
 import org.keycloak.component.ComponentModel;
-import org.midgard.Midgard;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
@@ -71,12 +69,10 @@ public class TideAttestor implements IgaAttestor {
 
     /**
      * Prefix marking a firstAdmin (single-signer, 1-of-1 admin quorum) bootstrap
-     * signature, distinct from the multiAdmin {@link #DUMMY_SIG_PREFIX}. As of
-     * wave 2 §6 the bytes after this prefix are a REAL VRK Ed25519 signature over
-     * the canonical (via {@link Midgard#SignWithVrk}); on a realm with no
-     * provisioned VRK the firstAdmin branch falls back to the SHA-256 stub under
-     * this same prefix (port plan §3.4, §6.4). See
-     * {@link #sign(KeycloakSession, RealmModel, String, byte[])}.
+     * signature, distinct from the multiAdmin {@link #DUMMY_SIG_PREFIX}. In wave 1a
+     * {@link #sign(KeycloakSession, RealmModel, String, byte[])}'s firstAdmin branch
+     * still produces the SHA-256 stub under this prefix; wave 2 swaps in the real
+     * VRK → Midgard → ORK signature here (port plan §3.4, §6.4).
      */
     public static final String FIRSTADMIN_SIG_PREFIX = "TIDE-FIRSTADMIN-v1:";
 
@@ -106,17 +102,6 @@ public class TideAttestor implements IgaAttestor {
     private static final String CFG_GVRK_CERTIFICATE = "gVRKCertificate";
     /** Vendor verifying-key id the admin policy artifact is keyed to (legacy TideRoleRequests.java:137). */
     private static final String CFG_VVK_ID = "vvkId";
-    /**
-     * Component config key carrying the JSON {@code SecretKeys} blob (private VRK
-     * material) — its {@code activeVrk} field is the Ed25519 private key the
-     * firstAdmin sign passes to {@link Midgard#SignWithVrk} (legacy
-     * IGAUtils.java:32-34,47; idp-extensions tide-vendor-key config contract).
-     * NOTE: distinct from {@link #CFG_GVRK} (the PUBLIC rotating key) — the VRK
-     * private key never leaves the {@code clientSecret} blob and is never logged.
-     */
-    private static final String CFG_CLIENT_SECRET = "clientSecret";
-    /** {@code SecretKeys.activeVrk} JSON field — the currently active VRK private key. */
-    private static final String SECRET_KEYS_ACTIVE_VRK = "activeVrk";
 
     // -------------------------------------------------------------------------
     // Admin-policy artifact shape (port plan §7a.2 / legacy TideRoleRequests.java:144-148)
@@ -945,114 +930,22 @@ public class TideAttestor implements IgaAttestor {
     // -------------------------------------------------------------------------
 
     /**
-     * Mode-aware signing swap-point (port plan §3.4). The two branches differ in
-     * (a) the prefix that marks the quorum + ceremony and (b) — as of wave 2 §6 —
-     * whether the bytes after the prefix are a REAL signature or still the stub:
+     * Mode-aware signing swap-point (port plan §3.4). WAVE 1a: both branches still
+     * produce the SHA-256 stub — sign() stays stubbed here. They differ ONLY in
+     * the prefix that marks the quorum + ceremony:
      * <ul>
-     *   <li>{@code firstAdmin} → {@link #FIRSTADMIN_SIG_PREFIX} + a REAL VRK
-     *       Ed25519 signature over the canonical bytes (wave 2 §6). firstAdmin is
-     *       the 1-of-1 vendor-bootstrap quorum, so the realm's {@code tide-vendor-key}
-     *       VRK private key ({@code clientSecret→activeVrk}) signs directly via
-     *       {@link Midgard#SignWithVrk}. See {@link #firstAdminVrkSign}.</li>
-     *   <li>{@code multiAdmin} (and any non-firstAdmin mode) → {@link #DUMMY_SIG_PREFIX}
-     *       + the SHA-256 stub. The multiAdmin enclave-threshold ceremony
-     *       (partial-attestation combine) is §8 — STILL STUBBED here.</li>
+     *   <li>{@code firstAdmin} → {@link #FIRSTADMIN_SIG_PREFIX}. Wave 2 swaps in the
+     *       real VRK → Midgard → ORK signature here (NOT a local key op; §5.1).</li>
+     *   <li>{@code multiAdmin} (and any non-firstAdmin mode) → {@link #DUMMY_SIG_PREFIX},
+     *       the existing enclave-threshold stub; wave 2 lands {@code Midgard.signClaims()}.</li>
      * </ul>
-     *
-     * <p>firstAdmin VRK sign is a LOCAL Ed25519 key op (the native {@code sign_with_vrk}
-     * deserializes the VRK private key and signs the message bytes — no ORK
-     * round-trip; Midgard/Exports.cs:194-214). The multiAdmin ceremony is the
-     * network/enclave one; that asymmetry is intrinsic to the two quorums.
-     *
-     * <p>Fail-open-to-stub precondition: if the realm has no provisioned VRK
-     * (no {@code tide-vendor-key} component, or no {@code clientSecret→activeVrk},
-     * or the native sign returns null), the firstAdmin branch logs a WARN and
-     * falls back to the stub — so a Tideless / not-yet-provisioned realm never 500s
-     * on a sign. A properly-provisioned Tide realm always takes the real path.
+     * The distinction between modes is NOT local-vs-network — both ceremonies go
+     * Midgard → ORK in production (§3.4, §8); it is (a) admin quorum and (b) key /
+     * signing ceremony.
      */
     private String sign(KeycloakSession session, RealmModel realm, String mode, byte[] canonical) {
-        if (MODE_FIRST_ADMIN.equals(mode)) {
-            return firstAdminVrkSign(realm, canonical);
-        }
-        // multiAdmin (and any non-firstAdmin mode): enclave-threshold ceremony is
-        // §8 — still the SHA-256 stub under the multiAdmin prefix.
-        return stubSign(DUMMY_SIG_PREFIX, canonical);
-    }
-
-    /**
-     * firstAdmin (1-of-1 vendor-bootstrap quorum) REAL VRK sign (wave 2 §6).
-     * Signs the canonical bytes with the realm's active VRK private key via
-     * {@link Midgard#SignWithVrk(String, String)} and returns
-     * {@code FIRSTADMIN_SIG_PREFIX + base64(signature)}.
-     *
-     * <p>The VRK private key is the {@code activeVrk} field of the JSON
-     * {@code SecretKeys} blob in the realm's {@code tide-vendor-key} component
-     * {@code clientSecret} config (legacy IGAUtils.signInitialTideAdmin reads it
-     * the same way: IGAUtils.java:32-34,47). We parse just that one field with
-     * Jackson (no dependency on the shared-models {@code SecretKeys} class, which
-     * is not on the provider runtime classpath).
-     *
-     * <p>{@code Midgard.SignWithVrk} marshals {@code msg} as UTF-8 and signs those
-     * bytes directly (Midgard/Exports.cs:201-203). The canonical is already UTF-8
-     * text (every canonicalizer ends in {@code .getBytes(UTF_8)}), so passing
-     * {@code new String(canonical, UTF_8)} signs byte-for-byte the same bytes the
-     * stub hashed — the signed message is the canonical, unchanged.
-     *
-     * <p>Fail-open-to-stub (gate): a missing component / missing-or-blank
-     * {@code clientSecret} / missing-or-blank {@code activeVrk} / null native
-     * result → WARN + the SHA-256 stub under {@link #FIRSTADMIN_SIG_PREFIX} (the
-     * mode marker is preserved; only the bytes after it are the stub). This keeps
-     * the not-yet-provisioned and Tideless paths from 500-ing.
-     */
-    private String firstAdminVrkSign(RealmModel realm, byte[] canonical) {
-        String activeVrk = activeVrkPrivateKey(realm);
-        if (activeVrk == null || activeVrk.isBlank()) {
-            log.warnf("IGA firstAdmin sign: realm %s has no provisioned VRK private key "
-                    + "(tide-vendor-key clientSecret/activeVrk absent or blank); falling back to the "
-                    + "stub signature. A real VRK signature requires a provisioned tide-vendor-key "
-                    + "component.", realm.getName());
-            return stubSign(FIRSTADMIN_SIG_PREFIX, canonical);
-        }
-
-        byte[] sig = Midgard.SignWithVrk(new String(canonical, StandardCharsets.UTF_8), activeVrk);
-        if (sig == null) {
-            // Midgard.SignWithVrk swallows native errors and returns null (Midgard.java:160-167).
-            log.warnf("IGA firstAdmin sign: Midgard.SignWithVrk returned null for realm %s "
-                    + "(native VRK sign failed); falling back to the stub signature.", realm.getName());
-            return stubSign(FIRSTADMIN_SIG_PREFIX, canonical);
-        }
-        log.debugf("IGA firstAdmin sign: realm %s signed %d canonical bytes with the active VRK.",
-                realm.getName(), canonical.length);
-        return FIRSTADMIN_SIG_PREFIX + java.util.Base64.getEncoder().encodeToString(sig);
-    }
-
-    /**
-     * Extract the active VRK private key ({@code SecretKeys.activeVrk}) from the
-     * realm's {@code tide-vendor-key} component {@code clientSecret} JSON, or
-     * {@code null} if the component / config / field is absent. SECURITY: the
-     * returned value is a private key — never log it or echo it in a response.
-     */
-    private static String activeVrkPrivateKey(RealmModel realm) {
-        ComponentModel vendorKey = realm.getComponentsStream()
-                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
-                .findFirst()
-                .orElse(null);
-        if (vendorKey == null || vendorKey.getConfig() == null) {
-            return null;
-        }
-        String clientSecret = vendorKey.getConfig().getFirst(CFG_CLIENT_SECRET);
-        if (clientSecret == null || clientSecret.isBlank()) {
-            return null;
-        }
-        try {
-            JsonNode node = MAPPER.readTree(clientSecret).get(SECRET_KEYS_ACTIVE_VRK);
-            return node != null && !node.isNull() ? node.asText() : null;
-        } catch (Exception e) {
-            // Do NOT include the clientSecret blob in the message — it carries private keys.
-            log.warnf("IGA firstAdmin sign: realm %s tide-vendor-key clientSecret is not parseable "
-                    + "JSON; cannot read activeVrk (%s).", realm.getName(), e.getClass().getSimpleName());
-            return null;
-        }
+        String prefix = MODE_FIRST_ADMIN.equals(mode) ? FIRSTADMIN_SIG_PREFIX : DUMMY_SIG_PREFIX;
+        return stubSign(prefix, canonical);
     }
 
     /**

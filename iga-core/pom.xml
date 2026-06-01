@@ -117,21 +117,6 @@
             <version>3.5.3.Final</version>
             <scope>provided</scope>
         </dependency>
-        <dependency>
-            <!--
-              Midgard Java crypto facade (org.midgard.Midgard). Carries
-              SignWithVrk(String,String) -> byte[], the VRK Ed25519 sign used by
-              the firstAdmin attestor swap-point (wave 2 §6). provided scope: the
-              runtime jar is deployed at /opt/keycloak/providers/MidgardJava.jar
-              (alongside this iga-core jar), so it is on the Keycloak classpath at
-              runtime — bundling it here would duplicate the native-loading facade
-              on the provider path and risk a JNA/classloader conflict.
-            -->
-            <groupId>org.tide</groupId>
-            <artifactId>MidgardJava</artifactId>
-            <version>1.0-SNAPSHOT</version>
-            <scope>provided</scope>
-        </dependency>
     </dependencies>
 
     <build>
