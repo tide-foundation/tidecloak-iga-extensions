@@ -203,8 +203,13 @@ public class TideAttestor implements IgaAttestor {
      *       calls this method, so this branch is reached only by a defensive stray
      *       call and deliberately does not fabricate a mode for a non-Tide realm.</li>
      * </ul>
+     *
+     * <p>Package-static so the single chokepoint {@link IgaScopeResolver#requireApprover}
+     * can consult the SAME mode signal that drives {@link #getThreshold} — the
+     * firstAdmin gate-bypass and the firstAdmin threshold=1 must agree on the mode
+     * or they could diverge (bypass without 1-of-1, or vice versa).
      */
-    private String resolveMode(KeycloakSession session, RealmModel realm) {
+    static String resolveMode(KeycloakSession session, RealmModel realm) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         IgaAuthorizerEntity row = em.createNamedQuery("IgaAuthorizer.findByRealm", IgaAuthorizerEntity.class)
                 .setParameter("realmId", realm.getId())

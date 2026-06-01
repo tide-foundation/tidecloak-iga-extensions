@@ -58,6 +58,14 @@ public final class IgaScopeResolver {
      */
     private static final String ADOPT_BYPASS_LOG_KEY_PREFIX = "iga.adoptBypass.logged.";
 
+    /**
+     * Session-attribute key prefix used to dedupe the "firstAdmin gate bypass"
+     * INFO log line (mirrors {@link #ADOPT_BYPASS_LOG_KEY_PREFIX}). A single
+     * authorize/commit request inspects the same CR several times; without dedup
+     * the line would balloon.
+     */
+    private static final String FIRSTADMIN_BYPASS_LOG_KEY_PREFIX = "iga.firstAdminBypass.logged.";
+
     private IgaScopeResolver() {
     }
 
@@ -222,6 +230,22 @@ public final class IgaScopeResolver {
      * to the same enforcement path as before. The caller's {@code manage-realm}
      * check (see {@code IgaAdminResource.authorize}/{@code commit}) remains
      * the only gate for ADOPT.
+     *
+     * <p><b>firstAdmin-mode bypass.</b> The {@code tide} attestor has two modes
+     * with different approval gating (port plan §3.1). In {@code firstAdmin} mode
+     * the realm has not yet bootstrapped its admin policy: the VRK (a 1-of-1 admin
+     * quorum) is the authority, and the very grant that installs the first
+     * {@code tide-realm-admin} is what flips the realm to {@code multiAdmin}
+     * ({@code TideAttestor.combineFinal} → {@code flipModeToMultiAdmin}). Enforcing
+     * the approver-role gate here would deadlock that bootstrap (no pre-existing
+     * {@code tide-realm-admin} exists to approve its own creation). So while the
+     * realm resolves to {@code firstAdmin} this gate is a no-op for ALL governed
+     * actions — not just ADOPT_* — leaving the caller's {@code manage-realm} check
+     * + the VRK 1-of-1 authority as the only gates. {@code multiAdmin} (and every
+     * Tideless realm) keep the full approver-role enforcement below. This composes
+     * with the ADOPT bypass above: ADOPT_* short-circuits FIRST (regardless of
+     * mode, with its own log line), so a firstAdmin-mode ADOPT still logs/behaves
+     * as ADOPT rather than firstAdmin — no double-bypass, no changed ADOPT logging.
      */
     public static void requireApprover(KeycloakSession session, RealmModel realm, UserModel admin,
                                        ResolvedScope scope, IgaChangeRequestEntity cr) {
@@ -229,7 +253,25 @@ public final class IgaScopeResolver {
             logAdoptBypassOnce(session, cr, "requireApprover");
             return;
         }
+        if (isFirstAdminMode(session, realm)) {
+            logFirstAdminBypassOnce(session, cr);
+            return;
+        }
         requireApproverInternal(realm, admin, scope);
+    }
+
+    /**
+     * True iff the realm's {@code tide} attestor resolves to {@code firstAdmin}
+     * mode. Delegates to the single source of truth
+     * ({@code TideAttestor.resolveMode}) so this gate-bypass and the firstAdmin
+     * threshold=1 ({@code TideAttestor.getThreshold}) can never disagree about the
+     * mode. Null-safe for the Tideless path: {@code resolveMode} returns
+     * {@code null} when {@code iga.attestor != "tide"} and no authorizer row pins a
+     * mode, so a Tideless realm is never treated as firstAdmin and keeps full
+     * approver-role enforcement.
+     */
+    private static boolean isFirstAdminMode(KeycloakSession session, RealmModel realm) {
+        return TideAttestor.MODE_FIRST_ADMIN.equals(TideAttestor.resolveMode(session, realm));
     }
 
     private static void requireApproverInternal(RealmModel realm, UserModel admin, ResolvedScope scope) {
@@ -325,6 +367,23 @@ public final class IgaScopeResolver {
         if (session != null) session.setAttribute(key, Boolean.TRUE);
         log.infof("IGA ADOPT gate bypass: actionType=%s CR=%s — threshold=1, no approver-role check (system-bootstrap action) [gate=%s]",
                 cr.getActionType(), cr.getId(), gate);
+    }
+
+    /**
+     * Emit one INFO line per (request, CR) when the firstAdmin gate-bypass fires
+     * (mirrors {@link #logAdoptBypassOnce}). Unlike ADOPT this is realm-mode
+     * driven rather than action-type driven, so it can fire for a {@code null} CR
+     * (defensive caller with no CR context); we still log, keying the dedup on a
+     * stable token when the CR id is unavailable.
+     */
+    private static void logFirstAdminBypassOnce(KeycloakSession session, IgaChangeRequestEntity cr) {
+        String crId = cr != null ? cr.getId() : "<no-cr>";
+        String actionType = cr != null ? cr.getActionType() : "<no-cr>";
+        String key = FIRSTADMIN_BYPASS_LOG_KEY_PREFIX + crId;
+        if (session != null && session.getAttribute(key) != null) return;
+        if (session != null) session.setAttribute(key, Boolean.TRUE);
+        log.infof("IGA firstAdmin gate bypass: actionType=%s CR=%s — no approver-role check (VRK 1-of-1 authority); realm in firstAdmin mode",
+                actionType, crId);
     }
 
     // -------------------------------------------------------------------------
