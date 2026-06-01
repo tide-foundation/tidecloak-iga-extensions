@@ -551,17 +551,19 @@ public class TideAttestor implements IgaAttestor {
      *       threshold, so this is the primary churn control (§7a.4). Exactly one
      *       regen per committed membership-changing CR.</li>
      *   <li>Rebuild the policy artifact (§7a.2 shape) at {@code newThreshold},
-     *       re-sign it via the VRK path (§7a.3 — the SAME signing primitive the
-     *       bootstrap policy sign uses, so {@code policySig} carries the
-     *       {@link #FIRSTADMIN_SIG_PREFIX} VRK prefix across bootstrap AND every
-     *       regen — §7a.5), and write {@code policy}/{@code policySig} in the same
-     *       JPA transaction as the CR commit (§7a.6 fail-closed + atomic).</li>
+     *       re-sign it with the realm's CURRENT authorizer mode (the invariant:
+     *       admin policy signed with the mode the realm is in). This regen fires
+     *       only while the realm is already multiAdmin, so {@code policySig} carries
+     *       the multiAdmin {@link #DUMMY_SIG_PREFIX} (enclave path) — distinct from
+     *       the firstAdmin/VRK {@link #FIRSTADMIN_SIG_PREFIX} the bootstrap
+     *       transition stamps. Write {@code policy}/{@code policySig} in the same JPA
+     *       transaction as the CR commit (§7a.6 fail-closed + atomic).</li>
      * </ol>
      *
      * <h3>Who signs (port plan §7a.3, legacy step 5)</h3>
      * The membership CR is authorized by the OLD quorum at the OLD threshold
      * ({@code getThreshold} was evaluated at the commit gate BEFORE this CR was
-     * counted); the regenerated policy — VRK-signed here — installs the NEW
+     * counted); the regenerated policy — multiAdmin-signed here — installs the NEW
      * threshold for SUBSEQUENT CRs. OLD quorum installs NEW threshold; no
      * circular "need the new quorum to authorize its own creation".
      */
@@ -601,11 +603,19 @@ public class TideAttestor implements IgaAttestor {
 
         String vvkId = realmVvkId(realm);
         String newPolicyBody = buildAdminPolicyArtifact(newThreshold, vvkId);
-        // VRK sign (firstAdmin signing primitive) — the admin policy is ALWAYS
-        // VRK-signed (bootstrap + every regen), even though the realm is multiAdmin:
-        // the artifact is a governance parameter, not the CR's enclave-signed rows
-        // (§7a.3, §7a.5). Forcing MODE_FIRST_ADMIN here selects the VRK prefix.
-        String newPolicySig = sign(session, realm, MODE_FIRST_ADMIN,
+        // INVARIANT: the admin policy is signed with the realm's CURRENT authorizer
+        // mode at sign time — firstAdmin at the bootstrap transition (VRK), multiAdmin
+        // at every steady-state regen (enclave). This regen fires ONLY from
+        // combineFinal's multiAdmin branch, so the realm is already multiAdmin here;
+        // resolve that current mode and pass it through (do NOT hardcode a constant).
+        // It returns multiAdmin → sign() selects the multiAdmin path.
+        //
+        // WAVE-2 open mechanic: in wave 2 the multiAdmin regen sign needs real enclave
+        // partial-attestations (the enclave-threshold ceremony, Midgard combine), not a
+        // local key op. For now sign() emits the SHA-256 stub under DUMMY_SIG_PREFIX
+        // (TIDE-DUMMY-v1:), which correctly marks this as the multiAdmin-signed path.
+        String currentMode = resolveMode(session, realm); // == multiAdmin in this branch
+        String newPolicySig = sign(session, realm, currentMode,
                 newPolicyBody.getBytes(StandardCharsets.UTF_8));
 
         policy.setPolicy(newPolicyBody);
@@ -619,8 +629,10 @@ public class TideAttestor implements IgaAttestor {
         session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
 
         log.infof("IGA admin policy regenerated: realm %s tide-realm-admin threshold %s -> %d "
-                + "(membership delta %+d, post-commit admins %d); policy re-signed (VRK prefix).",
-                realm.getName(), String.valueOf(currentThreshold), newThreshold, delta, postCommitCount);
+                + "(membership delta %+d, post-commit admins %d); policy re-signed with current mode %s "
+                + "(multiAdmin -> %s prefix).",
+                realm.getName(), String.valueOf(currentThreshold), newThreshold, delta, postCommitCount,
+                currentMode, DUMMY_SIG_PREFIX);
     }
 
     /**

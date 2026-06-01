@@ -30,8 +30,12 @@ import {
  * `tide-realm-admin` role) in sync with that dynamic threshold: whenever a
  * committed CR changes the active-admin set (GRANT/REVOKE of tide-realm-admin in
  * multiAdmin mode), TideAttestor.combineFinal regenerates the policy body at the
- * new floor(0.7 * N) threshold and RE-SIGNS it (VRK path → TIDE-FIRSTADMIN-v1:),
- * in the SAME commit transaction. An IsEqualTo short-circuit skips the rewrite
+ * new floor(0.7 * N) threshold and RE-SIGNS it with the realm's CURRENT mode. The
+ * rule: the admin policy is signed with whatever mode the realm is in at sign time
+ * — the firstAdmin->multiAdmin TRANSITION sign is firstAdmin/VRK (TIDE-FIRSTADMIN-
+ * v1:, see phase13), but every STEADY-STATE regen here fires while the realm is
+ * already multiAdmin, so it signs via the multiAdmin/enclave path (TIDE-DUMMY-v1:).
+ * All in the SAME commit transaction. An IsEqualTo short-circuit skips the rewrite
  * when the threshold did not actually move (one regen per CR, no churn).
  *
  *   14a  membership ADD that MOVES the threshold regenerates + re-signs
@@ -50,14 +54,17 @@ import {
  *          2, so it needs TWO signatures; we supply master + a 2nd approver.)
  *          Assert policy_sig CHANGED AGAIN and encoded threshold 2->1.
  *
- *   14c  re-sign prefix — every regen's policy_sig carries TIDE-FIRSTADMIN-v1:
- *        (the admin policy is ALWAYS VRK-signed, bootstrap AND every regen,
- *        §7a.3/§7a.5), NEVER the multiAdmin TIDE-DUMMY-v1: enclave prefix.
+ *   14c  re-sign prefix — every STEADY-STATE regen's policy_sig carries the
+ *        multiAdmin TIDE-DUMMY-v1: enclave prefix (the regen signs with the realm's
+ *        current mode, which is multiAdmin here), NEVER the firstAdmin/VRK
+ *        TIDE-FIRSTADMIN-v1: prefix. (Only the firstAdmin->multiAdmin TRANSITION
+ *        sign is VRK-prefixed — that is phase13's concern, not a regen.)
  *
- * WAVE-2 BOUNDARY: the real VRK→ORK signature is wave 2. sign() is the SHA-256
- * stub here, so we assert the reachable proxies: the policy_sig STRING CHANGING
- * across a threshold move, the encoded threshold MATH, the policy body shape, and
- * the VRK prefix. Each behaviour is a distinct assertion.
+ * WAVE-2 BOUNDARY: the real multiAdmin enclave/Midgard signature is wave 2. sign()
+ * is the SHA-256 stub here, so we assert the reachable proxies: the policy_sig
+ * STRING CHANGING across a threshold move, the encoded threshold MATH, the policy
+ * body shape, and the multiAdmin (TIDE-DUMMY-v1:) prefix. Each behaviour is a
+ * distinct assertion.
  *
  * API E2E (no browser). DB facts read via `docker exec postgresP psql`, mirroring
  * phase13. Every iga_role_policy query is SCOPED to the realm's UUID.
@@ -360,7 +367,11 @@ test.describe('IGA Phase 14: threshold-change admin-policy regeneration (wave 1b
     // Seed the admin policy artifact (threshold 1) the regen keeps in sync.
     // phase13 never created one; wave 1b needs a row to regenerate. We upsert it
     // via POST /iga/role-policies encoding threshold 1 (= floor(0.7*1)). policySig
-    // is seeded with the VRK prefix so the "prefix preserved" assertion is honest.
+    // is seeded with the firstAdmin/VRK prefix because that models the TRANSITION-
+    // era sign (the policy was first installed in firstAdmin mode). The first
+    // STEADY-STATE regen below then flips the prefix to the multiAdmin TIDE-DUMMY-v1:
+    // (the policy is signed with the realm's current mode), which is exactly what
+    // the REGEN prefix assertions verify.
     // ---------------------------------------------------------------------
     const seededBody = JSON.stringify({
       type: 'GenericResourceAccessThresholdRole:1',
@@ -461,20 +472,23 @@ test.describe('IGA Phase 14: threshold-change admin-policy regeneration (wave 1b
       afterAdmin3.policy.includes(`"resource":"${REALM_MANAGEMENT}"`),
       `REGEN body must scope resource realm-management (got '${afterAdmin3.policy}')`,
     ).toBeTruthy();
-    // ASSERT C (add side) — VRK prefix, never the multiAdmin enclave prefix.
-    expect(
-      afterAdmin3.policySig.startsWith(FIRSTADMIN_PREFIX),
-      `REGEN policy_sig must carry the VRK ${FIRSTADMIN_PREFIX} prefix (got '${afterAdmin3.policySig}')`,
-    ).toBeTruthy();
+    // ASSERT C (add side) — the steady-state regen signs with the realm's CURRENT
+    // mode (multiAdmin here), so policy_sig carries the multiAdmin enclave prefix
+    // TIDE-DUMMY-v1:, NEVER the firstAdmin/VRK TIDE-FIRSTADMIN-v1: (that prefix is
+    // only the firstAdmin->multiAdmin transition sign — phase13, not a regen).
     expect(
       afterAdmin3.policySig.startsWith(DUMMY_PREFIX),
-      `REGEN policy_sig must NOT carry the multiAdmin ${DUMMY_PREFIX} enclave prefix (got '${afterAdmin3.policySig}')`,
+      `REGEN policy_sig must carry the multiAdmin ${DUMMY_PREFIX} enclave prefix (got '${afterAdmin3.policySig}')`,
+    ).toBeTruthy();
+    expect(
+      afterAdmin3.policySig.startsWith(FIRSTADMIN_PREFIX),
+      `REGEN policy_sig must NOT carry the firstAdmin/VRK ${FIRSTADMIN_PREFIX} prefix in multiAdmin steady state (got '${afterAdmin3.policySig}')`,
     ).toBeFalsy();
 
     console.log(
       `\n[phase14a] realm=${realmId} mode=multiAdmin ` +
         `add admin2 (N=2): NO-CHURN sig unchanged thr=1; ` +
-        `add admin3 (N=3): REGEN thr 1->2 sig '${afterAdmin3.policySig.slice(0, FIRSTADMIN_PREFIX.length + 8)}...'\n`,
+        `add admin3 (N=3): REGEN thr 1->2 sig '${afterAdmin3.policySig.slice(0, DUMMY_PREFIX.length + 8)}...'\n`,
     );
 
     // ---------------------------------------------------------------------
@@ -529,11 +543,16 @@ test.describe('IGA Phase 14: threshold-change admin-policy regeneration (wave 1b
       afterRevoke.policy.includes('"threshold":1'),
       `REGEN-ON-REVOKE body must encode "threshold":1 (got '${afterRevoke.policy}')`,
     ).toBeTruthy();
-    // ASSERT C (revoke side) — VRK prefix preserved.
+    // ASSERT C (revoke side) — still the multiAdmin enclave prefix (the realm is
+    // multiAdmin, so the regen signs with TIDE-DUMMY-v1:, not the VRK prefix).
+    expect(
+      afterRevoke.policySig.startsWith(DUMMY_PREFIX),
+      `REGEN-ON-REVOKE policy_sig must carry the multiAdmin ${DUMMY_PREFIX} enclave prefix (got '${afterRevoke.policySig}')`,
+    ).toBeTruthy();
     expect(
       afterRevoke.policySig.startsWith(FIRSTADMIN_PREFIX),
-      `REGEN-ON-REVOKE policy_sig must carry the VRK ${FIRSTADMIN_PREFIX} prefix (got '${afterRevoke.policySig}')`,
-    ).toBeTruthy();
+      `REGEN-ON-REVOKE policy_sig must NOT carry the firstAdmin/VRK ${FIRSTADMIN_PREFIX} prefix (got '${afterRevoke.policySig}')`,
+    ).toBeFalsy();
 
     console.log(
       `\n[phase14b] realm=${realmId} revoke admin3 (N 3->2): REGEN thr 2->1 ` +
