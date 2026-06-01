@@ -100,6 +100,19 @@ public class TideAttestor implements IgaAttestor {
     /** Component config keys carrying the VRK authorizer material (legacy MultiAdmin.java:95-96). */
     private static final String CFG_GVRK = "gVRK";
     private static final String CFG_GVRK_CERTIFICATE = "gVRKCertificate";
+    /** Vendor verifying-key id the admin policy artifact is keyed to (legacy TideRoleRequests.java:137). */
+    private static final String CFG_VVK_ID = "vvkId";
+
+    // -------------------------------------------------------------------------
+    // Admin-policy artifact shape (port plan §7a.2 / legacy TideRoleRequests.java:144-148)
+    // -------------------------------------------------------------------------
+    /** Stock realm-management client id the admin policy scopes (legacy Constants.REALM_MANAGEMENT_CLIENT_ID). */
+    private static final String POLICY_RESOURCE = REALM_MANAGEMENT_CLIENT_ID;
+    /** Policy type tag legacy stamped on the {@code tide-realm-admin} policy (TideRoleRequests.java:148). */
+    private static final String POLICY_TYPE = "GenericResourceAccessThresholdRole:1";
+    /** ApprovalType.EXPLICIT / ExecutionType.PUBLIC (legacy TideRoleRequests.java:148). */
+    private static final String POLICY_APPROVAL_TYPE = "EXPLICIT";
+    private static final String POLICY_EXECUTION_TYPE = "PUBLIC";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<List<Map<String, Object>>> LIST_MAP_REF =
@@ -372,6 +385,16 @@ public class TideAttestor implements IgaAttestor {
         if (isPolicyBootstrap) {
             writeBackPolicySig(session, realm, cr, sig);
             flipModeToMultiAdmin(session, realm);
+        } else if (MODE_MULTI_ADMIN.equals(mode)) {
+            // Wave 1b (port plan §7a): multiAdmin steady-state. If this committing CR
+            // changes the active tide-realm-admin set (grant/revoke of the role), the
+            // dynamic threshold floor(0.7 x N) may move, so the SIGNED admin policy
+            // artifact must be regenerated + re-signed to encode the new threshold.
+            // Sequenced LAST — after the CR's own attestation `sig` is already built
+            // above — so the regen never disturbs the CR sign (legacy defer-to-end-of
+            // -batch rule, MultiAdmin.java:429-431). No-op (and IsEqualTo-skipped) when
+            // the CR is not a membership change or the threshold did not actually move.
+            maybeRegenerateAdminPolicyOnMembershipChange(session, realm, cr);
         }
         return sig;
     }
@@ -497,6 +520,198 @@ public class TideAttestor implements IgaAttestor {
             log.infof("IGA mode transition: realm %s flipped firstAdmin -> multiAdmin on tide-realm-admin "
                     + "policy sign.", realm.getName());
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Wave 1b — threshold-change admin-policy regeneration (port plan §7a)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Steady-state (multiAdmin) admin-policy regeneration on an active-admin-set
+     * change (port plan §7a). Fired from {@link #combineFinal} ONLY in multiAdmin
+     * mode, AFTER the committing CR's own attestation signature is built (so the
+     * regen is sequenced last — legacy {@code MultiAdmin.java:429-431} defer rule).
+     *
+     * <h3>What it does</h3>
+     * <ol>
+     *   <li>Detect a membership-changing CR: a committed GRANT/REVOKE of the
+     *       realm-management {@code tide-realm-admin} role. Anything else → no-op.</li>
+     *   <li>Compute the POST-commit active-admin count. {@code combineFinal} runs
+     *       BEFORE the dispatcher replays this CR, so {@link #countActiveTideRealmAdmins}
+     *       still returns the PRE-commit count; we add the CR's pending net delta
+     *       (+1 grant / -1 revoke) — the exact legacy {@code additionalAdmins}
+     *       (ChangeSetProcessor.java:304, TideRoleRequests.java:128).</li>
+     *   <li>{@code newThreshold = max(1, floor(0.7 x postCommitCount))} — the SAME
+     *       formula + the SAME counting function {@link #getThreshold} uses, so the
+     *       policy the artifact encodes and the gate {@code getThreshold} enforces
+     *       cannot drift (§7a.7).</li>
+     *   <li>IsEqualTo short-circuit (legacy TideRoleRequests.java:163-168): if the
+     *       current policy already encodes {@code newThreshold}, skip — no rewrite,
+     *       no re-sign. The floor formula means most single adds DON'T move the
+     *       threshold, so this is the primary churn control (§7a.4). Exactly one
+     *       regen per committed membership-changing CR.</li>
+     *   <li>Rebuild the policy artifact (§7a.2 shape) at {@code newThreshold},
+     *       re-sign it via the VRK path (§7a.3 — the SAME signing primitive the
+     *       bootstrap policy sign uses, so {@code policySig} carries the
+     *       {@link #FIRSTADMIN_SIG_PREFIX} VRK prefix across bootstrap AND every
+     *       regen — §7a.5), and write {@code policy}/{@code policySig} in the same
+     *       JPA transaction as the CR commit (§7a.6 fail-closed + atomic).</li>
+     * </ol>
+     *
+     * <h3>Who signs (port plan §7a.3, legacy step 5)</h3>
+     * The membership CR is authorized by the OLD quorum at the OLD threshold
+     * ({@code getThreshold} was evaluated at the commit gate BEFORE this CR was
+     * counted); the regenerated policy — VRK-signed here — installs the NEW
+     * threshold for SUBSEQUENT CRs. OLD quorum installs NEW threshold; no
+     * circular "need the new quorum to authorize its own creation".
+     */
+    private void maybeRegenerateAdminPolicyOnMembershipChange(KeycloakSession session, RealmModel realm,
+                                                              IgaChangeRequestEntity cr) {
+        int delta = tideRealmAdminMembershipDelta(realm, cr);
+        if (delta == 0) {
+            return; // not a tide-realm-admin grant/revoke — the set is unchanged.
+        }
+
+        IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
+        if (policy == null) {
+            // No admin policy artifact to keep in sync (it is upserted via the
+            // separate POST /iga/role-policies path, §7.1). Nothing to regenerate;
+            // the live getThreshold gate is unaffected (it never reads this row).
+            log.infof("IGA policy regen skipped: realm %s has no tide-realm-admin role-policy row "
+                    + "to regenerate (membership delta %+d); live threshold gate is unaffected.",
+                    realm.getName(), delta);
+            return;
+        }
+
+        // combineFinal runs PRE-replay, so the live count excludes this CR's effect;
+        // add the pending net delta to obtain the post-commit count (legacy
+        // additionalAdmins). Clamp at 0 — a revoke can never make the count negative.
+        int postCommitCount = Math.max(0, countActiveTideRealmAdmins(realm, session) + delta);
+        int newThreshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
+
+        // IsEqualTo short-circuit (legacy TideRoleRequests.java:163-168): regenerate
+        // only when the encoded threshold actually moves.
+        Integer currentThreshold = currentEncodedThreshold(policy);
+        if (currentThreshold != null && currentThreshold == newThreshold) {
+            log.infof("IGA policy regen skipped (threshold unchanged): realm %s tide-realm-admin policy "
+                    + "already encodes threshold %d (membership delta %+d, post-commit admins %d).",
+                    realm.getName(), newThreshold, delta, postCommitCount);
+            return;
+        }
+
+        String vvkId = realmVvkId(realm);
+        String newPolicyBody = buildAdminPolicyArtifact(newThreshold, vvkId);
+        // VRK sign (firstAdmin signing primitive) — the admin policy is ALWAYS
+        // VRK-signed (bootstrap + every regen), even though the realm is multiAdmin:
+        // the artifact is a governance parameter, not the CR's enclave-signed rows
+        // (§7a.3, §7a.5). Forcing MODE_FIRST_ADMIN here selects the VRK prefix.
+        String newPolicySig = sign(session, realm, MODE_FIRST_ADMIN,
+                newPolicyBody.getBytes(StandardCharsets.UTF_8));
+
+        policy.setPolicy(newPolicyBody);
+        policy.setPolicySig(newPolicySig);
+        policy.setThreshold(newThreshold);
+        policy.setApprovalType(POLICY_APPROVAL_TYPE);
+        policy.setExecutionType(POLICY_EXECUTION_TYPE);
+        policy.setUpdatedAt(System.currentTimeMillis());
+        // Managed entity — flush keeps the rewrite in the CR's commit transaction
+        // (§7a.6 atomic: if the commit rolls back, so does the regen).
+        session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
+
+        log.infof("IGA admin policy regenerated: realm %s tide-realm-admin threshold %s -> %d "
+                + "(membership delta %+d, post-commit admins %d); policy re-signed (VRK prefix).",
+                realm.getName(), String.valueOf(currentThreshold), newThreshold, delta, postCommitCount);
+    }
+
+    /**
+     * The pending net delta this CR applies to the active tide-realm-admin count
+     * (port plan §7a.1 / legacy ChangeSetProcessor.java:304): {@code +1} for a
+     * committed GRANT of the realm-management {@code tide-realm-admin} role,
+     * {@code -1} for a committed REVOKE, {@code 0} for any other CR. Detection
+     * mirrors {@link #isTideRealmAdminAssignment} (the role's IDENTITY on a CR row),
+     * extended to the REVOKE action.
+     */
+    private int tideRealmAdminMembershipDelta(RealmModel realm, IgaChangeRequestEntity cr) {
+        if (cr == null) return 0;
+        String action = cr.getActionType();
+        if (!"GRANT_ROLES".equals(action) && !"REVOKE_ROLES".equals(action)) return 0;
+        String tideRoleId = tideRealmAdminRoleId(realm);
+        if (tideRoleId == null) return 0;
+        boolean touchesTideAdmin = false;
+        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+            if (tideRoleId.equals(str(row, "ROLE_ID"))) { touchesTideAdmin = true; break; }
+        }
+        if (!touchesTideAdmin) return 0;
+        return "GRANT_ROLES".equals(action) ? 1 : -1;
+    }
+
+    /**
+     * Build the admin-policy artifact body (port plan §7a.2 / legacy
+     * TideRoleRequests.java:144-148): a deterministic JSON object carrying the
+     * recomputed {@code threshold} + the {@code role}/{@code resource} scope +
+     * the policy-type metadata, keyed to the realm's {@code vvkId}. Legacy built a
+     * Midgard {@code Policy("GenericResourceAccessThresholdRole:1","any",vvkId,
+     * EXPLICIT,PUBLIC,{threshold,role,resource})}; iga-core has no Midgard Policy
+     * type, so the same field set is emitted as canonical JSON. Keys are written in
+     * a FIXED order so the bytes are stable (same threshold → same body → the
+     * IsEqualTo skip and the deterministic stub signature both hold).
+     */
+    private static String buildAdminPolicyArtifact(int threshold, String vvkId) {
+        StringBuilder b = new StringBuilder(160);
+        b.append('{');
+        b.append("\"type\":\"").append(POLICY_TYPE).append("\",");
+        b.append("\"vvkId\":").append(vvkId == null ? "null" : "\"" + jsonEscape(vvkId) + "\"").append(',');
+        b.append("\"approvalType\":\"").append(POLICY_APPROVAL_TYPE).append("\",");
+        b.append("\"executionType\":\"").append(POLICY_EXECUTION_TYPE).append("\",");
+        b.append("\"threshold\":").append(threshold).append(',');
+        b.append("\"role\":\"").append(TIDE_REALM_ADMIN_ROLE).append("\",");
+        b.append("\"resource\":\"").append(POLICY_RESOURCE).append('"');
+        b.append('}');
+        return b.toString();
+    }
+
+    /**
+     * Read the threshold the current policy artifact encodes, for the IsEqualTo
+     * short-circuit. Prefers the stored {@code IgaRolePolicyEntity.threshold}
+     * column (authoritative + cheap); falls back to parsing {@code "threshold":N}
+     * out of the {@code policy} body for rows whose column was never populated
+     * (e.g. a bootstrap-only or externally-upserted policy). Returns {@code null}
+     * if neither yields an int (then the regen does NOT skip — it rewrites).
+     */
+    private static Integer currentEncodedThreshold(IgaRolePolicyEntity policy) {
+        if (policy.getThreshold() != null) {
+            return policy.getThreshold();
+        }
+        String body = policy.getPolicy();
+        if (body == null) return null;
+        java.util.regex.Matcher m = THRESHOLD_IN_BODY.matcher(body);
+        if (m.find()) {
+            try {
+                return Integer.valueOf(m.group(1));
+            } catch (NumberFormatException ignore) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /** Matches {@code "threshold": 7} (any surrounding whitespace) in a policy body. */
+    private static final java.util.regex.Pattern THRESHOLD_IN_BODY =
+            java.util.regex.Pattern.compile("\"threshold\"\\s*:\\s*(\\d+)");
+
+    /** The realm's {@code vvkId} from its {@code tide-vendor-key} component, or null. */
+    private static String realmVvkId(RealmModel realm) {
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElse(null);
+        if (vendorKey == null || vendorKey.getConfig() == null) return null;
+        return vendorKey.getConfig().getFirst(CFG_VVK_ID);
+    }
+
+    /** Minimal JSON string escaping for the policy body's {@code vvkId} value. */
+    private static String jsonEscape(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     // -------------------------------------------------------------------------
