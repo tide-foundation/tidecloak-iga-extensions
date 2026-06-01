@@ -1810,25 +1810,32 @@ public class IgaAdminResource {
         } catch (Exception ignored) {
         }
 
-        // readyToCommit = PENDING && authCount >= threshold. Threshold resolution
-        // depends on rows_json + realm state, so guard it.
+        // threshold + readyToCommit. Both MUST come from the SAME authoritative
+        // value the commit gate enforces (IgaAdminResource.commit:345 →
+        // attestor.getThreshold), so the representation can never report a number
+        // that disagrees with enforcement. Threshold resolution depends on
+        // rows_json + realm state, so guard it.
+        //   - simple (Tideless) attestor → getThreshold delegates to the static
+        //     IgaScopeResolver.resolveThreshold(...) — same number as before.
+        //   - tide/firstAdmin            → 1 (single-signer onboarding).
+        //   - tide/multiAdmin            → dynamic floor(0.7 × activeTideAdmins),
+        //     unless a per-scope override or ADOPT_* bypass wins (both honoured
+        //     inside getThreshold). ADOPT_* still reports threshold=1.
         try {
+            IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
+            int threshold = attestor.getThreshold(session, realm, cr);
+            rep.setThreshold(threshold);
             if ("PENDING".equals(cr.getStatus())) {
-                IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
-                int threshold = attestor.getThreshold(session, realm, cr);
                 rep.setReadyToCommit(authCount >= threshold);
             }
         } catch (Exception ignored) {
         }
 
-        // Scope-based approval metadata for the admin UI. Resolve once and reuse
-        // for both the threshold and the required approver roles to avoid walking
-        // the affected entities twice.
+        // Scope-based approval metadata for the admin UI (required approver roles
+        // + scope mode). The threshold itself is resolved above via the attestor;
+        // here we only need the scope's role set and the realm scope mode.
         try {
             IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
-            // ADOPT_* CRs report threshold=1 (system-bootstrap bypass) so the
-            // admin UI sees the same gate the server enforces at commit.
-            rep.setThreshold(IgaScopeResolver.resolveThreshold(session, realm, scope, cr));
             rep.setRequiredApproverRoles(new java.util.ArrayList<>(scope.requiredApproverRoles));
             // scopeMode is realm-level today (see IgaScopeResolver.requireApprover);
             // mirror that derivation exactly so the UI sees the same gate the
