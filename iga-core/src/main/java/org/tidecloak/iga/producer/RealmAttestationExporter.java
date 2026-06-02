@@ -143,6 +143,12 @@ public final class RealmAttestationExporter {
      * false so the closure stays exact on a stock realm; flip on for the future
      * trust-loop pass. NOTE: never narrows the transitive role closure — a role
      * that surfaces in the token must always get a definition.
+     *
+     * <p>WARNING: the firstAdmin signer ({@code TideAttestor#buildUserRoleMappingSetUnitCbor})
+     * hard-codes the UNFILTERED user_role_mapping_set (no {@code attestation IS NOT NULL}
+     * predicate). Flipping {@code onlyAttested=true} would narrow the producer's
+     * emitted membership below the signed set and silently break firstAdmin VVK
+     * signature verification on the ork (membership divergence over literal bytes).
      */
     private boolean onlyAttested = false;
 
@@ -677,6 +683,11 @@ public final class RealmAttestationExporter {
         if (onlyAttested) {
             jpql += " AND urm.attestation IS NOT NULL";
         }
+        // Deterministic role-id ordering: the VVK sig is verified over the LITERAL
+        // envelope bytes (no re-canonicalization), so role_ids order is load-bearing.
+        // Must stay the LAST clause and mirror the firstAdmin signer's final sort
+        // (TideAttestor#buildUserRoleMappingSetUnitCbor) so both emit an identical set.
+        jpql += " ORDER BY urm.roleId";
         @SuppressWarnings("unchecked")
         List<String> ids = em.createQuery(jpql).setParameter("owner", userId).getResultList();
         return new ArrayList<>(ids);

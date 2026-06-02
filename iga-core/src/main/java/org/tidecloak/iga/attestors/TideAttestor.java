@@ -3,6 +3,7 @@ package org.tidecloak.iga.attestors;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jboss.logging.Logger;
+import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.ClientModel;
@@ -10,6 +11,12 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
+import org.midgard.Midgard;
+import org.midgard.models.RequestExtensions.AttestationUnitSignRequest;
+import org.midgard.models.SignRequestSettingsMidgard;
+import org.midgard.models.SignatureResponse;
+import org.tidecloak.iga.crypto.SecretKeys;
+import org.tidecloak.iga.producer.units.UserRoleMappingSetUnit;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
@@ -22,6 +29,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -102,6 +110,44 @@ public class TideAttestor implements IgaAttestor {
     private static final String CFG_GVRK_CERTIFICATE = "gVRKCertificate";
     /** Vendor verifying-key id the admin policy artifact is keyed to (legacy TideRoleRequests.java:137). */
     private static final String CFG_VVK_ID = "vvkId";
+    /**
+     * Component config keys the firstAdmin VRK signing ceremony sources for its
+     * {@link SignRequestSettingsMidgard} (legacy {@code IGAUtils.java:42-49} /
+     * {@code VendorResource.ConstructSignSettings}). {@code clientSecret} is the
+     * {@link SecretKeys} JSON blob carrying {@code activeVrk}; the rest are the
+     * ORK-network endpoint + vendor identity the native Midgard core dials.
+     */
+    private static final String CFG_CLIENT_SECRET = "clientSecret";
+    private static final String CFG_HOME_ORK = "systemHomeOrk";
+    private static final String CFG_PAYER_PUBLIC = "payerPublic";
+    private static final String CFG_OBF_GVVK = "obfGVVK";
+
+    /** Threshold env vars the Midgard signing settings require (legacy {@code IGAUtils.java:34-39}). */
+    private static final String ENV_THRESHOLD_T = "THRESHOLD_T";
+    private static final String ENV_THRESHOLD_N = "THRESHOLD_N";
+
+    /**
+     * Auth-flow id for a firstAdmin attestation-unit VRK sign — the single
+     * {@code String} the {@link AttestationUnitSignRequest} constructor takes (the
+     * positional successor to {@code ModelRequest.New}'s auth-flow arg). {@code "VRK:1"}
+     * mirrors every legacy VRK sign site ({@code IGAUtils.java},
+     * {@code VendorResource.java:1103,1448}, {@code TideChainOfTrustExchangeProvider.java:214}).
+     */
+    private static final String VRK_AUTH_FLOW = "VRK:1";
+
+    /** GRANT_ROLES CR row keys (IgaUserAdapter.grantRole / IgaReplayDispatcher.java:183). */
+    private static final String ROW_USER_ID = "USER_ID";
+    private static final String ROW_ROLE_ID = "ROLE_ID";
+
+    /**
+     * Seconds added to the signing request's default expiry before
+     * {@code GetDataToAuthorize} (the 30s Midgard default is too short for the ORK
+     * ceremony round-trip). 3 minutes, matching the piece-4 plan.
+     */
+    private static final long FIRSTADMIN_SIGN_EXPIRY_SECONDS = 180L;
+
+    /** The action type whose firstAdmin sign is upgraded to the real VRK ceremony (piece-4 slice 1). */
+    private static final String ACTION_GRANT_ROLES = "GRANT_ROLES";
 
     // -------------------------------------------------------------------------
     // Admin-policy artifact shape (port plan §7a.2 / legacy TideRoleRequests.java:144-148)
@@ -374,7 +420,20 @@ public class TideAttestor implements IgaAttestor {
                 ? readTideRealmAdminPolicyBytes(session, realm, cr)
                 : canonicalForRegularCr(session, cr);
 
-        String sig = sign(session, realm, mode, canonical);
+        // Piece-4 slice 1: a firstAdmin NON-policy GRANT_ROLES CR is signed by the
+        // REAL VVK → Midgard → ORK ceremony over the producer's `user_role_mapping_set`
+        // unit-envelope CBOR (built fresh from the CR's POST-change role set, NOT the
+        // §6.3 entity-state canonical) — so the signed bytes are exactly what the ork
+        // TVE re-derives. Everything else — incl. the firstAdmin tide-realm-admin
+        // POLICY bootstrap (which signs policy bytes, not a role-mapping-set) and every
+        // multiAdmin CR — keeps the stub. The policy-bootstrap exclusion is essential:
+        // that path's `canonical` is the admin-policy bytes, NOT a user_role_mapping_set,
+        // so it must not enter the GRANT_ROLES unit ceremony even though its actionType
+        // is GRANT_ROLES. The ceremony rebuilds its OWN unit CBOR from `cr`; `canonical`
+        // is only the stub fallback's input (and every non-eligible path's bytes).
+        boolean realCeremonyEligible = !isPolicyBootstrap
+                && ACTION_GRANT_ROLES.equals(cr.getActionType());
+        String sig = sign(session, realm, mode, realCeremonyEligible, cr, canonical);
 
         // Transition trigger (port plan §7): on a successful firstAdmin-mode sign
         // of the tide-realm-admin policy CR, write back policySig AND flip the
@@ -615,7 +674,12 @@ public class TideAttestor implements IgaAttestor {
         // local key op. For now sign() emits the SHA-256 stub under DUMMY_SIG_PREFIX
         // (TIDE-DUMMY-v1:), which correctly marks this as the multiAdmin-signed path.
         String currentMode = resolveMode(session, realm); // == multiAdmin in this branch
-        String newPolicySig = sign(session, realm, currentMode,
+        // realCeremonyEligible=false: this is a multiAdmin policy-artifact regen
+        // (signs the policy body, not a GRANT_ROLES role-mapping-set); the firstAdmin
+        // VVK unit ceremony never applies here, so the stub path is selected as
+        // before. `cr` is passed only to satisfy the signature — the non-eligible
+        // path ignores it and signs the policy-body bytes.
+        String newPolicySig = sign(session, realm, currentMode, false, cr,
                 newPolicyBody.getBytes(StandardCharsets.UTF_8));
 
         policy.setPolicy(newPolicyBody);
@@ -930,22 +994,361 @@ public class TideAttestor implements IgaAttestor {
     // -------------------------------------------------------------------------
 
     /**
-     * Mode-aware signing swap-point (port plan §3.4). WAVE 1a: both branches still
-     * produce the SHA-256 stub — sign() stays stubbed here. They differ ONLY in
-     * the prefix that marks the quorum + ceremony:
+     * Mode-aware signing swap-point (port plan §3.4).
+     *
+     * <p><b>Piece-4 slice 1 (this change):</b> the {@code firstAdmin} branch is
+     * upgraded from the SHA-256 stub to the REAL VVK → Midgard → ORK ceremony — but
+     * ONLY for a non-policy {@code GRANT_ROLES} CR ({@code realCeremonyEligible})
+     * AND ONLY once the realm is established as REAL-SIGNING-CAPABLE
+     * ({@link #isRealSigningCapable}). The ceremony signs the producer's
+     * {@code user_role_mapping_set} unit-envelope CBOR (built from the CR's
+     * POST-change role set), NOT the §6.3 entity-state canonical, so the signed
+     * bytes are byte-identical to what the ork TVE re-derives. It re-wraps the
+     * returned Midgard signature with the existing {@link #FIRSTADMIN_SIG_PREFIX} so
+     * the stamp shape the dispatcher fan-out and the {@code TIDE-FIRSTADMIN-v1:}
+     * prefix contract (phase13 e2e) depend on is preserved.
+     *
+     * <p><b>Capability gate (graceful) vs fail-closed.</b> The real ceremony is
+     * attempted only when {@link #isRealSigningCapable} confirms the realm has a
+     * provisioned VRK ({@code tide-vendor-key} + {@code activeVrk}), the ork
+     * endpoint settings, and the {@code THRESHOLD_T/N} env. If NOT capable (phase13
+     * and any dev/test realm without real orks — {@code clientSecret='{}'}, no
+     * {@code systemHomeOrk}/{@code vvkId}, no threshold env) the path falls back to
+     * the firstAdmin {@link #FIRSTADMIN_SIG_PREFIX} STUB, exactly as before — no
+     * hard-fail. Once capable, a ceremony ERROR (e.g. ORKs unreachable) is
+     * fail-closed (throws): a real-provisioned firstAdmin GRANT_ROLES must never be
+     * stamped with a fake digest.
+     *
+     * <p>Every other path keeps the stub, unchanged:
      * <ul>
-     *   <li>{@code firstAdmin} → {@link #FIRSTADMIN_SIG_PREFIX}. Wave 2 swaps in the
-     *       real VRK → Midgard → ORK signature here (NOT a local key op; §5.1).</li>
-     *   <li>{@code multiAdmin} (and any non-firstAdmin mode) → {@link #DUMMY_SIG_PREFIX},
-     *       the existing enclave-threshold stub; wave 2 lands {@code Midgard.signClaims()}.</li>
+     *   <li>{@code firstAdmin} non-eligible (the tide-realm-admin POLICY bootstrap,
+     *       and — until later slices — any non-{@code GRANT_ROLES} CR) →
+     *       {@link #FIRSTADMIN_SIG_PREFIX} stub.</li>
+     *   <li>{@code multiAdmin} (and any non-firstAdmin mode) → {@link #DUMMY_SIG_PREFIX}
+     *       stub; the enclave-threshold {@code Midgard.signClaims()} swap lands later.</li>
      * </ul>
      * The distinction between modes is NOT local-vs-network — both ceremonies go
      * Midgard → ORK in production (§3.4, §8); it is (a) admin quorum and (b) key /
      * signing ceremony.
+     *
+     * @param realCeremonyEligible {@code true} iff this is a firstAdmin non-policy
+     *        {@code GRANT_ROLES} CR (computed by {@link #combineFinal}, which knows
+     *        the policy-bootstrap discriminator); gates the real ceremony so the
+     *        policy-bootstrap path — whose {@code canonical} is policy bytes, not a
+     *        role-mapping-set — never enters it.
+     * @param cr       the committing CR — the eligible firstAdmin ceremony rebuilds
+     *        its OWN {@code user_role_mapping_set} unit CBOR from this; every other
+     *        path ignores it and signs {@code canonical}.
+     * @param canonical the §6.3 entity-state canonical (the stub input for every
+     *        non-eligible path AND the eligible path's capability-gate fallback).
      */
-    private String sign(KeycloakSession session, RealmModel realm, String mode, byte[] canonical) {
-        String prefix = MODE_FIRST_ADMIN.equals(mode) ? FIRSTADMIN_SIG_PREFIX : DUMMY_SIG_PREFIX;
-        return stubSign(prefix, canonical);
+    private String sign(KeycloakSession session, RealmModel realm, String mode,
+                        boolean realCeremonyEligible, IgaChangeRequestEntity cr, byte[] canonical) {
+        if (MODE_FIRST_ADMIN.equals(mode)) {
+            if (realCeremonyEligible && isRealSigningCapable(realm)) {
+                return signFirstAdminUnitWithVvk(session, realm, cr);      // REAL VVK unit-CBOR ceremony (fail-closed)
+            }
+            return stubSign(FIRSTADMIN_SIG_PREFIX, canonical);             // firstAdmin stub (not capable / policy bootstrap / other CRs)
+        }
+        return stubSign(DUMMY_SIG_PREFIX, canonical);                     // multiAdmin / non-firstAdmin stub
+    }
+
+    /**
+     * Capability check (graceful) — is this realm REAL-SIGNING-CAPABLE? True iff the
+     * realm carries everything the firstAdmin VVK ceremony needs to reach the ORK
+     * network, so a NEGATIVE answer can safely fall back to the stub without
+     * hard-failing (phase13 / dev realms), while a POSITIVE answer commits the realm
+     * to fail-closed real signing.
+     *
+     * <p>Probes, all NON-throwing (a malformed {@code clientSecret} is treated as
+     * "not capable", not an error):
+     * <ol>
+     *   <li>a {@code tide-vendor-key} component with config exists;</li>
+     *   <li>its {@code clientSecret} {@link SecretKeys} blob carries a non-blank
+     *       {@code activeVrk} (the VRK private key to sign with) — phase13's
+     *       {@code clientSecret='{}'} fails here;</li>
+     *   <li>the VRK authorizer material {@code gVRK}/{@code gVRKCertificate} is
+     *       present;</li>
+     *   <li>the ork-endpoint settings {@code systemHomeOrk} + {@code vvkId} are
+     *       present (absent on phase13's component);</li>
+     *   <li>{@code THRESHOLD_T} and {@code THRESHOLD_N} env vars are set to non-zero
+     *       ints (unset in the phase13 container).</li>
+     * </ol>
+     * This is the SAME material {@link #constructSignSettings} requires — the gate is
+     * its non-fatal pre-flight, so "capable" ⇒ {@code constructSignSettings} will not
+     * throw on the settings it builds. (It does not pre-dial the ORKs; an actually
+     * unreachable ORK surfaces inside the ceremony and is fail-closed there.)
+     */
+    private static boolean isRealSigningCapable(RealmModel realm) {
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst().orElse(null);
+        if (vendorKey == null || vendorKey.getConfig() == null) {
+            return false;
+        }
+        MultivaluedHashMap<String, String> config = vendorKey.getConfig();
+
+        // (2) activeVrk from the clientSecret blob — a malformed/empty blob → not capable.
+        String clientSecret = config.getFirst(CFG_CLIENT_SECRET);
+        if (clientSecret == null || clientSecret.isBlank()) {
+            return false;
+        }
+        try {
+            SecretKeys secretKeys = MAPPER.readValue(clientSecret, SecretKeys.class);
+            if (secretKeys == null || secretKeys.activeVrk == null || secretKeys.activeVrk.isBlank()) {
+                return false;
+            }
+        } catch (Exception parseFail) {
+            return false; // unparseable clientSecret → treat as not-provisioned (stub).
+        }
+
+        // (3) VRK authorizer material + (4) ork-endpoint settings.
+        if (isBlank(config.getFirst(CFG_GVRK)) || isBlank(config.getFirst(CFG_GVRK_CERTIFICATE))
+                || isBlank(config.getFirst(CFG_HOME_ORK)) || isBlank(config.getFirst(CFG_VVK_ID))) {
+            return false;
+        }
+
+        // (5) THRESHOLD_T / THRESHOLD_N env, non-zero ints.
+        return thresholdEnv(ENV_THRESHOLD_T) > 0 && thresholdEnv(ENV_THRESHOLD_N) > 0;
+    }
+
+    /** Parse a THRESHOLD_* env var to an int; 0 when unset/blank/non-numeric. */
+    private static int thresholdEnv(String name) {
+        String v = System.getenv(name);
+        if (v == null || v.isBlank()) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException nfe) {
+            return 0;
+        }
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
+    }
+
+    /**
+     * The REAL firstAdmin signing ceremony (piece-4 slice 1) — single-signer
+     * (1-of-1 ADMIN quorum) VVK signature over the producer's
+     * {@code user_role_mapping_set} unit-envelope CBOR, routed Midgard → native
+     * core → ORK network. The settings build + VRK-authorizer triplet are copied
+     * field-for-field from the gold reference {@code IGAUtils.signInitialTideAdmin}
+     * ({@code tidecloak-iga-extensions-old/.../utils/IGAUtils.java:31-63}) and
+     * {@code VendorResource.ConstructSignSettings}
+     * ({@code tidecloak-idp-extensions/.../VendorResource.java:1857-1871}); the
+     * request triplet mirrors {@code TideChainOfTrustExchangeProvider.java:214-220}.
+     *
+     * <h3>What is signed: the unit CBOR, not the §6.3 canonical</h3>
+     * The bytes handed to Midgard are the EXACT {@code user_role_mapping_set}
+     * unit-envelope CBOR the producer ({@link RealmAttestationExporter}) emits and
+     * the ork {@code TokenValidationEngine} re-derives — built here from the CR's
+     * POST-change role set via {@link #buildUserRoleMappingSetUnitCbor}. They are
+     * passed VERBATIM through {@link AttestationUnitSignRequest#SetUnits(byte[][])}
+     * (the 2-D byte[] overload that stores the bytes as-is); the {@code List<?>} /
+     * {@code Object} overloads must NOT be used — they re-run the bytes through a
+     * Jackson {@code writeValueAsBytes}, double-CBOR-wrapping the already-encoded
+     * envelope into a byte-string and corrupting the wire shape. {@code Signatures[0]}
+     * is the VVK signature over {@code units[0]}'s CBOR.
+     *
+     * <p><b>Wire shape preserved:</b> the return is {@code FIRSTADMIN_SIG_PREFIX +
+     * <midgard-sig>}, byte-compatible with the prior stub's prefix so the
+     * dispatcher's opaque fan-out and the e2e prefix assertions are unaffected
+     * (phase13). Only reached when {@link #isRealSigningCapable} already passed, so
+     * the settings/material are present; an actual signing FAILURE is fail-closed.
+     *
+     * @throws RuntimeException if the unit cannot be built, or the Midgard sign
+     *         fails (fail-closed — a real-provisioned firstAdmin GRANT_ROLES cannot
+     *         be stamped with a fake signature).
+     */
+    private String signFirstAdminUnitWithVvk(KeycloakSession session, RealmModel realm,
+                                             IgaChangeRequestEntity cr) {
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException(
+                        "IGA firstAdmin sign: realm " + realm.getName()
+                                + " has no tide-vendor-key component (VRK not provisioned)"));
+        MultivaluedHashMap<String, String> config = vendorKey.getConfig();
+        if (config == null) {
+            throw new RuntimeException("IGA firstAdmin sign: tide-vendor-key component has no config (realm "
+                    + realm.getName() + ")");
+        }
+
+        try {
+            SignRequestSettingsMidgard settings = constructSignSettings(config);
+            String gVrk = config.getFirst(CFG_GVRK);
+            String gVrkCert = config.getFirst(CFG_GVRK_CERTIFICATE);
+            if (gVrk == null || gVrk.isBlank() || gVrkCert == null || gVrkCert.isBlank()) {
+                throw new RuntimeException("IGA firstAdmin sign: tide-vendor-key component is missing "
+                        + "VRK authorizer material (gVRK/gVRKCertificate) for realm " + realm.getName());
+            }
+
+            // The producer's user_role_mapping_set unit-envelope CBOR for the CR's
+            // affected user (POST-change role set) — the exact bytes the ork TVE
+            // re-derives. This IS the draft this ceremony attests.
+            byte[] unitCbor = buildUserRoleMappingSetUnitCbor(session, realm, cr);
+
+            AttestationUnitSignRequest req = new AttestationUnitSignRequest(VRK_AUTH_FLOW);
+            // VERBATIM CBOR via the byte[][] overload (NOT List<?>/Object — those
+            // re-CBOR-wrap each element through Jackson, corrupting the envelope).
+            req.SetUnits(new byte[][]{ unitCbor });
+
+            // Override expiry BEFORE GetDataToAuthorize — the 30s Midgard default is
+            // too short for the ORK ceremony round-trip (piece-4 plan: +180s).
+            req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
+
+            // Attach the VRK-authorization triplet (authorization computed LAST over
+            // GetDataToAuthorize, then the authorizer + its certificate) — exactly
+            // the gold-reference ordering (IGAUtils.java:57-62, ChainOfTrust:216-218).
+            req.SetAuthorization(
+                    Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
+            req.SetAuthorizer(java.util.HexFormat.of().parseHex(gVrk));
+            req.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(gVrkCert));
+
+            SignatureResponse resp = Midgard.SignModel(settings, req);
+            if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
+                    || resp.Signatures[0] == null) {
+                throw new RuntimeException("IGA firstAdmin sign: Midgard.SignModel returned no signature "
+                        + "for realm " + realm.getName());
+            }
+            log.infof("IGA firstAdmin GRANT_ROLES signed via Midgard VVK unit ceremony (realm %s).",
+                    realm.getName());
+            // Preserve the firstAdmin stamp shape: prefix + the real ORK signature
+            // (the VVK signature over unit[0]'s CBOR).
+            return FIRSTADMIN_SIG_PREFIX + resp.Signatures[0];
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            // Fail-closed: a real-provisioned firstAdmin GRANT_ROLES must not fall
+            // back to a fake stub on a real signing failure.
+            throw new RuntimeException("IGA firstAdmin sign: Midgard VVK unit ceremony failed for realm "
+                    + realm.getName() + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Build the producer's {@code user_role_mapping_set} unit-envelope CBOR for a
+     * firstAdmin {@code GRANT_ROLES} CR — Change 1 of piece-4 slice 1. The bytes
+     * are byte-identical to what {@link RealmAttestationExporter#userRoleMappingSet}
+     * → {@link UserRoleMappingSetUnit#serialize()} emits for the affected user, so
+     * the ork {@code TokenValidationEngine} re-derives the same envelope and the VVK
+     * signature verifies.
+     *
+     * <h3>POST-change set, in PRODUCER RAW order (not sorted)</h3>
+     * {@code combineFinal} runs BEFORE the dispatcher replays the grant, so the DB
+     * still holds the PRE-change USER_ROLE_MAPPING set. We read it with the SAME
+     * JPQL the producer uses ({@code SELECT urm.roleId FROM UserRoleMappingEntity urm
+     * WHERE urm.user.id = :owner}) — preserving the RAW JPA result order into an
+     * {@link ArrayList}, NOT a sorted {@link TreeSet} — then APPEND the CR's pending
+     * grant role-id(s) iff not already present. The producer emits the raw stored
+     * child set verbatim ({@code UserRoleMappingSetUnit} javadoc: "RAW stored
+     * USER_ROLE_MAPPING child set"); a TreeSet here would reorder the ids and the
+     * CBOR would NOT match the ork-side re-derivation. (Mirrors
+     * {@link #canonicalizeLinkageSet}'s PRE-set + delta logic but for the ordered
+     * producer set rather than the sorted canonical.)
+     *
+     * <p>A {@code GRANT_ROLES} CR is captured per single user+role
+     * ({@code IgaUserAdapter.grantRole}: one row {@code {USER_ID, ROLE_ID}}); we
+     * resolve that user from the rows (preferring {@code cr.getEntityId()}), apply
+     * EVERY row's ROLE_ID to that user's set (defensive against a multi-row CR), and
+     * serialize the one unit. The realm binding is the unit's {@code target_id ==
+     * userId}; the realm id is {@code realm.getId()}.
+     */
+    private byte[] buildUserRoleMappingSetUnitCbor(KeycloakSession session, RealmModel realm,
+                                                   IgaChangeRequestEntity cr) {
+        List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
+
+        // Resolve the affected user: prefer the CR's entityId (the grant subject —
+        // IgaUserAdapter.grantRole sets entityId = userId), fall back to the first
+        // row's USER_ID. Collect every pending grant role-id for that user.
+        String userId = cr.getEntityId();
+        LinkedHashSet<String> grantedRoleIds = new LinkedHashSet<>();
+        for (Map<String, Object> row : rows) {
+            String rowUser = str(row, ROW_USER_ID);
+            if (userId == null) {
+                userId = rowUser; // no entityId — adopt the first row's user.
+            }
+            if (rowUser != null && rowUser.equals(userId)) {
+                String roleId = str(row, ROW_ROLE_ID);
+                if (roleId != null) {
+                    grantedRoleIds.add(roleId);
+                }
+            }
+        }
+        if (userId == null) {
+            throw new RuntimeException("IGA firstAdmin sign: GRANT_ROLES CR " + cr.getId()
+                    + " carries no resolvable USER_ID for the user_role_mapping_set unit");
+        }
+
+        // PRE-change RAW stored role-id set for the user, in producer JPA order
+        // (UNFILTERED — onlyAttested=false on the producer's default export, so the
+        // pending-but-unsigned grant we are about to add is included; we mirror the
+        // unfiltered query and append the grant ourselves).
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        @SuppressWarnings("unchecked")
+        List<String> roleIds = new ArrayList<>(em.createQuery(
+                        "SELECT urm.roleId FROM UserRoleMappingEntity urm WHERE urm.user.id = :owner"
+                                + " ORDER BY urm.roleId")
+                .setParameter("owner", userId)
+                .getResultList());
+        // Apply the pending grant delta: add each granted id not already present.
+        for (String roleId : grantedRoleIds) {
+            if (!roleIds.contains(roleId)) {
+                roleIds.add(roleId);
+            }
+        }
+        // Deterministic role-id ordering. The VVK sig is verified over the LITERAL
+        // envelope bytes (no re-canonicalization), so role_ids ORDER is load-bearing.
+        // Sort the assembled set ascending so it byte-matches the producer's emitted
+        // unit (RealmAttestationExporter#userRoleMappingSet, ORDER BY urm.roleId):
+        // signer = sorted(pre-set ∪ granted) == producer = sorted(committed set).
+        roleIds.sort(Comparator.naturalOrder());
+
+        return new UserRoleMappingSetUnit(realm.getId(), userId, roleIds).serialize();
+    }
+
+    /**
+     * Build the {@link SignRequestSettingsMidgard} from the realm's
+     * {@code tide-vendor-key} config — the iga-core port of
+     * {@code VendorResource.ConstructSignSettings} ({@code VendorResource.java:1857-1871})
+     * with the {@code activeVrk} sourced from the {@code clientSecret}
+     * {@link SecretKeys} blob (as {@code IGAUtils.signInitialTideAdmin} does,
+     * {@code IGAUtils.java:30-47}). {@code THRESHOLD_T}/{@code THRESHOLD_N} come
+     * from the same env vars legacy reads; a missing/zero value is fatal (the ORK
+     * ceremony is undefined without a real threshold), matching legacy's guard.
+     */
+    private static SignRequestSettingsMidgard constructSignSettings(MultivaluedHashMap<String, String> config)
+            throws Exception {
+        String clientSecret = config.getFirst(CFG_CLIENT_SECRET);
+        if (clientSecret == null || clientSecret.isBlank()) {
+            throw new RuntimeException("IGA firstAdmin sign: tide-vendor-key component has no clientSecret "
+                    + "(no activeVrk to sign with)");
+        }
+        SecretKeys secretKeys = MAPPER.readValue(clientSecret, SecretKeys.class);
+        if (secretKeys.activeVrk == null || secretKeys.activeVrk.isBlank()) {
+            throw new RuntimeException("IGA firstAdmin sign: clientSecret carries no activeVrk");
+        }
+
+        String tEnv = System.getenv(ENV_THRESHOLD_T);
+        String nEnv = System.getenv(ENV_THRESHOLD_N);
+        int threshold = (tEnv == null || tEnv.isBlank()) ? 0 : Integer.parseInt(tEnv);
+        int max = (nEnv == null || nEnv.isBlank()) ? 0 : Integer.parseInt(nEnv);
+        if (threshold == 0 || max == 0) {
+            throw new RuntimeException("IGA firstAdmin sign: signing-threshold env vars not set "
+                    + "(THRESHOLD_T=" + threshold + ", THRESHOLD_N=" + max + ")");
+        }
+
+        SignRequestSettingsMidgard settings = new SignRequestSettingsMidgard();
+        settings.VVKId = config.getFirst(CFG_VVK_ID);
+        settings.HomeOrkUrl = config.getFirst(CFG_HOME_ORK);
+        settings.PayerPublicKey = config.getFirst(CFG_PAYER_PUBLIC);
+        settings.ObfuscatedVendorPublicKey = config.getFirst(CFG_OBF_GVVK);
+        settings.VendorRotatingPrivateKey = secretKeys.activeVrk;
+        settings.Threshold_T = threshold;
+        settings.Threshold_N = max;
+        return settings;
     }
 
     /**
