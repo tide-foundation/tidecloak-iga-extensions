@@ -247,7 +247,11 @@ public class IgaAdminResource {
                     .build();
         }
 
-        String partialSig = body != null ? (String) body.get("partialSig") : null;
+        // NOTE: the inbound JSON key is "approval" (renamed from "partialSig" to match
+        // the column/field rename PARTIAL_SIG->APPROVAL). This payload is the
+        // attestationPayload arg to record(), which both attestors ignore (they
+        // overwrite with the admin username), so the key name is vestigial.
+        String approval = body != null ? (String) body.get("approval") : null;
 
         UserModel admin = currentUser();
         if (admin == null) {
@@ -257,13 +261,13 @@ public class IgaAdminResource {
         }
 
         // Reject a duplicate signature from the same admin (SimpleNameAttestor
-        // stores the admin's username in PARTIAL_SIG — see SimpleNameAttestor.record).
+        // stores the admin's username in APPROVAL — see SimpleNameAttestor.record).
         List<IgaAuthorizationEntity> existing = em.createNamedQuery(
                         "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
                 .setParameter("changeRequestId", cr.getId())
                 .getResultList();
         for (IgaAuthorizationEntity a : existing) {
-            if (admin.getUsername() != null && admin.getUsername().equals(a.getPartialSig())) {
+            if (admin.getUsername() != null && admin.getUsername().equals(a.getApproval())) {
                 return Response.status(Response.Status.CONFLICT)
                         .entity(Map.of("error",
                                 "Caller has already signed this change request"))
@@ -279,7 +283,7 @@ public class IgaAdminResource {
 
         IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
         // record() also enforces IgaScopeResolver.requireApprover() internally.
-        attestor.record(session, cr, admin, partialSig);
+        attestor.record(session, cr, admin, approval);
 
         // NOTE: Even when authCount >= threshold we DO NOT invoke combineFinal()
         // or IgaReplayDispatcher.replay() here. Commit is now an explicit step
@@ -648,7 +652,7 @@ public class IgaAdminResource {
                     .getResultList();
             boolean alreadySigned = false;
             for (IgaAuthorizationEntity a : existing) {
-                if (admin.getUsername() != null && admin.getUsername().equals(a.getPartialSig())) {
+                if (admin.getUsername() != null && admin.getUsername().equals(a.getApproval())) {
                     alreadySigned = true;
                     break;
                 }
@@ -1803,7 +1807,7 @@ public class IgaAdminResource {
                     .getResultList();
             List<IgaCrAuthorizerRepresentation> authorizers = rows.stream()
                     .map(a -> new IgaCrAuthorizerRepresentation(
-                            a.getPartialSig(),
+                            a.getApproval(),
                             a.getCreatedAt() != null ? a.getCreatedAt() : 0L))
                     .collect(Collectors.toList());
             rep.setAuthorizers(authorizers);

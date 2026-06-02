@@ -39,8 +39,8 @@ public class IgaAuthorizationEntity {
     @Column(name = "AUTHORIZED_BY", length = 36, nullable = false)
     private String authorizedBy;
 
-    @Column(name = "PARTIAL_SIG", columnDefinition = "TEXT")
-    private String partialSig;
+    @Column(name = "APPROVAL", columnDefinition = "TEXT")
+    private String approval;
 
     @Column(name = "CREATED_AT", nullable = false)
     private Long createdAt;
@@ -54,8 +54,8 @@ public class IgaAuthorizationEntity {
     public String getAuthorizedBy() { return authorizedBy; }
     public void setAuthorizedBy(String authorizedBy) { this.authorizedBy = authorizedBy; }
 
-    public String getPartialSig() { return partialSig; }
-    public void setPartialSig(String partialSig) { this.partialSig = partialSig; }
+    public String getApproval() { return approval; }
+    public void setApproval(String approval) { this.approval = approval; }
 
     public Long getCreatedAt() { return createdAt; }
     public void setCreatedAt(Long createdAt) { this.createdAt = createdAt; }

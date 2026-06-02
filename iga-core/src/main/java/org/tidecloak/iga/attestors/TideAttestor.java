@@ -149,7 +149,7 @@ public class TideAttestor implements IgaAttestor {
         // row is born here, on the first Tide-mode record(), seeded firstAdmin.
         // Idempotent — only creates when absent. No mode-specific dedup difference:
         // both firstAdmin and multiAdmin persist the same IgaAuthorizationEntity
-        // shape (partialSig = admin username), and the existing approver-role gate
+        // shape (approval = admin username), and the existing approver-role gate
         // + the one-layer-up dedup (IgaAdminResource.authorize) are unchanged
         // (port plan §3.2).
         maybeSeedFirstAdminAuthorizer(session, realm);
@@ -162,7 +162,7 @@ public class TideAttestor implements IgaAttestor {
         auth.setId(UUID.randomUUID().toString());
         auth.setChangeRequest(cr);
         auth.setAuthorizedBy(admin.getId());
-        auth.setPartialSig(admin.getUsername());
+        auth.setApproval(admin.getUsername());
         auth.setCreatedAt(System.currentTimeMillis());
         em.persist(auth);
         em.flush();

@@ -114,9 +114,9 @@ rollback), (b) `setRollbackOnly()` on the request tx, (c) throws
 `REQUESTED_BY`, `CREATED_AT`, `RESOLVED_AT`, `RESOLVED_BY`. State is the `STATUS` string —
 there is no separate draft/committed boolean.
 
-**`IgaAuthorizationEntity`** → table `IGA_AUTHORIZATION` (the partial-sigs / approvals table):
-`ID`, `CHANGE_REQUEST_ID` (FK), `AUTHORIZED_BY` (admin user id), `PARTIAL_SIG` (TEXT — for
-`simple` this is the admin's **username**), `CREATED_AT`.
+**`IgaAuthorizationEntity`** → table `IGA_AUTHORIZATION` (the per-approver approvals table):
+`ID`, `CHANGE_REQUEST_ID` (FK), `AUTHORIZED_BY` (admin user id), `APPROVAL` (TEXT — for
+`simple` this is the admin's **username**; was `PARTIAL_SIG` before changelog 2.6.0), `CREATED_AT`.
 
 **Where attestation lands:** NOT on the CR. At replay, the final attestation string is
 stamped onto the **target KC entity/edge row's `ATTESTATION` column** (those columns are
@@ -161,7 +161,7 @@ ADOPT CRs are uniquely **resumable from CANCELLED** — authorize/commit flip th
 | **202** Accepted | action captured into a CR | `Location` header → CR-get endpoint | `IgaPendingApprovalExceptionMapper:36-68` |
 | **403** Forbidden | authorize/commit by an admin lacking the required approver role | `"Approver role required: [...] (mode=any\|all)"` | `IgaScopeResolver.requireApprover` → `ForbiddenException` |
 | **412** Precondition Failed | commit with `authCount < threshold` | `{error:"Need N more signature(s)", threshold, authCount}` | `IgaAdminResource:346-354` |
-| **409** Conflict | (a) CR not in PENDING state; (b) duplicate signature by same admin (same `PARTIAL_SIG` username or `AUTHORIZED_BY` id) | `"...not in PENDING state"` / `"Caller has already signed this change request"` | `IgaAdminResource:261-278` |
+| **409** Conflict | (a) CR not in PENDING state; (b) duplicate signature by same admin (same `APPROVAL` username or `AUTHORIZED_BY` id) | `"...not in PENDING state"` / `"Caller has already signed this change request"` | `IgaAdminResource:261-278` |
 | **409** Conflict | manual adopt of an already-attested target | `ALREADY_ATTESTED` | `IgaAdminResource:822-864` |
 | **429** Too Many Requests | bulk-authorize lost the per-realm cluster lock | — | `IgaBulkLock` |
 | **404** Not Found | ADOPT target deleted out-of-band during commit; CR stays PENDING | `{error:"ENTITY_VANISHED", entityType, entityId, realmId}` | `IgaAdminResource:378-388` |
@@ -213,7 +213,7 @@ silently dropped and resolution falls back to realm `iga.threshold` / default 1.
   realm attribute **`iga.attestor`** (default `"simple"`; falls back to simple if the named
   one is missing) → `session.getProvider(IgaAttestor.class, id)`.
 - **`SimpleNameAttestor`** (id `"simple"`, default/enforced): `record` enforces approver role
-  then stores `PARTIAL_SIG = admin.getUsername()`; `combineFinal` = JSON array of
+  then stores `APPROVAL = admin.getUsername()`; `combineFinal` = JSON array of
   `{by, at}`. Per-row, no crypto. This is what every Tideless realm uses.
 - **`TideAttestor`** (id `"tide"`, dummy/future, `attestors/TideAttestor.java`):
   `isSetSigned()=true`; implements the FULL per-(linkage-table, owner) **set-signing** —

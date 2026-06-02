@@ -379,7 +379,7 @@ public class IgaChangeRequestService {
     /**
      * Add an authorization record to an existing change request.
      */
-    public IgaAuthorizationEntity authorize(String changeRequestId, String authorizedBy, String partialSig) {
+    public IgaAuthorizationEntity authorize(String changeRequestId, String authorizedBy, String approval) {
         IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, changeRequestId);
         if (cr == null) {
             throw new IllegalArgumentException("Change request not found: " + changeRequestId);
@@ -388,7 +388,7 @@ public class IgaChangeRequestService {
         auth.setId(UUID.randomUUID().toString());
         auth.setChangeRequest(cr);
         auth.setAuthorizedBy(authorizedBy);
-        auth.setPartialSig(partialSig);
+        auth.setApproval(approval);
         auth.setCreatedAt(System.currentTimeMillis());
         em.persist(auth);
         em.flush();

@@ -61,7 +61,7 @@ public class SimpleNameAttestor implements IgaAttestor {
         auth.setChangeRequest(cr);
         auth.setAuthorizedBy(admin.getId());
         // The "name" is the attestation for the simple attestor; ignore attestationPayload.
-        auth.setPartialSig(admin.getUsername());
+        auth.setApproval(admin.getUsername());
         auth.setCreatedAt(System.currentTimeMillis());
         em.persist(auth);
         em.flush();
@@ -76,7 +76,7 @@ public class SimpleNameAttestor implements IgaAttestor {
         if (authorizations != null) {
             for (IgaAuthorizationEntity a : authorizations) {
                 Map<String, Object> entry = new LinkedHashMap<>();
-                entry.put("by", a.getPartialSig());
+                entry.put("by", a.getApproval());
                 entry.put("at", a.getCreatedAt());
                 list.add(entry);
             }

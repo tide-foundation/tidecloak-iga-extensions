@@ -462,7 +462,9 @@ public class IgaFirstAdminSignPreviewService {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", a.getId());
             m.put("authorizedBy", a.getAuthorizedBy());
-            m.put("partialSig", a.getPartialSig());
+            // Source column/field renamed PARTIAL_SIG->APPROVAL; the response JSON
+            // key is renamed to match ("approval").
+            m.put("approval", a.getApproval());
             m.put("createdAt", a.getCreatedAt());
             out.add(m);
         }
