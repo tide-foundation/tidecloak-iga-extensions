@@ -25,8 +25,8 @@ public final class RoleDefinitionUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "role_definition";
+    public AttestationUnitType type() {
+        return AttestationUnitType.ROLE_DEFINITION;
     }
 
     @Override
@@ -34,7 +34,6 @@ public final class RoleDefinitionUnit extends AttestationUnit {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("role_id", roleId);
         p.put("name", name);
-        p.put("realm_id", realmId);
         p.put("client_role", clientRole);
         p.put("container_id", containerId);
         return p;

@@ -52,14 +52,13 @@ public final class RealmConfigUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "realm_config";
+    public AttestationUnitType type() {
+        return AttestationUnitType.REALM_CONFIG;
     }
 
     @Override
     public Map<String, Object> payload() {
         Map<String, Object> p = new LinkedHashMap<>();
-        p.put("realm_id", realmId);
         p.put("name", name);
         p.put("access_token_lifespan_seconds", accessTokenLifespanSeconds);
         p.put("access_token_lifespan_for_implicit_flow_seconds",

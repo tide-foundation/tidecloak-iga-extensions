@@ -21,15 +21,14 @@ public final class UserGroupMembershipSetUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "user_group_membership_set";
+    public AttestationUnitType type() {
+        return AttestationUnitType.USER_GROUP_MEMBERSHIP_SET;
     }
 
     @Override
     public Map<String, Object> payload() {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("user_id", userId);
-        p.put("realm_id", realmId);
         p.put("group_ids", groupIds);
         return p;
     }

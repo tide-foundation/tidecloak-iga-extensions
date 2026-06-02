@@ -21,19 +21,24 @@ import java.util.Map;
  *
  * <h2>Envelope shape (matches ork {@code BaseAttestationUnit})</h2>
  * <pre>
- * { "unit_type":      "&lt;wire string&gt;",
+ * { "unit_type":      &lt;integer enum ordinal 0..17&gt;,
  *   "schema_version": 1,
  *   "target_id":      "&lt;primary key of the parent entity&gt;",
- *   "payload":        { ... INCLUDES realm_id ... } }
+ *   "payload":        { ... NO realm_id ... } }
  * </pre>
- * The envelope-level {@code realm_id} was DROPPED (envelope is now 4 keys).
- * The realm binding is carried by {@code payload.realm_id} — the payload still
- * INCLUDES {@code realm_id} (built by each subclass's {@code payload()} /
- * {@code BuildCanonicalPayload}). The ork side asserts the realm via
- * {@code payload.realm_id} now; there is no envelope/payload {@code realm_id}
- * equality check. Unlike the old compact {@code {u,t,p}} bundle form, each unit
- * still carries its OWN {@code unit_type}/{@code schema_version} so it is a
- * self-describing envelope on the wire.
+ * {@code unit_type} is the INTEGER ordinal of {@link AttestationUnitType}, not the
+ * snake_case string — the ork decoder reads it as a CBOR unsigned integer
+ * ({@code AttestationUnit.cs} {@code GetInt}/{@code (AttestationUnitType)}).
+ * Neither the envelope NOR the payload carries {@code realm_id} (the envelope is 4
+ * keys; each subclass's {@code payload()} omits it). This matches the ork side
+ * verbatim: {@code AttestationUnit.cs CanonicalBytes()} builds the same 4-key
+ * envelope and {@code BuildCanonicalPayload()} emits no {@code realm_id}, so the
+ * canonical CBOR is byte-identical. The realm binding is carried entirely by
+ * {@code target_id} — a realm-unique entity UUID per unit (for realm-scoped units
+ * {@code target_id == realmId}, enforced by ork {@code RequireTargetMatches(RealmId)}).
+ * Unlike the old compact {@code {u,t,p}} bundle form, each unit still carries its
+ * OWN {@code unit_type}/{@code schema_version} so it is a self-describing envelope
+ * on the wire.
  */
 public abstract class AttestationUnit {
 
@@ -56,8 +61,22 @@ public abstract class AttestationUnit {
         this.targetId = targetId;
     }
 
-    /** The ork {@code unit_type} wire string (snake_case, case-sensitive). */
-    public abstract String unitType();
+    /**
+     * The unit's type. The CBOR envelope's {@code unit_type} field is emitted as
+     * this type's INTEGER ordinal ({@link AttestationUnitType#wireValue()}), which
+     * is the authoritative producer→ork mapping — see {@link AttestationUnitType}.
+     */
+    public abstract AttestationUnitType type();
+
+    /**
+     * The ork {@code unit_type} wire NAME (snake_case, case-sensitive). NOTE: this
+     * is the human-readable name used in logs / spec / {@link #serialize()} error
+     * messages only — the CBOR envelope carries the INTEGER ordinal, not this
+     * string (the ork decoder requires an integer {@code unit_type}).
+     */
+    public final String unitType() {
+        return type().wireName();
+    }
 
     public final int schemaVersion() {
         return SCHEMA_VERSION;
@@ -72,9 +91,11 @@ public abstract class AttestationUnit {
     }
 
     /**
-     * The full, ordered payload map INCLUDING {@code realm_id}, keyed exactly as
-     * the corresponding ork unit's {@code BuildCanonicalPayload}. Each subclass
-     * preserves the legacy exporter's key set + null conventions.
+     * The full, ordered payload map, keyed exactly as the corresponding ork unit's
+     * {@code BuildCanonicalPayload}. Each subclass preserves the legacy exporter's
+     * key set + null conventions. {@code realm_id} is NOT a payload key (the ork
+     * {@code BuildCanonicalPayload} emits none); the realm binding lives in
+     * {@link #targetId}.
      */
     public abstract Map<String, Object> payload();
 
@@ -82,11 +103,18 @@ public abstract class AttestationUnit {
      * The full four-key envelope as an ordered {@link LinkedHashMap}
      * ({@code unit_type, schema_version, target_id, payload}). The
      * bundle writer drops one of these per {@code units[]} entry. The realm
-     * binding lives in {@code payload.realm_id}, not at the envelope level.
+     * binding lives in {@code target_id} (a realm-unique entity UUID); neither the
+     * envelope nor the payload carries {@code realm_id}.
      */
     public final Map<String, Object> toEnvelopeMap() {
         Map<String, Object> env = new LinkedHashMap<>();
-        env.put("unit_type", unitType());
+        // unit_type is the INTEGER enum ordinal (AttestationUnitType.wireValue),
+        // NOT the snake_case string: the ork decoder reads it via GetInt /
+        // (AttestationUnitType)utl (AttestationUnit.cs:210,535) and a text-string
+        // unit_type hard-fails ("must be an integer"). The int (not Integer via a
+        // boxing surprise — wireValue() returns primitive int) makes Jackson-CBOR
+        // encode a CBOR unsigned integer (major type 0).
+        env.put("unit_type", type().wireValue());
         env.put("schema_version", SCHEMA_VERSION);
         env.put("target_id", targetId);
         env.put("payload", payload());

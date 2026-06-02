@@ -21,14 +21,13 @@ public final class RealmDefaultGroupsSetUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "realm_default_groups_set";
+    public AttestationUnitType type() {
+        return AttestationUnitType.REALM_DEFAULT_GROUPS_SET;
     }
 
     @Override
     public Map<String, Object> payload() {
         Map<String, Object> p = new LinkedHashMap<>();
-        p.put("realm_id", realmId);
         p.put("group_ids", groupIds);
         return p;
     }

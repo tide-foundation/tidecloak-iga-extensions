@@ -23,15 +23,14 @@ public final class ClientScopeAssignmentSetUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "client_scope_assignment_set";
+    public AttestationUnitType type() {
+        return AttestationUnitType.CLIENT_SCOPE_ASSIGNMENT_SET;
     }
 
     @Override
     public Map<String, Object> payload() {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("client_id_uuid", clientIdUuid);
-        p.put("realm_id", realmId);
         p.put("assignments", assignments(assignments));
         return p;
     }

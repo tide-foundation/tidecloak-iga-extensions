@@ -31,15 +31,14 @@ public final class ProtocolMapperUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "protocol_mapper";
+    public AttestationUnitType type() {
+        return AttestationUnitType.PROTOCOL_MAPPER;
     }
 
     @Override
     public Map<String, Object> payload() {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("protocol_mapper_id", protocolMapperId);
-        p.put("realm_id", realmId);
         p.put("parent_type", parentType.name());
         p.put("parent_id", parentId);
         p.put("protocol", protocol);

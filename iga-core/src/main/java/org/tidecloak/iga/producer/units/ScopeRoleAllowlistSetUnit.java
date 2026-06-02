@@ -27,8 +27,8 @@ public final class ScopeRoleAllowlistSetUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "scope_role_allowlist_set";
+    public AttestationUnitType type() {
+        return AttestationUnitType.SCOPE_ROLE_ALLOWLIST_SET;
     }
 
     @Override
@@ -36,7 +36,6 @@ public final class ScopeRoleAllowlistSetUnit extends AttestationUnit {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("parent_type", parentType.name());
         p.put("parent_id", parentId);
-        p.put("realm_id", realmId);
         p.put("role_ids", roleIds);
         return p;
     }

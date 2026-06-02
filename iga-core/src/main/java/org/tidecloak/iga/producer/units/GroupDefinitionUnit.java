@@ -27,8 +27,8 @@ public final class GroupDefinitionUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "group_definition";
+    public AttestationUnitType type() {
+        return AttestationUnitType.GROUP_DEFINITION;
     }
 
     @Override
@@ -36,7 +36,6 @@ public final class GroupDefinitionUnit extends AttestationUnit {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("group_id", groupId);
         p.put("name", name);
-        p.put("realm_id", realmId);
         p.put("parent_group_id", parentGroupId); // null for top-level
         p.put("type", type.name());
         return p;

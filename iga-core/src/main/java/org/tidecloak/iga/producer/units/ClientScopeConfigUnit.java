@@ -25,8 +25,8 @@ public final class ClientScopeConfigUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "client_scope_config";
+    public AttestationUnitType type() {
+        return AttestationUnitType.CLIENT_SCOPE_CONFIG;
     }
 
     @Override
@@ -34,7 +34,6 @@ public final class ClientScopeConfigUnit extends AttestationUnit {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("client_scope_id", clientScopeId);
         p.put("name", name);
-        p.put("realm_id", realmId);
         p.put("protocol", protocol);
         p.put("attributes", nameValues(attributes));
         return p;

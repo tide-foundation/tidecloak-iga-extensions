@@ -26,15 +26,14 @@ public final class OrganizationDefinitionUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "organization_definition";
+    public AttestationUnitType type() {
+        return AttestationUnitType.ORGANIZATION_DEFINITION;
     }
 
     @Override
     public Map<String, Object> payload() {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("org_id", orgId);
-        p.put("realm_id", realmId);
         p.put("alias", alias);
         p.put("enabled", enabled);
         p.put("group_id", groupId);

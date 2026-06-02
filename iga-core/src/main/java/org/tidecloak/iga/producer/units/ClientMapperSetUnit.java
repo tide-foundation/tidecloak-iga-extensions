@@ -24,15 +24,14 @@ public final class ClientMapperSetUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "client_mapper_set";
+    public AttestationUnitType type() {
+        return AttestationUnitType.CLIENT_MAPPER_SET;
     }
 
     @Override
     public Map<String, Object> payload() {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("client_id_uuid", clientIdUuid);
-        p.put("realm_id", realmId);
         p.put("protocol_mapper_ids", protocolMapperIds);
         return p;
     }

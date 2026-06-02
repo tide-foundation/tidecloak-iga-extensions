@@ -33,8 +33,8 @@ public final class ClientConfigUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "client_config";
+    public AttestationUnitType type() {
+        return AttestationUnitType.CLIENT_CONFIG;
     }
 
     @Override
@@ -42,7 +42,6 @@ public final class ClientConfigUnit extends AttestationUnit {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("client_id_uuid", clientIdUuid);
         p.put("client_id", clientId);
-        p.put("realm_id", realmId);
         p.put("protocol", protocol);
         p.put("full_scope_allowed", fullScopeAllowed);
         p.put("service_accounts_enabled", serviceAccountsEnabled);

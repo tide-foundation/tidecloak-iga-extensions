@@ -23,15 +23,14 @@ public final class RoleCompositeChildrenSetUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "role_composite_children_set";
+    public AttestationUnitType type() {
+        return AttestationUnitType.ROLE_COMPOSITE_CHILDREN_SET;
     }
 
     @Override
     public Map<String, Object> payload() {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("composite_role_id", compositeRoleId);
-        p.put("realm_id", realmId);
         p.put("child_role_ids", childRoleIds);
         return p;
     }

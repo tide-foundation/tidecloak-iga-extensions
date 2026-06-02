@@ -22,15 +22,14 @@ public final class OrganizationDomainSetUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "organization_domain_set";
+    public AttestationUnitType type() {
+        return AttestationUnitType.ORGANIZATION_DOMAIN_SET;
     }
 
     @Override
     public Map<String, Object> payload() {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("org_id", orgId);
-        p.put("realm_id", realmId);
         p.put("domains", domains(domains));
         return p;
     }

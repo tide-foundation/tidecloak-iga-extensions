@@ -35,8 +35,8 @@ public final class UserIdentityUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "user_identity";
+    public AttestationUnitType type() {
+        return AttestationUnitType.USER_IDENTITY;
     }
 
     @Override
@@ -44,7 +44,6 @@ public final class UserIdentityUnit extends AttestationUnit {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("user_id", userId);
         p.put("username", username);
-        p.put("realm_id", realmId);
         p.put("email", email);              // explicit null if absent
         p.put("email_verified", emailVerified);
         p.put("first_name", firstName);     // explicit null if absent

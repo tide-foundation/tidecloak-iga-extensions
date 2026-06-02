@@ -22,15 +22,14 @@ public final class UserRoleMappingSetUnit extends AttestationUnit {
     }
 
     @Override
-    public String unitType() {
-        return "user_role_mapping_set";
+    public AttestationUnitType type() {
+        return AttestationUnitType.USER_ROLE_MAPPING_SET;
     }
 
     @Override
     public Map<String, Object> payload() {
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("user_id", userId);
-        p.put("realm_id", realmId);
         p.put("role_ids", roleIds);
         return p;
     }
