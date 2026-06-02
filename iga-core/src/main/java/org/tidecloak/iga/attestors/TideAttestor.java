@@ -108,6 +108,23 @@ public class TideAttestor implements IgaAttestor {
     /** Component config keys carrying the VRK authorizer material (legacy MultiAdmin.java:95-96). */
     private static final String CFG_GVRK = "gVRK";
     private static final String CFG_GVRK_CERTIFICATE = "gVRKCertificate";
+    /**
+     * Component config keys carrying the <b>firstAdmin</b> AuthorizerPack + its
+     * authenticating cert — the SignModel request's seg-6 authorizer / seg-8
+     * authorizer-certificate for a firstAdmin ceremony. Written by
+     * {@code VendorResource.SetUpTideRealm} ({@code authorizer}={@code resp.FIRST_ADMIN},
+     * {@code authorizerCertificate}={@code resp.FIRST_ADMIN_SIGNATURE}) and consumed by
+     * the legacy gold reference {@code IGAUtils.signInitialTideAdmin:61-62}
+     * ({@code parseHex(authorizer)} / {@code Base64.decode(authorizerCertificate)}).
+     * <p>Unlike {@link #CFG_GVRK} (the 7-model MAIN VRK pack: RotateVRK, UpdateSettings,
+     * UserToken, EnableOffboard, RequestInitialization, DelegationToken, ServerCert —
+     * <b>NO {@code AttestationUnit:1}</b>), the firstAdmin pack's ModelIds are
+     * {@code [UserContext:1, EnableOffboard:1, Policy:1, AttestationUnit:1]} — so the
+     * ORK's VRKAuthorizationFlow finds {@code AttestationUnit:1} among the authorizer's
+     * allowed models and accepts the sign. {@code authorizer} is hex; its cert base64.
+     */
+    private static final String CFG_FIRST_ADMIN_AUTHORIZER = "authorizer";
+    private static final String CFG_FIRST_ADMIN_AUTHORIZER_CERTIFICATE = "authorizerCertificate";
     /** Vendor verifying-key id the admin policy artifact is keyed to (legacy TideRoleRequests.java:137). */
     private static final String CFG_VVK_ID = "vvkId";
     /**
@@ -1178,11 +1195,21 @@ public class TideAttestor implements IgaAttestor {
 
         try {
             SignRequestSettingsMidgard settings = constructSignSettings(config);
-            String gVrk = config.getFirst(CFG_GVRK);
-            String gVrkCert = config.getFirst(CFG_GVRK_CERTIFICATE);
-            if (gVrk == null || gVrk.isBlank() || gVrkCert == null || gVrkCert.isBlank()) {
+            // seg-6 authorizer + seg-8 authorizer-certificate: the firstAdmin
+            // AuthorizerPack (ModelIds include AttestationUnit:1) and its VVK-signature
+            // cert — NOT the gVRK/gVRKCertificate MAIN pack (7 models, no
+            // AttestationUnit:1, which the ORK's VRKAuthorizationFlow rejects with
+            // "This authorizer has not allowed the model AttestationUnit:1 to be
+            // authorized"). Sourced exactly as the gold reference
+            // IGAUtils.signInitialTideAdmin:61-62 (parseHex(authorizer) /
+            // Base64.decode(authorizerCertificate)).
+            String firstAdminAuthorizer = config.getFirst(CFG_FIRST_ADMIN_AUTHORIZER);
+            String firstAdminAuthorizerCert = config.getFirst(CFG_FIRST_ADMIN_AUTHORIZER_CERTIFICATE);
+            if (firstAdminAuthorizer == null || firstAdminAuthorizer.isBlank()
+                    || firstAdminAuthorizerCert == null || firstAdminAuthorizerCert.isBlank()) {
                 throw new RuntimeException("IGA firstAdmin sign: tide-vendor-key component is missing "
-                        + "VRK authorizer material (gVRK/gVRKCertificate) for realm " + realm.getName());
+                        + "firstAdmin authorizer material (authorizer/authorizerCertificate) for realm "
+                        + realm.getName());
             }
 
             // The producer's user_role_mapping_set unit-envelope CBOR for the CR's
@@ -1199,13 +1226,13 @@ public class TideAttestor implements IgaAttestor {
             // too short for the ORK ceremony round-trip (piece-4 plan: +180s).
             req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
 
-            // Attach the VRK-authorization triplet (authorization computed LAST over
-            // GetDataToAuthorize, then the authorizer + its certificate) — exactly
-            // the gold-reference ordering (IGAUtils.java:57-62, ChainOfTrust:216-218).
+            // Attach the firstAdmin authorization triplet (authorization computed LAST
+            // over GetDataToAuthorize, then the firstAdmin authorizer pack + its cert)
+            // — exactly the gold-reference ordering (IGAUtils.java:57-62, ChainOfTrust:216-218).
             req.SetAuthorization(
                     Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
-            req.SetAuthorizer(java.util.HexFormat.of().parseHex(gVrk));
-            req.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(gVrkCert));
+            req.SetAuthorizer(java.util.HexFormat.of().parseHex(firstAdminAuthorizer));
+            req.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(firstAdminAuthorizerCert));
 
             SignatureResponse resp = Midgard.SignModel(settings, req);
             if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
