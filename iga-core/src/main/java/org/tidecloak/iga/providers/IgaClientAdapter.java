@@ -85,7 +85,7 @@ public class IgaClientAdapter extends ClientAdapter {
     private final boolean captureMode;
 
     /**
-     * Phase 4 — true when this capture-mode adapter was created on the
+     * True when this capture-mode adapter was created on the
      * {@code partialImport} {@code ClientsPartialImport.create} →
      * {@code RepresentationToModel.createClient} path
      * ({@code IgaRealmProvider.addClient} registered it with
@@ -93,8 +93,8 @@ public class IgaClientAdapter extends ClientAdapter {
      * {@code CREATE_CLIENT} row is then harvested ONCE at batch-emit time by
      * {@link #buildImportClientPendingCr()} (after
      * {@code RepresentationToModel.createClient} has called its terminal
-     * {@code updateClient()} on the pass-through scratch model, KC 26.5.5
-     * RepresentationToModel.java:404), so {@link #updateClient()} is a pure
+     * {@code updateClient()} on the pass-through scratch model), so
+     * {@link #updateClient()} is a pure
      * pass-through to {@code super.updateClient()} for this client (no
      * per-entity accumulate, no throw, no setRollbackOnly — the BatchEmit
      * prepare-tx owns the veto). Defaults false → the single-entity
@@ -103,7 +103,7 @@ public class IgaClientAdapter extends ClientAdapter {
     private boolean importDeferred = false;
 
     /**
-     * Phase 4 (CME fix) — pre-built {@code CREATE_CLIENT} row cached at the
+     * Pre-built {@code CREATE_CLIENT} row cached at the
      * eager-harvest seam ({@link #updateClient()} in {@code importDeferred}
      * mode), so {@link IgaImportMode.BatchEmitTransaction#commit} can read it
      * WITHOUT calling {@link ModelToRepresentation#toRepresentation
@@ -185,36 +185,29 @@ public class IgaClientAdapter extends ClientAdapter {
             return;
         }
 
-        // Phase 4 (CME fix) — partialImport EAGER-HARVEST at the terminal
-        // create seam. When this capture-mode adapter was created on the
+        // partialImport EAGER-HARVEST at the terminal create seam. When this
+        // capture-mode adapter was created on the
         // ClientsPartialImport.create → RepresentationToModel.createClient
         // path (IgaRealmProvider.addClient registered it with IgaImportMode),
         // the CREATE_CLIENT row MUST be harvested HERE — inside KC's
         // create-callable — not later in BatchEmitTransaction.commit().
         //
-        // ROOT CAUSE (the bug we are fixing): the earlier deferred-harvest
-        // built the row inside BatchEmitTransaction.commit(), which runs
+        // Why: harvesting inside BatchEmitTransaction.commit() runs
         // INSIDE DefaultKeycloakTransactionManager.commit()'s prepare-list
-        // iteration (KC 26.5.5 DefaultKeycloakTransactionManager.java:124,
-        // `for (KeycloakTransaction tx : prepare)`). buildCapturedClientRow
-        // calls ModelToRepresentation.toRepresentation(this, igaSession). KC
-        // 26.5.5 ModelToRepresentation.java:901 does
-        // `session.getProvider(AuthorizationProvider.class)` and
+        // iteration (`for (KeycloakTransaction tx : prepare)`). buildCapturedClientRow
+        // calls ModelToRepresentation.toRepresentation(this, igaSession), which
+        // does `session.getProvider(AuthorizationProvider.class)` and
         // `authorization.getStoreFactory().findByClient(clientModel)` — the
-        // first call lazily constructs StoreFactoryCacheSession (tidecloak
-        // fork model/infinispan/.../authorization/StoreFactoryCacheSession
-        // .java:122) whose constructor calls
+        // first call lazily constructs StoreFactoryCacheSession whose constructor calls
         // `session.getTransactionManager().enlistPrepare(getPrepareTransaction())`
         // on the parent session's TM — the SAME `prepare` LinkedList that
         // is currently being iterated. The next `iterator.next()` then fails
-        // the modCount check (LinkedList$ListItr.checkForComodification:977
-        // → ConcurrentModificationException at TM.lambda$commit$0:124). The
+        // the modCount check → ConcurrentModificationException. The
         // 5 CRs are already written successfully by runJobInTransaction
         // before the throw, but the CME bypasses the
         // IgaPendingApprovalException → 202 mapping and bubbles a 500.
         //
-        // FIX (Option A — eager harvest at the terminal create-stack seam,
-        // per source-confirmed instructions): build the row HERE, while
+        // So build the row HERE, while
         // RepresentationToModel.createClient is still on the call stack and
         // the parent TM is NOT yet iterating prepare. The
         // StoreFactoryCacheSession's enlistPrepare therefore happens BEFORE
@@ -223,15 +216,15 @@ public class IgaClientAdapter extends ClientAdapter {
         // pre-built `cachedImportRow` — zero model traversal, zero provider
         // lookups, zero prepare-time mutation.
         //
-        // updateClient() is the correct seam: KC 26.5.5
-        // RepresentationToModel.createClient (line 404) calls
+        // updateClient() is the correct seam:
+        // RepresentationToModel.createClient calls
         // `client.updateClient()` as its FINAL unconditional model mutation
-        // — AFTER updateClientProperties (line 347), the protocol-mapper
-        // rebuild (line 391) and updateClientScopes (line 402). So every
+        // — AFTER updateClientProperties, the protocol-mapper
+        // rebuild and updateClientScopes. So every
         // updateClientProperties field / protocol-mapper / scope link is on
         // the live model when we serialize. The row is byte-faithful with
-        // the prior deferred-harvest path (identical buildCapturedClientRow,
-        // identical IgaReplayDispatcher consumption — byte-unchanged).
+        // the deferred-harvest path (identical buildCapturedClientRow,
+        // identical IgaReplayDispatcher consumption).
         //
         // The seam still calls super.updateClient() so KC's createClient
         // finishes normally and ClientsPartialImport.getModelId — `realm
@@ -252,9 +245,9 @@ public class IgaClientAdapter extends ClientAdapter {
         Map<String, Object> row = buildCapturedClientRow();
         String clientUuid = (String) row.get("ID");
 
-        // Phase 4 — partialImport batch governance: accumulate + return
-        // normally (NO per-entity CR/setRollbackOnly/throw). Sole behavioural
-        // change vs Phases 1–3; the single-entity branch below is unchanged.
+        // partialImport batch governance: accumulate + return
+        // normally (NO per-entity CR/setRollbackOnly/throw). The single-entity
+        // branch below is unchanged.
         if (IgaImportMode.isImportMode(igaSession, realm)) {
             IgaImportMode.accumulate(igaSession, realm, "CLIENT", clientUuid,
                     "CREATE_CLIENT", List.of(row), null);
@@ -313,7 +306,7 @@ public class IgaClientAdapter extends ClientAdapter {
     /**
      * Build the {@code CREATE_CLIENT} CR row — the SINGLE source of truth
      * shared by the single-entity terminal seam ({@link #updateClient()}) and
-     * the Phase 4 partialImport deferred-harvest path
+     * the partialImport deferred-harvest path
      * ({@link #buildImportClientPendingCr()}). Identical rep/row contract in
      * both cases, so {@code IgaReplayDispatcher.replayCreateClient} is
      * byte-unchanged. NO side effects (no CR write, no throw, no
@@ -368,7 +361,7 @@ public class IgaClientAdapter extends ClientAdapter {
     }
 
     /**
-     * Phase 4 — partialImport batch path. Build this client's
+     * partialImport batch path. Build this client's
      * {@code CREATE_CLIENT} {@link IgaImportMode.PendingCr} from the live
      * (pass-through) scratch model. Called by
      * {@link IgaImportMode.BatchEmitTransaction#commit} AFTER
@@ -385,17 +378,16 @@ public class IgaClientAdapter extends ClientAdapter {
         if (!captureMode || !importDeferred) {
             return null;
         }
-        // Phase 4 (CME fix) — prefer the pre-built row that updateClient()
+        // Prefer the pre-built row that updateClient()
         // captured at the terminal create seam (see updateClient() javadoc
-        // for the root-cause analysis: building the row HERE during the
+        // for the analysis: building the row HERE during the
         // parent TM's prepare-list iteration causes
         // StoreFactoryCacheSession.enlistPrepare to mutate the list under
-        // the iterator → ConcurrentModificationException at
-        // DefaultKeycloakTransactionManager.lambda$commit$0:124). The
+        // the iterator → ConcurrentModificationException). The
         // fallback to buildCapturedClientRow() only fires if updateClient()
         // was never called on this client during the import — that should
         // be impossible on the ClientsPartialImport.create path
-        // (RepresentationToModel.createClient:404 always calls it), but is
+        // (RepresentationToModel.createClient always calls it), but is
         // retained as a defensive last resort that keeps the CR shape
         // identical (and is logged so any drift is visible in production).
         Map<String, Object> row = cachedImportRow;
@@ -646,13 +638,12 @@ public class IgaClientAdapter extends ClientAdapter {
     }
 
     // -------------------------------------------------------------------------
-    // Phase 6c — client quarantine hook (HARD refuse).
+    // Client quarantine hook (HARD refuse).
     //
-    // KC checkpoints surfaced by client.isEnabled() (cross-checked vs
-    // /tmp/kc-all-src/...):
-    //   ClientIdAndSecretAuthenticator.java:114  (client_secret_basic/post)
-    //   AbstractJWTClientValidator.java:124      (client JWT auth)
-    //   AccessTokenIntrospectionProvider.java:267 (introspection)
+    // KC checkpoints surfaced by client.isEnabled():
+    //   ClientIdAndSecretAuthenticator  (client_secret_basic/post)
+    //   AbstractJWTClientValidator      (client JWT auth)
+    //   AccessTokenIntrospectionProvider (introspection)
     //
     // Defers to super.isEnabled() first so an admin-disabled client stays
     // disabled regardless. If super reports enabled, the quarantine cache

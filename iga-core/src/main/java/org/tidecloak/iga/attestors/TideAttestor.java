@@ -69,48 +69,48 @@ public class TideAttestor implements IgaAttestor {
 
     /**
      * Prefix marking a firstAdmin (single-signer, 1-of-1 admin quorum) bootstrap
-     * signature, distinct from the multiAdmin {@link #DUMMY_SIG_PREFIX}. In wave 1a
+     * signature, distinct from the multiAdmin {@link #DUMMY_SIG_PREFIX}. Currently
      * {@link #sign(KeycloakSession, RealmModel, String, byte[])}'s firstAdmin branch
-     * still produces the SHA-256 stub under this prefix; wave 2 swaps in the real
-     * VRK → Midgard → ORK signature here (port plan §3.4, §6.4).
+     * produces the SHA-256 stub under this prefix; the real VRK → Midgard → ORK
+     * signature is the eventual replacement here.
      */
     public static final String FIRSTADMIN_SIG_PREFIX = "TIDE-FIRSTADMIN-v1:";
 
-    /** Mode column values on {@link IgaAuthorizerEntity} (port plan §3.1, §4). */
+    /** Mode column values on {@link IgaAuthorizerEntity}. */
     public static final String MODE_FIRST_ADMIN = "firstAdmin";
     public static final String MODE_MULTI_ADMIN = "multiAdmin";
 
-    /** Realm attribute discriminating Tide vs Tideless (IgaAttestors.java:21-35). */
+    /** Realm attribute discriminating Tide vs Tideless. */
     private static final String ATTR_IGA_ATTESTOR = "iga.attestor";
 
     /** Stock KC realm-management client + the legacy {@code Constants.TIDE_REALM_ADMIN} role name. */
     private static final String REALM_MANAGEMENT_CLIENT_ID = "realm-management";
     private static final String TIDE_REALM_ADMIN_ROLE = "tide-realm-admin";
 
-    /** Multiplier for the dynamic multiAdmin threshold floor (port plan §3.6). */
+    /** Multiplier for the dynamic multiAdmin threshold floor. */
     private static final double THRESHOLD_PERCENTAGE = 0.7;
 
     /**
-     * The realm's VRK key-provider component (port plan §5/§9.3). Its presence is
+     * The realm's VRK key-provider component. Its presence is
      * the VRK-availability precondition for the firstAdmin lazy seed: absent → no
      * VRK to sign with, so the seed is skipped and resolveMode's no-row branch
-     * keeps reporting firstAdmin (Decision 1).
+     * keeps reporting firstAdmin.
      */
     private static final String TIDE_VENDOR_KEY_PROVIDER_ID = "tide-vendor-key";
-    /** Component config keys carrying the VRK authorizer material (legacy MultiAdmin.java:95-96). */
+    /** Component config keys carrying the VRK authorizer material. */
     private static final String CFG_GVRK = "gVRK";
     private static final String CFG_GVRK_CERTIFICATE = "gVRKCertificate";
-    /** Vendor verifying-key id the admin policy artifact is keyed to (legacy TideRoleRequests.java:137). */
+    /** Vendor verifying-key id the admin policy artifact is keyed to. */
     private static final String CFG_VVK_ID = "vvkId";
 
     // -------------------------------------------------------------------------
-    // Admin-policy artifact shape (port plan §7a.2 / legacy TideRoleRequests.java:144-148)
+    // Admin-policy artifact shape
     // -------------------------------------------------------------------------
-    /** Stock realm-management client id the admin policy scopes (legacy Constants.REALM_MANAGEMENT_CLIENT_ID). */
+    /** Stock realm-management client id the admin policy scopes. */
     private static final String POLICY_RESOURCE = REALM_MANAGEMENT_CLIENT_ID;
-    /** Policy type tag legacy stamped on the {@code tide-realm-admin} policy (TideRoleRequests.java:148). */
+    /** Policy type tag stamped on the {@code tide-realm-admin} policy. */
     private static final String POLICY_TYPE = "GenericResourceAccessThresholdRole:1";
-    /** ApprovalType.EXPLICIT / ExecutionType.PUBLIC (legacy TideRoleRequests.java:148). */
+    /** ApprovalType.EXPLICIT / ExecutionType.PUBLIC. */
     private static final String POLICY_APPROVAL_TYPE = "EXPLICIT";
     private static final String POLICY_EXECUTION_TYPE = "PUBLIC";
 
@@ -145,13 +145,12 @@ public class TideAttestor implements IgaAttestor {
                                          String attestationPayload) {
         RealmModel realm = session.realms().getRealm(cr.getRealmId());
 
-        // Lazy firstAdmin seed (port plan §9.3 / Decision 2): the FIRST authorizer
-        // row is born here, on the first Tide-mode record(), seeded firstAdmin.
-        // Idempotent — only creates when absent. No mode-specific dedup difference:
-        // both firstAdmin and multiAdmin persist the same IgaAuthorizationEntity
-        // shape (approval = admin username), and the existing approver-role gate
-        // + the one-layer-up dedup (IgaAdminResource.authorize) are unchanged
-        // (port plan §3.2).
+        // Lazy firstAdmin seed: the FIRST authorizer row is born here, on the first
+        // Tide-mode record(), seeded firstAdmin. Idempotent — only creates when
+        // absent. No mode-specific dedup difference: both firstAdmin and multiAdmin
+        // persist the same IgaAuthorizationEntity shape (approval = admin username),
+        // and the existing approver-role gate + the one-layer-up dedup
+        // (IgaAdminResource.authorize) are unchanged.
         maybeSeedFirstAdminAuthorizer(session, realm);
 
         IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
@@ -173,8 +172,7 @@ public class TideAttestor implements IgaAttestor {
     public int getThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr) {
         // firstAdmin is single-signer onboarding: ALWAYS 1, unconditionally — it
         // does not consult per-scope overrides, the realm attribute, or the admin
-        // count (port plan §3.5; legacy FirstAdmin reads no threshold at all). The
-        // constant-first equals() is null-safe for resolveMode's null return.
+        // count. The constant-first equals() is null-safe for resolveMode's null return.
         if (MODE_FIRST_ADMIN.equals(resolveMode(session, realm))) {
             return 1;
         }
@@ -182,7 +180,7 @@ public class TideAttestor implements IgaAttestor {
         // same entity) or an ADOPT_* short-circuit still wins via the shared
         // resolver; only the realm-level default flips from the static
         // iga.threshold to the dynamic 0.7 floor. The shared IgaScopeResolver
-        // stays the Tideless-static path (port plan §3.5, §8, D9).
+        // stays the Tideless-static path.
         IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
         if (scope != null && !scope.thresholds.isEmpty()) {
             return IgaScopeResolver.resolveThreshold(session, realm, scope, cr);   // per-scope override wins
@@ -190,26 +188,26 @@ public class TideAttestor implements IgaAttestor {
         if (cr != null && IgaReplayExtension.isAdoptAction(cr.getActionType())) {
             return 1;                                                              // ADOPT bypass wins
         }
-        return Math.max(1, (int) (THRESHOLD_PERCENTAGE * countActiveTideRealmAdmins(realm, session))); // §3.6 / §3.7
+        return Math.max(1, (int) (THRESHOLD_PERCENTAGE * countActiveTideRealmAdmins(realm, session)));
     }
 
     // -------------------------------------------------------------------------
-    // Mode resolution + dynamic threshold count (port plan §3.1, §3.5–3.7)
+    // Mode resolution + dynamic threshold count
     // -------------------------------------------------------------------------
 
     /**
-     * Resolve the firstAdmin/multiAdmin mode for the realm (port plan §3.1).
+     * Resolve the firstAdmin/multiAdmin mode for the realm.
      *
      * <p>If an {@link IgaAuthorizerEntity} row exists and its {@code mode} column
      * is set, that column is authoritative. Otherwise (the dormant-entity default
-     * — {@code iga_authorizer} holds 0 rows for every realm today, §9.1) the mode
+     * — {@code iga_authorizer} holds 0 rows for every realm today) the mode
      * is decided by the realm's Tide-vs-Tideless discriminator
-     * {@code iga.attestor} (IgaAttestors.java:21-35):
+     * {@code iga.attestor}:
      * <ul>
      *   <li>{@code iga.attestor=="tide"} → {@code "firstAdmin"} — a Tide realm
      *       that has not yet bootstrapped its admin policy. The first Tide-mode
-     *       {@link #record} lazily materialises this row seeded {@code firstAdmin}
-     *       (§9.3); until then this no-row branch reports {@code firstAdmin} so the
+     *       {@link #record} lazily materialises this row seeded {@code firstAdmin};
+     *       until then this no-row branch reports {@code firstAdmin} so the
      *       bootstrap branch runs.</li>
      *   <li>otherwise → {@code null} (no-op). The authorizer entity is irrelevant
      *       to Tideless; {@code SimpleNameAttestor} never consults it and never
@@ -235,7 +233,7 @@ public class TideAttestor implements IgaAttestor {
 
         // No row (or a legacy row predating the MODE column): derive from the
         // realm's Tide-vs-Tideless discriminator.
-        String attestor = realm.getAttribute(ATTR_IGA_ATTESTOR);              // IgaAttestors.java:22
+        String attestor = realm.getAttribute(ATTR_IGA_ATTESTOR);
         if (ID.equals(attestor)) {
             return MODE_FIRST_ADMIN;
         }
@@ -244,12 +242,12 @@ public class TideAttestor implements IgaAttestor {
 
     /**
      * Count the realm's ACTIVE tide-realm-admins for the dynamic multiAdmin
-     * threshold (port plan §3.6 / §3.7). A user counts iff it simultaneously
+     * threshold. A user counts iff it simultaneously
      * (a) holds the {@code tide-realm-admin} realm-management role,
      * (b) is enabled, and (c) has a COMMITTED Tide identity — operationalised as a
      * {@code USER_ROLE_MAPPING} row for {@code (user, tide-realm-admin)} with
      * {@code attestation IS NOT NULL} (the inverse of the unsigned-row scan
-     * {@code IgaUnsignedRowScanner.userRoleMappings}, IgaUnsignedRowScanner.java:541-547).
+     * {@code IgaUnsignedRowScanner.userRoleMappings}).
      * A PENDING grant stamps nothing, so a committed grant is exactly a non-pending
      * one and this single signal subsumes both the "committed" and "not pending"
      * sub-predicates.
@@ -272,7 +270,7 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * Inverse of {@code IgaUnsignedRowScanner.userRoleMappings} (IgaUnsignedRowScanner.java:541-547):
+     * Inverse of {@code IgaUnsignedRowScanner.userRoleMappings}:
      * the user ids whose {@code (user, roleId)} USER_ROLE_MAPPING row is stamped
      * ({@code attestation IS NOT NULL}) — i.e. the committed grants of {@code roleId}
      * in the realm.
@@ -291,7 +289,7 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * Lazy firstAdmin authorizer seed (port plan §9.3 / Decision 2). On the first
+     * Lazy firstAdmin authorizer seed. On the first
      * Tide-mode {@link #record}, if the realm has NO {@link IgaAuthorizerEntity}
      * row AND {@code iga.attestor=="tide"}, create exactly one seeded
      * {@code mode="firstAdmin"} via the existing {@link IgaAuthorizerService#create}
@@ -299,19 +297,19 @@ public class TideAttestor implements IgaAttestor {
      * toggle-on / realm-init seed); it is idempotent (the {@code !hasRow} guard
      * skips re-seeding).
      *
-     * <p>VRK-availability precondition (§9.3 / §Q4): the seed needs the realm's
+     * <p>VRK-availability precondition: the seed needs the realm's
      * {@code tide-vendor-key} component for its NOT-NULL {@code providerId} /
      * {@code authorizer} / {@code authorizerCertificate} fields (the VRK material).
      * If that component is absent — or present but not yet VRK-provisioned — the
      * seed is SKIPPED and {@link #resolveMode}'s no-row branch keeps reporting
-     * {@code firstAdmin} (Decision 1). A missing component means "VRK not
+     * {@code firstAdmin}. A missing component means "VRK not
      * provisioned", NOT "Tideless": the Tide discriminator is {@code iga.attestor},
      * and this whole method runs only on the tide attestor's path.
      *
-     * <p>Wave 1a note: this reads the component with plain KC model access only
+     * <p>This reads the component with plain KC model access only
      * (no MidgardJava / no {@code SecretKeys} deserialization / no crypto). The
      * gVRK / gVRKCertificate config values are carried verbatim into the row; the
-     * VRK signing that interprets them is wave 2 (§5).
+     * VRK signing that interprets them is a later step.
      */
     private void maybeSeedFirstAdminAuthorizer(KeycloakSession session, RealmModel realm) {
         if (!ID.equals(realm.getAttribute(ATTR_IGA_ATTESTOR))) {
@@ -323,9 +321,8 @@ public class TideAttestor implements IgaAttestor {
             return; // row already exists — idempotent, do not re-seed.
         }
 
-        // VRK material from the realm's tide-vendor-key component (legacy
-        // MultiAdmin.java:95-96, 474-484). Absent component or unprovisioned
-        // material → defer the seed (the no-row branch reports firstAdmin).
+        // VRK material from the realm's tide-vendor-key component. Absent component
+        // or unprovisioned material → defer the seed (the no-row branch reports firstAdmin).
         ComponentModel vendorKey = realm.getComponentsStream()
                 .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
                 .findFirst()
@@ -366,8 +363,8 @@ public class TideAttestor implements IgaAttestor {
 
         // The tide-realm-admin POLICY bootstrap is the only case whose payload
         // differs: in firstAdmin mode a GRANT_ROLES of tide-realm-admin signs the
-        // realm's stored policy bytes verbatim (port plan §6.2); every other CR —
-        // in both modes — signs the regular set/node canonical (§6.3, unchanged).
+        // realm's stored policy bytes verbatim; every other CR —
+        // in both modes — signs the regular set/node canonical.
         boolean isPolicyBootstrap = MODE_FIRST_ADMIN.equals(mode)
                 && isTideRealmAdminAssignment(realm, cr);
         byte[] canonical = isPolicyBootstrap
@@ -376,32 +373,31 @@ public class TideAttestor implements IgaAttestor {
 
         String sig = sign(session, realm, mode, canonical);
 
-        // Transition trigger (port plan §7): on a successful firstAdmin-mode sign
+        // Transition trigger: on a successful firstAdmin-mode sign
         // of the tide-realm-admin policy CR, write back policySig AND flip the
         // realm's authorizer mode to multiAdmin — in the SAME JPA transaction as
-        // the dispatcher's ATTESTATION write (§7.2/§7.3). Null-safe + idempotent:
+        // the dispatcher's ATTESTATION write. Null-safe + idempotent:
         // already-multiAdmin never reaches here (gated on firstAdmin), and a
-        // redundant flip is a harmless no-op (§7.4 / §12 Q6).
+        // redundant flip is a harmless no-op.
         if (isPolicyBootstrap) {
             writeBackPolicySig(session, realm, cr, sig);
             flipModeToMultiAdmin(session, realm);
         } else if (MODE_MULTI_ADMIN.equals(mode)) {
-            // Wave 1b (port plan §7a): multiAdmin steady-state. If this committing CR
+            // multiAdmin steady-state. If this committing CR
             // changes the active tide-realm-admin set (grant/revoke of the role), the
             // dynamic threshold floor(0.7 x N) may move, so the SIGNED admin policy
             // artifact must be regenerated + re-signed to encode the new threshold.
             // Sequenced LAST — after the CR's own attestation `sig` is already built
-            // above — so the regen never disturbs the CR sign (legacy defer-to-end-of
-            // -batch rule, MultiAdmin.java:429-431). No-op (and IsEqualTo-skipped) when
-            // the CR is not a membership change or the threshold did not actually move.
+            // above — so the regen never disturbs the CR sign. No-op (and IsEqualTo-
+            // skipped) when the CR is not a membership change or the threshold did not
+            // actually move.
             maybeRegenerateAdminPolicyOnMembershipChange(session, realm, cr);
         }
         return sig;
     }
 
     /**
-     * The regular set/node canonical today's attestor produces — unchanged by the
-     * port (port plan §6.3, §3.3 multiAdmin row). LINKAGE actions sign the owner's
+     * The regular set/node canonical today's attestor produces. LINKAGE actions sign the owner's
      * POST-change member set; NODE / non-linkage actions sign the entity's own
      * canonical state.
      */
@@ -422,15 +418,13 @@ public class TideAttestor implements IgaAttestor {
     }
 
     // -------------------------------------------------------------------------
-    // firstAdmin policy-bootstrap detection + transition flip (port plan §6.2, §7)
+    // firstAdmin policy-bootstrap detection + transition flip
     // -------------------------------------------------------------------------
 
     /**
-     * Detect "this CR is the tide-realm-admin policy CR" (port plan §7.1) — the
-     * signal legacy used: a {@code GRANT_ROLES} CR whose row carries the
-     * realm-management {@code tide-realm-admin} role id
-     * ({@code FirstAdmin.isAssigningTideRealmAdminRole}, FirstAdmin.java:160-167).
-     * GRANT_ROLES rows carry USER_ID + ROLE_ID (IgaReplayDispatcher.java:181-184).
+     * Detect "this CR is the tide-realm-admin policy CR" — a {@code GRANT_ROLES}
+     * CR whose row carries the realm-management {@code tide-realm-admin} role id.
+     * GRANT_ROLES rows carry USER_ID + ROLE_ID.
      */
     private boolean isTideRealmAdminAssignment(RealmModel realm, IgaChangeRequestEntity cr) {
         if (cr == null || !"GRANT_ROLES".equals(cr.getActionType())) return false;
@@ -451,15 +445,15 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * The bootstrap payload (port plan §6.2): the realm's tide-realm-admin
+     * The bootstrap payload: the realm's tide-realm-admin
      * {@code IgaRolePolicyEntity.policy} value, signed as UTF-8 bytes VERBATIM
      * (no base64-decode — iga-core does not base64-encode the policy on the way
-     * in; §6.2 byte-shape resolution). If no policy row exists yet for the
+     * in). If no policy row exists yet for the
      * tide-realm-admin role (the policy may be upserted via the separate
-     * {@code POST /iga/role-policies} path, §7.1), fall back to the regular CR
+     * {@code POST /iga/role-policies} path), fall back to the regular CR
      * canonical so the role grant still receives a valid attestation and the
      * transition still fires on the role-assignment signal. The policy write-back
-     * (§7.2) is then a no-op (there is no row to stamp).
+     * is then a no-op (there is no row to stamp).
      */
     private byte[] readTideRealmAdminPolicyBytes(KeycloakSession session, RealmModel realm,
                                                  IgaChangeRequestEntity cr) {
@@ -486,8 +480,8 @@ public class TideAttestor implements IgaAttestor {
 
     /**
      * Write the firstAdmin bootstrap signature back to the tide-realm-admin
-     * {@code IgaRolePolicyEntity.policySig} (port plan §6.4, §7.2), in the same
-     * JPA transaction as the dispatcher's ATTESTATION write (§7.3 — the entity is
+     * {@code IgaRolePolicyEntity.policySig}, in the same
+     * JPA transaction as the dispatcher's ATTESTATION write (the entity is
      * managed, so the column update commits atomically with the replay). No-op
      * when no policy row exists (see {@link #readTideRealmAdminPolicyBytes}).
      */
@@ -502,10 +496,10 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * Transition flip (port plan §7.2): set the realm's authorizer
+     * Transition flip: set the realm's authorizer
      * {@code mode = "multiAdmin"} in the same JPA transaction as the ATTESTATION
-     * write. Null-safe + idempotent — a redundant flip is a harmless no-op
-     * (§7.4 / §12 Q6). The lazy seed (§9.3) guarantees the row exists by the time
+     * write. Null-safe + idempotent — a redundant flip is a harmless no-op.
+     * The lazy seed guarantees the row exists by the time
      * this runs (record() fires before combineFinal), but we guard defensively.
      */
     private void flipModeToMultiAdmin(KeycloakSession session, RealmModel realm) {
@@ -523,14 +517,14 @@ public class TideAttestor implements IgaAttestor {
     }
 
     // -------------------------------------------------------------------------
-    // Wave 1b — threshold-change admin-policy regeneration (port plan §7a)
+    // Threshold-change admin-policy regeneration
     // -------------------------------------------------------------------------
 
     /**
      * Steady-state (multiAdmin) admin-policy regeneration on an active-admin-set
-     * change (port plan §7a). Fired from {@link #combineFinal} ONLY in multiAdmin
+     * change. Fired from {@link #combineFinal} ONLY in multiAdmin
      * mode, AFTER the committing CR's own attestation signature is built (so the
-     * regen is sequenced last — legacy {@code MultiAdmin.java:429-431} defer rule).
+     * regen is sequenced last).
      *
      * <h3>What it does</h3>
      * <ol>
@@ -539,28 +533,27 @@ public class TideAttestor implements IgaAttestor {
      *   <li>Compute the POST-commit active-admin count. {@code combineFinal} runs
      *       BEFORE the dispatcher replays this CR, so {@link #countActiveTideRealmAdmins}
      *       still returns the PRE-commit count; we add the CR's pending net delta
-     *       (+1 grant / -1 revoke) — the exact legacy {@code additionalAdmins}
-     *       (ChangeSetProcessor.java:304, TideRoleRequests.java:128).</li>
+     *       (+1 grant / -1 revoke).</li>
      *   <li>{@code newThreshold = max(1, floor(0.7 x postCommitCount))} — the SAME
      *       formula + the SAME counting function {@link #getThreshold} uses, so the
      *       policy the artifact encodes and the gate {@code getThreshold} enforces
-     *       cannot drift (§7a.7).</li>
-     *   <li>IsEqualTo short-circuit (legacy TideRoleRequests.java:163-168): if the
+     *       cannot drift.</li>
+     *   <li>IsEqualTo short-circuit: if the
      *       current policy already encodes {@code newThreshold}, skip — no rewrite,
      *       no re-sign. The floor formula means most single adds DON'T move the
-     *       threshold, so this is the primary churn control (§7a.4). Exactly one
+     *       threshold, so this is the primary churn control. Exactly one
      *       regen per committed membership-changing CR.</li>
-     *   <li>Rebuild the policy artifact (§7a.2 shape) at {@code newThreshold},
+     *   <li>Rebuild the policy artifact at {@code newThreshold},
      *       re-sign it with the realm's CURRENT authorizer mode (the invariant:
      *       admin policy signed with the mode the realm is in). This regen fires
      *       only while the realm is already multiAdmin, so {@code policySig} carries
      *       the multiAdmin {@link #DUMMY_SIG_PREFIX} (enclave path) — distinct from
      *       the firstAdmin/VRK {@link #FIRSTADMIN_SIG_PREFIX} the bootstrap
      *       transition stamps. Write {@code policy}/{@code policySig} in the same JPA
-     *       transaction as the CR commit (§7a.6 fail-closed + atomic).</li>
+     *       transaction as the CR commit (fail-closed + atomic).</li>
      * </ol>
      *
-     * <h3>Who signs (port plan §7a.3, legacy step 5)</h3>
+     * <h3>Who signs</h3>
      * The membership CR is authorized by the OLD quorum at the OLD threshold
      * ({@code getThreshold} was evaluated at the commit gate BEFORE this CR was
      * counted); the regenerated policy — multiAdmin-signed here — installs the NEW
@@ -577,7 +570,7 @@ public class TideAttestor implements IgaAttestor {
         IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
         if (policy == null) {
             // No admin policy artifact to keep in sync (it is upserted via the
-            // separate POST /iga/role-policies path, §7.1). Nothing to regenerate;
+            // separate POST /iga/role-policies path). Nothing to regenerate;
             // the live getThreshold gate is unaffected (it never reads this row).
             log.infof("IGA policy regen skipped: realm %s has no tide-realm-admin role-policy row "
                     + "to regenerate (membership delta %+d); live threshold gate is unaffected.",
@@ -586,13 +579,12 @@ public class TideAttestor implements IgaAttestor {
         }
 
         // combineFinal runs PRE-replay, so the live count excludes this CR's effect;
-        // add the pending net delta to obtain the post-commit count (legacy
-        // additionalAdmins). Clamp at 0 — a revoke can never make the count negative.
+        // add the pending net delta to obtain the post-commit count.
+        // Clamp at 0 — a revoke can never make the count negative.
         int postCommitCount = Math.max(0, countActiveTideRealmAdmins(realm, session) + delta);
         int newThreshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
 
-        // IsEqualTo short-circuit (legacy TideRoleRequests.java:163-168): regenerate
-        // only when the encoded threshold actually moves.
+        // IsEqualTo short-circuit: regenerate only when the encoded threshold actually moves.
         Integer currentThreshold = currentEncodedThreshold(policy);
         if (currentThreshold != null && currentThreshold == newThreshold) {
             log.infof("IGA policy regen skipped (threshold unchanged): realm %s tide-realm-admin policy "
@@ -610,10 +602,10 @@ public class TideAttestor implements IgaAttestor {
         // resolve that current mode and pass it through (do NOT hardcode a constant).
         // It returns multiAdmin → sign() selects the multiAdmin path.
         //
-        // WAVE-2 open mechanic: in wave 2 the multiAdmin regen sign needs real enclave
-        // partial-attestations (the enclave-threshold ceremony, Midgard combine), not a
-        // local key op. For now sign() emits the SHA-256 stub under DUMMY_SIG_PREFIX
-        // (TIDE-DUMMY-v1:), which correctly marks this as the multiAdmin-signed path.
+        // Eventually the multiAdmin regen sign needs real enclave partial-attestations
+        // (the enclave-threshold ceremony, Midgard combine), not a local key op. For now
+        // sign() emits the SHA-256 stub under DUMMY_SIG_PREFIX (TIDE-DUMMY-v1:), which
+        // correctly marks this as the multiAdmin-signed path.
         String currentMode = resolveMode(session, realm); // == multiAdmin in this branch
         String newPolicySig = sign(session, realm, currentMode,
                 newPolicyBody.getBytes(StandardCharsets.UTF_8));
@@ -625,7 +617,7 @@ public class TideAttestor implements IgaAttestor {
         policy.setExecutionType(POLICY_EXECUTION_TYPE);
         policy.setUpdatedAt(System.currentTimeMillis());
         // Managed entity — flush keeps the rewrite in the CR's commit transaction
-        // (§7a.6 atomic: if the commit rolls back, so does the regen).
+        // (atomic: if the commit rolls back, so does the regen).
         session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
 
         log.infof("IGA admin policy regenerated: realm %s tide-realm-admin threshold %s -> %d "
@@ -636,9 +628,8 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * The pending net delta this CR applies to the active tide-realm-admin count
-     * (port plan §7a.1 / legacy ChangeSetProcessor.java:304): {@code +1} for a
-     * committed GRANT of the realm-management {@code tide-realm-admin} role,
+     * The pending net delta this CR applies to the active tide-realm-admin count:
+     * {@code +1} for a committed GRANT of the realm-management {@code tide-realm-admin} role,
      * {@code -1} for a committed REVOKE, {@code 0} for any other CR. Detection
      * mirrors {@link #isTideRealmAdminAssignment} (the role's IDENTITY on a CR row),
      * extended to the REVOKE action.
@@ -658,13 +649,12 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * Build the admin-policy artifact body (port plan §7a.2 / legacy
-     * TideRoleRequests.java:144-148): a deterministic JSON object carrying the
+     * Build the admin-policy artifact body: a deterministic JSON object carrying the
      * recomputed {@code threshold} + the {@code role}/{@code resource} scope +
-     * the policy-type metadata, keyed to the realm's {@code vvkId}. Legacy built a
+     * the policy-type metadata, keyed to the realm's {@code vvkId}. The equivalent
      * Midgard {@code Policy("GenericResourceAccessThresholdRole:1","any",vvkId,
-     * EXPLICIT,PUBLIC,{threshold,role,resource})}; iga-core has no Midgard Policy
-     * type, so the same field set is emitted as canonical JSON. Keys are written in
+     * EXPLICIT,PUBLIC,{threshold,role,resource})} has no type in iga-core, so the
+     * same field set is emitted as canonical JSON. Keys are written in
      * a FIXED order so the bytes are stable (same threshold → same body → the
      * IsEqualTo skip and the deterministic stub signature both hold).
      */
@@ -930,17 +920,17 @@ public class TideAttestor implements IgaAttestor {
     // -------------------------------------------------------------------------
 
     /**
-     * Mode-aware signing swap-point (port plan §3.4). WAVE 1a: both branches still
-     * produce the SHA-256 stub — sign() stays stubbed here. They differ ONLY in
-     * the prefix that marks the quorum + ceremony:
+     * Mode-aware signing swap-point. Both branches currently produce the SHA-256
+     * stub — sign() stays stubbed here. They differ ONLY in the prefix that marks
+     * the quorum + ceremony:
      * <ul>
-     *   <li>{@code firstAdmin} → {@link #FIRSTADMIN_SIG_PREFIX}. Wave 2 swaps in the
-     *       real VRK → Midgard → ORK signature here (NOT a local key op; §5.1).</li>
+     *   <li>{@code firstAdmin} → {@link #FIRSTADMIN_SIG_PREFIX}. The real VRK →
+     *       Midgard → ORK signature (NOT a local key op) is the eventual replacement here.</li>
      *   <li>{@code multiAdmin} (and any non-firstAdmin mode) → {@link #DUMMY_SIG_PREFIX},
-     *       the existing enclave-threshold stub; wave 2 lands {@code Midgard.signClaims()}.</li>
+     *       the existing enclave-threshold stub; eventually {@code Midgard.signClaims()}.</li>
      * </ul>
      * The distinction between modes is NOT local-vs-network — both ceremonies go
-     * Midgard → ORK in production (§3.4, §8); it is (a) admin quorum and (b) key /
+     * Midgard → ORK in production; it is (a) admin quorum and (b) key /
      * signing ceremony.
      */
     private String sign(KeycloakSession session, RealmModel realm, String mode, byte[] canonical) {

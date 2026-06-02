@@ -143,7 +143,7 @@ public class IgaRoleAdapter extends RoleAdapter {
     private boolean captureEmitted = false;
 
     /**
-     * Phase 4 — true when this capture-mode adapter was created on the
+     * True when this capture-mode adapter was created on the
      * {@code partialImport} {@code RepresentationToModel.importRoles}/
      * {@code createRole} path ({@code IgaRealmProvider.add{Realm,Client}Role}
      * registered it with {@link IgaImportMode#registerImportRole}). The
@@ -213,7 +213,7 @@ public class IgaRoleAdapter extends RoleAdapter {
         if (!captureMode || captureEmitted) {
             return super.getName();
         }
-        // Phase 4 — partialImport deferred-harvest. When this capture-mode
+        // partialImport deferred-harvest. When this capture-mode
         // adapter was created on the RepresentationToModel.importRoles/
         // createRole path (IgaRealmProvider.add{Realm,Client}Role registered it
         // with IgaImportMode), the CREATE_ROLE row is harvested ONCE at
@@ -235,7 +235,7 @@ public class IgaRoleAdapter extends RoleAdapter {
         String roleId = (String) row.get("ID");
         String roleName = (String) row.get("NAME");
 
-        // Phase 4 — partialImport batch governance. If a partialImport frame is
+        // partialImport batch governance. If a partialImport frame is
         // on the stack (and IGA on, not replay) accumulate this fully-built CR
         // and RETURN NORMALLY (getName() yields the real name): NO per-entity
         // CR write, NO setRollbackOnly, NO throw. The batch-emit prepare-tx
@@ -271,7 +271,7 @@ public class IgaRoleAdapter extends RoleAdapter {
 
     /**
      * Build the {@code CREATE_ROLE} CR row — the SINGLE source of truth shared
-     * by the single-entity terminal seam ({@link #getName()}) and the Phase 4
+     * by the single-entity terminal seam ({@link #getName()}) and the
      * partialImport deferred-harvest path
      * ({@link #buildImportRolePendingCr()}). Identical rep/row contract in both
      * cases, so {@code IgaReplayDispatcher.replayCreateRole} is byte-unchanged.
@@ -358,7 +358,7 @@ public class IgaRoleAdapter extends RoleAdapter {
     }
 
     /**
-     * Phase 4 — partialImport batch path. Build this role's
+     * partialImport batch path. Build this role's
      * {@code CREATE_ROLE} {@link IgaImportMode.PendingCr} from the live
      * (pass-through) scratch model + recorded composites. Called by
      * {@link IgaImportMode.BatchEmitTransaction#commit} AFTER

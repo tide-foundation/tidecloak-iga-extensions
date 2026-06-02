@@ -38,11 +38,11 @@ import java.util.Set;
  * Backwards-compat admin resource at /admin/realms/{realm}/tide-admin
  * Replaces the old IGA's IGARealmResource.toggleIga endpoint so the existing admin UI works.
  *
- * <p>Phase 6b — on OFF→ON the handler triggers a one-shot {@link IgaAdoptScan}
+ * <p>On OFF→ON the handler triggers a one-shot {@link IgaAdoptScan}
  * in its own {@code runJobInTransaction} so a scan failure cannot abort the
  * toggle attribute write that just succeeded.</p>
  *
- * <p>Phase 6d — on ON→OFF the handler triggers a one-shot {@link IgaAdoptCancel}
+ * <p>On ON→OFF the handler triggers a one-shot {@link IgaAdoptCancel}
  * in its own {@code runJobInTransaction} that cancels every PENDING ADOPT_*
  * CR and clears the entire sidecar register for the realm. The toggle-on path
  * also gains a sidecar cap check: if the realm already has more than
@@ -83,15 +83,15 @@ public class TideAdminCompatResource {
         // "true" pending CR approval) and arming a one-pending-CR-per-realm
         // 409 trap on the next toggle. IGA_REPLAY_ACTIVE bypasses the
         // wrapper for the duration of the attribute write so the realm
-        // attribute is actually flipped (matching the Phase 6b/6d cancel +
-        // scan contracts that assume the attribute is real after toggle).
+        // attribute is actually flipped (matching the cancel + scan
+        // contracts that assume the attribute is real after toggle).
         writeIgaAttributeDirect(IGA_ATTRIBUTE, Boolean.toString(next));
         logger.infof("IGA has been toggled to : %s for realm %s", next, realm.getName());
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("enabled", next);
 
-        // Phase 6b — OFF→ON: run the one-shot ADOPT scan inside its own
+        // OFF→ON: run the one-shot ADOPT scan inside its own
         // transaction. Master is excluded by design — the master-realm
         // escape hatch must remain unconditionally usable for recovery.
         if (!current && next && !"master".equals(realm.getName())) {
@@ -114,7 +114,7 @@ public class TideAdminCompatResource {
                             resultHolder[0] = IgaAdoptScan.scan(scanSession, scanRealm, requestedBy, includeSystem);
                         });
             } catch (SidecarCapExceededException cap) {
-                // Phase 6d cap (design risk #6). Roll back the realm-attribute
+                // Sidecar cap exceeded. Roll back the realm-attribute
                 // write so IGA stays OFF — half-enabling is more confusing
                 // than refusing — and 409 SIDECAR_CAP_EXCEEDED with the
                 // numbers in the body. One INFO log line, no stack.
@@ -149,7 +149,7 @@ public class TideAdminCompatResource {
             }
 
             if (resultHolder[0] != null) {
-                // Phase 6c — invalidate every live user session on the realm
+                // Invalidate every live user session on the realm
                 // so any user newly quarantined by the OFF→ON scan cannot
                 // ride an existing cookie/refresh token past the toggle. The
                 // design memo's recommendation (accept the re-login storm —
@@ -158,15 +158,12 @@ public class TideAdminCompatResource {
                 // removeUserSessions(realm) call against the request-scoped
                 // session.sessions() provider. Surface the count in the
                 // response so operators see exactly how many sessions were
-                // dropped. The bulk method exists in KC 26.5.5
-                // (UserSessionProvider.java:190 — verified vs source).
+                // dropped. The bulk method exists in KC 26.5.5.
                 long invalidated = invalidateRealmSessions(session, realm);
-                // Phase 6c regression fix (direct-grant miss): also evict the
+                // Direct-grant miss: also evict the
                 // infinispan user-cache for this realm. KC's UserCacheSession
-                // (model/infinispan UserCacheSession.java:262-319) returns a
-                // CachedUser-backed UserAdapter whose isEnabled() reads the
-                // snapshot stored at cache-load time
-                // (model/infinispan UserAdapter.java:166-168) and does NOT
+                // returns a CachedUser-backed UserAdapter whose isEnabled() reads
+                // the snapshot stored at cache-load time and does NOT
                 // delegate to the underlying IgaUserAdapter on each call. If a
                 // user was loaded BEFORE the OFF→ON toggle (e.g. a pre-IGA
                 // direct-grant seeded the cache with enabled=true), the cache
@@ -180,19 +177,15 @@ public class TideAdminCompatResource {
                 // must never abort the toggle (the attribute is already
                 // committed and the response is about to be sent).
                 evictRealmUserCache(session, realm);
-                // Phase 6c regression fix (CLIENT quarantine miss, symmetric to
-                // the user-cache eviction above). KC's RealmCacheSession
-                // (model/infinispan RealmCacheSession.java:1170-1192,
-                // 1215-1248) caches client snapshots as CachedClient and the
-                // resulting ClientAdapter.isEnabled() returns
-                // cached.isEnabled() (ClientAdapter.java:150-152) rather than
-                // delegating to IgaClientAdapter.isEnabled() (quarantine REFUSE
-                // hook at IgaClientAdapter.java:634). A confidential client
-                // whose entry was loaded pre-IGA (e.g. a pre-toggle
-                // client_credentials call) keeps returning enabled=true after
-                // the OFF→ON toggle, so the unsigned-client client_credentials
-                // is wrongly granted a 200 (observed in
-                // iga-phase6c-client-e2e CASE 3). Evict the per-realm
+                // CLIENT quarantine miss, symmetric to the user-cache eviction
+                // above. KC's RealmCacheSession caches client snapshots as
+                // CachedClient and the resulting ClientAdapter.isEnabled() returns
+                // cached.isEnabled() rather than delegating to
+                // IgaClientAdapter.isEnabled() (quarantine REFUSE hook). A
+                // confidential client whose entry was loaded pre-IGA (e.g. a
+                // pre-toggle client_credentials call) keeps returning enabled=true
+                // after the OFF→ON toggle, so the unsigned-client client_credentials
+                // is wrongly granted a 200. Evict the per-realm
                 // client/role/group/scope cache entries so the next read
                 // re-loads through the IGA wrappers and the quarantine fires.
                 // Same best-effort contract as the user-cache eviction — never
@@ -212,7 +205,7 @@ public class TideAdminCompatResource {
             }
         }
 
-        // Phase 6d — ON→OFF: cancel PENDING ADOPT CRs + clear sidecar inside
+        // ON→OFF: cancel PENDING ADOPT CRs + clear sidecar inside
         // its own transaction (mirror of the OFF→ON pattern above). Master
         // is excluded by symmetry: IGA is never enabled on master, so an
         // ON→OFF for master is impossible in practice; the guard is
@@ -250,7 +243,7 @@ public class TideAdminCompatResource {
                 err.put("message", String.valueOf(offErrHolder[0].getMessage()));
                 body.put("scanOff", err);
             }
-            // Phase 6c regression fix (symmetric): evict the user-cache on
+            // Symmetric to the OFF→ON eviction: evict the user-cache on
             // ON→OFF too. While IGA was ON, a quarantined user's cached
             // UserAdapter held enabled=false (snapshot of IgaUserAdapter
             // returning false). After ON→OFF the IGA quarantine no longer
@@ -260,8 +253,8 @@ public class TideAdminCompatResource {
             // so the next session.users() lookup re-loads through
             // IgaUserProvider → IgaUserAdapter and reflects the IGA-off state.
             evictRealmUserCache(session, realm);
-            // Phase 6c regression fix (symmetric, client/role/group/scope
-            // realm-cache). While IGA was ON, the cached ClientAdapter for a
+            // Symmetric eviction for the client/role/group/scope realm-cache.
+            // While IGA was ON, the cached ClientAdapter for a
             // client that toggled-on hit the quarantine path may hold
             // enabled=false from the IgaClientAdapter snapshot. After ON→OFF
             // the quarantine no longer applies, but the realm-cache snapshot
@@ -295,7 +288,7 @@ public class TideAdminCompatResource {
      * of writing directly. That behaviour is correct for arbitrary realm
      * attributes but fatal for the toggle attribute itself: turning IGA OFF
      * via this endpoint would emit a CR (response lies "enabled=false" while
-     * isIGAEnabled stays "true"), the Phase 6d cancel runs against a still-ON
+     * isIGAEnabled stays "true"), the toggle-off cancel runs against a still-ON
      * realm, and the next toggle hits {@code checkNoPendingCr} → 500 because
      * the prior toggle-off CR is still PENDING.</p>
      *
@@ -328,20 +321,19 @@ public class TideAdminCompatResource {
     }
 
     /**
-     * Phase 6c — bulk-invalidate every live user session on the realm after a
+     * Bulk-invalidate every live user session on the realm after a
      * successful OFF→ON ADOPT scan, returning the number of sessions that
      * were dropped.
      *
-     * <p>The brief's design memo recommends invalidating ALL user sessions in
-     * the realm and accepting the re-login storm rather than tracking which
+     * <p>We invalidate ALL user sessions in
+     * the realm and accept the re-login storm rather than tracking which
      * users were just quarantined: it is simpler, strictly correct (any user
      * whose roles/groups were quarantined will reflect the new state on their
      * next token issuance), and the alternative would require a per-user
      * walk on the same session that just did the scan. KC 26.5.5
      * UserSessionProvider exposes {@code removeUserSessions(RealmModel)} as
-     * the bulk primitive (UserSessionProvider.java:190 — used by
-     * RealmAdminResource.java:714 for the realm-wide "logout all" admin
-     * endpoint), which is exactly the call we need.</p>
+     * the bulk primitive (the same call backing the realm-wide "logout all"
+     * admin endpoint), which is exactly the call we need.</p>
      *
      * <p>Counting: KC's bulk method returns void, so we count by streaming the
      * pre-existing sessions per user via {@code getUserSessionsStream} before
@@ -400,7 +392,7 @@ public class TideAdminCompatResource {
     }
 
     /**
-     * Phase 6c regression fix (direct-grant miss) — evict every cached user
+     * Direct-grant miss eviction — evict every cached user
      * entry for the realm so subsequent {@code session.users().getUserBy*}
      * lookups re-load through {@code IgaUserProvider} and the
      * {@code IgaUserAdapter#isEnabled} quarantine override fires.
@@ -408,7 +400,7 @@ public class TideAdminCompatResource {
      * <p>The infinispan user-cache ({@code model/infinispan UserCacheSession})
      * returns a {@code CachedUser}-backed {@code UserAdapter} whose
      * {@code isEnabled()} reads the snapshot recorded at cache-load time
-     * ({@code model/infinispan UserAdapter.java:166-168}) and does NOT delegate
+     * and does NOT delegate
      * to the underlying {@code IgaUserAdapter} on each call. Without an
      * eviction, the OFF→ON toggle does not affect users whose cache entry was
      * seeded before the toggle (e.g. a pre-IGA direct-grant or admin REST read
@@ -417,7 +409,7 @@ public class TideAdminCompatResource {
      * receives a token.</p>
      *
      * <p>The eviction primitive is {@link UserCache#evict(RealmModel)}
-     * ({@code UserCache.java:43} — bulk per-realm eviction). It is the right
+     * (bulk per-realm eviction). It is the right
      * grain because the OFF→ON scan may have quarantined any number of users
      * in the realm (no per-user information is plumbed back from the scan)
      * and the toggle is a rare admin action — the re-warm cost is acceptable
@@ -453,8 +445,8 @@ public class TideAdminCompatResource {
     }
 
     /**
-     * Phase 6c regression fix (CLIENT quarantine, symmetric to
-     * {@link #evictRealmUserCache}) — evict every cached client / role / group
+     * CLIENT quarantine eviction, symmetric to
+     * {@link #evictRealmUserCache} — evict every cached client / role / group
      * / client-scope entry for the realm so subsequent
      * {@code session.clients()} / {@code realm.getRole*} / {@code realm.getGroup*}
      * / {@code realm.getClientScopes*} reads re-load through the IGA wrappers
@@ -463,11 +455,11 @@ public class TideAdminCompatResource {
      * {@code getScopeMappingsStream} STRIP on client scopes, etc.) fire on
      * the next call.
      *
-     * <p>KC's realm-cache ({@code model/infinispan RealmCacheSession.java:1170-1192,
-     * 1215-1248}) returns a {@code CachedClient}-backed {@link
+     * <p>KC's realm-cache ({@code model/infinispan RealmCacheSession})
+     * returns a {@code CachedClient}-backed {@link
      * org.keycloak.models.cache.infinispan.ClientAdapter} whose
      * {@code isEnabled()} reads the snapshot recorded at cache-load time
-     * ({@code ClientAdapter.java:150-152}) and does NOT delegate to the
+     * and does NOT delegate to the
      * underlying {@link org.tidecloak.iga.providers.IgaClientAdapter} on each
      * call. Without an eviction, the OFF→ON toggle does not affect clients
      * whose realm-cache entry was seeded before the toggle (e.g. a pre-IGA
@@ -480,14 +472,10 @@ public class TideAdminCompatResource {
      * realm-cache returns its own adapter.</p>
      *
      * <p>API choice: {@code CacheRealmProvider.registerRealmInvalidation(id, name)}
-     * ({@code keycloak-model-storage-private/.../CacheRealmProvider.java:34};
-     * impl at {@code RealmCacheSession.java:239-246} via
-     * {@code RealmCacheManager.realmUpdated:56-59}) invalidates only the
-     * realm entry + its by-name key — it does NOT cascade to clients/roles/
-     * groups/scopes (verified against the impl: {@code realmUpdated}
-     * adds only {@code id} and {@code getRealmByNameCacheKey(name)}). The
-     * coarser primitive {@code RealmCacheSession.evictRealmOnRemoval} sweeps
-     * everything in-realm but emits a {@link
+     * invalidates only the realm entry + its by-name key — it does NOT cascade
+     * to clients/roles/groups/scopes. The coarser primitive
+     * {@code RealmCacheSession.evictRealmOnRemoval} sweeps everything in-realm
+     * but emits a {@link
      * org.keycloak.models.cache.infinispan.events.RealmRemovedEvent} that
      * would falsely tell the cluster the realm is gone — not safe to reuse.
      * The surgical correct primitive is per-entity:
@@ -495,14 +483,11 @@ public class TideAdminCompatResource {
      * {@code registerRoleInvalidation(id, name, containerId)} +
      * {@code registerGroupInvalidation(id)} +
      * {@code registerClientScopeInvalidation(id, realmId)}, each of which
-     * drops the corresponding cache entry on transaction commit (see the
-     * {@code registerXInvalidation} bodies at {@code RealmCacheSession.java:
-     * 248-279, 261-272, 330-348}). We iterate the four entity collections on
-     * the realm and call each. The iterators
+     * drops the corresponding cache entry on transaction commit. We iterate
+     * the four entity collections on the realm and call each. The iterators
      * ({@code realm.getClientsStream}, {@code session.roles().getRealmRolesStream},
      * {@code realm.getGroupsStream}, {@code realm.getClientScopesStream}) all
-     * delegate past the cache (verified at
-     * {@code RealmCacheSession.java:648-654, 1026-1062}) so iteration does
+     * delegate past the cache, so iteration does
      * not re-warm what we are about to evict.</p>
      *
      * <p>The toggle is a rare admin action; the re-warm cost is bounded by
@@ -515,7 +500,7 @@ public class TideAdminCompatResource {
      * eviction is preferable to an aborted toggle.</p>
      */
     private static void evictRealmCache(KeycloakSession session, RealmModel realm) {
-        // NOTE (post-63f3bba): the IgaOrganizationProvider extends-Infinispan refactor
+        // NOTE: the IgaOrganizationProvider extends-Infinispan refactor
         // makes FUTURE reads traverse the cache → IGA chain naturally, but it does NOT
         // invalidate entries that were ALREADY cached before this toggle flipped. A
         // CachedClient / CachedRole / CachedOrganization loaded pre-toggle still holds
@@ -541,7 +526,7 @@ public class TideAdminCompatResource {
         String realmId = realm.getId();
         int clients = 0, roles = 0, groups = 0, scopes = 0, orgs = 0, idps = 0;
 
-        // Clients — the immediate Phase 6c CASE 3 fix surface.
+        // Clients — the immediate client-quarantine fix surface.
         try {
             for (ClientModel client : realm.getClientsStream().toList()) {
                 try {
@@ -632,11 +617,11 @@ public class TideAdminCompatResource {
                     realm.getName(), scopes);
         }
 
-        // Phase 7b — organizations. KC's CacheRealmProvider has no public
+        // Organizations. KC's CacheRealmProvider has no public
         // registerOrgInvalidation primitive (the InfinispanOrganizationProvider's
         // registerOrganizationInvalidation is package-private), but the cached
         // CachedOrganization is keyed on the org id alone
-        // (InfinispanOrganizationProvider.java:94 in KC 26.5.5) and that key
+        // and that key
         // is invalidated via the public CacheRealmProvider.registerInvalidation(id)
         // call — see the same primitive used in
         // IgaReplayExtension.evictCacheForAdopt's ADOPT_ORGANIZATION branch.
@@ -666,16 +651,15 @@ public class TideAdminCompatResource {
                     realm.getName(), orgs);
         }
 
-        // Phase 7d — identity providers. IdPs aren't quarantineable entities
+        // Identity providers. IdPs aren't quarantineable entities
         // (toggle-on doesn't scan IdPs, no IGA_UNSIGNED_ENTITY rows) but the
-        // Phase 7d IdP-aware scope resolver reads iga.approverRole /
+        // IdP-aware scope resolver reads iga.approverRole /
         // iga.threshold off IdentityProviderModel.getConfig() via
         // session.identityProviders().getByAlias(...). That path goes through
         // InfinispanIdentityProviderStorageProvider which caches the
         // CachedIdentityProvider snapshot under two keys: the internalId and
-        // realmId + "." + alias + ".idp.alias" (see
-        // InfinispanIdentityProviderStorageProvider.cacheKeyIdpAlias:69 in
-        // KC 26.5.5 — both suffix constants are private). Without invalidating
+        // realmId + "." + alias + ".idp.alias" (both suffix constants are
+        // private in KC). Without invalidating
         // those entries, an iga.approverRole / iga.threshold edit on an IdP
         // made BEFORE toggle-on could remain stale post-toggle, letting an
         // ORG_ADD_IDP / ORG_REMOVE_IDP CR resolve against pre-edit config and
@@ -729,12 +713,11 @@ public class TideAdminCompatResource {
     }
 
     /**
-     * Heuristic admin-coverage check. The Phase 6b scan is non-quarantining
-     * (Phase 6c will add quarantine), but the warning is still useful: once
-     * 6c lands, a realm whose only admin holder is the realm's first
-     * (governance-only) user will lock itself out the moment we start
-     * enforcing PENDING ADOPT_USER. We warn now so the operator can
-     * provision a second admin / configure approver-roles BEFORE 6c lands.
+     * Heuristic admin-coverage check. Once quarantine enforcement is active, a
+     * realm whose only admin holder is the realm's first (governance-only) user
+     * will lock itself out the moment we start enforcing PENDING ADOPT_USER. We
+     * warn so the operator can provision a second admin / configure approver-roles
+     * before that.
      *
      * <p>Heuristic: count distinct holders of {@code realm-management:
      * manage-realm} + any role named by an existing {@code iga.approverRole}

@@ -20,26 +20,25 @@ import org.keycloak.organization.jpa.JpaOrganizationProviderFactory;
  * {@code JpaOrganizationProviderFactory} so organization behaviour outside the
  * IGA interception points is byte-for-byte stock Keycloak.
  *
- * <h2>Priority pitfall (the Phase 7a wire-up fix)</h2>
+ * <h2>Priority pitfall</h2>
  * Unlike Realm/User/Client/Group/Role caching — done by SEPARATE
  * {@code *CacheProviderFactory} provider types — KC's organization caching
  * lives on the same {@code OrganizationProviderFactory} SPI via
- * {@code InfinispanOrganizationProviderFactory.order() == 10} (KC 26.5.5,
- * {@code model/infinispan/.../organization/InfinispanOrganizationProviderFactory.java:80-82}).
- * The original {@code order() == 2} therefore lost to the Infinispan cache
+ * {@code InfinispanOrganizationProviderFactory.order() == 10}.
+ * An {@code order() == 2} therefore lost to the Infinispan cache
  * factory and the IGA wrapper was never instantiated. Bumping to {@code 20}
  * wins.
  *
- * <h2>Phase 7f architectural fix — wrap the cache, don't replace it</h2>
- * Until Phase 7f the IGA provider class {@code extends JpaOrganizationProvider}
- * directly, so winning {@code order()==20} also bypassed the Infinispan cache
+ * <h2>Wrap the cache, don't replace it</h2>
+ * Extending {@code JpaOrganizationProvider}
+ * directly while winning {@code order()==20} also bypassed the Infinispan cache
  * layer entirely. Cache invalidations registered by KC's own
  * {@code InfinispanOrganizationProviderFactory.postInit} listeners
  * ({@code IdentityProviderUpdatedEvent}/{@code IdentityProviderRemovedEvent}/
  * {@code UserPreRemovedEvent}) had no reader and stale reads could leak after
  * IGA-mediated mutations — the per-org explicit eviction loop in
- * {@code TideAdminCompatResource.evictRealmCache} was the Phase 7b/7c/7d
- * workaround. Phase 7f re-architects {@link IgaOrganizationProvider} to
+ * {@code TideAdminCompatResource.evictRealmCache} was the workaround. Instead
+ * {@link IgaOrganizationProvider}
  * {@code extends InfinispanOrganizationProvider}, so the layering is now
  * IGA (top) → Infinispan cache (middle, via {@code super} calls) → JPA (bottom,
  * resolved by Infinispan's {@code getDelegate()} via
@@ -72,14 +71,13 @@ public class IgaOrganizationProviderFactory implements OrganizationProviderFacto
 
     @Override
     public int order() {
-        // Beat InfinispanOrganizationProviderFactory (order==10, KC 26.5.5
-        // model/infinispan/.../organization/InfinispanOrganizationProviderFactory.java:80-82).
+        // Beat InfinispanOrganizationProviderFactory (order==10).
         // Unlike Realm/User/Client/Group/Role caching — which lives under
         // separate *CacheProviderFactory provider types so order==2 above the
         // stock JPA factory is enough — organization caching sits ON the same
         // OrganizationProviderFactory SPI at order==10. Anything <=10 loses
         // to the Infinispan cache factory and the IGA wrapper is never
-        // instantiated, which was the latent wire-up defect Phase 7a fixes.
+        // instantiated.
         // 20 leaves headroom for future Tide-side organization wrappers.
         return 20;
     }

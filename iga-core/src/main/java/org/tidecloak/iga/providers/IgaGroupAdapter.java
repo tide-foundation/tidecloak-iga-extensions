@@ -75,7 +75,7 @@ public class IgaGroupAdapter extends GroupAdapter {
     private final boolean captureMode;
 
     /**
-     * Phase 4 — true when this capture-mode adapter was created on the
+     * True when this capture-mode adapter was created on the
      * {@code partialImport} {@code RepresentationToModel.importGroup} path
      * ({@code IgaRealmProvider.createGroup} registered it with
      * {@link IgaImportMode#registerImportGroup}). The {@code CREATE_GROUP} row
@@ -110,7 +110,7 @@ public class IgaGroupAdapter extends GroupAdapter {
     /**
      * Build the {@code CREATE_GROUP} CR row — the SINGLE source of truth shared
      * by the single-entity terminal seam ({@link #setDescription(String)}) and
-     * the Phase 4 partialImport deferred-harvest path
+     * the partialImport deferred-harvest path
      * ({@link #buildImportGroupPendingCr()}). Identical rep/row contract in
      * both cases, so {@code IgaReplayDispatcher.replayCreateGroup} is
      * byte-unchanged. NO side effects (no CR write, no throw, no
@@ -165,7 +165,7 @@ public class IgaGroupAdapter extends GroupAdapter {
     }
 
     /**
-     * Phase 4 — partialImport batch path. Build this group's
+     * partialImport batch path. Build this group's
      * {@code CREATE_GROUP} {@link IgaImportMode.PendingCr} from the live
      * (pass-through) scratch model. Called by
      * {@link IgaImportMode.BatchEmitTransaction#commit} AFTER
@@ -238,7 +238,7 @@ public class IgaGroupAdapter extends GroupAdapter {
             return;
         }
 
-        // Phase 4 — partialImport deferred-harvest. When this capture-mode
+        // partialImport deferred-harvest. When this capture-mode
         // adapter was created on the RepresentationToModel.importGroup path
         // (IgaRealmProvider.createGroup registered it with IgaImportMode), the
         // CREATE_GROUP row is harvested ONCE at batch-emit time by
@@ -263,9 +263,9 @@ public class IgaGroupAdapter extends GroupAdapter {
         Map<String, Object> row = buildCapturedGroupRow(description);
         String groupId = (String) row.get("ID");
 
-        // Phase 4 — partialImport batch governance: accumulate + return
-        // normally (NO per-entity CR/setRollbackOnly/throw). Sole behavioural
-        // change vs Phases 1–3; the single-entity branch below is unchanged.
+        // partialImport batch governance: accumulate + return
+        // normally (NO per-entity CR/setRollbackOnly/throw). The single-entity
+        // branch below is unchanged.
         if (IgaImportMode.isImportMode(session, realm)) {
             IgaImportMode.accumulate(session, realm, "GROUP", groupId,
                     "CREATE_GROUP", List.of(row), null);

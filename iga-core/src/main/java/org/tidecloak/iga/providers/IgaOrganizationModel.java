@@ -265,7 +265,7 @@ public class IgaOrganizationModel implements OrganizationModel {
     }
 
     // -------------------------------------------------------------------------
-    // Phase 7c — organization quarantine hook (HARD refuse, cascading through
+    // Organization quarantine hook (HARD refuse, cascading through
     // KC's own org-aware enforcement points).
     //
     // KC checkpoints surfaced by org.isEnabled() (cross-checked vs
@@ -349,8 +349,7 @@ public class IgaOrganizationModel implements OrganizationModel {
 
     // ---- equality/hash by org id ----
     //
-    // KC's JpaOrganizationProvider.getMemberById (KC 26.5.5,
-    // {@code JpaOrganizationProvider.java:444-457}) probes membership with
+    // KC's JpaOrganizationProvider.getMemberById probes membership with
     // {@code getByMember(user).anyMatch(organization::equals)}. The
     // {@code organization} argument on the inbound REST call is the
     // {@link IgaOrganizationModel} returned by {@code getById}; the stream
@@ -363,7 +362,7 @@ public class IgaOrganizationModel implements OrganizationModel {
     // .../members/{id}, GET .../members/{id}) responds with HTTP 404 — which
     // breaks every {@code REMOVE_ORG_MEMBER}-style flow.
     //
-    // Mirror KC's own pattern (model/jpa OrganizationAdapter.java:252-263):
+    // Mirror KC's own pattern (model/jpa OrganizationAdapter):
     // any two {@link OrganizationModel} instances with the same {@code getId()}
     // are equal, hash on the id alone. Identical contract — symmetric across
     // mixed (wrapped vs raw) comparisons used by KC's own anyMatch.

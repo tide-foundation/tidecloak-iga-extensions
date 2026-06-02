@@ -17,7 +17,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Phase 6b — one-shot toggle-on ADOPT scan.
+ * One-shot toggle-on ADOPT scan.
  *
  * <p>When IGA flips OFF→ON for a realm, this scan walks every unattested
  * "info" row ({@link IgaUnsignedRowScanner#allInfoEntities}) and emits a
@@ -62,7 +62,7 @@ public final class IgaAdoptScan {
     private static final Logger log = Logger.getLogger(IgaAdoptScan.class);
 
     /**
-     * Phase 6d sidecar soft-cap. If at scan-start the realm already has more
+     * Sidecar soft-cap. If at scan-start the realm already has more
      * than this many unattested sidecar rows, the toggle-on refuses with
      * {@link SidecarCapExceededException} and the caller rolls back the
      * realm-attribute write so IGA stays OFF. "Soft" here means the cap can
@@ -104,7 +104,7 @@ public final class IgaAdoptScan {
         public final long skippedAlreadyAttested;
         public final long errors;
         /**
-         * Phase 6c — number of live user sessions invalidated on this
+         * Number of live user sessions invalidated on this
          * toggle-on so newly-quarantined users do NOT retain their existing
          * cookies / refresh tokens past the OFF→ON transition. Surfaced in
          * the toggle response as {@code scan.sessionsInvalidated}. Populated
@@ -206,13 +206,12 @@ public final class IgaAdoptScan {
         // realm bound by default; without this, every USER row in
         // createAdoptCr → ModelToRepresentation.toRepresentation fails with
         // IllegalArgumentException ("Session not bound to a realm") at the
-        // InfinispanOrganizationProvider#getRealm guard. Phase 6a's tests
-        // happened not to exercise this path because they never pre-create
-        // users with IGA off — Phase 6b's happy/race/already cases all do.
+        // InfinispanOrganizationProvider#getRealm guard. This matters whenever
+        // users are pre-created with IGA off (the happy/race/already cases).
         session.getContext().setRealm(realm);
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
-        // Phase 6d sidecar cap (design risk #6). Reject before doing any work
+        // Sidecar cap. Reject before doing any work
         // so a runaway realm cannot exhaust memory by emitting hundreds of
         // thousands of ADOPT CRs in one scan. The caller catches the
         // exception, restores isIGAEnabled=false on the realm, and returns
@@ -234,8 +233,8 @@ public final class IgaAdoptScan {
         }
 
         // Build per-type "already committed ADOPT" skip sets ONCE at scan
-        // start. Uses the IDX_IGA_CR_REALM_ACTION_STATUS index added in 6a.
-        // Phase 7b — adds ORGANIZATION (Map.of caps at 10 entries so we
+        // start. Uses the IDX_IGA_CR_REALM_ACTION_STATUS index.
+        // Includes ORGANIZATION (Map.of caps at 10 entries so we
         // switch to a builder-style LinkedHashMap once we have 6 keys).
         Map<String, Set<String>> committedAdoptByType = new LinkedHashMap<>();
         committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_USER,
@@ -271,7 +270,7 @@ public final class IgaAdoptScan {
         // Build per-type "pending CREATE_*" race skip sets. CREATE actions
         // are literal strings (no central constants in the IgaReplayExtension
         // surface today — see IgaGroupAdapter / IgaUserProvider / etc).
-        // Phase 7b adds CREATE_ORGANIZATION (the literal action type emitted
+        // Includes CREATE_ORGANIZATION (the literal action type emitted
         // by IgaOrganizationModel.setDomains when captureCreate=true).
         Map<String, Set<String>> pendingCreateByType = new LinkedHashMap<>();
         pendingCreateByType.put(IgaReplayExtension.ENTITY_TYPE_USER,
@@ -361,7 +360,7 @@ public final class IgaAdoptScan {
                     requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
                     created, counters, alreadyAttestedCounter);
         }
-        // Phase 7b — orgs. The org is now a first-class NODE in the attested
+        // Orgs. The org is a first-class NODE in the attested
         // set; the scanner enumerates only UNSIGNED orgs (the
         // organizationsWithNames query carries the same `attestation IS NULL`
         // filter as every other node lane, against the ORG.ATTESTATION column

@@ -59,8 +59,7 @@ import java.util.stream.Stream;
  * <ul>
  *   <li><b>realmRoles / clientRoles</b> — roles are NOT capturable at
  *       user-create by any model-layer mechanism. Stock KC's
- *       {@code UsersResource.createUser} (keycloak-services 26.5.5
- *       UsersResource.java:143-192) NEVER applies {@code realmRoles}/
+ *       {@code UsersResource.createUser} NEVER applies {@code realmRoles}/
  *       {@code clientRoles} — only {@code updateUserFromRep} +
  *       {@code createFederatedIdentities} + {@code createGroups} +
  *       {@code createCredentials}; {@code createRoleMappings} runs only on the
@@ -97,53 +96,51 @@ import java.util.stream.Stream;
  * {@code setFederationLink(null)}) so an inbound value can never ride along by
  * any path into a CR row. The scratch user is rolled back at draft regardless.
  *
- * <h2>KC 26.5.5 user-create model-call trace (verified, source on classpath)</h2>
- * {@code UsersResource.createUser} (keycloak-services
- * UsersResource.java:143-192):
+ * <h2>User-create model-call trace</h2>
+ * {@code UsersResource.createUser}:
  * <pre>
- * 160  profileProvider.create(USER_API, rep.getRawAttributes())
- * 168  UserModel user = profile.create();
- *        DefaultUserProfile.create (DefaultUserProfile.java:94-106):
- *          103  user = userSupplier.apply(attributes)   // == session.users()
+ *   profileProvider.create(USER_API, rep.getRawAttributes())
+ *   UserModel user = profile.create();
+ *        DefaultUserProfile.create:
+ *          user = userSupplier.apply(attributes)        // == session.users()
  *                                                       //    .addUser(realm,username)
  *                                                       //    → IgaUserProvider.addUser
  *                                                       //      (2-arg)  → scratch
  *                                                       //      IgaUserAdapter (capture)
- *          105  updateInternal(user,false)              // DefaultUserProfile.java:
- *               117-194: per writable attribute (sorted by key)
+ *          updateInternal(user,false)                   // per writable attribute
+ *               (sorted by key)
  *               user.setAttribute(name,values) — for ROOT attrs
  *               (USERNAME/FIRST_NAME/LAST_NAME/EMAIL) UserAdapter.setAttribute
- *               redirects to setUsername/setFirstName/setLastName/setEmail
- *               (UserAdapter.java:182-216); custom attrs persist as attributes.
- * 170  UserResource.updateUserFromRep(profile,user,rep,session,false)
- *        UserResource.java:296-331:
- *          299  if rep.isEnabled()!=null      user.setEnabled(..)
- *          300  if rep.isEmailVerified()!=null user.setEmailVerified(..)
- *          301  if createdTimestamp!=null     user.setCreatedTimestamp(..)
+ *               redirects to setUsername/setFirstName/setLastName/setEmail;
+ *               custom attrs persist as attributes.
+ *   UserResource.updateUserFromRep(profile,user,rep,session,false):
+ *          if rep.isEnabled()!=null      user.setEnabled(..)
+ *          if rep.isEmailVerified()!=null user.setEmailVerified(..)
+ *          if createdTimestamp!=null     user.setCreatedTimestamp(..)
  *                  — NOT governed; passes through to super, never accumulated.
- *          303  if federationLink!=null       user.setFederationLink(..)
+ *          if federationLink!=null       user.setFederationLink(..)
  *                  — NOT governed; passes through to super, never accumulated.
- *          307-320 reqActions!=null: per provider id user.addRequiredAction /
+ *          reqActions!=null: per provider id user.addRequiredAction /
  *                  removeRequiredAction — NOT governed; passes straight through
  *                  to super (no capture interception), never accumulated.
- *          322-330 if a password credential isTemporary →
+ *          if a password credential isTemporary →
  *                  user.addRequiredAction(UPDATE_PASSWORD) — same: pass-through.
- * 171  RepresentationToModel.createFederatedIdentities(rep,session,realm,user)
- *        RepresentationToModel.java:775-782: per identity
+ *   RepresentationToModel.createFederatedIdentities(rep,session,realm,user):
+ *        per identity
  *        session.users().addFederatedIdentity(realm,user,model)
  *        → IgaUserProvider.addFederatedIdentity — NOT governed; reverted to
  *        plain super delegation, never accumulated.
- * 172  RepresentationToModel.createGroups(session,rep,realm,user)
- *        RepresentationToModel.java:762-773: per path user.joinGroup(group)
- * 174  RepresentationToModel.createCredentials(rep,session,realm,user,true)
- *        RepresentationToModel.java:784-808: NOT intercepted — the
+ *   RepresentationToModel.createGroups(session,rep,realm,user)
+ *        per path user.joinGroup(group)
+ *   RepresentationToModel.createCredentials(rep,session,realm,user,true)
+ *        NOT intercepted — the
  *        credentialManager() override was removed; any inbound password is
  *        applied (if at all) to the throw-away scratch user via the real
  *        (super) credential manager and dies with the request-tx rollback. It
  *        is NEVER accumulated into the captured rep (see "Govern ONLY
  *        token-affecting user fields").
- * 175  adminEvent...resourcePath(uri, user.getId())...   // user.getId() #1
- * 177  Response.created(...user.getId()...)              // user.getId() #2
+ *   adminEvent...resourcePath(uri, user.getId())...   // user.getId() #1
+ *   Response.created(...user.getId()...)              // user.getId() #2
  * </pre>
  *
  * <h3>Snapshot-lossy fields</h3>
@@ -161,8 +158,8 @@ import java.util.stream.Stream;
  * <h3>Deterministic terminal seam: {@code getId()} invoked DIRECTLY from
  * {@code UsersResource.createUser} (StackWalker resource boundary)</h3>
  * {@code user.getId()} is invoked early and unpredictably on the scratch
- * adapter via {@code UserAdapter.equals()} (UserAdapter.java:587-594) and
- * {@code hashCode()} (596-599) during the JPA persistence context / user
+ * adapter via {@code UserAdapter.equals()} and
+ * {@code hashCode()} during the JPA persistence context / user
  * events, and again from {@code DefaultUserProfile} /
  * {@code RepresentationToModel.*} mid-build. The fragile "first {@code getId()}
  * after a username was observed" trigger is replaced by a deterministic
@@ -172,8 +169,8 @@ import java.util.stream.Stream;
  * the inherited {@code UserAdapter.equals/hashCode} that delegate straight
  * back into {@code getId()}) is {@code UsersResource.createUser} (or its
  * Quarkus {@code *quarkusrestinvoker*createUser*} wrapper) are the two
- * resource-terminal calls — UsersResource.java:175 ({@code adminEvent
- * ...resourcePath(uri, user.getId())}) and :177
+ * resource-terminal calls — ({@code adminEvent
+ * ...resourcePath(uri, user.getId())}) and
  * ({@code Response.created(...user.getId()...)}), both AFTER the full model is
  * built. Every mid-build {@code getId()} has an intermediate non-resource
  * frame (UserAdapter.equals/hashCode, JPA proxy/persistence,
@@ -181,52 +178,46 @@ import java.util.stream.Stream;
  * createFederatedIdentities, group-event listeners) as its immediate caller →
  * NOT a terminal → falls straight through to {@code super.getId()} WITHOUT
  * emitting. {@link #usernameObserved} is retained as a defensive SECONDARY
- * gate. The fire-once guard latches the :175 emit; the second {@code getId()}
- * at :177 falls through.
+ * gate. The fire-once guard latches the first (resourcePath) emit; the second
+ * {@code getId()} (Response.created) falls through.
  *
  * <h3>REP_JSON faithfulness vs. replay (byte-faithful, replay UNCHANGED)</h3>
  * {@code IgaReplayDispatcher.replayCreateUser} deserializes {@code REP_JSON} to
  * a {@link UserRepresentation}, pins {@code id}/{@code username}, then calls
  * {@code RepresentationToModel.createUser} →
- * {@code DefaultExportImportManager.createUser}
- * (keycloak-model-storage-private DefaultExportImportManager.java:975-1026),
- * which consumes EXACTLY: id+username (979, via 5-arg local addUser, NOT the
- * IGA 1-arg), enabled (980), createdTimestamp (981-983), email (984),
- * emailVerified (985), firstName (986), lastName (987), federationLink (988),
- * attributes (989-996), requiredActions (997-1001),
- * credentials→createCredentials (1002), federatedIdentities (1003),
- * realmRoles/clientRoles→createRoleMappings (1004), clientConsents (1005),
- * notBefore (1012), serviceAccountClientId (1016), groups (1024). The
+ * {@code DefaultExportImportManager.createUser},
+ * which consumes EXACTLY: id+username (via 5-arg local addUser, NOT the
+ * IGA 1-arg), enabled, createdTimestamp, email,
+ * emailVerified, firstName, lastName, federationLink,
+ * attributes, requiredActions,
+ * credentials→createCredentials, federatedIdentities,
+ * realmRoles/clientRoles→createRoleMappings, clientConsents,
+ * notBefore, serviceAccountClientId, groups. The
  * accumulator below populates ONLY the 8 KC-routed token fields (username,
  * enabled, email, emailVerified, firstName, lastName, attributes, groups);
  * {@code groups} are group PATHS — the exact shape {@code createGroups}
- * (RepresentationToModel.java:762-773) consumes via {@code findGroupByPath}.
+ * consumes via {@code findGroupByPath}.
  * The other 7 fields are absent from REP_JSON and KC's import path is
- * null-safe for each absent one (verified, KC 26.5.5 sources on classpath):
+ * null-safe for each absent one:
  * <ul>
  *   <li>{@code createRoleMappings} guards
- *       {@code if (userRep.getRealmRoles() != null)}
- *       (RepresentationToModel.java:824) AND
- *       {@code if (userRep.getClientRoles() != null)}
- *       (RepresentationToModel.java:833) → both loops skipped, user gets NO
- *       role mappings from the CREATE_USER replay (roles are governed
- *       separately via the GRANT_ROLES role-mapping CR).</li>
+ *       {@code if (userRep.getRealmRoles() != null)} AND
+ *       {@code if (userRep.getClientRoles() != null)} → both loops skipped,
+ *       user gets NO role mappings from the CREATE_USER replay (roles are
+ *       governed separately via the GRANT_ROLES role-mapping CR).</li>
  *   <li>{@code createCredentials} guards
- *       {@code if (userRep.getCredentials() != null)}
- *       (RepresentationToModel.java:786) → loop skipped, user has NO password
- *       (no NPE).</li>
+ *       {@code if (userRep.getCredentials() != null)} → loop skipped, user has
+ *       NO password (no NPE).</li>
  *   <li>{@code requiredActions} guarded
- *       {@code if (userRep.getRequiredActions() != null)}
- *       (DefaultExportImportManager.java:997) → loop skipped.</li>
+ *       {@code if (userRep.getRequiredActions() != null)} → loop skipped.</li>
  *   <li>{@code createFederatedIdentities} guards
- *       {@code if (userRep.getFederatedIdentities() != null)}
- *       (RepresentationToModel.java:776) → loop skipped, no IdP link.</li>
+ *       {@code if (userRep.getFederatedIdentities() != null)} → loop skipped,
+ *       no IdP link.</li>
  *   <li>{@code createdTimestamp} guarded
- *       {@code if (userRep.getCreatedTimestamp() != null)}
- *       (DefaultExportImportManager.java:981) → KC assigns its own create
- *       timestamp.</li>
+ *       {@code if (userRep.getCreatedTimestamp() != null)} → KC assigns its
+ *       own create timestamp.</li>
  *   <li>{@code federationLink}: {@code user.setFederationLink(
- *       userRep.getFederationLink())} (DefaultExportImportManager.java:988) is
+ *       userRep.getFederationLink())} is
  *       unconditional but null-safe — passing null leaves the column at its
  *       default (no federation link), no NPE.</li>
  * </ul>
@@ -250,8 +241,7 @@ public class IgaUserAdapter extends UserAdapter {
     /**
      * The KC 26.5.5 admin user-create resource method whose <em>direct</em>
      * presence as the immediate caller of {@code getId()} is the deterministic
-     * terminal-emit signal. {@code UsersResource.createUser}
-     * (keycloak-services 26.5.5 UsersResource.java:143-192) is the ONLY method
+     * terminal-emit signal. {@code UsersResource.createUser} is the ONLY method
      * that invokes {@code user.getId()} with NO intermediate non-adapter frame
      * (lines :175 adminEvent resourcePath, :177 Response.created — both AFTER
      * the full model is built by profile.create/updateUserFromRep/
@@ -397,8 +387,8 @@ public class IgaUserAdapter extends UserAdapter {
     // (mn.equals, not contains). The Quarkus generated
     // *quarkusrestinvoker*$createUser_* wrapper sits BELOW UsersResource#createUser
     // on the stack — it is NEVER the immediate caller — so it is deliberately
-    // NOT matched here (requiring/looking for it was 4d217fb's mistake; the
-    // runtime harvest proves #7/#8's immediate frame is UsersResource#createUser
+    // NOT matched here (matching it would be wrong; the runtime harvest proves
+    // the resource-terminal calls' immediate frame is UsersResource#createUser
     // itself). usernameObserved is kept as a defensive SECONDARY gate. The
     // StackWalker runs only on getId() in capture mode for an IGA-governed user
     // create — a rare path — and short-circuits on the first surviving frame.
@@ -508,7 +498,7 @@ public class IgaUserAdapter extends UserAdapter {
 
     @Override
     public String getId() {
-        // Phase 4 hard guard: in a partialImport this capture adapter's row is
+        // Hard guard: in a partialImport this capture adapter's row is
         // harvested by the batch-emit tx (buildImportUserPendingCr), NOT the
         // single-entity terminal seam. The StackWalker gate below already
         // never matches in import (the caller is
@@ -596,7 +586,7 @@ public class IgaUserAdapter extends UserAdapter {
     /**
      * Build the {@code CREATE_USER} CR row from the accumulator — the SINGLE
      * source of truth shared by the single-entity terminal seam
-     * ({@link #getId()}) and the Phase 4 partialImport batch path
+     * ({@link #getId()}) and the partialImport batch path
      * ({@link #buildImportUserPendingCr()}). Identical rep/row contract in
      * both cases (so {@code IgaReplayDispatcher.replayCreateUser} is
      * byte-unchanged). NO side effects (no CR write, no throw, no
@@ -639,8 +629,7 @@ public class IgaUserAdapter extends UserAdapter {
         // `federationLink`).
         //
         // realmRoles/clientRoles in particular: roles are NOT capturable at
-        // user-create — stock KC's UsersResource.createUser
-        // (keycloak-services 26.5.5 UsersResource.java:143-192) NEVER applies
+        // user-create — stock KC's UsersResource.createUser NEVER applies
         // realmRoles/clientRoles (only updateUserFromRep +
         // createFederatedIdentities + createGroups + createCredentials;
         // createRoleMappings runs only on the import/replay path). Roles are
@@ -700,7 +689,7 @@ public class IgaUserAdapter extends UserAdapter {
     }
 
     /**
-     * Phase 4 — partialImport batch path. Build this user's
+     * partialImport batch path. Build this user's
      * {@code CREATE_USER} {@link IgaImportMode.PendingCr} from the
      * accumulator. Called by {@link IgaImportMode.BatchEmitTransaction#commit}
      * AFTER {@code DefaultExportImportManager.createUser} has applied every
@@ -832,8 +821,7 @@ public class IgaUserAdapter extends UserAdapter {
     //
     // CREATE_USER does NOT govern roles. Roles are NOT capturable at
     // user-create by any model-layer mechanism: stock KC's
-    // UsersResource.createUser (keycloak-services 26.5.5
-    // UsersResource.java:143-192) NEVER applies realmRoles/clientRoles — it
+    // UsersResource.createUser NEVER applies realmRoles/clientRoles — it
     // runs only updateUserFromRep + createFederatedIdentities + createGroups +
     // createCredentials; createRoleMappings runs only on the import/replay
     // path. So grantRole/deleteRoleMapping do NOT fire during an admin user
@@ -897,7 +885,7 @@ public class IgaUserAdapter extends UserAdapter {
     // Group memberships.
     //
     // capture: pass through + accumulate the group PATH (the exact shape
-    // RepresentationToModel.createGroups, RepresentationToModel.java:762-773,
+    // RepresentationToModel.createGroups
     // consumes — userRep.getGroups() are paths resolved via findGroupByPath).
     // inline: targeted JOIN_GROUPS / LEAVE_GROUPS CR (unchanged).
     // -------------------------------------------------------------------------
@@ -1140,35 +1128,34 @@ public class IgaUserAdapter extends UserAdapter {
     }
 
     // -------------------------------------------------------------------------
-    // Phase 6c — quarantine hooks.
+    // Quarantine hooks.
     //
     // The IGA capture-then-veto workflow leaves an entity that pre-dates IGA
     // (or that pre-dates an OFF→ON toggle) "unsigned" until its ADOPT_X CR
-    // commits. Per the locked Phase 6c brief, an unsigned user — or a user who
-    // holds ANY unsigned role — is treated as not-enabled (HARD refuse, per
-    // user decision: NOT silent strip). The group quarantine is silent-strip
+    // commits. An unsigned user — or a user who
+    // holds ANY unsigned role — is treated as not-enabled (HARD refuse, NOT
+    // silent strip). The group quarantine is silent-strip
     // (membership simply vanishes from token mapping) so the user can still
     // log in while their unsigned-group claims are absent.
     //
     // KC checkpoints surfaced by user.isEnabled():
-    //   TokenManager.java:193, :267              (token issuance / refresh)
-    //   AuthorizationCodeGrantType.java:121      (auth-code → token)
-    //   JWTAuthorizationGrantType.java:114       (JWT bearer grant)
-    //   DeviceGrantType.java:313                 (device code → token)
-    //   CibaGrantType.java:234                   (CIBA → token)
-    //   AbstractTokenExchangeProvider.java:407   (token exchange)
+    //   TokenManager                          (token issuance / refresh)
+    //   AuthorizationCodeGrantType            (auth-code → token)
+    //   JWTAuthorizationGrantType             (JWT bearer grant)
+    //   DeviceGrantType                       (device code → token)
+    //   CibaGrantType                         (CIBA → token)
+    //   AbstractTokenExchangeProvider         (token exchange)
     //   ResourceOwnerPasswordCredentialsGrantType: via authenticator-flow
     //   browser flow: via AbstractUsernameFormAuthenticator etc.
-    // (cross-checked vs /tmp/kc-all-src/...)
     //
     // KC checkpoints surfaced by client.isEnabled():
-    //   ClientIdAndSecretAuthenticator.java:114  (client_secret_basic/post)
-    //   AbstractJWTClientValidator.java:124      (client JWT auth)
-    //   AccessTokenIntrospectionProvider.java:267 (introspection)
+    //   ClientIdAndSecretAuthenticator   (client_secret_basic/post)
+    //   AbstractJWTClientValidator       (client JWT auth)
+    //   AccessTokenIntrospectionProvider (introspection)
     // -------------------------------------------------------------------------
 
     /**
-     * Phase 6c — user quarantine hook (HARD refuse).
+     * User quarantine hook (HARD refuse).
      *
      * <p>Defers to {@code super.isEnabled()} first to preserve vanilla KC
      * behaviour: if the user was explicitly disabled by an admin, that
@@ -1176,7 +1163,7 @@ public class IgaUserAdapter extends UserAdapter {
      * user is otherwise enabled, consult the quarantine cache: when the user
      * OR any role they effectively hold has an unattested
      * {@code IGA_UNSIGNED_ENTITY} sidecar row, return {@code false} so every
-     * KC isEnabled checkpoint (TokenManager:193,267 etc.) hard-refuses the
+     * KC isEnabled checkpoint (TokenManager etc.) hard-refuses the
      * operation. The cache is request-scoped (memoised on the session) so a
      * single token issuance pays the batched query at most once.</p>
      */
@@ -1203,7 +1190,7 @@ public class IgaUserAdapter extends UserAdapter {
     }
 
     /**
-     * Phase 6c — group quarantine hook (SILENT strip).
+     * Group quarantine hook (SILENT strip).
      *
      * <p>Filter the user's group stream so unsigned groups never reach the
      * token-mapping path. Group membership claims that derive from an
@@ -1211,9 +1198,9 @@ public class IgaUserAdapter extends UserAdapter {
      * still log in. Roles inherited via an unsigned group are also stripped
      * at the same point (groups gone → role-through-group gone).</p>
      *
-     * <p><b>Phase 6c regression fix (Failure B): admin-REST context bypass.</b>
-     * Per the Phase 6c brief, "admin reads: WARN but don't block — operators
-     * must see the queue". The no-arg {@code getGroupsStream()} is invoked from
+     * <p><b>Admin-REST context bypass.</b>
+     * For admin reads: WARN but don't block — operators
+     * must see the queue. The no-arg {@code getGroupsStream()} is invoked from
      * BOTH the token-mapping path (oidc/saml GroupMembershipMapper,
      * TokenManager → must strip) AND from the admin-REST path
      * ({@code UserResource.groupMembership} and the
@@ -1263,14 +1250,14 @@ public class IgaUserAdapter extends UserAdapter {
     }
 
     /**
-     * Phase 6c regression fix (Failure B) — true iff any frame on the live
+     * True iff any frame on the live
      * call stack is one of KC's admin REST resource classes (declaring class
      * FQN starts with {@code org.keycloak.services.resources.admin.}). When
      * true, the no-arg {@link #getGroupsStream()} MUST NOT strip — admins
      * must see unsigned groups so they can authorize ADOPT.
      *
-     * <p>Why a stack-walk rather than a session attribute: per the Phase 6c
-     * brief security note, the discriminator must not be spoofable. A
+     * <p>Why a stack-walk rather than a session attribute: the discriminator
+     * must not be spoofable. A
      * malicious caller could set an arbitrary session attribute before
      * issuing a token-issuance request and trick the gate into NOT stripping;
      * the StackWalker is immune because the discriminator IS the call site.

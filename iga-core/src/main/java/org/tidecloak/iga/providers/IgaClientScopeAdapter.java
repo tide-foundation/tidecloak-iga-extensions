@@ -52,27 +52,25 @@ import java.util.stream.Stream;
  *       The previous design snapshotted the live model at the FIRST
  *       {@code getId()} call, assuming (statically) that the only
  *       {@code getId()} on the scope adapter was
- *       {@code ClientScopesResource.createClientScope#getId} (KC 26.5.5
- *       ClientScopesResource.java:133, after {@code RepresentationToModel
- *       .createClientScope} returns). Runtime contradicted this: the snapshot
+ *       {@code ClientScopesResource.createClientScope#getId} (after
+ *       {@code RepresentationToModel.createClientScope} returns). Runtime
+ *       contradicted this: the snapshot
  *       fired with {@code protocol=null, protocolMappers=0, attributes=0} —
- *       i.e. BEFORE {@code RepresentationToModel.createClientScope}
- *       (RepresentationToModel.java:715-740) applied
- *       setName(719)/setDescription(720)/setProtocol(721)/addProtocolMapper
- *       loop(722-730)/setAttribute loop(732-736).
+ *       i.e. BEFORE {@code RepresentationToModel.createClientScope} applied
+ *       setName/setDescription/setProtocol/addProtocolMapper
+ *       loop/setAttribute loop.
  *
  *       The reason is structural and unavoidable for client scope:
- *       {@code ClientScopeAdapter.equals()} (KC 26.5.5
- *       ClientScopeAdapter.java:303-310), {@code hashCode()} (313-315) and
- *       {@code toString()} (317-320) ALL call the overridable
+ *       {@code ClientScopeAdapter.equals()}, {@code hashCode()} and
+ *       {@code toString()} ALL call the overridable
  *       {@code getId()}. The scratch adapter is created by
  *       {@code IgaRealmProvider.addClientScope} and returned into
- *       {@code RepresentationToModel.createClientScope} line 718
- *       ({@code realm.addClientScope(rep.getName())}); between line 718 and the
- *       first config setter at line 719 the adapter takes part in the JPA
+ *       {@code RepresentationToModel.createClientScope}
+ *       ({@code realm.addClientScope(rep.getName())}); between that and the
+ *       first config setter the adapter takes part in the JPA
  *       persistence context, the {@code ClientScopeModel.ClientScopeCreatedEvent}
- *       publication ({@code JpaRealmProvider.addClientScope},
- *       JpaRealmProvider.java:1179) and debug logging — any of which invokes
+ *       publication ({@code JpaRealmProvider.addClientScope}) and debug
+ *       logging — any of which invokes
  *       {@code equals/hashCode/toString} → {@code getId()} <i>before any field
  *       is set</i>. A fire-once-on-FIRST-getId guard then latched that empty
  *       snapshot. Unlike role (whose terminal seam {@code getName()} is a
@@ -87,12 +85,12 @@ import java.util.stream.Stream;
  *       (mappers WITH their full {@code config} map). Emission happens at
  *       {@code getId()} but is GATED on {@code nameObserved} — the builder has
  *       seen {@code setName}. {@code RepresentationToModel.createClientScope}
- *       calls {@code setName} at line 719 (always, the resource validates a
- *       non-null name at ClientScopesResource.java:123) as the FIRST config
- *       call, strictly AFTER {@code realm.addClientScope} (718) and strictly
+ *       calls {@code setName} (always, the resource validates a
+ *       non-null name) as the FIRST config
+ *       call, strictly AFTER {@code realm.addClientScope} and strictly
  *       BEFORE every early {@code equals/hashCode/toString}-driven
- *       {@code getId()} (which all happen during the 718→719 persistence-context
- *       window, before any setter). So {@code nameObserved} cleanly partitions
+ *       {@code getId()} (which all happen during the addClientScope→setName
+ *       persistence-context window, before any setter). So {@code nameObserved} cleanly partitions
  *       the early racy {@code getId()} calls (no setter seen yet → fall
  *       through to {@code super.getId()}) from the resource-level terminal
  *       {@code getId()} at ClientScopesResource.createClientScope:133 (every
@@ -166,7 +164,7 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
     private boolean captureEmitted = false;
 
     /**
-     * Phase 4 — true when this capture-mode adapter was created on a
+     * True when this capture-mode adapter was created on a
      * {@code partialImport} (or any multi-entity import) path that calls
      * {@code realm.addClientScope(...)}
      * ({@code IgaRealmProvider.addClientScope} registered it with
@@ -239,15 +237,14 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
     // clientScope.getId(), GATED on nameObserved.
     //
     // getId() is invoked early and unpredictably on the scratch adapter via
-    // ClientScopeAdapter.equals()/hashCode()/toString() (KC 26.5.5
-    // ClientScopeAdapter.java:303-320) during the JPA persistence context /
-    // ClientScopeCreatedEvent publish (JpaRealmProvider.java:1179) BEFORE
-    // RepresentationToModel.createClientScope (RepresentationToModel.java:
-    // 715-740) applies any field. Those early calls happen in the 718→719
-    // window — BEFORE setName(719) — so nameObserved is false for them and we
+    // ClientScopeAdapter.equals()/hashCode()/toString() during the JPA
+    // persistence context / ClientScopeCreatedEvent publish BEFORE
+    // RepresentationToModel.createClientScope applies any field. Those early
+    // calls happen in the addClientScope→setName window — BEFORE setName — so
+    // nameObserved is false for them and we
     // fall straight through to super.getId(). The resource-level terminal
-    // getId() (ClientScopesResource.createClientScope:133, after createClientScope
-    // returns at RepresentationToModel:739) happens AFTER setName + every other
+    // getId() (ClientScopesResource.createClientScope, after createClientScope
+    // returns) happens AFTER setName + every other
     // setter the rep carries, so nameObserved is true and we emit from the
     // ACCUMULATED rep (not a live snapshot).
     // -------------------------------------------------------------------------
@@ -256,7 +253,7 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         if (!captureMode || captureEmitted || !nameObserved) {
             return super.getId();
         }
-        // Phase 4 — partialImport deferred-harvest. When this capture-mode
+        // partialImport deferred-harvest. When this capture-mode
         // adapter was created on an import path (IgaRealmProvider
         // .addClientScope registered it with IgaImportMode), the
         // CREATE_CLIENT_SCOPE row is harvested ONCE at batch-emit time by
@@ -282,9 +279,9 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         Map<String, Object> row = buildCapturedClientScopeRow();
         String scopeId = (String) row.get("ID");
 
-        // Phase 4 — partialImport batch governance: accumulate + return the
-        // real scope id (NO per-entity CR/setRollbackOnly/throw). Sole
-        // behavioural change vs Phases 1–3; single-entity branch unchanged.
+        // partialImport batch governance: accumulate + return the
+        // real scope id (NO per-entity CR/setRollbackOnly/throw).
+        // single-entity branch unchanged.
         if (IgaImportMode.isImportMode(igaSession, realm)) {
             IgaImportMode.accumulate(igaSession, realm, "CLIENT_SCOPE", scopeId,
                     "CREATE_CLIENT_SCOPE", List.of(row), null);
@@ -314,7 +311,7 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
     /**
      * Build the {@code CREATE_CLIENT_SCOPE} CR row from the accumulator — the
      * SINGLE source of truth shared by the single-entity terminal seam
-     * ({@link #getId()}) and the Phase 4 partialImport deferred-harvest path
+     * ({@link #getId()}) and the partialImport deferred-harvest path
      * ({@link #buildImportClientScopePendingCr()}). Identical rep/row contract
      * in both cases (so {@code IgaReplayDispatcher.replayCreateClientScope} is
      * byte-unchanged). NO side effects (no CR write, no throw, no
@@ -386,7 +383,7 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
     }
 
     /**
-     * Phase 4 — partialImport batch path (defensive parity with addClient).
+     * partialImport batch path (defensive parity with addClient).
      * Build this scope's {@code CREATE_CLIENT_SCOPE}
      * {@link IgaImportMode.PendingCr} from the accumulator. Called by
      * {@link IgaImportMode.BatchEmitTransaction#commit} AFTER every observed
@@ -657,7 +654,7 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         if (captureMode) {
             super.removeProtocolMapper(mapping);
             // createClientScope removes all built-in/default mappers before
-            // re-adding the incoming ones (RepresentationToModel.java:724).
+            // re-adding the incoming ones.
             // Keep the accumulator consistent so REP_JSON carries exactly the
             // surviving mappers.
             if (mapping.getId() != null) {
@@ -680,7 +677,7 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
     }
 
     // -------------------------------------------------------------------------
-    // Phase 6c — client-scope quarantine hook (SILENT strip).
+    // Client-scope quarantine hook (SILENT strip).
     //
     // Protocol mappers attached to an unsigned client scope must not
     // contribute to the issued token until the ADOPT_CLIENT_SCOPE CR commits.
@@ -689,13 +686,12 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
     // itself is not refused) but any claim the unsigned scope's mappers would
     // have added is absent.
     //
-    // Capture mode is a HARD bypass (Phase 6c regression fix — Failure A):
-    // RepresentationToModel.createClientScope (KC 26.5.5
-    // RepresentationToModel.java:724) calls
+    // Capture mode is a HARD bypass:
+    // RepresentationToModel.createClientScope calls
     //   clientScope.getProtocolMappersStream().collect(...).forEach(removeProtocolMapper)
-    // STRICTLY AFTER setName(719)/setDescription(720)/setProtocol(721) and
-    // STRICTLY BEFORE the rep's addProtocolMapper loop (725-728) and
-    // setAttribute loop (732-734). At that point nameObserved==true and
+    // STRICTLY AFTER setName/setDescription/setProtocol and
+    // STRICTLY BEFORE the rep's addProtocolMapper loop and
+    // setAttribute loop. At that point nameObserved==true and
     // captureEmitted==false. If this override consults IgaQuarantineCache the
     // cache code calls scope.getId() (parameter dereference inside the cache
     // helper); that getId() routes through THIS adapter's getId() override
@@ -703,11 +699,9 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
     // !captureEmitted && nameObserved && !importDeferred) — so the emit
     // fires INSIDE getProtocolMappersStream(), the CR is written, the request
     // tx is marked rollback-only and IgaPendingApprovalException is thrown
-    // BEFORE KC's createClientScope ever reaches lines 725-734. The rep
-    // therefore captured only setName/setDescription/setProtocol — that is
-    // the exact symptom Failure A reports (observed order ends in
-    // setProtocol,getId#emit; the probe scope's mapper + attribute setters
-    // never fired).
+    // BEFORE KC's createClientScope ever reaches the mapper/attribute loops. The
+    // rep therefore captured only setName/setDescription/setProtocol — the
+    // mapper + attribute setters never fired.
     //
     // In capture mode the scratch scope CANNOT be quarantined (no
     // IGA_UNSIGNED_ENTITY row is written until ADOPT, never at
@@ -723,8 +717,8 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
 
     @Override
     public Stream<ProtocolMapperModel> getProtocolMappersStream() {
-        // HARD bypass during capture-mode create. See header comment above
-        // for the Failure A root cause: consulting the cache here causes
+        // HARD bypass during capture-mode create. See header comment above:
+        // consulting the cache here causes
         // scope.getId() to re-enter this adapter's terminal-emit seam mid-
         // createClientScope, truncating the captured rep.
         if (captureMode) {

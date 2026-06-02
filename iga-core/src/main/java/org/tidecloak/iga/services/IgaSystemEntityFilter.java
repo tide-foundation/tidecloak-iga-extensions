@@ -6,7 +6,7 @@ import org.tidecloak.iga.replay.IgaReplayExtension;
 import java.util.Set;
 
 /**
- * Phase 6b — system-entity skip rules for the toggle-on ADOPT scan.
+ * System-entity skip rules for the toggle-on ADOPT scan.
  *
  * <p>The toggle-on scan ({@link IgaAdoptScan}) walks every unattested row in
  * the realm and (by default) emits a per-entity ADOPT_X change request. Two
@@ -146,7 +146,7 @@ public final class IgaSystemEntityFilter {
      * @param realm        the realm being scanned (its name supplies the
      *                     {@code default-roles-&lt;realm&gt;} hard-pin string).
      * @param entityType   USER | ROLE | GROUP | CLIENT | CLIENT_SCOPE (the
-     *                     five Phase 6b scan targets).
+     *                     five scan targets).
      * @param entityId     the entity's own UUID (unused today but kept on the
      *                     surface so future rules can pivot on it without
      *                     re-threading callers).

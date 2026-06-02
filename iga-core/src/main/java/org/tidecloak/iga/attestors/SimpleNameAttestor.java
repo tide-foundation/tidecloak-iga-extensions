@@ -49,7 +49,7 @@ public class SimpleNameAttestor implements IgaAttestor {
                                          String attestationPayload) {
         RealmModel realm = session.realms().getRealm(cr.getRealmId());
         IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
-        // ADOPT_* CRs (Phase 6+) bypass the approver-role gate inside
+        // ADOPT_* CRs bypass the approver-role gate inside
         // requireApprover — they are a system-bootstrap onramp, not a
         // governance decision. The action-type-aware overload handles that
         // short-circuit; all other action types enforce the gate as before.

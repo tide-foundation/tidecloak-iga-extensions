@@ -118,15 +118,13 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public GroupModel createGroup(RealmModel realm, String id, Type type, String name, GroupModel toParent) {
-        // Phase 4 — partialImport batch governance for GROUP. This branch MUST
+        // partialImport batch governance for GROUP. This branch MUST
         // come BEFORE the single-entity isIgaActive() capture return and is
         // strictly gated by the import-mode predicate; the single-entity
-        // admin-create path below is byte-unchanged.
+        // admin-create path below is unchanged.
         //
-        // Mechanism (implemented; proven sound end-to-end on KC 26.5.5):
-        // create the REAL scratch group via super.createGroup
-        // (em.persist + em.flush — JpaRealmProvider.createGroup:835-836 in the
-        // tidecloak fork) so the group is FULLY persisted and queryable by
+        // Mechanism: create the REAL scratch group via super.createGroup
+        // (em.persist + em.flush) so the group is FULLY persisted and queryable by
         // name+parent in the nested import session. Return a capture-mode
         // IgaGroupAdapter whose per-setter overrides all fall straight through
         // to the real GroupAdapter (captureMode bypasses isIgaActive in every
@@ -137,32 +135,30 @@ public class IgaRealmProvider extends JpaRealmProvider {
         // on the live pass-through model AFTER importGroup has applied every
         // conditional setDescription/setAttribute/grantRole). The whole
         // nested import tx is then vetoed by the BatchEmit prepare-seam throw
-        // (DefaultKeycloakTransactionManager.commit:124-130 → rollback) so
+        // (DefaultKeycloakTransactionManager.commit → rollback) so
         // the scratch group is discarded atomically; one 202 + Location is
         // returned by IgaPendingApprovalExceptionMapper.
         //
-        // ROOT CAUSE NOTE (empirically proven 2026-05-19, 4th-look final):
-        // The earlier "still NPEs at GroupsPartialImport:53" was NOT an IGA
+        // ROOT CAUSE NOTE:
+        // A "still NPEs at GroupsPartialImport" symptom is NOT an IGA
         // capture-mode artifact. KC's getModelId is
-        // `findGroupModel(...).getId()` (KC 26.5.5
-        // GroupsPartialImport.java:52-54) where findGroupModel ==
+        // `findGroupModel(...).getId()` where findGroupModel ==
         // KeycloakModelUtils.findGroupByPath(session, realm,
         // groupRep.getPath()). findGroupByPath returns null at its first
-        // guard (`if (path == null) return null;` —
-        // KeycloakModelUtils.java:800-802) when the GroupRepresentation in
+        // guard (`if (path == null) return null;`) when the GroupRepresentation in
         // the partialImport payload omits `path`, so `.getId()` on the next
         // line NPEs UNCONDITIONALLY, regardless of whether the scratch group
         // is persisted, regardless of IGA. Confirmed by running an
         // IGA-DISABLED vanilla-KC realm with `{"groups":[{"name":"vp-group",
         // "attributes":{...}}]}` (no path): identical HTTP 500 / identical
-        // GroupsPartialImport.java:53 NPE / identical KC-SERVICES0037 stack.
+        // GroupsPartialImport NPE / identical KC-SERVICES0037 stack.
         // KC's own AbstractPartialImportTest.addGroups always sets BOTH
         // setName AND setPath("/" + GROUP_PREFIX + i) — pathless group reps
         // are malformed per KC's partialImport contract, not an IGA defect.
         // Roles/users don't NPE because RealmRolesPartialImport.getModelId
-        // uses `.orElse(null)` (RealmRolesPartialImport.java:59-64) and
+        // uses `.orElse(null)` and
         // UsersPartialImport.getModelId uses a createdIds cache populated by
-        // create() (UsersPartialImport.java:42, 57-69).
+        // create().
         //
         // The corresponding E2E payload now sets `path` on the group rep so
         // KC's intra-import getModelId resolves the (real, persisted, super-
@@ -248,7 +244,7 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public RoleModel addRealmRole(RealmModel realm, String id, String name) {
-        // Phase 4 — partialImport batch governance for REALM ROLE. Same gap
+        // partialImport batch governance for REALM ROLE. Same gap
         // class as createGroup: under POST /partialImport, KC's
         // RolesPartialImport.doImport → RepresentationToModel.importRoles →
         // createRole calls realm.addRole(...) (→ here) then applies
@@ -262,7 +258,7 @@ public class IgaRealmProvider extends JpaRealmProvider {
         // adapter (per-setter + composites still pass through to the real
         // model so RealmRolesPartialImport.getModelId resolves a real id),
         // markImportDeferred() makes getName() a pure pass-through, and the
-        // CREATE_ROLE row is harvested ONCE for the batch by the Phase 4
+        // CREATE_ROLE row is harvested ONCE for the batch by the
         // BatchEmitTransaction (registerImportRole). No per-entity throw.
         if (IgaImportMode.isImportMode(igaSession, realm)) {
             RoleModel base = super.addRealmRole(realm, id, name);
@@ -333,10 +329,10 @@ public class IgaRealmProvider extends JpaRealmProvider {
     @Override
     public RoleModel addClientRole(ClientModel client, String id, String name) {
         RealmModel realm = client.getRealm();
-        // Phase 4 — partialImport batch governance for CLIENT ROLE. Same gap
+        // partialImport batch governance for CLIENT ROLE. Same gap
         // class as addRealmRole: under POST /partialImport, KC's
         // RolesPartialImport.doImport → RepresentationToModel.importRoles
-        // (client-roles branch, RepresentationToModel:167-174) calls
+        // (client-roles branch) calls
         // client.addRole(...) (→ here) then conditional setDescription/
         // setAttribute and second-pass addComposites; getName() is never
         // called on the returned adapter. Fix mirrors addRealmRole, with the
@@ -409,19 +405,19 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public ClientModel addClient(RealmModel realm, String id, String clientId) {
-        // Phase 4 — partialImport batch governance for CLIENT. This branch MUST
+        // partialImport batch governance for CLIENT. This branch MUST
         // come BEFORE the single-entity isIgaActive() capture return and is
         // strictly gated by the import-mode predicate; the single-entity
-        // admin-create path below is byte-unchanged.
+        // admin-create path below is unchanged.
         //
         // Mechanism (mirrors createGroup / addRealmRole / addClientRole /
         // 5-arg addUser exactly): under POST /partialImport,
         // PartialImportManager.saveResources → ClientsPartialImport.doImport →
-        // ClientsPartialImport.create (services/.../ClientsPartialImport.java:
-        // 112-127) calls RepresentationToModel.createClient which in turn calls
+        // ClientsPartialImport.create calls RepresentationToModel.createClient
+        // which in turn calls
         // realm.addClient(rep.getId(), rep.getClientId()) (→ here). KC's very
-        // next call after create() returns is ClientsPartialImport.getModelId
-        // (ClientsPartialImport.java:77-79): `realm.getClientByClientId(
+        // next call after create() returns is ClientsPartialImport.getModelId:
+        // `realm.getClientByClientId(
         // getName(clientRep)).getId()`, where getName(clientRep) ==
         // clientRep.getClientId(). That lookup MUST resolve in the nested
         // import session — so we persist the REAL scratch ClientEntity via
@@ -438,9 +434,9 @@ public class IgaRealmProvider extends JpaRealmProvider {
         // ModelToRepresentation.toRepresentation on the live pass-through
         // model AFTER RepresentationToModel.createClient has applied every
         // updateClientProperties field / protocol-mapper / scope / final
-        // updateClient — KC 26.5.5 RepresentationToModel.java:347-404). The
+        // updateClient). The
         // whole nested import tx is then vetoed by the BatchEmit prepare-seam
-        // throw (DefaultKeycloakTransactionManager.commit:124-130 → rollback)
+        // throw (DefaultKeycloakTransactionManager.commit → rollback)
         // so the scratch client + its mappers + scope links + redirectUri /
         // webOrigin rows are discarded atomically; one 202 + Location is
         // returned by IgaPendingApprovalExceptionMapper.
@@ -671,7 +667,7 @@ public class IgaRealmProvider extends JpaRealmProvider {
      *   <li>{@code ClientManager.createClient} — the services-layer create
      *       entry point.</li>
      *   <li>{@code ClientManager.enableServiceAccount} — attaches the
-     *       service-account scope (ClientManager.java:198,
+     *       service-account scope (ClientManager,
      *       {@code client.addClientScope(serviceAccountScope, true)}).</li>
      *   <li>{@code AbstractLoginProtocolFactory.addDefaultClientScopes}
      *       (server-spi-private) — the protocol-factory hook that calls
@@ -715,18 +711,17 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public ClientScopeModel addClientScope(RealmModel realm, String id, String name) {
-        // Phase 4 — partialImport batch governance for CLIENT_SCOPE
-        // (DEFENSIVE PARITY with addClient — KC-source-confirmed). This branch
+        // partialImport batch governance for CLIENT_SCOPE
+        // (defensive parity with addClient). This branch
         // MUST come BEFORE the single-entity isIgaActive() capture return and
         // is strictly gated by the import-mode predicate; the single-entity
-        // admin-create path below is byte-unchanged.
+        // admin-create path below is unchanged.
         //
-        // Source confirmation (KC 26.5.5): PartialImportManager
-        // (services/.../partialimport/PartialImportManager.java:47-52)
+        // PartialImportManager
         // registers ONLY ClientsPartialImport / RolesPartialImport /
         // IdentityProvidersPartialImport / IdentityProviderMappersPartialImport
         // / GroupsPartialImport / UsersPartialImport — there is NO
-        // ClientScopesPartialImport.java in the partialimport package, so no
+        // ClientScopesPartialImport in the partialimport package, so no
         // current per-type partialImport handler reaches addClientScope. This
         // branch is therefore cheap insurance against (a) future KC versions
         // that add ClientScopesPartialImport, and (b) any indirect
@@ -779,11 +774,10 @@ public class IgaRealmProvider extends JpaRealmProvider {
             // dead JAX-RS IgaRepresentationCaptureFilter.pendingRepJson early
             // throw; provider-jar @Provider request filters are never
             // discovered by Keycloak's RESTEasy runtime, see the addClient
-            // comment / Phase 1 report). Create the REAL (scratch)
+            // comment). Create the REAL (scratch)
             // ClientScopeEntity via super so Keycloak's
-            // RepresentationToModel.createClientScope (KC 26.5.5
-            // RepresentationToModel.java:715-740, invoked by
-            // ClientScopesResource.createClientScope:131) can apply the
+            // RepresentationToModel.createClientScope (invoked by
+            // ClientScopesResource.createClientScope) can apply the
             // COMPLETE incoming ClientScopeRepresentation (name, description,
             // protocol, protocol mappers WITH full config, attributes) to a
             // genuine ClientScopeAdapter. The IgaClientScopeAdapter is returned
@@ -791,14 +785,13 @@ public class IgaRealmProvider extends JpaRealmProvider {
             // through to the real adapter, and the FIRST unconditional model
             // call KC makes AFTER the conditional-only createClientScope body —
             // clientScope.getId() at ClientScopesResource.createClientScope
-            // line 133 (adminEvent.resourcePath), again at 135
-            // (Response.created) — is the terminal seam where the now-complete
-            // model is snapshotted to a ClientScopeRepresentation via
+            // (adminEvent.resourcePath, then Response.created) — is the terminal
+            // seam where the now-complete model is snapshotted to a
+            // ClientScopeRepresentation via
             // ModelToRepresentation.toRepresentation(ClientScopeModel) (which —
             // unlike role's composites — DOES serialize name, description,
-            // protocol, protocolMappers WITH full config, AND attributes:
-            // KC 26.5.5 ModelToRepresentation.java:821-835, so NO field
-            // accumulation is needed), the CREATE_CLIENT_SCOPE change request
+            // protocol, protocolMappers WITH full config, AND attributes, so NO
+            // field accumulation is needed), the CREATE_CLIENT_SCOPE change request
             // (with full REP_JSON) is written in a separate transaction, the
             // REQUEST transaction is marked rollback-only and
             // IgaPendingApprovalException is thrown (→ HTTP 202 + Location).

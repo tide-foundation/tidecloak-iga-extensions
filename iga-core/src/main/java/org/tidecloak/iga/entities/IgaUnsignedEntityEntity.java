@@ -17,7 +17,7 @@ import java.util.Objects;
  * ATTESTATION column and delete the sidecar row.
  *
  * <p>{@code ADOPT_CR_ID} is nullable so a sidecar row can briefly exist
- * without a CR pointer during the mid-toggle window (see Phase 6d). The
+ * without a CR pointer during the mid-toggle window. The
  * composite primary key (REALM_ID, ENTITY_TYPE, ENTITY_ID) guarantees at
  * most one sidecar row per entity.</p>
  *

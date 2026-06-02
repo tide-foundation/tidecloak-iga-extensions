@@ -47,13 +47,13 @@ public class IgaAuthorizerEntity {
     private String type;
 
     /**
-     * firstAdmin/multiAdmin mode discriminator for the {@code tide} attestor
-     * (port plan §3.1, §4). Nullable: pre-existing rows predate the column and
+     * firstAdmin/multiAdmin mode discriminator for the {@code tide} attestor.
+     * Nullable: pre-existing rows predate the column and
      * are tolerated by {@code TideAttestor.resolveMode} (null → fall back to the
      * realm's {@code iga.attestor} discriminator). The Java-side default mirrors
      * the SQL {@code defaultValue="multiAdmin"} so a {@code new IgaAuthorizerEntity()}
      * built without an explicit setMode is well-defined; the lazy firstAdmin seed
-     * (§9.3) overrides it to {@code "firstAdmin"}.
+     * overrides it to {@code "firstAdmin"}.
      */
     @Column(name = "MODE", length = 32)
     private String mode = "multiAdmin";

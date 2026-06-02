@@ -7,7 +7,7 @@ import org.keycloak.cluster.ExecutionResult;
 import org.keycloak.models.KeycloakSession;
 
 /**
- * Phase 6e — per-realm cluster-safe mutex for the bulk-authorize endpoint.
+ * Per-realm cluster-safe mutex for the bulk-authorize endpoint.
  *
  * <p>This is a thin wrapper around KC's canonical cluster-wide
  * single-execution primitive
@@ -20,8 +20,8 @@ import org.keycloak.models.KeycloakSession;
  * expected to respond with HTTP 429.</p>
  *
  * <p><strong>Why a SPI wrapper and not a plain {@code ConcurrentHashMap}.
- * </strong> The Phase 6e brief originally accepted an in-JVM
- * {@code ConcurrentHashMap<String, AtomicBoolean>} as a single-node
+ * </strong> An in-JVM
+ * {@code ConcurrentHashMap<String, AtomicBoolean>} would be a single-node
  * shortcut. In a multi-node KC cluster, however, two simultaneous bulks
  * hitting different nodes wouldn't see each other's locks and could race
  * the per-CR loop. {@code ClusterProvider} is the same SPI KC itself uses

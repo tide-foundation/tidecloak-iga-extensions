@@ -15,7 +15,7 @@ import jakarta.persistence.EntityManager;
  * enabled. {@code JpaUserProvider.session} is private, so we maintain our own
  * reference as {@code igaSession}.
  *
- * <h2>CREATE_USER — model-layer accumulate-then-veto (Phase 3)</h2>
+ * <h2>CREATE_USER — model-layer accumulate-then-veto</h2>
  * This replaces the dead JAX-RS {@code IgaRepresentationCaptureFilter}
  * transport (provider-jar {@code @Provider} request filters are never
  * discovered by Keycloak's RESTEasy runtime — same finding as CLIENT /
@@ -120,15 +120,15 @@ public class IgaUserProvider extends JpaUserProvider {
     }
 
     /**
-     * Phase 4 — close the partialImport user bypass.
+     * Close the partialImport user bypass.
      *
      * <p>{@code PartialImportManager}'s {@code UsersPartialImport} routes users
      * through {@code DefaultExportImportManager.createUser}
-     * (DefaultExportImportManager.java:979) which calls THIS 5-arg
+     * which calls THIS 5-arg
      * local-storage {@code addUser(realm,id,username,false,false)} — NOT the
-     * 1-arg seam above. Before Phase 4 this fell straight through to
+     * 1-arg seam above. Without this seam it fell straight through to
      * {@code JpaUserProvider}, so partialImport users were created
-     * UNGOVERNED (the live bypass).
+     * UNGOVERNED (the bypass).
      *
      * <p>Gating (provably does NOT regress single-entity user replay, which
      * uses this exact 5-arg path):
