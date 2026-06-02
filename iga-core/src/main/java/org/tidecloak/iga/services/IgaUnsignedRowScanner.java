@@ -8,17 +8,16 @@ import java.util.List;
 import java.util.stream.Stream;
 
 /**
- * Extracted in Phase 6a from {@code IgaBaselineService.collectAllUnsignedRows}
- * (deleted in the same commit). Holds the battle-tested JPQL projections that
+ * Extracted from {@code IgaBaselineService.collectAllUnsignedRows}.
+ * Holds the battle-tested JPQL projections that
  * find "unsigned" rows — rows whose {@code attestation} column is still NULL —
  * across every IGA-tracked entity / relationship / attribute table.
  *
- * <p>Phase 6a itself does NOT call any of these methods — they are scaffolding
- * for Phase 6b's toggle-on scan, which will iterate the five "info" tables
- * (users, roles, groups, clients, client_scopes) and create a per-entity ADOPT
+ * <p>The toggle-on scan iterates the five "info" tables
+ * (users, roles, groups, clients, client_scopes) and creates a per-entity ADOPT
  * change request for each unattested row. The relationship and attribute
- * scanners are kept (a) to avoid losing the JPQL the BASELINE codepath spent
- * Phases 1-5 perfecting, and (b) for Phase 6c / 6d quarantine cross-checks.</p>
+ * scanners are kept (a) to avoid losing the JPQL the BASELINE codepath
+ * developed, and (b) for quarantine cross-checks.</p>
  *
  * <p>Surface contract: every public method takes the realm id as its sole
  * scalar parameter (matching the original BASELINE collector signature) and
@@ -59,7 +58,7 @@ public final class IgaUnsignedRowScanner {
     }
 
     // -------------------------------------------------------------------------
-    // "Info" entities — the five Phase 6b toggle-on scan targets.
+    // "Info" entities — the five toggle-on scan targets.
     // Each ADOPT_X CR replays a single row update on its info table.
     // -------------------------------------------------------------------------
 
@@ -113,8 +112,8 @@ public final class IgaUnsignedRowScanner {
     }
 
     /**
-     * Aggregate the five info-table streams into one. Convenience for Phase 6b
-     * — preserves the same insertion order BASELINE used (users → roles →
+     * Aggregate the five info-table streams into one.
+     * Preserves the same insertion order BASELINE used (users → roles →
      * groups → clients → client_scopes) so existing snapshots remain
      * comparable.
      */
@@ -129,7 +128,7 @@ public final class IgaUnsignedRowScanner {
     }
 
     // -------------------------------------------------------------------------
-    // Phase 6b — projection variants that surface the columns needed by
+    // Projection variants that surface the columns needed by
     // {@link IgaSystemEntityFilter} to identify built-in clients (by clientId
     // string) and client-roles whose parent is a built-in client. These are
     // ADDITIVE: the existing id-only methods above remain byte-unchanged in
@@ -263,7 +262,7 @@ public final class IgaUnsignedRowScanner {
     }
 
     // -------------------------------------------------------------------------
-    // Protocol mappers (scoped to clients in the realm). Phase 6b/6c may treat
+    // Protocol mappers (scoped to clients in the realm). The caller may treat
     // these alongside their parent client; surfaced separately so the caller
     // can decide.
     // -------------------------------------------------------------------------
@@ -534,7 +533,7 @@ public final class IgaUnsignedRowScanner {
     }
 
     // -------------------------------------------------------------------------
-    // Relationship tables — composite key rows. Phase 6b/6c quarantine.
+    // Relationship tables — composite key rows. Quarantine.
     // entityId = key1, parentRef = key2.
     // -------------------------------------------------------------------------
 

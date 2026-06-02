@@ -196,7 +196,7 @@ public final class IgaScopeResolver {
                 resolveIdpScopesFromRows(session, realm, cr, scope, "IDP_ALIAS");
                 break;
             // CREATE_USER / CREATE_ROLE / CREATE_GROUP / CREATE_CLIENT /
-            // CREATE_ORGANIZATION, the Phase 6+ ADOPT_* family, and realm-wide
+            // CREATE_ORGANIZATION, the ADOPT_* family, and realm-wide
             // action types (REQUEST_SERVER_CERT, INSTALL_LICENSE,
             // ROTATE_LICENSE) intentionally leave the scope empty.
             default:
@@ -232,7 +232,7 @@ public final class IgaScopeResolver {
      * the only gate for ADOPT.
      *
      * <p><b>firstAdmin-mode bypass.</b> The {@code tide} attestor has two modes
-     * with different approval gating (port plan §3.1). In {@code firstAdmin} mode
+     * with different approval gating. In {@code firstAdmin} mode
      * the realm has not yet bootstrapped its admin policy: the VRK (a 1-of-1 admin
      * quorum) is the authority, and the very grant that installs the first
      * {@code tide-realm-admin} is what flips the realm to {@code multiAdmin}

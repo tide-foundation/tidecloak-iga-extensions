@@ -19,7 +19,7 @@ import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.services.IgaUnsignedEntityService;
 
 /**
- * Phase 6a replay extension for the capture-then-veto ADOPT workflow.
+ * Replay extension for the capture-then-veto ADOPT workflow.
  *
  * <p>Unlike the existing CREATE_* actions (which create the entity at commit),
  * ADOPT_* actions are about retroactively attesting an entity that ALREADY
@@ -55,7 +55,7 @@ import org.tidecloak.iga.services.IgaUnsignedEntityService;
  * <p>The dispatcher itself is intentionally NOT touched for ADOPT_* — keeping
  * the new action types out of the giant switch keeps the dispatcher diff to
  * the BASELINE-delete only, and the routing layer becomes the single point of
- * truth for "does Phase 6+ own this action type or not".</p>
+ * truth for "does the extension own this action type or not".</p>
  */
 public final class IgaReplayExtension {
 
@@ -67,7 +67,7 @@ public final class IgaReplayExtension {
     public static final String ACTION_ADOPT_CLIENT = "ADOPT_CLIENT";
     public static final String ACTION_ADOPT_CLIENT_SCOPE = "ADOPT_CLIENT_SCOPE";
     /**
-     * Phase 7b — retroactive ADOPT for KC organizations.
+     * Retroactive ADOPT for KC organizations.
      *
      * <p>Orgs reuse the existing {@code IGA_UNSIGNED_ENTITY} table with
      * {@code entity_type='ORGANIZATION'} for the toggle-on sidecar onramp, AND
@@ -138,7 +138,7 @@ public final class IgaReplayExtension {
 
     /**
      * Single source of truth for "is this action type one of the five ADOPT_*
-     * variants owned by the Phase 6+ extension router". Used by the
+     * variants owned by the extension router". Used by the
      * {@link org.tidecloak.iga.rest.IgaAdminResource} resume-from-CANCELLED
      * lane and by {@link org.tidecloak.iga.attestors.IgaScopeResolver} to
      * short-circuit the threshold + approver-role gates: ADOPT_* CRs are a
@@ -171,7 +171,7 @@ public final class IgaReplayExtension {
     }
 
     /**
-     * Attempt to replay a CR via the Phase 6+ extension. Returns {@code true}
+     * Attempt to replay a CR via the extension. Returns {@code true}
      * iff the extension fully handled the CR (caller skips the dispatcher).
      * Returns {@code false} for any action type the extension does not own.
      */
@@ -255,7 +255,7 @@ public final class IgaReplayExtension {
         // step (which is being deleted in the same commit; the idiom lives on
         // here as the per-entity ADOPT stamp).
         //
-        // Phase 7b — ADOPT_ORGANIZATION stamps here like every other node
+        // ADOPT_ORGANIZATION stamps here like every other node
         // ADOPT: OrganizationEntity now carries an `attestation` column (ORG
         // table, iga-changelog-2.4.0 + the matching field in tidecloak-
         // override), so the org node is stamped per-entity (keyed on the org
@@ -279,7 +279,7 @@ public final class IgaReplayExtension {
         // state (attestation set, sidecar cleared, quarantine satisfied).
         //
         // Without this, a request that previously failed the quarantine check
-        // (e.g. a direct-grant against an unsigned user — Phase 6c case 1)
+        // (e.g. a direct-grant against an unsigned user)
         // leaves KC's UserCacheSession holding a snapshot with enabled=false.
         // The post-toggle realm-wide UserCache eviction in
         // TideAdminCompatResource only clears the cache once at toggle time;
@@ -616,24 +616,19 @@ public final class IgaReplayExtension {
      * target. Per-action mapping:
      *
      * <ul>
-     *   <li>{@code ADOPT_USER}: {@link UserCache#evict(RealmModel, UserModel)}
-     *       — {@code keycloak-model-storage} {@code UserCache.java:36}. The
-     *       per-user variant (not the realm-wide {@code evict(RealmModel)})
+     *   <li>{@code ADOPT_USER}: {@link UserCache#evict(RealmModel, UserModel)}.
+     *       The per-user variant (not the realm-wide {@code evict(RealmModel)})
      *       so a single ADOPT commit doesn't blow the entire realm's user
      *       cache.</li>
      *   <li>{@code ADOPT_CLIENT}: {@link CacheRealmProvider#registerClientInvalidation}
-     *       — {@code keycloak-model-storage-private} {@code CacheRealmProvider.java:36};
-     *       implementation in {@code RealmCacheSession.java:252} invalidates
-     *       the cached client adapter + sends a cluster invalidation event.</li>
-     *   <li>{@code ADOPT_GROUP}: {@link CacheRealmProvider#registerGroupInvalidation}
-     *       — {@code CacheRealmProvider.java:41}; {@code RealmCacheSession.java:334}.</li>
-     *   <li>{@code ADOPT_ROLE}: {@link CacheRealmProvider#registerRoleInvalidation}
-     *       — {@code CacheRealmProvider.java:39}; {@code RealmCacheSession.java:278}.
+     *       — invalidates the cached client adapter + sends a cluster
+     *       invalidation event.</li>
+     *   <li>{@code ADOPT_GROUP}: {@link CacheRealmProvider#registerGroupInvalidation}.</li>
+     *   <li>{@code ADOPT_ROLE}: {@link CacheRealmProvider#registerRoleInvalidation}.
      *       Requires the role name and container id, which we resolve via the
      *       model API (same lookup the assertEntityExists path uses).</li>
      *   <li>{@code ADOPT_CLIENT_SCOPE}:
-     *       {@link CacheRealmProvider#registerClientScopeInvalidation}
-     *       — {@code CacheRealmProvider.java:37}; {@code RealmCacheSession.java:265}.</li>
+     *       {@link CacheRealmProvider#registerClientScopeInvalidation}.</li>
      * </ul>
      *
      * <p>If either cache provider isn't installed (deployments without the
@@ -747,22 +742,21 @@ public final class IgaReplayExtension {
                     return;
                 }
                 case ACTION_ADOPT_ORGANIZATION: {
-                    // Phase 7b — per-org cache eviction. KC's
+                    // Per-org cache eviction. KC's
                     // CacheRealmProvider has no public registerOrgInvalidation
                     // primitive (the InfinispanOrganizationProvider's
                     // registerOrganizationInvalidation is package-private), but
                     // InfinispanOrganizationProvider.getById keys the cached
                     // CachedOrganization on the org id alone
-                    // ({@code realmCache.getCache().get(id, CachedOrganization.class)}
-                    // — KC 26.5.5 InfinispanOrganizationProvider.java:94), and
-                    // {@code registerOrganizationInvalidation} (line 371-372)
+                    // ({@code realmCache.getCache().get(id, CachedOrganization.class)}),
+                    // and {@code registerOrganizationInvalidation}
                     // invalidates that key via the public
                     // {@code CacheRealmProvider.registerInvalidation(id)}
                     // method. Calling that public method here drops the
                     // CachedOrganization for this org so the next getById
                     // re-loads through the IGA provider chain and observes
-                    // the post-ADOPT sidecar absence — i.e. the (future
-                    // Phase 7c) IgaOrganizationModel.isEnabled quarantine
+                    // the post-ADOPT sidecar absence — i.e. the (future)
+                    // IgaOrganizationModel.isEnabled quarantine
                     // override sees the just-cleared sidecar on the very next
                     // request.
                     //
@@ -873,7 +867,7 @@ public final class IgaReplayExtension {
                 break;
             }
             case ACTION_ADOPT_ORGANIZATION: {
-                // Phase 7b — resolve through KC's OrganizationProvider SPI so
+                // Resolve through KC's OrganizationProvider SPI so
                 // federation / cache layers are honoured (same idiom as the
                 // other ADOPT existence probes). If the OrganizationProvider
                 // factory isn't installed (deployment without the orgs

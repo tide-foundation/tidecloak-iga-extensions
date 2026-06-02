@@ -10,7 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Phase 6d — one-shot toggle-OFF cancel + sidecar clear.
+ * One-shot toggle-OFF cancel + sidecar clear.
  *
  * <p>When IGA flips ON→OFF for a realm, this routine performs two bulk JPQL
  * updates inside the surrounding {@code runJobInTransaction}:</p>
@@ -18,14 +18,14 @@ import java.util.Map;
  *   <li><b>Cancel pending ADOPTs</b> — every {@code IgaChangeRequestEntity}
  *       with {@code status='PENDING'} and {@code actionType LIKE 'ADOPT_%'} is
  *       flipped to {@code status='CANCELLED'} with {@code resolvedAt=now}. The
- *       {@code IDX_IGA_CR_REALM_ACTION_STATUS} index added in Phase 6a backs
+ *       {@code IDX_IGA_CR_REALM_ACTION_STATUS} index backs
  *       this lookup. Other PENDING CR types (CREATE_*, UPDATE_*, DELETE_*,
  *       etc.) are left untouched — only the toggle-on-emitted ADOPTs are
  *       reaped here.</li>
  *   <li><b>Clear sidecar</b> — every {@code IgaUnsignedEntityEntity} row for
  *       this realm is bulk-deleted via {@link
  *       IgaUnsignedEntityService#clearByRealm}. Sidecar rows always pair with
- *       a PENDING ADOPT CR (Phase 6a invariant), so cancelling the CRs
+ *       a PENDING ADOPT CR (invariant), so cancelling the CRs
  *       without clearing their sidecars would leave dangling rows; conversely
  *       clearing the sidecar without cancelling the CRs would leave PENDING
  *       ADOPTs with no enforcement point. Both must happen — atomically — in
@@ -42,7 +42,7 @@ import java.util.Map;
  * <p>The caller (see {@code TideAdminCompatResource#toggleIga}) wraps this in
  * its own {@code KeycloakModelUtils.runJobInTransaction} so a cancel failure
  * cannot abort the toggle attribute write that just succeeded — mirror of the
- * Phase 6b OFF→ON pattern.</p>
+ * OFF→ON pattern.</p>
  */
 public final class IgaAdoptCancel {
 
@@ -51,7 +51,7 @@ public final class IgaAdoptCancel {
     /**
      * Result of one toggle-off cancel. All counters are non-negative and the
      * counts are independent (sidecar rows and ADOPT CRs are distinct tables,
-     * even if 1:1-paired by Phase 6a's invariant).
+     * even if 1:1-paired by the invariant).
      */
     public static final class CancelResult {
         public final String realmId;

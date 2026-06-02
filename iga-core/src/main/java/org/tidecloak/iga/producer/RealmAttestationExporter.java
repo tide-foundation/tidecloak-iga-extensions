@@ -51,7 +51,7 @@ import java.util.Set;
 
 /**
  * Emits the closure of typed {@link AttestationUnit} instances (plain CBOR/JSON,
- * no JCS / no signature — design §2) for a {@code (realm, client, user, scope)},
+ * no JCS / no signature) for a {@code (realm, client, user, scope)},
  * so the ork {@code TokenValidationEngine} can validate a real issued token
  * against current attested realm state. Each unit mirrors its ork C# counterpart
  * field-for-field and can {@code serialize()} itself to a self-contained
@@ -87,14 +87,14 @@ import java.util.Set;
  * {@code attestation} NULL. To keep the claim-closure EXACT (a referenced row
  * that is omitted makes the engine reject), the producer includes the required
  * rows regardless of attestation state. The {@code attestation IS NOT NULL}
- * discriminator (design §7) is wired as {@link #onlyAttested} for a future
+ * discriminator is wired as {@link #onlyAttested} for a future
  * trust-loop pass but defaults to off.
  */
 public final class RealmAttestationExporter {
 
     private static final Logger log = Logger.getLogger(RealmAttestationExporter.class);
 
-    // realm_config attributes the ork preset carries (design §5 / RealmConfig preset).
+    // realm_config attributes the ork preset carries (the RealmConfig preset).
     private static final List<String> REALM_CONFIG_ATTR_KEYS = List.of(
             "frontendUrl", "acr.loa.map", "organizationsEnabled");
 
@@ -139,7 +139,7 @@ public final class RealmAttestationExporter {
 
     /**
      * When true, only rows whose IGA {@code attestation} column is non-null are
-     * emitted (the design §7 "governed/committed" discriminator). Leaves this
+     * emitted (the "governed/committed" discriminator). Leaves this
      * false so the closure stays exact on a stock realm; flip on for the future
      * trust-loop pass. NOTE: never narrows the transitive role closure — a role
      * that surfaces in the token must always get a definition.

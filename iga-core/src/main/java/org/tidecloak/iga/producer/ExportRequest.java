@@ -7,7 +7,7 @@ import java.util.List;
  * {@code TokenValidationEngine.TokenRequest} (TokenType, ClientId, Scope,
  * RequestedAudience). These four are the OIDC grant parameters the producer
  * issues against the realm token endpoint, not values recoverable from the
- * issued token itself (the design §8 explains why: {@code azp != clientId},
+ * issued token itself ({@code azp != clientId},
  * scope is the raw requested param, audience-prune is request-driven).
  *
  * @param clientId          the requesting client's {@code clientId} STRING

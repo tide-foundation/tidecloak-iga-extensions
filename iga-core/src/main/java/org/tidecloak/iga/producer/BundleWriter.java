@@ -47,7 +47,7 @@ import java.util.Map;
  *       whitespace-agnostic.</li>
  * </ul>
  *
- * <p>The ork side trusts the parsed shape and verifies no signature (design §2),
+ * <p>The ork side trusts the parsed shape and verifies no signature,
  * so no RFC-8785/JCS canonicalization is required here.
  */
 public final class BundleWriter {

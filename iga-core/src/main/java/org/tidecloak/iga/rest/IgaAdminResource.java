@@ -137,7 +137,7 @@ public class IgaAdminResource {
 
     /**
      * True iff the action type is one of the five ADOPT_* variants owned by
-     * the Phase 6+ extension router. ADOPT actions are uniquely resumable
+     * the extension router. ADOPT actions are uniquely resumable
      * from the CANCELLED terminal status because (a) the underlying entity
      * row was never modified (capture-then-veto's whole point is the entity
      * already exists), (b) the entity's attestation column is still NULL
@@ -223,7 +223,7 @@ public class IgaAdminResource {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
         // ADOPT_* CRs are resumable from the CANCELLED terminal status: the
-        // Phase 6d toggle-off cancel marks every still-PENDING ADOPT as
+        // toggle-off cancel marks every still-PENDING ADOPT as
         // CANCELLED so the realm can flip OFF cleanly, but the entity row
         // is left untouched (attestation still NULL) and the operator may
         // still want to complete the adoption on a subsequent admin pass.
@@ -247,8 +247,8 @@ public class IgaAdminResource {
                     .build();
         }
 
-        // NOTE: the inbound JSON key is "approval" (renamed from "partialSig" to match
-        // the column/field rename PARTIAL_SIG->APPROVAL). This payload is the
+        // NOTE: the inbound JSON key is "approval", matching the
+        // column/field APPROVAL. This payload is the
         // attestationPayload arg to record(), which both attestors ignore (they
         // overwrite with the admin username), so the key name is vestigial.
         String approval = body != null ? (String) body.get("approval") : null;
@@ -358,7 +358,7 @@ public class IgaAdminResource {
         }
 
         String finalAttestation = attestor.combineFinal(session, cr, all);
-        // Phase 6+ ADOPT_* actions are handled by the extension router; every
+        // ADOPT_* actions are handled by the extension router; every
         // other action type falls through to the dispatcher (whose tail also
         // sets status=APPROVED + resolvedAt on the managed CR — same as the
         // extension does).
@@ -396,7 +396,7 @@ public class IgaAdminResource {
     }
 
     // -------------------------------------------------------------------------
-    // POST /iga/change-requests/bulk-authorize  — Phase 6e
+    // POST /iga/change-requests/bulk-authorize
     //
     // Operator one-shot to drain large PENDING ADOPT_* (or any other action)
     // queues. The body selects CRs by action-type list and an optional
@@ -424,8 +424,7 @@ public class IgaAdminResource {
     // concurrent caller is detected as non-PENDING and skipped — see
     // processOneCr below).
     //
-    // Response is buffered JSON (option b in the Phase 6 brief). Streaming
-    // (option a) was rejected because (1) KC's JAX-RS stack has no
+    // Response is buffered JSON. Streaming was rejected because (1) KC's JAX-RS stack has no
     // ergonomic incremental-array primitive, (2) the hard cap of 1000
     // bounds the response size, and (3) the summary block at the tail
     // requires the totals — buffered preserves a single read pass for the
@@ -667,9 +666,9 @@ public class IgaAdminResource {
                 attestor.record(session, cr, admin, null);
             }
         } catch (ForbiddenException fe) {
-            // Approver-role gate refused this caller for THIS CR. Per the
-            // Phase 6 brief: non-ADOPT CRs must NOT be shortcut — surface
-            // the per-CR rejection in the results array.
+            // Approver-role gate refused this caller for THIS CR. non-ADOPT
+            // CRs must NOT be shortcut — surface the per-CR rejection in the
+            // results array.
             outcome.put("status", "REJECTED");
             outcome.put("error", "FORBIDDEN_APPROVER_ROLE");
             outcome.put("httpStatus", 403);
@@ -814,10 +813,10 @@ public class IgaAdminResource {
     }
 
     // -------------------------------------------------------------------------
-    // POST /iga/adopt — Phase 6a: create an ADOPT_<type> change request for an
+    // POST /iga/adopt — create an ADOPT_<type> change request for an
     // entity that already exists in the realm but has not yet been attested.
     //
-    // Phase 6b will drive this from the toggle-on scan; Phase 6a exposes it on
+    // The toggle-on scan drives this; it is also exposed on
     // the existing admin surface so the E2E can exercise the round-trip
     // (CR create → sidecar row → authorize+commit → attestation stamped, row
     // deleted) without shipping a separate test-only endpoint.
@@ -851,7 +850,7 @@ public class IgaAdminResource {
                             "entityId", entityId))
                     .build();
         } catch (IgaChangeRequestService.AlreadyAttestedException aae) {
-            // Phase 6b — entity already carries an attestation (a prior ADOPT
+            // Entity already carries an attestation (a prior ADOPT
             // already committed). Refuse with 409 so a manual driver doesn't
             // create a CR whose replay would be a JPQL no-op against
             // attestation IS NULL.

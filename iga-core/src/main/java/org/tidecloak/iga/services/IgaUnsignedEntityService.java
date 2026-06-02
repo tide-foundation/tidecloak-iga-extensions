@@ -6,13 +6,13 @@ import org.jboss.logging.Logger;
 import org.tidecloak.iga.entities.IgaUnsignedEntityEntity;
 
 /**
- * Sidecar-table operations for the Phase 6a capture-then-veto ADOPT workflow.
+ * Sidecar-table operations for the capture-then-veto ADOPT workflow.
  *
  * <p>{@link IgaUnsignedEntityEntity} is the per-entity register of rows that
  * exist in the underlying entity table (USER_ENTITY, KEYCLOAK_ROLE,
  * KEYCLOAK_GROUP, CLIENT, CLIENT_SCOPE) but whose ATTESTATION column is still
  * NULL. The hot read path ({@link #isUnsigned}) is a single-PK probe — every
- * downstream "quarantine" enforcement (Phase 6c) sits behind it.</p>
+ * downstream "quarantine" enforcement sits behind it.</p>
  *
  * <p>Stateless: every operation takes its {@link EntityManager} as a parameter
  * to match the existing static-utility style of the {@code IgaReplayDispatcher}
@@ -70,7 +70,7 @@ public final class IgaUnsignedEntityService {
     }
 
     /**
-     * Single-PK probe — the hot path used by the Phase 6c quarantine guards.
+     * Single-PK probe — the hot path used by the quarantine guards.
      * Returns {@code true} when an unattested sidecar row exists for the given
      * triple.
      */
@@ -85,8 +85,8 @@ public final class IgaUnsignedEntityService {
     /**
      * Delete every sidecar row whose {@code adoptCrId} matches the supplied
      * value. The index {@code IDX_IGA_UNSIGNED_BY_CR} backs this lookup. Used
-     * by the ADOPT replay path (Phase 6a) and by the toggle-off cancel (Phase
-     * 6d) when the per-entity CR is itself being deleted.
+     * by the ADOPT replay path and by the toggle-off cancel when the
+     * per-entity CR is itself being deleted.
      */
     public static void clearByAdoptCr(EntityManager em, String adoptCrId) {
         if (em == null || adoptCrId == null) return;
@@ -100,7 +100,7 @@ public final class IgaUnsignedEntityService {
     }
 
     /**
-     * Bulk-delete every sidecar row for a realm — used by the Phase 6d
+     * Bulk-delete every sidecar row for a realm — used by the
      * toggle-off path to atomically clear the unattested register when IGA is
      * disabled.
      */
@@ -116,7 +116,7 @@ public final class IgaUnsignedEntityService {
     }
 
     /**
-     * Count the unattested entities for a realm. Used by the Phase 6d cap
+     * Count the unattested entities for a realm. Used by the cap
      * check (toggle-on must refuse if the realm already exceeds the configured
      * sidecar ceiling).
      */

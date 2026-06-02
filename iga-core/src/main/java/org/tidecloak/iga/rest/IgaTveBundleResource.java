@@ -200,7 +200,7 @@ public class IgaTveBundleResource {
 
         // Build a TRANSIENT user+client session and ClientSessionContext mirroring
         // the ResourceOwnerPasswordCredentialsGrantType pattern
-        // (services/.../grants/ResourceOwnerPasswordCredentialsGrantType.java:94-100, 133-138).
+        // (the ResourceOwnerPasswordCredentialsGrantType session/context setup).
         // Hydration parity with the real password-grant flow is required so the
         // mapper pipeline (transformAccessToken) sees the same inputs and the
         // resulting unsigned token is byte-shape-equivalent to a real
@@ -210,35 +210,34 @@ public class IgaTveBundleResource {
         AuthenticationSessionModel authSession = rootAuthSession.createAuthenticationSession(client);
         authSession.setAuthenticatedUser(user);
         authSession.setProtocol(OIDCLoginProtocol.LOGIN_PROTOCOL);
-        // Mirrors ResourceOwnerPasswordCredentialsGrantType.java:98 — the
+        // Mirrors ResourceOwnerPasswordCredentialsGrantType — the
         // AUTHENTICATE action is what the auth processor sets at the start of
         // the password flow. AcrStore reads no LOA note here so token.acr falls
-        // back to the non-step-up "1" branch in initToken (TokenManager.java:1014-1017).
+        // back to the non-step-up "1" branch in initToken.
         authSession.setAction(AuthenticatedClientSessionModel.Action.AUTHENTICATE.name());
-        // CRITICAL — mirrors ResourceOwnerPasswordCredentialsGrantType.java:99.
-        // initToken (TokenManager.java:1009) reads `iss` solely from the client
+        // CRITICAL — mirrors ResourceOwnerPasswordCredentialsGrantType.
+        // initToken reads `iss` solely from the client
         // session's OIDCLoginProtocol.ISSUER note, which is transferred from the
-        // auth-session client-notes by attachAuthenticationSession
-        // (TokenManager.java:577-580). Without this note, the synthesized token
+        // auth-session client-notes by attachAuthenticationSession.
+        // Without this note, the synthesized token
         // emits iss=null.
         authSession.setClientNote(OIDCLoginProtocol.ISSUER,
                 Urls.realmIssuer(session.getContext().getUri().getBaseUri(), realm.getName()));
-        // Mirrors ResourceOwnerPasswordCredentialsGrantType.java:100. Set the
+        // Mirrors ResourceOwnerPasswordCredentialsGrantType. Set the
         // scope-param client-note unconditionally so attachAuthenticationSession's
-        // scope resolution (TokenManager.java:548) sees a consistent input.
-        // A null scope param resolves to "client default scopes + client itself"
-        // (TokenManager.java:660-662), matching what `password` grant with no
-        // explicit scope= form param produces. The real ROPC code at
-        // ResourceOwnerPasswordCredentialsGrantType.java:100 sets this note
+        // scope resolution sees a consistent input.
+        // A null scope param resolves to "client default scopes + client itself",
+        // matching what `password` grant with no
+        // explicit scope= form param produces. The real ROPC code sets this note
         // unconditionally (even with a null scope) — we mirror that exactly.
         authSession.setClientNote(OIDCLoginProtocol.SCOPE_PARAM, scope);
 
         UserSessionModel userSession = null;
         UserSessionProvider sessions = session.sessions();
         try {
-            // Use UserSessionManager (mirrors ClientCredentialsGrantType.java:116
-            // and ResourceOwnerPasswordCredentialsGrantType.java path through
-            // AuthenticationProcessor.attachSession:1161) rather than
+            // Use UserSessionManager (mirrors ClientCredentialsGrantType
+            // and the ResourceOwnerPasswordCredentialsGrantType path through
+            // AuthenticationProcessor.attachSession) rather than
             // session.sessions().createUserSession(...) directly: it additionally
             // attaches device-activity info, which keeps any DeviceActivityManager
             // mappers happy.
@@ -252,7 +251,7 @@ public class IgaTveBundleResource {
                     false,                            // rememberMe
                     null, null,
                     UserSessionModel.SessionPersistenceState.TRANSIENT);
-            // Mirrors AuthenticationProcessor.java:1181. Without LOGGED_IN state
+            // Mirrors AuthenticationProcessor. Without LOGGED_IN state
             // some mapper guards short-circuit (e.g. session-status mappers,
             // certain role-resolution edges). Keycloak's password-grant always
             // reaches this state via AuthenticationProcessor.attachSession.
@@ -267,18 +266,18 @@ public class IgaTveBundleResource {
             // client, which is unrelated to the synthesize target.
             session.getContext().setClient(client);
 
-            // Mirrors ResourceOwnerPasswordCredentialsGrantType.java:133 and
-            // ClientCredentialsGrantType.java:120 — MUST be called BEFORE
+            // Mirrors ResourceOwnerPasswordCredentialsGrantType and
+            // ClientCredentialsGrantType — MUST be called BEFORE
             // attachAuthenticationSession so the auth-session has its requested
             // client-scope set computed, which downstream code can inspect.
-            // AuthenticationManager.setClientScopesInSession (line 1269) calls
+            // AuthenticationManager.setClientScopesInSession calls
             // TokenManager.getRequestedClientScopes(...) using the SCOPE_PARAM
             // client-note and stores the resulting scope ids on the auth-session
             // via authSession.setClientScopes(...).
             AuthenticationManager.setClientScopesInSession(session, authSession);
 
             // Attach the auth session as a client session and build the context.
-            // attachAuthenticationSession (TokenManager.java:545-593) does:
+            // attachAuthenticationSession does:
             //   - creates the client session (transient, since userSession is transient)
             //   - transfers all auth-session client-notes to the client session
             //     (including OIDCLoginProtocol.ISSUER set above)
@@ -290,7 +289,7 @@ public class IgaTveBundleResource {
             // notes; we do NOT need to rebuild it via fromClientSessionAndScopeParameter.
             ClientSessionContext clientSessionCtx =
                     TokenManager.attachAuthenticationSession(session, userSession, authSession);
-            // Mirrors ResourceOwnerPasswordCredentialsGrantType.java:136. The
+            // Mirrors ResourceOwnerPasswordCredentialsGrantType. The
             // GRANT_TYPE context attribute is consumed by some mappers (e.g.
             // session-state mappers). We keep this as PASSWORD to match what
             // the real password-grant pipeline reports to mappers. The JTI
@@ -308,14 +307,14 @@ public class IgaTveBundleResource {
             }
 
             TokenManager tokenManager = new TokenManager();
-            // services/src/main/java/org/keycloak/protocol/oidc/TokenManager.java:529
+            // TokenManager.createClientAccessToken:
             //   public AccessToken createClientAccessToken(KeycloakSession, RealmModel, ClientModel,
             //                                              UserModel, UserSessionModel, ClientSessionContext)
             // This is the claim-construction path (initToken + transformAccessToken) and does NOT
             // call session.tokens().encode(...), so the Tide-signed branch in DefaultTokenManager
             // is never reached.
 
-            // H4 diagnostic — DEBUG log just before the mapper pipeline runs.
+            // Diagnostic — DEBUG log just before the mapper pipeline runs.
             // If mapperCount == 0 the cause is upstream (scope/user filtering
             // in DefaultClientSessionContext.isAllowed). If it's non-zero but
             // mapper-derived claims remain absent in the synth payload, the
@@ -359,9 +358,8 @@ public class IgaTveBundleResource {
 
             String unsignedToken;
             if (tokenType == TokenType.id) {
-                // Synthesize an IDToken from the access token like generateIDToken in
-                // services/.../oidc/TokenManager.java:1272 (transformIDToken applies the
-                // id-token-claim gate of the same mapper set).
+                // Synthesize an IDToken from the access token like TokenManager.generateIDToken
+                // (transformIDToken applies the id-token-claim gate of the same mapper set).
                 IDToken idToken = new IDToken();
                 idToken.id(claims.getId());
                 idToken.type(org.keycloak.util.TokenUtil.TOKEN_TYPE_ID);

@@ -84,7 +84,7 @@ public class IgaChangeRequestService {
     }
 
     /**
-     * Phase 6a — create a per-entity ADOPT change request for an entity that
+     * Create a per-entity ADOPT change request for an entity that
      * already exists in the realm but has not yet been attested.
      *
      * <p>Builds the per-entity REP_JSON capture via Keycloak's own
@@ -97,10 +97,10 @@ public class IgaChangeRequestService {
      *
      * <p>Throws {@link IllegalArgumentException} for an unsupported
      * {@code entityType} or when the entity is not resolvable in the realm —
-     * a Phase 6b toggle-on scan should never see this, but it protects an
+     * a toggle-on scan should never see this, but it protects an
      * unit/E2E driver from creating a dangling CR.</p>
      *
-     * <p>Phase 6b — throws {@link AlreadyAttestedException} when the target
+     * <p>Throws {@link AlreadyAttestedException} when the target
      * entity's {@code attestation} column is non-null. The toggle-on scan
      * already filters to {@code attestation IS NULL} at the JPQL level so
      * never triggers this; the manual {@code POST /iga/adopt} endpoint maps
@@ -120,7 +120,7 @@ public class IgaChangeRequestService {
             throw new IllegalArgumentException(
                     "createAdoptCr requires non-null realm + entityType + entityId");
         }
-        // Phase 6b — refuse to enqueue an ADOPT CR for an already-attested
+        // Refuse to enqueue an ADOPT CR for an already-attested
         // entity. Single SELECT against the underlying info-table's
         // attestation column; if the entity row is missing the existing
         // model lookup below will surface the more specific
@@ -188,7 +188,7 @@ public class IgaChangeRequestService {
                 break;
             }
             case IgaReplayExtension.ENTITY_TYPE_ORGANIZATION: {
-                // Phase 7b — resolve through the OrganizationProvider SPI
+                // Resolve through the OrganizationProvider SPI
                 // (federation + cache layers honoured, same idiom as the
                 // other five entity-type lookups). The OrganizationProvider
                 // factory is loaded when the organizations feature is on for
@@ -515,7 +515,7 @@ public class IgaChangeRequestService {
     }
 
     // -------------------------------------------------------------------------
-    // Phase 6e — bulk-authorize PENDING CR selector. See
+    // Bulk-authorize PENDING CR selector. See
     // IgaAdminResource#bulkAuthorize. Backed by IDX_IGA_CR_REALM_ACTION_STATUS
     // (REALM_ID, ACTION_TYPE, STATUS). Applies LIMIT at the query level so a
     // wide actionTypeIn filter cannot pull a runaway result set into memory.
@@ -562,14 +562,14 @@ public class IgaChangeRequestService {
     }
 
     // -------------------------------------------------------------------------
-    // Phase 6b — already-attested guard. See createAdoptCr JavaDoc.
+    // Already-attested guard. See createAdoptCr JavaDoc.
     // -------------------------------------------------------------------------
 
     /**
      * Thrown by {@link #createAdoptCr} when the target entity already has its
      * {@code attestation} column populated. The manual {@code POST /iga/adopt}
      * endpoint maps this to a 409 CONFLICT with body {@code {error:
-     * "ALREADY_ATTESTED", entityType, entityId}}. The Phase 6b toggle-on scan
+     * "ALREADY_ATTESTED", entityType, entityId}}. The toggle-on scan
      * never triggers this (it filters {@code attestation IS NULL} at JPQL)
      * but defensively catches it for visibility.
      */

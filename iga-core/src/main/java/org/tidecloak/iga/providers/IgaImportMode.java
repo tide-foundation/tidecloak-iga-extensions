@@ -17,10 +17,10 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
 
 /**
- * Phase 4 — true batch governance for {@code partialImport}.
+ * True batch governance for {@code partialImport}.
  *
  * <h2>Why this exists</h2>
- * The single-entity capture seams (Phases 1–3:
+ * The single-entity capture seams (
  * {@code IgaRoleAdapter#getName}, {@code IgaGroupAdapter#setDescription},
  * {@code IgaClientAdapter#updateClient}, {@code IgaClientScopeAdapter#getId},
  * {@code IgaUserAdapter#getId}) each emit ONE CR and then
@@ -28,32 +28,30 @@ import org.keycloak.models.utils.KeycloakModelUtils;
  * mid-flow. Inside {@code POST /admin/realms/{realm}/partialImport} that means
  * the FIRST captured entity aborts the whole import (the rest never run) and,
  * worse, the 5-arg local-storage {@code addUser} that
- * {@code DefaultExportImportManager.createUser} uses is NOT a Phase-3 seam at
- * all, so partial-import users were created UNGOVERNED.
+ * {@code DefaultExportImportManager.createUser} uses is NOT a single-entity seam
+ * at all, so partial-import users were created UNGOVERNED.
  *
- * <h2>Mechanism (source-proven against KC 26.5.5)</h2>
- * {@code RealmAdminResource#partialImport} (RealmAdminResource.java:1304) runs
+ * <h2>Mechanism</h2>
+ * {@code RealmAdminResource#partialImport} runs
  * the whole import inside
- * {@code KeycloakModelUtils.runJobInTransactionWithResult}
- * (KeycloakModelUtils.java:453-472): a fresh nested {@link KeycloakSession}
- * with its own {@code KeycloakTransactionManager}. The nested JPA scratch tx
- * is enlisted into that manager's MAIN {@code transactions} list
- * ({@code DefaultJpaConnectionProviderFactory.java:108}
- * {@code getTransactionManager().enlist(new JpaKeycloakTransaction(em))}).
+ * {@code KeycloakModelUtils.runJobInTransactionWithResult}: a fresh nested
+ * {@link KeycloakSession} with its own {@code KeycloakTransactionManager}. The
+ * nested JPA scratch tx is enlisted into that manager's MAIN
+ * {@code transactions} list
+ * ({@code getTransactionManager().enlist(new JpaKeycloakTransaction(em))}).
  *
- * <p>{@code DefaultKeycloakTransactionManager#commit}
- * (DefaultKeycloakTransactionManager.java:113-167) commits the
- * {@code prepare} list FIRST (:124-130), strictly BEFORE the main
- * {@code transactions} list (:135-141). If a {@code prepare} tx's
- * {@code commit()} throws a {@code RuntimeException} it is captured (:127-128)
+ * <p>{@code DefaultKeycloakTransactionManager#commit} commits the
+ * {@code prepare} list FIRST, strictly BEFORE the main
+ * {@code transactions} list. If a {@code prepare} tx's
+ * {@code commit()} throws a {@code RuntimeException} it is captured
  * and {@code if (exception != null) { rollback(exception); return; }}
- * (:131-134) runs: {@code rollback(RuntimeException)} (:187-208) rolls back
- * ALL main {@code transactions} (:190-196 → {@code JpaKeycloakTransaction
- * .rollback()} → scratch JPA DISCARDED) then {@code throw exception} (:205-207)
+ * runs: {@code rollback(RuntimeException)} rolls back
+ * ALL main {@code transactions} ({@code JpaKeycloakTransaction
+ * .rollback()} → scratch JPA DISCARDED) then {@code throw exception}
  * rethrows. The throw propagates:
- * {@code DefaultKeycloakSession#closeTransactionManager} (:393 commit, :395-396
- * catch+return) → {@code close()} rethrows (:379-381) → out of the
- * try-with-resources in {@code runJobInTransactionWithResult} (:457-470, the
+ * {@code DefaultKeycloakSession#closeTransactionManager} (commit, catch+return)
+ * → {@code close()} rethrows → out of the
+ * try-with-resources in {@code runJobInTransactionWithResult} (the
  * {@code finally} only restores the session util — does NOT swallow) → out of
  * {@code partialImport} (catches only {@code ModelDuplicateException}) →
  * JAX-RS → {@link org.tidecloak.iga.rest.IgaPendingApprovalExceptionMapper}
@@ -71,17 +69,16 @@ import org.keycloak.models.utils.KeycloakModelUtils;
  * (every imported entity discarded atomically) and the mapper returns a single
  * 202 carrying the batch.
  *
- * <p><b>CRITICAL constraint:</b> {@code closeTransactionManager} (:390) checks
+ * <p><b>CRITICAL constraint:</b> {@code closeTransactionManager} checks
  * {@code getRollbackOnly()} BEFORE deciding commit-vs-rollback; the
  * {@code rollback()} path NEVER iterates the {@code prepare} list. Therefore
  * in import mode the capture seams MUST NOT call
  * {@code session.getTransactionManager().setRollbackOnly()} (the single-entity
- * Phases 1–3 branches still do — that path is byte-unchanged). The
+ * branches still do — that path is unchanged). The
  * prepare-tx's own throw is what causes the discard.
  *
  * <p>{@code enlistPrepare} called mid-callable is safe: the manager is
- * {@code active} so it calls {@code transaction.begin()}
- * (DefaultKeycloakTransactionManager.java:69-75) — {@link BatchEmitTransaction
+ * {@code active} so it calls {@code transaction.begin()} — {@link BatchEmitTransaction
  * #begin()} is a no-op.
  *
  * <h2>Replay contract</h2>
@@ -169,7 +166,7 @@ public final class IgaImportMode {
         // scratch model.
         final List<IgaGroupAdapter> pendingGroups = new ArrayList<>();
         final List<IgaRoleAdapter> pendingRoles = new ArrayList<>();
-        // Phase 4 extension — capture-mode client/client-scope adapters created
+        // Capture-mode client/client-scope adapters created
         // on the partialImport ClientsPartialImport.create → RepresentationToModel
         // .createClient path (and the symmetrically defensive addClientScope
         // path, even though KC 26.5.5 has NO ClientScopesPartialImport so
@@ -359,8 +356,7 @@ public final class IgaImportMode {
      * second per-entity CR or throw mid-batch.
      *
      * <p>KC's {@code ClientsPartialImport.getModelId}
-     * ({@code services/.../ClientsPartialImport.java:77-79} —
-     * {@code realm.getClientByClientId(getName(clientRep)).getId()}) is called
+     * ({@code realm.getClientByClientId(getName(clientRep)).getId()}) is called
      * immediately after {@code create()} returns, so the import branch in
      * {@code IgaRealmProvider.addClient} MUST call {@code super.addClient(...)}
      * (em.persist+flush of the scratch ClientEntity) so the
@@ -388,10 +384,9 @@ public final class IgaImportMode {
      * Register a capture-mode client-scope adapter. <b>Defensive parity</b>
      * with {@link #registerImportClient}: KC 26.5.5 has NO
      * {@code ClientScopesPartialImport} ({@code PartialImportManager}
-     * registers only Clients/Roles/IdPs/IdP-mappers/Groups/Users — verified
-     * against {@code services/.../partialimport/PartialImportManager.java:47-52},
-     * and the per-type source set has no {@code ClientScopesPartialImport.java}
-     * — see the audit log), so no current partialImport call path reaches
+     * registers only Clients/Roles/IdPs/IdP-mappers/Groups/Users,
+     * and the per-type source set has no {@code ClientScopesPartialImport}),
+     * so no current partialImport call path reaches
      * {@code addClientScope}. This registration is wired up as cheap insurance
      * against future KC versions or any indirect multi-entity import path that
      * could one day call {@code addClientScope} — same import-mode predicate,
@@ -452,8 +447,7 @@ public final class IgaImportMode {
         @Override
         public void begin() {
             // No-op: there is no real resource here. enlistPrepare on an
-            // already-active manager calls begin()
-            // (DefaultKeycloakTransactionManager.java:69-75); nothing to do.
+            // already-active manager calls begin(); nothing to do.
         }
 
         @Override
@@ -516,7 +510,7 @@ public final class IgaImportMode {
             // Harvest the deferred-harvest client rows now (every
             // RepresentationToModel.createClient updateClientProperties /
             // protocol-mapper rebuild / updateClientScopes / final
-            // updateClient() — KC 26.5.5 RepresentationToModel.java:347-404 —
+            // updateClient() — via RepresentationToModel.createClient —
             // has run on the pass-through scratch ClientAdapter, so the live
             // model is fully built). Same contract/row shape as the
             // single-entity IgaClientAdapter#updateClient seam, so

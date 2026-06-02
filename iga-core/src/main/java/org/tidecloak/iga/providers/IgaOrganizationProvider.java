@@ -20,33 +20,31 @@ import java.util.Map;
  * mirroring exactly how {@link IgaRealmProvider} intercepts client/group/role
  * creation.
  *
- * <h2>Why wrap the cache layer (Phase 7f architectural fix)</h2>
+ * <h2>Why wrap the cache layer</h2>
  * Unlike Realm/User/Client/Group/Role caching — which lives under SEPARATE
  * {@code *CacheProviderFactory} SPI types so the cache always layers ON TOP of
  * IGA naturally — KC's organization caching sits ON the same
  * {@code OrganizationProviderFactory} SPI as JPA
  * ({@code InfinispanOrganizationProviderFactory.order()==10},
- * {@link InfinispanOrganizationProvider} at
- * {@code model/infinispan/.../organization/InfinispanOrganizationProvider.java:40}).
+ * {@link InfinispanOrganizationProvider}).
  * With IGA at {@code order()==20} we MUST be selected over Infinispan, so when
  * we extended {@code JpaOrganizationProvider} the entire Infinispan cache layer
  * was bypassed: cache invalidations registered by KC's own listeners
- * (e.g. {@code IdentityProviderUpdatedEvent} —
- * {@code InfinispanOrganizationProviderFactory.postInit:46-51}) flowed into a
+ * (e.g. {@code IdentityProviderUpdatedEvent} via
+ * {@code InfinispanOrganizationProviderFactory.postInit}) flowed into a
  * cache that nothing read from, and reads after an IGA-mediated mutation could
  * return stale {@code CachedOrganization}/{@code CachedOrganizationIds}/
  * {@code CachedCount} entries until per-org explicit invalidations were sent
- * by the Phase 7b/7c/7d workaround in
+ * by the workaround in
  * {@code TideAdminCompatResource.evictRealmCache}.
  *
  * <p>Now {@code IgaOrganizationProvider extends InfinispanOrganizationProvider}
  * the layering becomes: IGA (top) → Infinispan cache (middle, via super calls)
  * → JPA (bottom, resolved lazily by Infinispan via
  * {@code session.getProvider(OrganizationProvider.class, "jpa")} —
- * {@link InfinispanOrganizationProvider#getDelegate()},
- * {@code InfinispanOrganizationProvider.java:73-79}). KC's
+ * {@link InfinispanOrganizationProvider#getDelegate()}). KC's
  * {@code JpaOrganizationProviderFactory} is registered at id {@code "jpa"}
- * ({@code model/jpa/.../JpaOrganizationProviderFactory.java:33}) so the SPI
+ * so the SPI
  * lookup resolves regardless of which factory is the default.</p>
  *
  * <p>Behaviour: cache invalidations fired by Infinispan's own listeners now
@@ -81,8 +79,7 @@ import java.util.Map;
  * invalidation chain.</h2>
  *
  * <p>{@link InfinispanOrganizationProvider} is non-{@code final} and exposes a
- * public single-arg constructor {@code (KeycloakSession)} (KC 26.5.5,
- * {@code InfinispanOrganizationProvider.java:52-57}), so extension is feasible
+ * public single-arg constructor {@code (KeycloakSession)}, so extension is feasible
  * — no fallback to composition required.</p>
  *
  * <h2>Intercepted operations</h2>
@@ -206,7 +203,7 @@ public class IgaOrganizationProvider extends InfinispanOrganizationProvider {
      * 2-arg call ({@code IgaReplayDispatcher.replayCreateOrganization}). The
      * previously-defined 3-arg {@code create(name, alias, redirectUrl)} did
      * NOT match any SPI method — it overrode nothing and the interception was
-     * therefore unreachable (the latent wire-up defect fixed in Phase 7a).
+     * therefore unreachable.
      */
     @Override
     public OrganizationModel create(String id, String name, String alias) {

@@ -63,7 +63,7 @@ import java.util.stream.Stream;
  * not intercepted), so a denied resend leaves no invitation behind. Properly
  * governing the {@code remove(id)} on the resend path requires a JAX-RS
  * pre-matching filter or a Tide-side patch to {@code OrganizationInvitationResource}
- * (out of scope for Phase 7a — see report).
+ * (currently out of scope).
  *
  * <h2>Governance model</h2>
  * <ul>

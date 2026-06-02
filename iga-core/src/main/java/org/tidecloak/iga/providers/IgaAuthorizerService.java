@@ -25,7 +25,7 @@ public class IgaAuthorizerService {
      * {@code MODE} column {@code defaultValue}); the operator-facing
      * {@code POST /iga/authorizers} path uses this overload. The firstAdmin lazy
      * seed uses {@link #create(String, String, String, String, String, String)}
-     * to set {@code mode="firstAdmin"} explicitly (port plan §9.3).
+     * to set {@code mode="firstAdmin"} explicitly.
      */
     public IgaAuthorizerEntity create(String realmId, String providerId, String type,
                                        String authorizer, String authorizerCertificate) {
@@ -34,7 +34,7 @@ public class IgaAuthorizerService {
 
     /**
      * Create a new authorizer record with an explicit firstAdmin/multiAdmin
-     * {@code mode} (port plan §9.3 lazy seed). A {@code null} mode leaves the
+     * {@code mode} (lazy seed). A {@code null} mode leaves the
      * entity's Java-side {@code multiAdmin} default in place.
      */
     public IgaAuthorizerEntity create(String realmId, String providerId, String type,

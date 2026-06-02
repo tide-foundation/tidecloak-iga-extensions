@@ -19,9 +19,9 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Phase 6c — per-request, session-attribute-backed quarantine cache.
+ * Per-request, session-attribute-backed quarantine cache.
  *
- * <p>The Phase 6c quarantine guards fire on every token issuance, every login
+ * <p>The quarantine guards fire on every token issuance, every login
  * attempt, every client-auth, every protocol-mapper resolution. A naive
  * {@link IgaUnsignedEntityService#isUnsigned} call per check would cost N JPA
  * round-trips per token (N = number of role/group/scope hits during token
@@ -44,8 +44,8 @@ import java.util.Set;
  * </ul>
  *
  * <h2>User-quarantine semantics (the role-fan-out)</h2>
- * Per the locked Phase 6c brief (user decision: hard-refuse, NOT silent strip),
- * a user is treated as "not enabled" iff ANY of the following holds:
+ * A user is treated as "not enabled" (hard-refuse, NOT silent strip) iff ANY
+ * of the following holds:
  * <ol>
  *   <li>the user themselves has a sidecar row
  *       ({@code IGA_UNSIGNED_ENTITY} for (realmId, USER, userId));</li>
@@ -262,7 +262,7 @@ public final class IgaQuarantineCache {
     // -------------------------------------------------------------------------
     // Group quarantine — single PK probe, memoised
     //
-    // NB: groups are SILENTLY STRIPPED from token mapping (per Phase 6c brief),
+    // NB: groups are SILENTLY STRIPPED from token mapping,
     // not hard-refused — the filter call site is IgaUserAdapter.getGroupsStream.
     // The cache here is the lookup primitive; the strip semantic is at the
     // call site.
@@ -331,12 +331,11 @@ public final class IgaQuarantineCache {
     }
 
     // -------------------------------------------------------------------------
-    // Organization quarantine — single PK probe, memoised (Phase 7b
-    // groundwork for Phase 7c).
+    // Organization quarantine — single PK probe, memoised.
     //
-    // Phase 7b doesn't USE this method yet — IgaOrganizationModel.isEnabled
-    // is NOT overridden until Phase 7c — but the lookup primitive lives here
-    // alongside the other four entity types so 7c just needs to call it.
+    // Not yet USED — IgaOrganizationModel.isEnabled is not overridden — but the
+    // lookup primitive lives here alongside the other four entity types so a
+    // future override just needs to call it.
     // Shape mirrors isClientUnsigned / isGroupUnsigned: gate on
     // IGA_REPLAY_ACTIVE + isIgaActive(realm) + sidecar PK probe; memoise
     // per (session, org) under {@code IGA_QUARANTINE:org:<id>}.
