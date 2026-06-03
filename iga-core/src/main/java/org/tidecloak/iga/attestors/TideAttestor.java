@@ -12,7 +12,12 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.midgard.Midgard;
+import org.midgard.models.Policy.ApprovalType;
+import org.midgard.models.Policy.ExecutionType;
+import org.midgard.models.Policy.Policy;
+import org.midgard.models.Policy.PolicyParameters;
 import org.midgard.models.RequestExtensions.AttestationUnitSignRequest;
+import org.midgard.models.RequestExtensions.PolicySignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
 import org.tidecloak.iga.crypto.SecretKeys;
@@ -553,16 +558,53 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * Write the firstAdmin bootstrap signature back to the tide-realm-admin
-     * {@code IgaRolePolicyEntity.policySig}, in the same
-     * JPA transaction as the dispatcher's ATTESTATION write (the entity is
-     * managed, so the column update commits atomically with the replay). No-op
-     * when no policy row exists (see {@link #readTideRealmAdminPolicyBytes}).
+     * Write the firstAdmin bootstrap result back to the tide-realm-admin
+     * {@code IgaRolePolicyEntity}, in the same JPA transaction as the dispatcher's
+     * ATTESTATION write (the entity is managed, so the column updates commit
+     * atomically with the replay). No-op when no policy row exists (see
+     * {@link #readTideRealmAdminPolicyBytes}).
+     *
+     * <h3>M0 capability split</h3>
+     * <ul>
+     *   <li>REAL-SIGNING-CAPABLE realm: install a genuine VVK-signed admin
+     *       threshold {@link Policy} — {@code POLICY = Base64(signed Policy.ToBytes())},
+     *       {@code POLICY_SIG = real VVK sig}, plus {@code THRESHOLD}/types — at the
+     *       POST-bootstrap admin threshold (the multiAdmin floor the realm transitions
+     *       into). The real {@link #signAdminPolicyWithVvk} ceremony is fail-closed.</li>
+     *   <li>NON-capable (dev/test) realm: keep the pre-M0 behaviour exactly — stamp
+     *       only {@code POLICY_SIG} with the firstAdmin bootstrap signature {@code sig}
+     *       (the VVK-unit / stub GRANT signature produced by {@link #combineFinal}),
+     *       leaving {@code POLICY} as upserted.</li>
+     * </ul>
      */
     private void writeBackPolicySig(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr,
                                     String sig) {
         IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
         if (policy == null) return;
+
+        if (isRealSigningCapable(realm)) {
+            // POST-bootstrap admin threshold: combineFinal runs PRE-replay, so the live
+            // count excludes this bootstrap CR's tide-realm-admin grant; add its pending
+            // delta (+1) and apply the SAME max(1, floor(0.7 x N)) floor getThreshold /
+            // the regen use, so the installed admin policy and the live gate agree.
+            int postCommitCount = Math.max(0,
+                    countActiveTideRealmAdmins(realm, session) + tideRealmAdminMembershipDelta(realm, cr));
+            int threshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
+            String vvkId = realmVvkId(realm);
+            AdminPolicyArtifact artifact = buildSignedAdminPolicyArtifact(session, realm, threshold, vvkId);
+            policy.setPolicy(artifact.policyBody);
+            policy.setPolicySig(artifact.policySig);
+            policy.setThreshold(threshold);
+            policy.setApprovalType(POLICY_APPROVAL_TYPE);
+            policy.setExecutionType(POLICY_EXECUTION_TYPE);
+            policy.setUpdatedAt(System.currentTimeMillis());
+            session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
+            log.infof("IGA firstAdmin policy bootstrap: realm %s installed REAL VVK-signed admin "
+                    + "threshold Policy (threshold %d).", realm.getName(), threshold);
+            return;
+        }
+
+        // NON-capable: pre-M0 behaviour — stamp the bootstrap GRANT signature only.
         policy.setPolicySig(sig);
         policy.setUpdatedAt(System.currentTimeMillis());
         // managed entity — no explicit persist needed; flush keeps it in-tx.
@@ -668,26 +710,15 @@ public class TideAttestor implements IgaAttestor {
         }
 
         String vvkId = realmVvkId(realm);
-        String newPolicyBody = buildAdminPolicyArtifact(newThreshold, vvkId);
-        // INVARIANT: the admin policy is signed with the realm's CURRENT authorizer
-        // mode at sign time — firstAdmin at the bootstrap transition (VRK), multiAdmin
-        // at every steady-state regen (enclave). This regen fires ONLY from
-        // combineFinal's multiAdmin branch, so the realm is already multiAdmin here;
-        // resolve that current mode and pass it through (do NOT hardcode a constant).
-        // It returns multiAdmin → sign() selects the multiAdmin path.
-        //
-        // Eventually the multiAdmin regen sign needs real enclave partial-attestations
-        // (the enclave-threshold ceremony, Midgard combine), not a local key op. For now
-        // sign() emits the SHA-256 stub under DUMMY_SIG_PREFIX (TIDE-DUMMY-v1:), which
-        // correctly marks this as the multiAdmin-signed path.
-        String currentMode = resolveMode(session, realm); // == multiAdmin in this branch
-        // realCeremonyEligible=false: this is a multiAdmin policy-artifact regen
-        // (signs the policy body, not a GRANT_ROLES role-mapping-set); the firstAdmin
-        // VVK unit ceremony never applies here, so the stub path is selected as
-        // before. `cr` is passed only to satisfy the signature — the non-eligible
-        // path ignores it and signs the policy-body bytes.
-        String newPolicySig = sign(session, realm, currentMode, false, cr,
-                newPolicyBody.getBytes(StandardCharsets.UTF_8));
+        // M0: capability-aware artifact. On a REAL-SIGNING-CAPABLE realm this is a
+        // genuine VVK-signed Midgard Policy (POLICY = Base64(signed Policy.ToBytes()),
+        // POLICY_SIG = real VVK sig); on a non-capable dev/test realm it is the
+        // pre-M0 stub (hand-rolled JSON body + DUMMY_SIG_PREFIX digest) — byte-for-byte
+        // the previous behaviour. This regen fires ONLY from combineFinal's multiAdmin
+        // branch, so when not capable the sig is the multiAdmin DUMMY_SIG_PREFIX as before.
+        AdminPolicyArtifact artifact = buildSignedAdminPolicyArtifact(session, realm, newThreshold, vvkId);
+        String newPolicyBody = artifact.policyBody;
+        String newPolicySig = artifact.policySig;
 
         policy.setPolicy(newPolicyBody);
         policy.setPolicySig(newPolicySig);
@@ -700,10 +731,9 @@ public class TideAttestor implements IgaAttestor {
         session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
 
         log.infof("IGA admin policy regenerated: realm %s tide-realm-admin threshold %s -> %d "
-                + "(membership delta %+d, post-commit admins %d); policy re-signed with current mode %s "
-                + "(multiAdmin -> %s prefix).",
+                + "(membership delta %+d, post-commit admins %d); policy re-signed (%s).",
                 realm.getName(), String.valueOf(currentThreshold), newThreshold, delta, postCommitCount,
-                currentMode, DUMMY_SIG_PREFIX);
+                artifact.real ? "real VVK ceremony" : (DUMMY_SIG_PREFIX + " stub"));
     }
 
     /**
@@ -749,6 +779,198 @@ public class TideAttestor implements IgaAttestor {
         b.append("\"resource\":\"").append(POLICY_RESOURCE).append('"');
         b.append('}');
         return b.toString();
+    }
+
+    // -------------------------------------------------------------------------
+    // M0: real VVK-signed admin threshold Policy (multiAdmin ceremony)
+    // -------------------------------------------------------------------------
+
+    /**
+     * The (policy-body, policy-signature) pair an admin-policy artifact resolves to.
+     * <ul>
+     *   <li>REAL-SIGNING-CAPABLE realm: {@code policyBody} is
+     *       {@code Base64(Policy.ToBytes())} of a REAL VVK-signed Midgard
+     *       {@link Policy} (signature attached via {@link Policy#AddSignature}), and
+     *       {@code policySig} is the Base64 VVK signature string returned by the ORK
+     *       network; {@code real == true}.</li>
+     *   <li>NON-capable (dev/test) realm: {@code policyBody} is the legacy hand-rolled
+     *       canonical JSON ({@link #buildAdminPolicyArtifact}) and {@code policySig} is
+     *       the SHA-256 stub under {@link #DUMMY_SIG_PREFIX}; {@code real == false}.</li>
+     * </ul>
+     * Carrying both together lets every write site stamp {@code POLICY} and
+     * {@code POLICY_SIG} consistently from ONE capability decision.
+     */
+    private static final class AdminPolicyArtifact {
+        final String policyBody;
+        final String policySig;
+        final boolean real;
+        AdminPolicyArtifact(String policyBody, String policySig, boolean real) {
+            this.policyBody = policyBody;
+            this.policySig = policySig;
+            this.real = real;
+        }
+    }
+
+    /**
+     * Capability-aware admin-policy producer — the single seam M0 introduces so the
+     * {@code IgaRolePolicyEntity.POLICY}/{@code POLICY_SIG} write sites no longer
+     * hand-roll the body + SHA-256 stub directly.
+     *
+     * <p>When the realm is REAL-SIGNING-CAPABLE ({@link #isRealSigningCapable}) the
+     * artifact is a genuine VVK-signed Midgard {@link Policy} produced by
+     * {@link #signAdminPolicyWithVvk} (routed Midgard → native core → ORK network).
+     * Otherwise it is the EXISTING stub: the legacy hand-rolled JSON body
+     * ({@link #buildAdminPolicyArtifact}) plus a {@link #DUMMY_SIG_PREFIX} SHA-256
+     * signature over those bytes — byte-for-byte what the pre-M0 code produced, so
+     * current dev/test realms and their assertions are unaffected.
+     *
+     * <p>The real path is fail-closed (it throws if the ORK ceremony fails): once a
+     * realm is provisioned, its admin policy must never be stamped with a fake digest.
+     * The stub path never throws.
+     */
+    private AdminPolicyArtifact buildSignedAdminPolicyArtifact(KeycloakSession session, RealmModel realm,
+                                                               int threshold, String vvkId) {
+        if (isRealSigningCapable(realm)) {
+            SignedPolicy signed = signAdminPolicyWithVvk(session, realm, threshold, vvkId);
+            // Store the SIGNED Policy bytes Base64-encoded into the TEXT POLICY column,
+            // exactly as the gold reference persists it
+            // (TideRoleRequests: Base64.encode(policy.ToBytes())).
+            String body = java.util.Base64.getEncoder().encodeToString(signed.signedPolicyBytes);
+            return new AdminPolicyArtifact(body, signed.vvkSignature, true);
+        }
+        // NON-capable: keep the pre-M0 stub (hand-rolled body + DUMMY_SIG_PREFIX digest).
+        String body = buildAdminPolicyArtifact(threshold, vvkId);
+        String sig = stubSign(DUMMY_SIG_PREFIX, body.getBytes(StandardCharsets.UTF_8));
+        return new AdminPolicyArtifact(body, sig, false);
+    }
+
+    /** The (signed-policy-bytes, VVK-signature) result of the real admin-policy ceremony. */
+    private static final class SignedPolicy {
+        final byte[] signedPolicyBytes;
+        final String vvkSignature;
+        SignedPolicy(byte[] signedPolicyBytes, String vvkSignature) {
+            this.signedPolicyBytes = signedPolicyBytes;
+            this.vvkSignature = vvkSignature;
+        }
+    }
+
+    /**
+     * The REAL admin-threshold Policy signing ceremony (M0) — a single-signer
+     * (1-of-1 ADMIN quorum) VVK signature over a genuine Midgard {@link Policy},
+     * routed Midgard → native core → ORK network. It mirrors
+     * {@link #signFirstAdminUnitWithVvk} field-for-field: the SAME
+     * {@link #constructSignSettings} settings build, the SAME firstAdmin authorizer
+     * pack ({@code authorizer}/{@code authorizerCertificate} — whose ModelIds carry
+     * {@code Policy:1} so the ORK's VRKAuthorizationFlow accepts the policy sign),
+     * the SAME {@code Midgard.SignWithVrk(req.GetDataToAuthorize(), activeVrk)}
+     * VRK:1 authorization, and the SAME {@code Midgard.SignModel} call. The ONLY
+     * difference from the firstAdmin GRANT ceremony is the signed payload: a
+     * {@link PolicySignRequest} carrying {@code policy.ToBytes()} instead of an
+     * {@link AttestationUnitSignRequest} carrying a {@code user_role_mapping_set}
+     * unit CBOR. This is the exact shape the gold reference
+     * {@code IGAUtils.signInitialTideAdmin} / {@code TideRoleRequests} uses for the
+     * admin-policy sign.
+     *
+     * <h3>Policy shape</h3>
+     * {@code new Policy("GenericResourceAccessThresholdRole:1", "any", vvkId,
+     * EXPLICIT, PUBLIC, {threshold, role=tide-realm-admin, resource=realm-management})}
+     * — reusing the existing {@link #POLICY_TYPE}/{@link #TIDE_REALM_ADMIN_ROLE}/
+     * {@link #POLICY_RESOURCE} constants and the {@code "any"} modelId the gold
+     * reference uses. The ORK feeds the policy's v3 {@code DataToVerify} to the VVK
+     * signer; the returned signature is attached back onto the {@link Policy} via
+     * {@link Policy#AddSignature} so {@link Policy#ToBytes()} carries it.
+     *
+     * <p>Called only after {@link #isRealSigningCapable} already passed (via
+     * {@link #buildSignedAdminPolicyArtifact}), so the settings/material are present.
+     * A signing FAILURE is fail-closed (throws) — a real-provisioned admin policy
+     * must not fall back to a fake stub.
+     *
+     * @return the real VVK-signed {@link Policy#ToBytes()} (signature attached) plus
+     *         the Base64 VVK signature string.
+     * @throws RuntimeException if material is missing or the Midgard sign fails.
+     */
+    private SignedPolicy signAdminPolicyWithVvk(KeycloakSession session, RealmModel realm,
+                                                int threshold, String vvkId) {
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException(
+                        "IGA admin-policy sign: realm " + realm.getName()
+                                + " has no tide-vendor-key component (VRK not provisioned)"));
+        MultivaluedHashMap<String, String> config = vendorKey.getConfig();
+        if (config == null) {
+            throw new RuntimeException("IGA admin-policy sign: tide-vendor-key component has no config (realm "
+                    + realm.getName() + ")");
+        }
+
+        try {
+            SignRequestSettingsMidgard settings = constructSignSettings(config);
+            // seg-6 authorizer + seg-8 authorizer-certificate: the SAME firstAdmin
+            // AuthorizerPack signFirstAdminUnitWithVvk uses (its ModelIds include
+            // Policy:1, so the ORK's VRKAuthorizationFlow accepts a Policy sign) —
+            // NOT the gVRK/gVRKCertificate MAIN pack. Sourced exactly as
+            // IGAUtils.signInitialTideAdmin (parseHex(authorizer) /
+            // Base64.decode(authorizerCertificate)).
+            String firstAdminAuthorizer = config.getFirst(CFG_FIRST_ADMIN_AUTHORIZER);
+            String firstAdminAuthorizerCert = config.getFirst(CFG_FIRST_ADMIN_AUTHORIZER_CERTIFICATE);
+            if (firstAdminAuthorizer == null || firstAdminAuthorizer.isBlank()
+                    || firstAdminAuthorizerCert == null || firstAdminAuthorizerCert.isBlank()) {
+                throw new RuntimeException("IGA admin-policy sign: tide-vendor-key component is missing "
+                        + "firstAdmin authorizer material (authorizer/authorizerCertificate) for realm "
+                        + realm.getName());
+            }
+
+            // Build the REAL Midgard admin-threshold Policy. Params + shape are
+            // byte-identical to the gold reference (TideRoleRequests / IGAUtils):
+            // contractId=GenericResourceAccessThresholdRole:1, modelId="any",
+            // keyId=vvkId, EXPLICIT/PUBLIC, params{threshold, role, resource}.
+            PolicyParameters params = new PolicyParameters();
+            params.put("threshold", threshold);
+            params.put("role", TIDE_REALM_ADMIN_ROLE);
+            params.put("resource", POLICY_RESOURCE);
+            Policy policy = new Policy(POLICY_TYPE, "any", vvkId,
+                    ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params);
+
+            // PolicySignRequest stamps Name=Policy,Version=1; its byte[] payload is the
+            // unsigned policy bytes (policy.ToBytes()) and its String arg is the VRK:1
+            // auth-flow — exactly the gold reference's
+            // `new PolicySignRequest(policy.ToBytes(), "VRK:1")`.
+            PolicySignRequest req = new PolicySignRequest(policy.ToBytes(), VRK_AUTH_FLOW);
+
+            // Override expiry BEFORE GetDataToAuthorize — match the firstAdmin ceremony's
+            // +180s ORK round-trip headroom (the PolicySignRequest default is 30s).
+            req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
+
+            // Attach the firstAdmin authorization triplet — authorization computed LAST
+            // over GetDataToAuthorize, then the firstAdmin authorizer pack + its cert,
+            // exactly as signFirstAdminUnitWithVvk / IGAUtils.signInitialTideAdmin.
+            req.SetAuthorization(
+                    Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
+            req.SetAuthorizer(java.util.HexFormat.of().parseHex(firstAdminAuthorizer));
+            req.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(firstAdminAuthorizerCert));
+
+            SignatureResponse resp = Midgard.SignModel(settings, req);
+            if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
+                    || resp.Signatures[0] == null) {
+                throw new RuntimeException("IGA admin-policy sign: Midgard.SignModel returned no signature "
+                        + "for realm " + realm.getName());
+            }
+            String vvkSig = resp.Signatures[0];
+            // Attach the VVK signature onto the Policy so ToBytes() carries it (the
+            // real signed artifact). Mirrors TideRoleRequests.commitRolePolicy
+            // (policy.AddSignature(Base64.decode(signature))).
+            policy.AddSignature(java.util.Base64.getDecoder().decode(vvkSig));
+            log.infof("IGA admin threshold Policy signed via Midgard VVK ceremony (realm %s, threshold %d).",
+                    realm.getName(), threshold);
+            return new SignedPolicy(policy.ToBytes(), vvkSig);
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            // Fail-closed: a real-provisioned admin policy must not fall back to a
+            // fake stub on a real signing failure.
+            throw new RuntimeException("IGA admin-policy sign: Midgard VVK ceremony failed for realm "
+                    + realm.getName() + ": " + e.getMessage(), e);
+        }
     }
 
     /**
