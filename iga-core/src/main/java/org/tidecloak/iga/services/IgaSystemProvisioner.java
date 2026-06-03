@@ -37,15 +37,34 @@ import java.util.UUID;
  * explicitly so the operator sees and approves the provisioning the same way
  * they approve everything else.
  *
- * <h3>Ordering hazard &rarr; the dependency contract</h3>
- * The {@code REALM_DEFAULT_SCOPE_ADD} and {@code ASSIGN_SCOPE} replays
+ * <h3>One-pass filing &rarr; the dependency contract</h3>
+ * All three CRs are filed in a SINGLE pass. When the scope does NOT yet exist
+ * we file the {@code CREATE_CLIENT_SCOPE} CR AND, in the same pass, the
+ * {@code REALM_DEFAULT_SCOPE_ADD} CR plus one {@code ASSIGN_SCOPE} CR per
+ * existing client — each referencing the <em>deterministic</em> scope id (the
+ * id the create CR pins the scope to) by {@code SCOPE_ID}, and each carrying
+ * {@code dependsOn = [createScopeCrId]}. The dependents reference a scope that
+ * does not physically exist yet; that is fine — the {@code blocked}/fail-closed
+ * machinery holds them until the create CR commits, and at their replay time
+ * (post-commit) {@code getClientScopeById(deterministicId)} resolves.
+ *
+ * <p>This is what makes the dependency live. Without it (the old two-pass
+ * behaviour) the dependents were filed only AFTER the create committed, with
+ * empty {@code dependsOn}, so the whole {@code dependsOn}/{@code blocked}/
+ * fail-closed/grey-out machinery never engaged.</p>
+ *
+ * <p>The {@code REALM_DEFAULT_SCOPE_ADD} and {@code ASSIGN_SCOPE} replays
  * <em>silently no-op</em> if the scope does not exist yet
  * (see {@code IgaReplayDispatcher.replayAddRealmDefaultScope} /
- * {@code assignScopeDirect}). If an admin committed the realm-default-add
- * before the create, the wiring would vanish with no error. To make that
- * impossible we stamp every dependent CR's {@code dependsOn} with the
- * {@code CREATE_CLIENT_SCOPE} CR id; the commit path then refuses (412) any
- * dependent whose prerequisite is not yet APPROVED.
+ * {@code assignScopeDirect}); the {@code dependsOn} gate (commit refuses 412
+ * until the prerequisite is APPROVED) is exactly what prevents a dependent from
+ * replaying before the scope exists.</p>
+ *
+ * <h3>Self-heal</h3>
+ * When the scope ALREADY exists (committed) but the realm-default and/or some
+ * clients are not yet wired (and not pending), the same pass files those
+ * dependents with an <em>empty</em> {@code dependsOn} — the prerequisite is
+ * already satisfied, so no blocking is needed.
  *
  * <h3>Idempotency</h3>
  * Every step is guarded by a state check (scope-exists / already-default /
@@ -130,15 +149,24 @@ public final class IgaSystemProvisioner {
         final String scopeName = scopeRep.getName();
         final String realmId = realm.getId();
 
+        // The deterministic scope id is the linchpin of the one-pass contract:
+        // it is what the CREATE_CLIENT_SCOPE CR pins the scope to (REP_JSON.id /
+        // row ID), so every dependent CR can reference it by SCOPE_ID BEFORE the
+        // scope physically exists. At the dependents' replay time (post-commit
+        // of the create) getClientScopeById(deterministicId) resolves.
+        final String deterministicId = deterministicScopeId(realmId);
+
         // ----- Resolve current scope state once -----
         ClientScopeModel existingScope = findScopeByName(realm, scopeName);
         final boolean scopeExists = existingScope != null;
 
         // ----- (1) Scope step -----
+        // createScopeCrId != null  -> we just filed (or found pending) the create
+        //                             this pass; dependents depend on it.
+        // createScopeCrId == null  -> scope already exists & committed; dependents
+        //                             have an already-satisfied prerequisite.
         String createScopeCrId = null;
         if (!scopeExists) {
-            String deterministicId = UUID.nameUUIDFromBytes(
-                    (TIDE_CLAIMS_ID_PREFIX + realmId).getBytes(StandardCharsets.UTF_8)).toString();
             // Pending-create dedup: a CREATE_CLIENT_SCOPE CR keyed on the same
             // deterministic entityId already PENDING means a prior server start
             // already enqueued it.
@@ -159,62 +187,77 @@ public final class IgaSystemProvisioner {
             }
         }
 
-        // The prerequisite for the dependent steps. When the scope already
-        // exists AND is committed there is no prerequisite; when we just filed
-        // (or found pending) the create, the dependents depend on it.
-        List<String> prereq = createScopeCrId == null
+        // ----- Resolve the SCOPE_ID the dependents reference + their dependsOn -----
+        // When the create is in flight this pass, the dependents reference the
+        // deterministic id (not yet a physical row) and block on the create CR.
+        // When the scope is already committed, they reference the live scope id
+        // (which equals the deterministic id when this scope was itself created
+        // through our CREATE_CLIENT_SCOPE CR, but we use the resolved live id to
+        // be correct even for a scope created some other way) and have NO
+        // prerequisite (empty dependsOn).
+        final String dependentScopeId = scopeExists ? existingScope.getId() : deterministicId;
+        final List<String> prereq = createScopeCrId == null
                 ? List.of()
                 : List.of(createScopeCrId);
 
-        // ----- (2) Realm-default step (ONLY if the scope already EXISTS) -----
-        // If the scope does not yet exist we cannot resolve it to add as a
-        // realm default; the realm-default CR is enqueued on a later server
-        // start AFTER the create CR has been committed (scope then exists).
+        // ----- (2) Realm-default step -----
+        // Filed in the SAME pass as the create (one-pass contract). When the
+        // scope already exists we additionally state-check (already-default?)
+        // and self-heal if missing. When we just filed the create, the scope is
+        // not yet a default (it doesn't exist) so we always file, blocked on the
+        // create CR — modulo the pending-dedup guard.
         String realmDefaultCrId = null;
-        if (scopeExists) {
-            boolean alreadyDefault = realm.getDefaultClientScopesStream(true)
-                    .anyMatch(s -> s.getId().equals(existingScope.getId()));
-            if (!alreadyDefault && !hasPendingRealmDefaultAdd(realmId, existingScope.getId())) {
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("REALM_ID", realmId);
-                row.put("SCOPE_ID", existingScope.getId());
-                row.put("DEFAULT_SCOPE", true);
-                IgaChangeRequestEntity cr = service.create(realm, "REALM", realmId,
-                        "REALM_DEFAULT_SCOPE_ADD", List.of(row), requestedBy, prereq);
-                realmDefaultCrId = cr.getId();
-                log.infof("IGA system-provision: filed REALM_DEFAULT_SCOPE_ADD CR %s for scope '%s' in realm %s (dependsOn=%s)",
-                        realmDefaultCrId, scopeName, realmId, prereq);
-            }
+        boolean alreadyDefault = scopeExists && realm.getDefaultClientScopesStream(true)
+                .anyMatch(s -> s.getId().equals(existingScope.getId()));
+        if (!alreadyDefault && !hasPendingRealmDefaultAdd(realmId, dependentScopeId)) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("REALM_ID", realmId);
+            row.put("SCOPE_ID", dependentScopeId);
+            row.put("DEFAULT_SCOPE", true);
+            IgaChangeRequestEntity cr = service.create(realm, "REALM", realmId,
+                    "REALM_DEFAULT_SCOPE_ADD", List.of(row), requestedBy, prereq);
+            realmDefaultCrId = cr.getId();
+            log.infof("IGA system-provision: filed REALM_DEFAULT_SCOPE_ADD CR %s for scope '%s' in realm %s (scopeId=%s, dependsOn=%s)",
+                    realmDefaultCrId, scopeName, realmId, dependentScopeId, prereq);
         }
 
-        // ----- (3) Per-client attach step (ONLY if the scope already EXISTS) -----
+        // ----- (3) Per-client attach step -----
+        // Also filed in the SAME pass as the create. One ASSIGN_SCOPE CR per
+        // existing client that lacks the scope and has no pending assign for it.
         List<String> assignScopeCrIds = new ArrayList<>();
-        if (scopeExists) {
-            String scopeId = existingScope.getId();
-            // Pending ASSIGN_SCOPE CRs already in flight, indexed by client UUID,
-            // so re-running does not double-file for a client.
-            java.util.Set<String> clientsWithPendingAssign =
-                    pendingAssignScopeClientUuids(realmId, scopeId);
-            List<ClientModel> clients = session.clients()
-                    .getClientsStream(realm).collect(java.util.stream.Collectors.toList());
-            for (ClientModel client : clients) {
-                if (clientHasScope(client, scopeId)) continue;
-                if (clientsWithPendingAssign.contains(client.getId())) continue;
-                Map<String, Object> row = new LinkedHashMap<>();
-                // Row shape MUST match IgaReplayDispatcher.assignScopeDirect +
-                // IgaRealmProvider.addClientScopes capture:
-                //   CLIENT_UUID, CLIENT_ID, SCOPE_ID, DEFAULT_SCOPE
-                row.put("CLIENT_UUID", client.getId());
-                row.put("CLIENT_ID", client.getClientId());
-                row.put("SCOPE_ID", scopeId);
-                row.put("DEFAULT_SCOPE", true);
-                IgaChangeRequestEntity cr = service.create(realm,
-                        IgaReplayExtension.ENTITY_TYPE_CLIENT, client.getId(),
-                        "ASSIGN_SCOPE", List.of(row), requestedBy, prereq);
-                assignScopeCrIds.add(cr.getId());
-                log.infof("IGA system-provision: filed ASSIGN_SCOPE CR %s for client %s (uuid=%s) scope '%s' in realm %s (dependsOn=%s)",
-                        cr.getId(), client.getClientId(), client.getId(), scopeName, realmId, prereq);
-            }
+        // Pending ASSIGN_SCOPE CRs already in flight for THIS scope, indexed by
+        // client UUID, so re-running does not double-file for a client. The
+        // dedup key is (realm, CLIENT, clientUuid, action=ASSIGN_SCOPE,
+        // scope=dependentScopeId): findPendingByAction gives us (realm, CLIENT,
+        // ASSIGN_SCOPE) and we narrow to the scope discriminator by inspecting
+        // each pending row's SCOPE_ID (findPendingByAction cannot express it),
+        // bucketed by the CR's entityId (== client UUID). This both prevents
+        // duplicates AND avoids colliding with unrelated scope-assign CRs for
+        // other scopes on the same client.
+        java.util.Set<String> clientsWithPendingAssign =
+                pendingAssignScopeClientUuids(realmId, dependentScopeId);
+        List<ClientModel> clients = session.clients()
+                .getClientsStream(realm).collect(java.util.stream.Collectors.toList());
+        for (ClientModel client : clients) {
+            // clientHasScope only resolves when the scope physically exists
+            // (scopeExists branch). When the create is still pending no client
+            // can have it yet, so this is a no-op there — correct.
+            if (scopeExists && clientHasScope(client, dependentScopeId)) continue;
+            if (clientsWithPendingAssign.contains(client.getId())) continue;
+            Map<String, Object> row = new LinkedHashMap<>();
+            // Row shape MUST match IgaReplayDispatcher.assignScopeDirect +
+            // IgaRealmProvider.addClientScopes capture:
+            //   CLIENT_UUID, CLIENT_ID, SCOPE_ID, DEFAULT_SCOPE
+            row.put("CLIENT_UUID", client.getId());
+            row.put("CLIENT_ID", client.getClientId());
+            row.put("SCOPE_ID", dependentScopeId);
+            row.put("DEFAULT_SCOPE", true);
+            IgaChangeRequestEntity cr = service.create(realm,
+                    IgaReplayExtension.ENTITY_TYPE_CLIENT, client.getId(),
+                    "ASSIGN_SCOPE", List.of(row), requestedBy, prereq);
+            assignScopeCrIds.add(cr.getId());
+            log.infof("IGA system-provision: filed ASSIGN_SCOPE CR %s for client %s (uuid=%s) scope '%s' in realm %s (scopeId=%s, dependsOn=%s)",
+                    cr.getId(), client.getClientId(), client.getId(), scopeName, realmId, dependentScopeId, prereq);
         }
 
         return new TideUhoEnqueueResult(createScopeCrId, realmDefaultCrId,
@@ -224,6 +267,18 @@ public final class IgaSystemProvisioner {
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Deterministic scope id for the tide-claims scope in {@code realmId}:
+     * {@code UUID.nameUUIDFromBytes("tide-claims|" + realmId)}. This is the id
+     * the CREATE_CLIENT_SCOPE CR pins the scope to (REP_JSON.id / row ID) AND
+     * the SCOPE_ID every dependent CR references, so the dependency is live
+     * before the scope physically exists.
+     */
+    private static String deterministicScopeId(String realmId) {
+        return UUID.nameUUIDFromBytes(
+                (TIDE_CLAIMS_ID_PREFIX + realmId).getBytes(StandardCharsets.UTF_8)).toString();
+    }
 
     private ClientScopeModel findScopeByName(RealmModel realm, String name) {
         return realm.getClientScopesStream()
