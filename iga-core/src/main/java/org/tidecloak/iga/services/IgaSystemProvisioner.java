@@ -91,6 +91,17 @@ public final class IgaSystemProvisioner {
     }
 
     /**
+     * Test/seam constructor: inject the {@link IgaChangeRequestService} directly
+     * so unit tests can drive the one-pass enqueue / idempotency / self-heal
+     * logic against a mocked service (and a mocked session) without a live
+     * EntityManager. Production code uses {@link #IgaSystemProvisioner(KeycloakSession, EntityManager)}.
+     */
+    IgaSystemProvisioner(KeycloakSession session, IgaChangeRequestService service) {
+        this.session = session;
+        this.service = service;
+    }
+
+    /**
      * Outcome of {@link #enqueueTideClaimsScopeProvisioning}. All ids are CR
      * ids (or {@code null} when the corresponding step was skipped because it
      * was already satisfied / already pending).
