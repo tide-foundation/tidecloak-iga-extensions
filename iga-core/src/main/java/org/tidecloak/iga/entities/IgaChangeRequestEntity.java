@@ -85,6 +85,36 @@ public class IgaChangeRequestEntity {
     @Column(name = "DEPENDS_ON", columnDefinition = "TEXT")
     private String dependsOn;
 
+    /**
+     * The serialized Midgard {@code Policy:1} {@link org.midgard.models.ModelRequest}
+     * carrier for a multiAdmin approval ceremony (M1 two-phase doken collection).
+     *
+     * <p>Stored as the Base64 of {@code ModelRequest.Encode()}. Its lifecycle is the
+     * two-phase round-trip with the admin's browser enclave (Heimdall):
+     * <ol>
+     *   <li><b>Phase 1</b> ({@code TideAttestor.buildMultiAdminApprovalModel}) writes
+     *       the freshly-built {@code Policy:1} request here — the action's draft (the
+     *       same producer unit-CBOR the firstAdmin path signs) wrapped in a
+     *       {@code ModelRequest}, with the M0 admin {@link IgaRolePolicyEntity#getPolicy()}
+     *       Policy set on it ({@code SetPolicy}) and the VRK creation-authorization
+     *       attached. The admin-UI fetches it (GET .../approval-model) and hands ONLY
+     *       the serialized request to the enclave.</li>
+     *   <li><b>Phase 2</b> ({@code TideAttestor.acceptMultiAdminApprovalModel}) accepts
+     *       the doken-embedded serialized request back (POST .../approval-model),
+     *       validates it parses, and overwrites this column with the doken-embedded
+     *       bytes. The policy is NOT re-set on accept-back — that would invalidate the
+     *       embedded doken (mirrors the gold-reference {@code MultiAdmin.commit}, which
+     *       deliberately skips {@code SetPolicy} for the already-doken'd model).</li>
+     * </ol>
+     *
+     * <p>{@code TEXT} (nullable) — Base64 of a CBOR-ish request, larger than a UUID;
+     * NULL = no approval ceremony has begun (every firstAdmin / Tideless / pre-M1 CR).
+     * Only ever populated for multiAdmin-mode CRs; the firstAdmin single-phase path
+     * never touches it.
+     */
+    @Column(name = "REQUEST_MODEL", columnDefinition = "TEXT")
+    private String requestModel;
+
     @OneToMany(mappedBy = "changeRequest", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<IgaAuthorizationEntity> authorizations = new ArrayList<>();
 
@@ -123,6 +153,9 @@ public class IgaChangeRequestEntity {
 
     public String getDependsOn() { return dependsOn; }
     public void setDependsOn(String dependsOn) { this.dependsOn = dependsOn; }
+
+    public String getRequestModel() { return requestModel; }
+    public void setRequestModel(String requestModel) { this.requestModel = requestModel; }
 
     /**
      * Parse {@link #dependsOn} into a list of prerequisite CR ids. Returns an

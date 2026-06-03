@@ -12,6 +12,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.midgard.Midgard;
+import org.midgard.models.ModelRequest;
 import org.midgard.models.Policy.ApprovalType;
 import org.midgard.models.Policy.ExecutionType;
 import org.midgard.models.Policy.Policy;
@@ -159,6 +160,33 @@ public class TideAttestor implements IgaAttestor {
     private static final String ROW_USER_ID = "USER_ID";
     private static final String ROW_ROLE_ID = "ROLE_ID";
 
+    // -------------------------------------------------------------------------
+    // M1: multiAdmin two-phase approval ModelRequest (doken-collection seam)
+    // -------------------------------------------------------------------------
+    /**
+     * Auth-flow id stamped on the phase-1 multiAdmin approval {@link org.midgard.models.ModelRequest}.
+     * {@code "Policy:1"} is the admin-quorum (threshold-Policy) authorization flow —
+     * the ORK evaluates the embedded admin {@link Policy} (the M0 artifact) against the
+     * collected dokens. Mirrors the gold-reference {@code MultiAdmin.signWithAuthorizer}
+     * ({@code ModelRequest.New(name, version, "Policy:1", draft)}) and the
+     * {@code AddPolicyAuthorizationToSerializedRequest} contract Heimdall uses.
+     */
+    private static final String POLICY_AUTH_FLOW = "Policy:1";
+
+    /**
+     * {@code ModelRequest.New} model name/version for the phase-1 approval request.
+     * The draft is an attestation-unit envelope CBOR (the same {@code user_role_mapping_set}
+     * bytes the firstAdmin {@link AttestationUnitSignRequest} carries), so the model is
+     * {@code AttestationUnit:1} — exactly what {@link AttestationUnitSignRequest}'s
+     * constructor stamps (Name={@code AttestationUnit}, Version={@code 1}) and one of the
+     * firstAdmin authorizer pack's allowed ModelIds, so the ORK's creation-auth flow
+     * accepts the {@code InitializeTideRequestWithVrk} seg-7 signature.
+     */
+    private static final String APPROVAL_MODEL_NAME = "AttestationUnit";
+    private static final String APPROVAL_MODEL_VERSION = "1";
+    /** The {@code modelId} arg to {@code InitializeTideRequestWithVrk} for the approval request. */
+    private static final String APPROVAL_MODEL_ID = "AttestationUnit:1";
+
     /**
      * Seconds added to the signing request's default expiry before
      * {@code GetDataToAuthorize} (the 30s Midgard default is too short for the ORK
@@ -286,6 +314,16 @@ public class TideAttestor implements IgaAttestor {
      * firstAdmin gate-bypass and the firstAdmin threshold=1 must agree on the mode
      * or they could diverge (bypass without 1-of-1, or vice versa).
      */
+    /**
+     * Public mode check for the REST layer (which lives in a different package and
+     * cannot see the package-private {@link #resolveMode}). True iff the realm's
+     * authorizer mode resolves to {@code multiAdmin} — the discriminator the two-phase
+     * approval endpoints branch on (firstAdmin stays single-phase).
+     */
+    public static boolean isMultiAdminMode(KeycloakSession session, RealmModel realm) {
+        return MODE_MULTI_ADMIN.equals(resolveMode(session, realm));
+    }
+
     static String resolveMode(KeycloakSession session, RealmModel realm) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         IgaAuthorizerEntity row = em.createNamedQuery("IgaAuthorizer.findByRealm", IgaAuthorizerEntity.class)
@@ -1015,6 +1053,236 @@ public class TideAttestor implements IgaAttestor {
     /** Minimal JSON string escaping for the policy body's {@code vvkId} value. */
     private static String jsonEscape(String s) {
         return s.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    // -------------------------------------------------------------------------
+    // M1: multiAdmin two-phase approval ModelRequest (doken-collection seam)
+    // -------------------------------------------------------------------------
+
+    /**
+     * <b>Phase 1</b> of the multiAdmin doken-collection ceremony: build the per-CR
+     * {@code Policy:1} {@link ModelRequest} the admin's browser enclave (Heimdall)
+     * approves, and persist its Base64 on the CR's {@code REQUEST_MODEL} carrier.
+     *
+     * <h3>What it assembles</h3>
+     * <ol>
+     *   <li><b>Draft</b> — the action's signing payload. For a steady-state
+     *       {@code GRANT_ROLES} CR this is the EXACT same {@code user_role_mapping_set}
+     *       unit-envelope CBOR the firstAdmin path signs ({@link #buildUserRoleMappingSetUnitCbor}),
+     *       so the ork {@code TokenValidationEngine} re-derives identical bytes. Any
+     *       other action falls back to the regular set/node canonical
+     *       ({@link #canonicalForRegularCr}) — a valid draft to carry through the
+     *       round-trip even though M1 does not yet do the real per-action sign.</li>
+     *   <li><b>Request</b> — {@code ModelRequest.New(AttestationUnit, 1, "Policy:1", draft)}.
+     *       {@code Policy:1} is the admin-quorum auth flow; the model is
+     *       {@code AttestationUnit:1} (one of the firstAdmin authorizer pack's allowed
+     *       ModelIds, and what {@link AttestationUnitSignRequest} stamps for unit CBOR).</li>
+     *   <li><b>Policy</b> — {@code SetPolicy(<the M0 admin Policy bytes>)}: the genuine
+     *       VVK-signed threshold {@link Policy} M0 installed on the tide-realm-admin
+     *       {@link IgaRolePolicyEntity} (stored Base64 of {@code Policy.ToBytes()}). The
+     *       enclave authorizes the request AGAINST this policy.</li>
+     *   <li><b>Creation-auth</b> — {@code InitializeTideRequestWithVrk(...)}: the seg-7
+     *       VRK signature proving this realm's vendor created the request, sourced from
+     *       the SAME firstAdmin authorizer pack + settings the M0 / firstAdmin ceremonies
+     *       use. Capability-gated: only attempted on a {@link #isRealSigningCapable} realm
+     *       (dev/test realms get the un-initialized request, sufficient for the round-trip
+     *       wiring M1 validates).</li>
+     * </ol>
+     *
+     * <p><b>multiAdmin only.</b> Callers branch on {@link #resolveMode}; the firstAdmin
+     * single-phase path never invokes this. The persisted Base64 is what the admin-UI
+     * fetches (GET .../approval-model) and hands to the enclave.
+     *
+     * @return the Base64 of {@code ModelRequest.Encode()} (also persisted on the CR).
+     * @throws RuntimeException if the realm has no M0 admin Policy to embed, or (on a
+     *         real-signing-capable realm) the VRK creation-auth fails — fail-closed, so a
+     *         provisioned realm never ships an un-authorized approval request.
+     */
+    public String buildMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
+                                               IgaChangeRequestEntity cr) {
+        // The M0 admin Policy bytes to embed — the genuine VVK-signed threshold Policy.
+        byte[] adminPolicyBytes = readM0AdminPolicyBytes(session, realm);
+        if (adminPolicyBytes == null) {
+            throw new RuntimeException("IGA multiAdmin approval: realm " + realm.getName()
+                    + " has no signed tide-realm-admin admin Policy (M0) to embed in the "
+                    + "Policy:1 approval request for CR " + cr.getId());
+        }
+
+        // The action's draft: reuse the firstAdmin unit-CBOR for GRANT_ROLES so the ork
+        // TVE re-derives identical bytes; otherwise the regular canonical.
+        byte[] draft = ACTION_GRANT_ROLES.equals(cr.getActionType())
+                ? buildUserRoleMappingSetUnitCbor(session, realm, cr)
+                : canonicalForRegularCr(session, cr);
+
+        ModelRequest req = ModelRequest.New(APPROVAL_MODEL_NAME, APPROVAL_MODEL_VERSION,
+                POLICY_AUTH_FLOW, draft);
+        // Longer expiry than the 30s default — admin approval is a human round-trip.
+        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
+        // Embed the M0 admin Policy the enclave authorizes the request against.
+        req.SetPolicy(adminPolicyBytes);
+
+        // seg-7 creation-authorization via the realm's VRK — only on a real-signing-capable
+        // realm (dev/test realms carry no real VRK; the un-initialized request still
+        // round-trips for the M1 carrier/threshold wiring). Fail-closed once capable.
+        if (isRealSigningCapable(realm)) {
+            initializeApprovalRequestWithVrk(realm, req);
+        }
+
+        String encoded = java.util.Base64.getEncoder().encodeToString(req.Encode());
+        cr.setRequestModel(encoded);
+        session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
+        log.infof("IGA multiAdmin approval (phase 1): built Policy:1 ModelRequest for CR %s "
+                + "(action=%s, realm=%s, creation-auth=%s).", cr.getId(), cr.getActionType(),
+                realm.getName(), isRealSigningCapable(realm) ? "VRK" : "none(dev)");
+        return encoded;
+    }
+
+    /**
+     * Attach the seg-7 VRK creation-authorization to the phase-1 approval request — the
+     * iga-core port of the gold-reference {@code MultiAdmin.signWithAuthorizer}'s
+     * {@code ModelRequest.InitializeTideRequestWithVrk(req, settings, modelId, authorizerBytes, certBytes)}.
+     * Uses the SAME settings build ({@link #constructSignSettings}) and the SAME firstAdmin
+     * authorizer pack ({@code authorizer}/{@code authorizerCertificate}) the M0 /
+     * firstAdmin unit ceremonies use, so the ORK's VRKAuthorizationFlow accepts the
+     * {@code AttestationUnit:1} creation. Called only after {@link #isRealSigningCapable}
+     * passed; fail-closed (throws) on any signing failure.
+     */
+    private void initializeApprovalRequestWithVrk(RealmModel realm, ModelRequest req) {
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException(
+                        "IGA multiAdmin approval: realm " + realm.getName()
+                                + " has no tide-vendor-key component (VRK not provisioned)"));
+        MultivaluedHashMap<String, String> config = vendorKey.getConfig();
+        if (config == null) {
+            throw new RuntimeException("IGA multiAdmin approval: tide-vendor-key component has no config "
+                    + "(realm " + realm.getName() + ")");
+        }
+        try {
+            SignRequestSettingsMidgard settings = constructSignSettings(config);
+            String firstAdminAuthorizer = config.getFirst(CFG_FIRST_ADMIN_AUTHORIZER);
+            String firstAdminAuthorizerCert = config.getFirst(CFG_FIRST_ADMIN_AUTHORIZER_CERTIFICATE);
+            if (firstAdminAuthorizer == null || firstAdminAuthorizer.isBlank()
+                    || firstAdminAuthorizerCert == null || firstAdminAuthorizerCert.isBlank()) {
+                throw new RuntimeException("IGA multiAdmin approval: tide-vendor-key component is missing "
+                        + "firstAdmin authorizer material (authorizer/authorizerCertificate) for realm "
+                        + realm.getName());
+            }
+            ModelRequest.InitializeTideRequestWithVrk(req, settings, APPROVAL_MODEL_ID,
+                    java.util.HexFormat.of().parseHex(firstAdminAuthorizer),
+                    java.util.Base64.getDecoder().decode(firstAdminAuthorizerCert));
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("IGA multiAdmin approval: VRK creation-auth failed for realm "
+                    + realm.getName() + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * <b>Phase 2</b> of the multiAdmin doken-collection ceremony: accept the
+     * doken-embedded serialized {@link ModelRequest} back from the admin's enclave,
+     * validate it, persist it onto the CR carrier, and record the approving admin
+     * toward threshold.
+     *
+     * <h3>What it does (mirrors the gold-reference {@code MultiAdmin.commit})</h3>
+     * <ol>
+     *   <li><b>Validate</b> — the returned Base64 must parse via {@link ModelRequest#FromBytes}.
+     *       A malformed request is rejected (the enclave round-trip produced garbage).</li>
+     *   <li><b>Persist</b> — overwrite {@code REQUEST_MODEL} with the doken-embedded bytes.
+     *       The policy is deliberately NOT re-set ({@code SetPolicy} would invalidate the
+     *       embedded doken — gold reference {@code MultiAdmin.commit}, the "would invalidate
+     *       the doken" skip).</li>
+     *   <li><b>Record</b> — once-per-admin dedup (mirrors the gold reference's
+     *       already-approved guard), then persist the admin's {@link IgaAuthorizationEntity}
+     *       toward the {@link #getThreshold} gate, reusing {@link #record}'s approver-role +
+     *       persistence path. The commit gate ({@code IgaAdminResource.commit}) still does
+     *       the actual threshold check + combineFinal/dispatch.</li>
+     * </ol>
+     *
+     * <p>M1 does NOT do the real {@code Midgard.SignModel(Policy:1)} on the collected
+     * dokens — that is M2. The commit signature stays the existing
+     * {@link #DUMMY_SIG_PREFIX} stub ({@link #combineFinal}'s multiAdmin branch).
+     *
+     * @param dokenEmbeddedModelB64 the Base64 of the doken-embedded {@code ModelRequest.Encode()}.
+     * @param admin the approving admin (whose distinct approval counts toward threshold).
+     * @return {@code true} if this call recorded a NEW approval; {@code false} if the admin
+     *         had already approved (idempotent dedup — the model is still persisted).
+     * @throws RuntimeException if the returned bytes do not parse as a {@link ModelRequest}.
+     */
+    public boolean acceptMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
+                                                 IgaChangeRequestEntity cr,
+                                                 String dokenEmbeddedModelB64, UserModel admin) {
+        if (dokenEmbeddedModelB64 == null || dokenEmbeddedModelB64.isBlank()) {
+            throw new RuntimeException("IGA multiAdmin approval (phase 2): empty doken-embedded model "
+                    + "for CR " + cr.getId());
+        }
+        // (1) Validate it parses as a ModelRequest (round-trip integrity).
+        byte[] decoded;
+        try {
+            decoded = java.util.Base64.getDecoder().decode(dokenEmbeddedModelB64);
+            ModelRequest parsed = ModelRequest.FromBytes(decoded);
+            if (parsed == null) {
+                throw new RuntimeException("ModelRequest.FromBytes returned null");
+            }
+        } catch (RuntimeException re) {
+            throw re;
+        } catch (Exception e) {
+            throw new RuntimeException("IGA multiAdmin approval (phase 2): returned model for CR "
+                    + cr.getId() + " is not a valid ModelRequest: " + e.getMessage(), e);
+        }
+
+        // (2) Persist the doken-embedded model back on the carrier. NO re-SetPolicy —
+        // that would invalidate the embedded doken (gold reference MultiAdmin.commit:441).
+        cr.setRequestModel(dokenEmbeddedModelB64);
+
+        // (3) Once-per-admin dedup, then record toward threshold.
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<IgaAuthorizationEntity> existing = em.createNamedQuery(
+                        "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
+                .setParameter("changeRequestId", cr.getId())
+                .getResultList();
+        for (IgaAuthorizationEntity a : existing) {
+            if ((admin.getUsername() != null && admin.getUsername().equals(a.getApproval()))
+                    || (admin.getId() != null && admin.getId().equals(a.getAuthorizedBy()))) {
+                em.flush(); // keep the doken-embedded model write
+                log.infof("IGA multiAdmin approval (phase 2): admin %s already approved CR %s — "
+                        + "model persisted, no new approval recorded.", admin.getUsername(), cr.getId());
+                return false;
+            }
+        }
+        // record() enforces the approver-role gate and persists the IgaAuthorizationEntity.
+        record(session, cr, admin, null);
+        em.flush();
+        log.infof("IGA multiAdmin approval (phase 2): recorded approval by %s for CR %s "
+                + "(doken-embedded model persisted).", admin.getUsername(), cr.getId());
+        return true;
+    }
+
+    /**
+     * The M0 admin Policy bytes to embed in the phase-1 approval request: the
+     * tide-realm-admin {@link IgaRolePolicyEntity#getPolicy()} value. On a
+     * real-signing-capable realm M0 stores {@code Base64(Policy.ToBytes())} of a genuine
+     * VVK-signed {@link Policy}, so we Base64-decode to recover the raw {@code Policy.ToBytes()}.
+     * If the stored value is NOT Base64 (a dev/test stub realm where M0 wrote the legacy
+     * hand-rolled JSON body), we fall back to the verbatim UTF-8 bytes so the round-trip
+     * still carries SOMETHING as the policy — the enclave/ORK only consumes it for real on
+     * a provisioned realm. Returns {@code null} only when there is no admin policy row at all.
+     */
+    private static byte[] readM0AdminPolicyBytes(KeycloakSession session, RealmModel realm) {
+        IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
+        if (policy == null || policy.getPolicy() == null || policy.getPolicy().isBlank()) {
+            return null;
+        }
+        String body = policy.getPolicy();
+        try {
+            // M0 real path persists Base64(Policy.ToBytes()) — decode to the raw Policy bytes.
+            return java.util.Base64.getDecoder().decode(body);
+        } catch (IllegalArgumentException notBase64) {
+            // Dev/test stub realm: M0 wrote hand-rolled JSON. Carry it verbatim.
+            return body.getBytes(StandardCharsets.UTF_8);
+        }
     }
 
     // -------------------------------------------------------------------------

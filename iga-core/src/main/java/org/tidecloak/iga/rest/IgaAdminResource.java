@@ -44,6 +44,7 @@ import org.tidecloak.iga.replay.IgaReplayExtension;
 import org.tidecloak.iga.attestors.IgaAttestor;
 import org.tidecloak.iga.attestors.IgaAttestors;
 import org.tidecloak.iga.attestors.IgaScopeResolver;
+import org.tidecloak.iga.attestors.TideAttestor;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
@@ -409,6 +410,164 @@ public class IgaAdminResource {
         IgaChangeRequestService service = getService();
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
         return Response.ok(toRepresentation(updated, service)).build();
+    }
+
+    // -------------------------------------------------------------------------
+    // multiAdmin two-phase approval (M1 doken-collection seam)
+    //
+    // GET  /iga/change-requests/{id}/approval-model  — phase 1: build + return the
+    //      per-CR Policy:1 ModelRequest the admin's browser enclave (Heimdall)
+    //      approves. The admin-UI hands ONLY the serialized request to the enclave.
+    // POST /iga/change-requests/{id}/approval-model  — phase 2: accept the
+    //      doken-embedded serialized ModelRequest back, persist it, and record the
+    //      approving admin toward threshold (dedup once-per-admin).
+    //
+    // Both are multiAdmin-only — firstAdmin keeps its single-phase authorize/commit
+    // path untouched. A firstAdmin / Tideless / simple realm gets 409 CONFLICT so the
+    // caller falls back to the single-phase flow. M1 does NOT do the real
+    // Midgard.SignModel(Policy:1) on the collected dokens — that is M2; the commit
+    // signature stays the existing stub.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Phase 1 — build + persist the per-CR {@code Policy:1} approval
+     * {@link org.midgard.models.ModelRequest} and return its Base64 serialization for
+     * the admin's browser enclave to approve. multiAdmin-only.
+     */
+    @GET
+    @Path("change-requests/{id}/approval-model")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getApprovalModel(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        EntityManager em = getEm();
+        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
+        if (cr == null || !realm.getId().equals(cr.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        if (!"PENDING".equals(cr.getStatus())) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of("error", "Change request is not in PENDING state",
+                            "crStatus", cr.getStatus()))
+                    .build();
+        }
+        // multiAdmin-only gate. firstAdmin / Tideless realms have no two-phase ceremony.
+        if (!TideAttestor.isMultiAdminMode(session, realm)) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of("error", "NOT_MULTI_ADMIN",
+                            "message", "Two-phase approval applies only to multiAdmin-mode realms; "
+                                    + "use the single-phase authorize/commit flow"))
+                    .build();
+        }
+        IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
+        if (!(attestor instanceof TideAttestor tide)) {
+            // Defensive: multiAdmin mode implies the tide attestor — but never NPE if not.
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of("error", "NOT_TIDE_ATTESTOR",
+                            "message", "Resolved attestor does not support the two-phase approval ceremony"))
+                    .build();
+        }
+        try {
+            String serializedModel = tide.buildMultiAdminApprovalModel(session, realm, cr);
+            // Shape mirrors the gold-reference response: the serialized request the
+            // admin-UI hands to the enclave, keyed by CR id.
+            return Response.ok(Map.of(
+                            "changeRequestId", cr.getId(),
+                            "actionType", cr.getActionType(),
+                            "requiresApprovalPopup", true,
+                            "requestModel", serializedModel))
+                    .build();
+        } catch (RuntimeException rex) {
+            log.warnf(rex, "IGA multiAdmin approval (phase 1): failed to build approval model for CR %s", id);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity(Map.of("error", "APPROVAL_MODEL_BUILD_FAILED",
+                            "message", String.valueOf(rex.getMessage())))
+                    .build();
+        }
+    }
+
+    /**
+     * Phase 2 — accept the doken-embedded serialized {@code ModelRequest} back from the
+     * admin's enclave, persist it on the CR carrier, and record the approving admin
+     * toward threshold (dedup once-per-admin). multiAdmin-only.
+     *
+     * <p>Body: {@code {"requestModel": "<base64 doken-embedded ModelRequest.Encode()>"}}.
+     */
+    @POST
+    @Path("change-requests/{id}/approval-model")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response submitApprovalModel(@PathParam("id") String id, Map<String, Object> body) {
+        auth.realm().requireManageRealm();
+
+        EntityManager em = getEm();
+        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
+        if (cr == null || !realm.getId().equals(cr.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        if (!"PENDING".equals(cr.getStatus())) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of("error", "Change request is not in PENDING state",
+                            "crStatus", cr.getStatus()))
+                    .build();
+        }
+        if (!TideAttestor.isMultiAdminMode(session, realm)) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of("error", "NOT_MULTI_ADMIN",
+                            "message", "Two-phase approval applies only to multiAdmin-mode realms; "
+                                    + "use the single-phase authorize/commit flow"))
+                    .build();
+        }
+        String requestModel = body != null ? (String) body.get("requestModel") : null;
+        if (requestModel == null || requestModel.isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "requestModel is required (the doken-embedded "
+                            + "serialized ModelRequest returned by the enclave)"))
+                    .build();
+        }
+        UserModel admin = currentUser();
+        if (admin == null) {
+            return Response.status(Response.Status.UNAUTHORIZED)
+                    .entity(Map.of("error", "No authenticated admin user"))
+                    .build();
+        }
+        IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
+        if (!(attestor instanceof TideAttestor tide)) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of("error", "NOT_TIDE_ATTESTOR",
+                            "message", "Resolved attestor does not support the two-phase approval ceremony"))
+                    .build();
+        }
+        boolean recorded;
+        try {
+            recorded = tide.acceptMultiAdminApprovalModel(session, realm, cr, requestModel, admin);
+        } catch (ForbiddenException fe) {
+            // Approver-role gate refused this admin for this CR (raised inside record()).
+            return Response.status(Response.Status.FORBIDDEN)
+                    .entity(Map.of("error", "FORBIDDEN_APPROVER_ROLE",
+                            "message", String.valueOf(fe.getMessage())))
+                    .build();
+        } catch (RuntimeException rex) {
+            log.warnf(rex, "IGA multiAdmin approval (phase 2): failed to accept approval model for CR %s", id);
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "APPROVAL_MODEL_INVALID",
+                            "message", String.valueOf(rex.getMessage())))
+                    .build();
+        }
+        // Report the current approval count vs threshold so the caller knows whether the
+        // CR is ready for commit (the commit endpoint still does the real gate).
+        List<IgaAuthorizationEntity> all = em.createNamedQuery(
+                        "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
+                .setParameter("changeRequestId", cr.getId())
+                .getResultList();
+        int threshold = tide.getThreshold(session, realm, cr);
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("changeRequestId", cr.getId());
+        resp.put("recorded", recorded);
+        resp.put("authCount", all.size());
+        resp.put("threshold", threshold);
+        resp.put("readyForCommit", all.size() >= threshold);
+        return Response.ok(resp).build();
     }
 
     // -------------------------------------------------------------------------
