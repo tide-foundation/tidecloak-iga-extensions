@@ -1,2 +1,3 @@
 org.tidecloak.iga.attestors.IgaAttestorSpi
 org.tidecloak.iga.providers.IgaSystemProvisionerSpi
+org.keycloak.tide.attestation.AttestationExporterSpi
