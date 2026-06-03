@@ -253,6 +253,7 @@ public class IgaReplayDispatcher {
             case "REALM_DEFAULT_SCOPE_ADD" -> replayAddRealmDefaultScope(session, realm, rows, finalAttestation, em, setSigned);
             case "REALM_DEFAULT_SCOPE_REMOVE" -> replayRemoveRealmDefaultScope(session, realm, rows, finalAttestation, em, setSigned);
             case "CREATE_CLIENT_SCOPE" -> replayCreateClientScope(session, realm, rows, finalAttestation, em, setSigned);
+            case "DELETE_CLIENT_SCOPE" -> replayDeleteClientScope(session, realm, rows);
             case "UPDATE_PROTOCOL_MAPPER" -> replayUpdateProtocolMapper(session, realm, rows, finalAttestation, em);
             case "REMOVE_PROTOCOL_MAPPER" -> replayRemoveProtocolMapper(session, realm, rows);
 
@@ -1884,6 +1885,55 @@ public class IgaReplayDispatcher {
                             .executeUpdate();
                 }
             }
+        }
+    }
+
+    /**
+     * Replay DELETE_CLIENT_SCOPE: delete the {@code tide-claims} (or any) client
+     * scope by id via {@code session.clientScopes().removeClientScope(realm, id)}.
+     *
+     * <p>This is the teardown counterpart of {@link #replayCreateClientScope}.
+     * A SINGLE scope deletion is self-contained: Keycloak's
+     * {@code JpaRealmProvider.removeClientScope(realm, id)} (the active
+     * {@code ClientScopeProvider} delegate) does, in one call —
+     * <ul>
+     *   <li>{@code realm.removeDefaultClientScope(scope)} — drops the
+     *       {@code DEFAULT_CLIENT_SCOPE} realm-default row;</li>
+     *   <li>{@code deleteClientScopeClientMappingByClientScope} — drops every
+     *       {@code CLIENT_SCOPE_CLIENT} per-client attachment;</li>
+     *   <li>{@code deleteClientScopeRoleMappingByClientScope} — drops the
+     *       scope's role-mapping allow-list;</li>
+     *   <li>{@code em.remove(clientScopeEntity)} — drops the scope, whose nested
+     *       {@code PROTOCOL_MAPPER} rows (incl. the inline {@code t.uho} mapper)
+     *       cascade away via the {@code ClientScopeEntity.protocolMappers}
+     *       {@code orphanRemoval}/cascade-ALL FK.</li>
+     * </ul>
+     * So one removal CR tears the entire provisioning chain back down — no
+     * reverse-ordered detach / remove-default CRs are needed. (Confirmed against
+     * Keycloak 26.5.5 {@code JpaRealmProvider.removeClientScope}.)
+     *
+     * <p>Runs under {@code IGA_REPLAY_ACTIVE} (set by {@link #replay}), so the
+     * delete passes straight through the IGA wrappers without being re-captured.
+     * No attestation stamp — the rows are deleted (mirrors the
+     * {@code DELETE_ORGANIZATION} / {@code REMOVE_SCOPE} revoke replays). The
+     * {@code ClientScopeRemovedEvent} published by {@code removeClientScope}
+     * drives cache invalidation, so no explicit eviction is needed here.
+     */
+    private static void replayDeleteClientScope(KeycloakSession session, RealmModel realm,
+                                                List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String id = str(row, "ID");
+            if (id == null) id = str(row, "SCOPE_ID");
+            if (id == null) continue;
+            ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, id);
+            if (scope == null) {
+                log.warnf("DELETE_CLIENT_SCOPE replay: scope %s no longer exists in realm %s; skipping",
+                        id, realm.getId());
+                continue;
+            }
+            boolean removed = session.clientScopes().removeClientScope(realm, id);
+            log.infof("DELETE_CLIENT_SCOPE replay: scope %s in realm %s removed=%s",
+                    id, realm.getId(), removed);
         }
     }
 

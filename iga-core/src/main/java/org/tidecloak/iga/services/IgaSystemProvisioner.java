@@ -82,6 +82,15 @@ public final class IgaSystemProvisioner {
     /** Deterministic-id namespace prefix for the tide-claims CREATE_CLIENT_SCOPE CR. */
     private static final String TIDE_CLAIMS_ID_PREFIX = "tide-claims|";
 
+    /**
+     * Canonical {@code tide-claims} client-scope name. The provisioning path
+     * takes the name from the caller's {@code scopeRep}; the removal path has no
+     * rep, so it resolves the scope to tear down by this literal name (which is
+     * what the provisioning rep uses and what the deterministic-id prefix is
+     * derived from).
+     */
+    private static final String TIDE_CLAIMS_SCOPE_NAME = "tide-claims";
+
     private final KeycloakSession session;
     private final IgaChangeRequestService service;
 
@@ -273,6 +282,119 @@ public final class IgaSystemProvisioner {
 
         return new TideUhoEnqueueResult(createScopeCrId, realmDefaultCrId,
                 assignScopeCrIds, scopeExists);
+    }
+
+    /**
+     * Outcome of {@link #enqueueTideClaimsScopeRemoval}. {@code removeScopeCrId}
+     * is the filed {@code DELETE_CLIENT_SCOPE} CR id, or {@code null} when there
+     * was nothing to do (scope absent, or a removal CR already pending).
+     */
+    public static final class TideUhoRemovalResult {
+        /** CR id of the filed DELETE_CLIENT_SCOPE, or null when nothing was filed. */
+        public final String removeScopeCrId;
+        /** True when no CR was filed because the scope does not exist. */
+        public final boolean scopeAbsent;
+        /** True when no CR was filed because a removal CR was already pending. */
+        public final boolean removalAlreadyPending;
+
+        TideUhoRemovalResult(String removeScopeCrId, boolean scopeAbsent,
+                             boolean removalAlreadyPending) {
+            this.removeScopeCrId = removeScopeCrId;
+            this.scopeAbsent = scopeAbsent;
+            this.removalAlreadyPending = removalAlreadyPending;
+        }
+
+        /** True when a DELETE_CLIENT_SCOPE CR was actually filed this pass. */
+        public boolean filed() {
+            return removeScopeCrId != null && !removalAlreadyPending;
+        }
+
+        @Override
+        public String toString() {
+            return "TideUhoRemovalResult{removeScopeCrId=" + removeScopeCrId
+                    + ", scopeAbsent=" + scopeAbsent
+                    + ", removalAlreadyPending=" + removalAlreadyPending + "}";
+        }
+    }
+
+    /**
+     * State-aware, idempotent enqueue of the tide-claims scope <em>teardown</em>
+     * for {@code realm} — the counterpart of
+     * {@link #enqueueTideClaimsScopeProvisioning}. Files a SINGLE governed
+     * {@code DELETE_CLIENT_SCOPE} change request that, on commit/replay, removes
+     * the {@code tide-claims} client scope by id.
+     *
+     * <h3>Why a single removal CR (no reverse-ordered detach chain)</h3>
+     * A scope deletion is self-contained. Keycloak's
+     * {@code JpaRealmProvider.removeClientScope(realm, id)} (the active
+     * {@code ClientScopeProvider} delegate, which iga-core does NOT override for
+     * this overload) does, in ONE call: drop the realm-default
+     * ({@code realm.removeDefaultClientScope}), drop every
+     * {@code CLIENT_SCOPE_CLIENT} per-client attachment
+     * ({@code deleteClientScopeClientMappingByClientScope}), drop the role-mapping
+     * allow-list, and remove the scope row — whose nested {@code PROTOCOL_MAPPER}
+     * rows (incl. the inline {@code t.uho} mapper) cascade away via the
+     * {@code ClientScopeEntity.protocolMappers} orphan-removal/cascade-ALL FK.
+     * (Verified against Keycloak 26.5.5.) So the cascade tears the entire
+     * provisioning chain back down — no detach / remove-default CRs and no
+     * {@code dependsOn} ordering are required.
+     *
+     * <h3>Gap filled</h3>
+     * iga-core had no governed {@code DELETE_CLIENT_SCOPE} action/replay before
+     * this work (only the per-client detach {@code REMOVE_SCOPE} and the
+     * realm-default {@code REALM_DEFAULT_SCOPE_REMOVE}). A minimal
+     * {@code DELETE_CLIENT_SCOPE} replay was added to
+     * {@code IgaReplayDispatcher} (calls {@code removeClientScope(realm, id)}
+     * under {@code IGA_REPLAY_ACTIVE}); this method files that CR.
+     *
+     * <h3>Idempotency</h3>
+     * No-op (returns a result with {@code removeScopeCrId == null}) when the
+     * scope does not exist, OR when a {@code DELETE_CLIENT_SCOPE} CR for the same
+     * scope is already PENDING. The pending guard uses the same
+     * {@code findPending}/deterministic-entityId idiom as provisioning: the CR's
+     * {@code entityId} is the live scope id (== the deterministic id when the
+     * scope was provisioned through our CREATE_CLIENT_SCOPE CR).
+     *
+     * @param realm       the IGA-enabled target realm (caller checks enablement)
+     * @param requestedBy the {@code REQUESTED_BY} stamp (e.g. {@code "system"})
+     * @return a {@link TideUhoRemovalResult} describing whether a CR was filed
+     */
+    public TideUhoRemovalResult enqueueTideClaimsScopeRemoval(RealmModel realm, String requestedBy) {
+        if (realm == null) {
+            throw new IllegalArgumentException("enqueueTideClaimsScopeRemoval requires a non-null realm");
+        }
+        final String realmId = realm.getId();
+
+        // ----- (1) Scope-absent idempotency: nothing to remove -----
+        ClientScopeModel existingScope = findScopeByName(realm, TIDE_CLAIMS_SCOPE_NAME);
+        if (existingScope == null) {
+            log.debugf("IGA system-deprovision: tide-claims scope absent in realm %s; nothing to remove", realmId);
+            return new TideUhoRemovalResult(null, true, false);
+        }
+        final String scopeId = existingScope.getId();
+
+        // ----- (2) Pending-removal idempotency -----
+        // A DELETE_CLIENT_SCOPE CR keyed on the live scope id already PENDING
+        // means a prior self-heal pass already enqueued the teardown.
+        IgaChangeRequestEntity pendingRemoval = service.findPending(
+                realmId, IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, scopeId);
+        if (pendingRemoval != null && "DELETE_CLIENT_SCOPE".equals(pendingRemoval.getActionType())) {
+            log.debugf("IGA system-deprovision: DELETE_CLIENT_SCOPE for scope %s in realm %s already PENDING (CR %s)",
+                    scopeId, realmId, pendingRemoval.getId());
+            return new TideUhoRemovalResult(pendingRemoval.getId(), false, true);
+        }
+
+        // ----- (3) File the single cascade removal CR -----
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("ID", scopeId);
+        row.put("SCOPE_ID", scopeId); // tolerated alias; replay reads ID then SCOPE_ID
+        row.put("NAME", TIDE_CLAIMS_SCOPE_NAME);
+        IgaChangeRequestEntity cr = service.create(realm,
+                IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, scopeId,
+                "DELETE_CLIENT_SCOPE", List.of(row), requestedBy);
+        log.infof("IGA system-deprovision: filed DELETE_CLIENT_SCOPE CR %s for scope '%s' (id=%s) in realm %s",
+                cr.getId(), TIDE_CLAIMS_SCOPE_NAME, scopeId, realmId);
+        return new TideUhoRemovalResult(cr.getId(), false, false);
     }
 
     // -------------------------------------------------------------------------

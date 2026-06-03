@@ -6,6 +6,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.representations.idm.ClientScopeRepresentation;
 import org.tidecloak.iga.services.IgaSystemProvisioner;
 import org.tidecloak.iga.services.IgaSystemProvisioner.TideUhoEnqueueResult;
+import org.tidecloak.iga.services.IgaSystemProvisioner.TideUhoRemovalResult;
 
 import jakarta.persistence.EntityManager;
 
@@ -29,6 +30,13 @@ public class DefaultIgaSystemProvisionerProvider implements IgaSystemProvisioner
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         return new IgaSystemProvisioner(session, em)
                 .enqueueTideClaimsScopeProvisioning(realm, scopeRep, requestedBy);
+    }
+
+    @Override
+    public TideUhoRemovalResult enqueueTideClaimsScopeRemoval(RealmModel realm, String requestedBy) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        return new IgaSystemProvisioner(session, em)
+                .enqueueTideClaimsScopeRemoval(realm, requestedBy);
     }
 
     @Override

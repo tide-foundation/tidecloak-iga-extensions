@@ -4,6 +4,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.provider.Provider;
 import org.keycloak.representations.idm.ClientScopeRepresentation;
 import org.tidecloak.iga.services.IgaSystemProvisioner.TideUhoEnqueueResult;
+import org.tidecloak.iga.services.IgaSystemProvisioner.TideUhoRemovalResult;
 
 /**
  * Keycloak SPI provider exposing the {@code tide-claims} scope auto-provisioning
@@ -38,4 +39,25 @@ public interface IgaSystemProvisionerProvider extends Provider {
      */
     TideUhoEnqueueResult enqueueTideClaimsScopeProvisioning(
             RealmModel realm, ClientScopeRepresentation scopeRep, String requestedBy);
+
+    /**
+     * State-aware, idempotent enqueue of the tide-claims scope <em>teardown</em>
+     * (a single governed {@code DELETE_CLIENT_SCOPE} CR) for {@code realm} — the
+     * counterpart of {@link #enqueueTideClaimsScopeProvisioning}, invoked when a
+     * realm is offboarded to local {@code /crypto} signing so the attested
+     * {@code t.uho} mapper does not linger. Safe to call repeatedly. See
+     * {@link org.tidecloak.iga.services.IgaSystemProvisioner#enqueueTideClaimsScopeRemoval}.
+     *
+     * <p>A SINGLE removal CR is sufficient: Keycloak's
+     * {@code removeClientScope(realm, id)} cascade removes the realm-default, all
+     * per-client attachments, the role-mapping allow-list, and the nested
+     * {@code t.uho} protocol mapper in one operation — no reverse-ordered detach
+     * CRs are needed.
+     *
+     * @param realm       the IGA-enabled target realm (caller checks enablement)
+     * @param requestedBy the {@code REQUESTED_BY} stamp (e.g. {@code "system"})
+     * @return a {@link TideUhoRemovalResult} describing whether a CR was filed
+     *         (or that there was nothing to do)
+     */
+    TideUhoRemovalResult enqueueTideClaimsScopeRemoval(RealmModel realm, String requestedBy);
 }

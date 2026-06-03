@@ -19,6 +19,7 @@ import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.replay.IgaReplayExtension;
 import org.tidecloak.iga.services.IgaSystemProvisioner.TideUhoEnqueueResult;
+import org.tidecloak.iga.services.IgaSystemProvisioner.TideUhoRemovalResult;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -360,5 +361,128 @@ class IgaSystemProvisionerTest {
         ClientScopeRepresentation noName = new ClientScopeRepresentation();
         assertThrows(IllegalArgumentException.class,
                 () -> provisioner.enqueueTideClaimsScopeProvisioning(realm, noName, "system"));
+    }
+
+    // =====================================================================
+    // Removal (teardown) — enqueueTideClaimsScopeRemoval
+    // =====================================================================
+
+    private ClientScopeModel mockExistingTideClaims(String scopeId) {
+        ClientScopeModel existing = mock(ClientScopeModel.class);
+        lenient().when(existing.getName()).thenReturn(SCOPE_NAME);
+        lenient().when(existing.getId()).thenReturn(scopeId);
+        when(realm.getClientScopesStream()).thenReturn(Stream.of(existing));
+        return existing;
+    }
+
+    // ---------------------------------------------------------------------
+    // Scope exists, no pending removal: files ONE DELETE_CLIENT_SCOPE CR
+    // (single cascade CR, no dependsOn, keyed on the live scope id).
+    // ---------------------------------------------------------------------
+
+    @Test
+    void removalFilesSingleDeleteCrWhenScopeExists() {
+        String liveScopeId = DETERMINISTIC_ID;
+        mockExistingTideClaims(liveScopeId);
+        when(service.findPending(REALM_ID, IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, liveScopeId))
+                .thenReturn(null);
+
+        TideUhoRemovalResult r = provisioner.enqueueTideClaimsScopeRemoval(realm, "system");
+
+        // Exactly one DELETE_CLIENT_SCOPE CR, no detach/remove-default CRs.
+        CreatedCr del = only("DELETE_CLIENT_SCOPE");
+        assertEquals(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, del.entityType());
+        assertEquals(liveScopeId, del.entityId());
+        assertEquals(liveScopeId, del.rows().get(0).get("ID"));
+        assertTrue(del.dependsOn().isEmpty(), "the single removal CR has no prerequisite");
+        assertEquals(1, created.size(), "exactly one CR filed; got " + created);
+
+        assertNotNull(r.removeScopeCrId);
+        assertTrue(r.filed());
+        assertFalse(r.scopeAbsent);
+        assertFalse(r.removalAlreadyPending);
+    }
+
+    // ---------------------------------------------------------------------
+    // Scope absent: no-op (nothing to remove).
+    // ---------------------------------------------------------------------
+
+    @Test
+    void removalNoOpWhenScopeAbsent() {
+        when(realm.getClientScopesStream()).thenReturn(Stream.empty());
+
+        TideUhoRemovalResult r = provisioner.enqueueTideClaimsScopeRemoval(realm, "system");
+
+        assertTrue(created.isEmpty(), "no CR should be filed when scope absent; got " + created);
+        assertNull(r.removeScopeCrId);
+        assertTrue(r.scopeAbsent);
+        assertFalse(r.filed());
+        // Must never touch findPending when there is no scope to key on.
+        verify(service, never()).findPending(anyString(), anyString(), anyString());
+    }
+
+    // ---------------------------------------------------------------------
+    // Idempotency: a DELETE_CLIENT_SCOPE CR already pending -> no duplicate.
+    // ---------------------------------------------------------------------
+
+    @Test
+    void removalIdempotentWhenDeleteAlreadyPending() {
+        String liveScopeId = DETERMINISTIC_ID;
+        mockExistingTideClaims(liveScopeId);
+
+        IgaChangeRequestEntity pendingDelete = new IgaChangeRequestEntity();
+        pendingDelete.setId("pending-delete-cr");
+        pendingDelete.setActionType("DELETE_CLIENT_SCOPE");
+        when(service.findPending(REALM_ID, IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, liveScopeId))
+                .thenReturn(pendingDelete);
+
+        TideUhoRemovalResult r = provisioner.enqueueTideClaimsScopeRemoval(realm, "system");
+
+        assertTrue(created.isEmpty(), "no new CR when a removal is already pending; got " + created);
+        assertEquals("pending-delete-cr", r.removeScopeCrId);
+        assertTrue(r.removalAlreadyPending);
+        assertFalse(r.filed());
+    }
+
+    // ---------------------------------------------------------------------
+    // A pending CR on the same scope id that is NOT a DELETE must not be
+    // mistaken for a pending removal — we still file the delete.
+    // ---------------------------------------------------------------------
+
+    @Test
+    void removalNotSuppressedByNonDeletePendingCrOnSameScope() {
+        String liveScopeId = DETERMINISTIC_ID;
+        mockExistingTideClaims(liveScopeId);
+
+        // e.g. a SET_CLIENT_SCOPE_ATTRIBUTE CR pending on the same scope id.
+        IgaChangeRequestEntity otherPending = new IgaChangeRequestEntity();
+        otherPending.setId("other-cr");
+        otherPending.setActionType("SET_CLIENT_SCOPE_ATTRIBUTE");
+        when(service.findPending(REALM_ID, IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, liveScopeId))
+                .thenReturn(otherPending);
+
+        TideUhoRemovalResult r = provisioner.enqueueTideClaimsScopeRemoval(realm, "system");
+
+        CreatedCr del = only("DELETE_CLIENT_SCOPE");
+        assertEquals(liveScopeId, del.entityId());
+        assertTrue(r.filed());
+        assertFalse(r.removalAlreadyPending);
+    }
+
+    @Test
+    void removalRejectsNullRealm() {
+        assertThrows(IllegalArgumentException.class,
+                () -> provisioner.enqueueTideClaimsScopeRemoval(null, "system"));
+    }
+
+    @Test
+    void removalNeverAuthorizesOrDenies() {
+        mockExistingTideClaims(DETERMINISTIC_ID);
+        when(service.findPending(anyString(), anyString(), anyString())).thenReturn(null);
+
+        provisioner.enqueueTideClaimsScopeRemoval(realm, "system");
+
+        verify(service, never()).authorize(anyString(), anyString(), anyString());
+        verify(service, never()).deny(anyString(), anyString());
     }
 }
