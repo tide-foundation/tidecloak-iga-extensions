@@ -68,6 +68,19 @@ public class IgaChangeRequestService {
     public IgaChangeRequestEntity create(RealmModel realm, String entityType, String entityId,
                                           String actionType, List<Map<String, Object>> rows,
                                           String requestedBy) {
+        return create(realm, entityType, entityId, actionType, rows, requestedBy, null);
+    }
+
+    /**
+     * Create a new change request for the given realm/entity, optionally with a
+     * prerequisite-CR dependency list (see
+     * {@link IgaChangeRequestEntity#setDependsOnList(List)}). A non-empty
+     * {@code dependsOn} list marks this CR as <em>blocked</em> until every
+     * listed CR is APPROVED — the commit path enforces this with a 412.
+     */
+    public IgaChangeRequestEntity create(RealmModel realm, String entityType, String entityId,
+                                          String actionType, List<Map<String, Object>> rows,
+                                          String requestedBy, List<String> dependsOn) {
         IgaChangeRequestEntity entity = new IgaChangeRequestEntity();
         entity.setId(UUID.randomUUID().toString());
         entity.setRealmId(realm.getId());
@@ -78,9 +91,31 @@ public class IgaChangeRequestService {
         entity.setStatus("PENDING");
         entity.setRequestedBy(requestedBy);
         entity.setCreatedAt(System.currentTimeMillis());
+        entity.setDependsOnList(dependsOn);
         em.persist(entity);
         em.flush();
         return entity;
+    }
+
+    /**
+     * Find PENDING CRs in {@code realmId} matching {@code entityType} +
+     * {@code actionType}. Unlike {@link #findPending} this does NOT key on
+     * entityId, because several action types share one entityId (e.g. every
+     * CLIENT-scoped action on a client uses the client UUID as entityId) — the
+     * caller disambiguates by inspecting each CR's ROWS_JSON.
+     */
+    public List<IgaChangeRequestEntity> findPendingByAction(String realmId, String entityType,
+                                                            String actionType) {
+        return em.createQuery(
+                        "SELECT cr FROM IgaChangeRequestEntity cr " +
+                                "WHERE cr.realmId = :realmId " +
+                                "AND cr.entityType = :entityType " +
+                                "AND cr.actionType = :actionType " +
+                                "AND cr.status = 'PENDING'", IgaChangeRequestEntity.class)
+                .setParameter("realmId", realmId)
+                .setParameter("entityType", entityType)
+                .setParameter("actionType", actionType)
+                .getResultList();
     }
 
     /**

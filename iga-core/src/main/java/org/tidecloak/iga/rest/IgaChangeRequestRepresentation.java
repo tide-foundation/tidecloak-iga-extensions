@@ -25,6 +25,9 @@ public class IgaChangeRequestRepresentation {
     private int threshold;
     private List<String> requiredApproverRoles;
     private String scopeMode;
+    private List<String> dependsOn;
+    private boolean blocked;
+    private String blockedReason;
 
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
@@ -76,4 +79,13 @@ public class IgaChangeRequestRepresentation {
 
     public String getScopeMode() { return scopeMode; }
     public void setScopeMode(String scopeMode) { this.scopeMode = scopeMode; }
+
+    public List<String> getDependsOn() { return dependsOn; }
+    public void setDependsOn(List<String> dependsOn) { this.dependsOn = dependsOn; }
+
+    public boolean isBlocked() { return blocked; }
+    public void setBlocked(boolean blocked) { this.blocked = blocked; }
+
+    public String getBlockedReason() { return blockedReason; }
+    public void setBlockedReason(String blockedReason) { this.blockedReason = blockedReason; }
 }

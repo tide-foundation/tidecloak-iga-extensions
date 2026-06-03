@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.7.0: Add a DEPENDS_ON column to IGA_CHANGE_REQUEST.
+
+      Carries the prerequisite-CR dependency contract: a comma-separated list of
+      CR ids that MUST be APPROVED before this CR may be committed. Today this is
+      used by the auto-enqueued tide-claims-scope provisioning chain — a
+      REALM_DEFAULT_SCOPE_ADD or ASSIGN_SCOPE CR depends on the
+      CREATE_CLIENT_SCOPE CR that provisions the tide-claims scope, because the
+      realm-default-add / per-client-assign replays silently no-op if the scope
+      does not yet exist. The commit path (IgaAdminResource.commit) rejects with
+      412 PRECONDITION_FAILED if any listed prerequisite CR is not APPROVED,
+      making the silent no-op impossible via API / bulk / race.
+
+      TEXT (nullable) because the elements are canonical 36-char UUIDs (no
+      commas) and the list is tiny; NULL/empty = no prerequisites. Existing rows
+      backfill to NULL (no prerequisites), which is the correct legacy semantic —
+      no pre-2.7.0 CR ever had a dependency.
+    -->
+
+    <changeSet id="iga-2.7.0-1" author="tidecloak-iga">
+        <addColumn tableName="IGA_CHANGE_REQUEST">
+            <column name="DEPENDS_ON" type="TEXT"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>

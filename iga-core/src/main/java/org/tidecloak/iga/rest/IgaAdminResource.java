@@ -328,6 +328,22 @@ public class IgaAdminResource {
                     .build();
         }
 
+        // Fail-closed dependency gate: refuse to commit a CR whose dependsOn
+        // set contains any CR not yet APPROVED. This makes the silent-no-op of
+        // a dependent replay (REALM_DEFAULT_SCOPE_ADD / ASSIGN_SCOPE applied
+        // before its CREATE_CLIENT_SCOPE prerequisite) impossible via the API /
+        // bulk / race — independent of any UI gating. Uses 412 PRECONDITION
+        // FAILED, consistent with the threshold check below.
+        BlockState block = computeBlockState(cr.getDependsOnList());
+        if (block.blocked) {
+            return Response.status(Response.Status.PRECONDITION_FAILED)
+                    .entity(Map.of(
+                            "error", "DEPENDENCY_NOT_MET",
+                            "message", block.reason,
+                            "dependsOn", cr.getDependsOnList()))
+                    .build();
+        }
+
         UserModel admin = currentUser();
         if (admin == null) {
             return Response.status(Response.Status.UNAUTHORIZED)
@@ -633,6 +649,19 @@ public class IgaAdminResource {
             outcome.put("status", "SKIPPED");
             outcome.put("error", "ALREADY_RESOLVED");
             outcome.put("crStatus", cr.getStatus());
+            return outcome;
+        }
+
+        // Fail-closed dependency gate (same as the per-CR commit endpoint): a
+        // CR whose dependsOn set has any non-APPROVED prerequisite is REJECTED
+        // here — neither signed nor committed in bulk. Surfaced per-CR so the
+        // operator can see why it was held back.
+        BlockState block = computeBlockState(cr.getDependsOnList());
+        if (block.blocked) {
+            outcome.put("status", "REJECTED");
+            outcome.put("error", "DEPENDENCY_NOT_MET");
+            outcome.put("message", block.reason);
+            outcome.put("dependsOn", cr.getDependsOnList());
             return outcome;
         }
 
@@ -1850,6 +1879,66 @@ public class IgaAdminResource {
             // Resolver failures (e.g. malformed rows) should never break the
             // list/detail endpoint; leave the new fields at their defaults.
         }
+
+        // Dependency contract: surface the prerequisite CR ids + a server-
+        // computed blocked flag/reason. A CR is blocked iff any prerequisite CR
+        // is not APPROVED — the SAME gate the commit path enforces (so the UI
+        // never offers a commit the server would 412). Guarded so a malformed
+        // CR can't break the list/detail endpoints.
+        try {
+            List<String> deps = cr.getDependsOnList();
+            rep.setDependsOn(deps);
+            if (!deps.isEmpty()) {
+                BlockState bs = computeBlockState(deps);
+                rep.setBlocked(bs.blocked);
+                rep.setBlockedReason(bs.reason);
+            }
+        } catch (Exception ignored) {
+        }
         return rep;
+    }
+
+    /**
+     * Holds the resolved blocked state of a CR's prerequisite set.
+     */
+    private static final class BlockState {
+        final boolean blocked;
+        final String reason;
+        BlockState(boolean blocked, String reason) {
+            this.blocked = blocked;
+            this.reason = reason;
+        }
+    }
+
+    /**
+     * Compute whether a CR with the given prerequisite CR ids is blocked, and a
+     * short human reason. Blocked iff any prerequisite CR's status != APPROVED
+     * (including a missing/denied/cancelled prerequisite — anything other than
+     * APPROVED keeps the dependent blocked, fail-closed). Shared by the
+     * representation builder and the commit gate so the reported and enforced
+     * states cannot diverge.
+     */
+    private BlockState computeBlockState(List<String> dependsOn) {
+        if (dependsOn == null || dependsOn.isEmpty()) {
+            return new BlockState(false, null);
+        }
+        EntityManager em = getEm();
+        for (String prereqId : dependsOn) {
+            IgaChangeRequestEntity prereq = em.find(IgaChangeRequestEntity.class, prereqId);
+            String status = prereq == null ? "MISSING" : prereq.getStatus();
+            if (!"APPROVED".equals(status)) {
+                String actionType = prereq == null ? null : prereq.getActionType();
+                String reason;
+                if ("CREATE_CLIENT_SCOPE".equals(actionType)) {
+                    reason = "Waiting on: create tide-claims scope";
+                } else if (actionType != null) {
+                    reason = "Waiting on prerequisite change request (" + actionType + ", " + status + ")";
+                } else {
+                    reason = "Waiting on prerequisite change request (" + status + ")";
+                }
+                return new BlockState(true, reason);
+            }
+        }
+        return new BlockState(false, null);
     }
 }
