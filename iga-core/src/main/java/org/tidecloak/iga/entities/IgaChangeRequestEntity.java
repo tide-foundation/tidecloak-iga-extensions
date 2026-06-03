@@ -68,6 +68,23 @@ public class IgaChangeRequestEntity {
     @Column(name = "RESOLVED_BY", length = 36)
     private String resolvedBy;
 
+    /**
+     * Prerequisite CR-dependency list. Comma-separated list of CR ids that MUST
+     * be APPROVED before this CR may be committed (the commit path enforces a
+     * 412 PRECONDITION_FAILED otherwise — see {@code IgaAdminResource.commit}).
+     *
+     * <p>Stored as a {@code TEXT} comma-separated string (CR ids are
+     * canonical 36-char UUIDs, no commas), serialized/parsed via
+     * {@link #getDependsOnList()}/{@link #setDependsOnList(java.util.List)}. A
+     * comma-separated TEXT column (rather than JSON) is sufficient because the
+     * elements are fixed-shape UUIDs and the list is small (1 element today —
+     * the CREATE_CLIENT_SCOPE prerequisite of a REALM_DEFAULT_SCOPE_ADD /
+     * ASSIGN_SCOPE), and it keeps the read path a trivial split with no JSON
+     * dependency in the hot commit gate. {@code null}/empty = no prerequisites.</p>
+     */
+    @Column(name = "DEPENDS_ON", columnDefinition = "TEXT")
+    private String dependsOn;
+
     @OneToMany(mappedBy = "changeRequest", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<IgaAuthorizationEntity> authorizations = new ArrayList<>();
 
@@ -103,6 +120,35 @@ public class IgaChangeRequestEntity {
 
     public String getResolvedBy() { return resolvedBy; }
     public void setResolvedBy(String resolvedBy) { this.resolvedBy = resolvedBy; }
+
+    public String getDependsOn() { return dependsOn; }
+    public void setDependsOn(String dependsOn) { this.dependsOn = dependsOn; }
+
+    /**
+     * Parse {@link #dependsOn} into a list of prerequisite CR ids. Returns an
+     * empty (mutable) list when there are no prerequisites.
+     */
+    public List<String> getDependsOnList() {
+        List<String> out = new ArrayList<>();
+        if (dependsOn == null || dependsOn.isBlank()) return out;
+        for (String part : dependsOn.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) out.add(trimmed);
+        }
+        return out;
+    }
+
+    /**
+     * Set {@link #dependsOn} from a list of prerequisite CR ids. A null/empty
+     * list clears the column to {@code null}.
+     */
+    public void setDependsOnList(List<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            this.dependsOn = null;
+            return;
+        }
+        this.dependsOn = String.join(",", ids);
+    }
 
     public List<IgaAuthorizationEntity> getAuthorizations() { return authorizations; }
     public void setAuthorizations(List<IgaAuthorizationEntity> authorizations) { this.authorizations = authorizations; }
