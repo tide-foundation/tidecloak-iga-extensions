@@ -174,17 +174,13 @@ public class TideAttestor implements IgaAttestor {
     private static final String POLICY_AUTH_FLOW = "Policy:1";
 
     /**
-     * {@code ModelRequest.New} model name/version for the phase-1 approval request.
-     * The draft is an attestation-unit envelope CBOR (the same {@code user_role_mapping_set}
-     * bytes the firstAdmin {@link AttestationUnitSignRequest} carries), so the model is
-     * {@code AttestationUnit:1} — exactly what {@link AttestationUnitSignRequest}'s
-     * constructor stamps (Name={@code AttestationUnit}, Version={@code 1}) and one of the
-     * firstAdmin authorizer pack's allowed ModelIds, so the ORK's creation-auth flow
-     * accepts the {@code InitializeTideRequestWithVrk} seg-7 signature.
+     * The {@code modelId} arg to {@code InitializeTideRequestWithVrk} for the phase-1
+     * approval request. The phase-1 request is a Midgard {@link AttestationUnitSignRequest}
+     * whose constructor stamps Name={@code AttestationUnit}, Version={@code 1}; this
+     * {@code AttestationUnit:1} id is one of the firstAdmin authorizer pack's allowed
+     * ModelIds, so the ORK's creation-auth flow accepts the {@code InitializeTideRequestWithVrk}
+     * seg-7 signature.
      */
-    private static final String APPROVAL_MODEL_NAME = "AttestationUnit";
-    private static final String APPROVAL_MODEL_VERSION = "1";
-    /** The {@code modelId} arg to {@code InitializeTideRequestWithVrk} for the approval request. */
     private static final String APPROVAL_MODEL_ID = "AttestationUnit:1";
 
     /**
@@ -1071,12 +1067,18 @@ public class TideAttestor implements IgaAttestor {
      *       unit-envelope CBOR the firstAdmin path signs ({@link #buildUserRoleMappingSetUnitCbor}),
      *       so the ork {@code TokenValidationEngine} re-derives identical bytes. Any
      *       other action falls back to the regular set/node canonical
-     *       ({@link #canonicalForRegularCr}) — a valid draft to carry through the
-     *       round-trip even though M1 does not yet do the real per-action sign.</li>
-     *   <li><b>Request</b> — {@code ModelRequest.New(AttestationUnit, 1, "Policy:1", draft)}.
-     *       {@code Policy:1} is the admin-quorum auth flow; the model is
-     *       {@code AttestationUnit:1} (one of the firstAdmin authorizer pack's allowed
-     *       ModelIds, and what {@link AttestationUnitSignRequest} stamps for unit CBOR).</li>
+     *       ({@link #canonicalForRegularCr}) — a dev carry-through (only GRANT_ROLES is
+     *       exercised by the live Policy:1 round-trip).</li>
+     *   <li><b>Request</b> — a Midgard {@link AttestationUnitSignRequest} (auth flow
+     *       {@code Policy:1}), the SAME class the firstAdmin path uses
+     *       ({@link #signFirstAdminUnitWithVvk}). {@code SetUnits(byte[][])} stores the
+     *       unit CBOR VERBATIM and {@code SerializeDraft} frames it as the canonical
+     *       TideMemory ({@code [LE version=1][LE len][unit]...}) the ork's
+     *       {@code AttestationUnitSignRequest.Deserialize} reads via {@code Draft.TryGetValue(i)}
+     *       — NOT a raw {@code ModelRequest.New} with the unit bytes as the Draft. The
+     *       constructor stamps Name={@code AttestationUnit}, Version={@code 1}; {@code Policy:1}
+     *       is the admin-quorum auth flow the ork's {@code AttestationUnit:1} accepts
+     *       (its {@code AllowedAuthorizationFlows} include {@code Policy}).</li>
      *   <li><b>Policy</b> — {@code SetPolicy(<the M0 admin Policy bytes>)}: the genuine
      *       VVK-signed threshold {@link Policy} M0 installed on the tide-realm-admin
      *       {@link IgaRolePolicyEntity} (stored Base64 of {@code Policy.ToBytes()}). The
@@ -1109,21 +1111,50 @@ public class TideAttestor implements IgaAttestor {
         }
 
         // The action's draft: reuse the firstAdmin unit-CBOR for GRANT_ROLES so the ork
-        // TVE re-derives identical bytes; otherwise the regular canonical.
-        byte[] draft = ACTION_GRANT_ROLES.equals(cr.getActionType())
+        // TVE re-derives identical bytes; otherwise the regular canonical (the latter is
+        // a dev/non-real-signing carry-through — only GRANT_ROLES is exercised by the live
+        // Policy:1 round-trip).
+        byte[] unitCbor = ACTION_GRANT_ROLES.equals(cr.getActionType())
                 ? buildUserRoleMappingSetUnitCbor(session, realm, cr)
                 : canonicalForRegularCr(session, cr);
 
-        ModelRequest req = ModelRequest.New(APPROVAL_MODEL_NAME, APPROVAL_MODEL_VERSION,
-                POLICY_AUTH_FLOW, draft);
-        // Longer expiry than the 30s default — admin approval is a human round-trip.
+        // M2: frame the draft via the proper Midgard AttestationUnitSignRequest (NOT a raw
+        // ModelRequest.New). SetUnits(byte[][]) stores the unit CBOR VERBATIM; SerializeDraft
+        // then builds the canonical TideMemory framing ([LE version=1][LE len][unit]...) the
+        // ork's AttestationUnitSignRequest.Deserialize reads via Draft.TryGetValue(i). This
+        // mirrors signFirstAdminUnitWithVvk's request construction field-for-field, with the
+        // ONLY differences being (a) the Policy:1 auth flow (admin-quorum) instead of VRK:1,
+        // and (b) SetPolicy + InitializeTideRequestWithVrk creation-auth (vs. the firstAdmin
+        // SignWithVrk authorizer triplet). The constructor stamps Name=AttestationUnit,
+        // Version=1 (model id AttestationUnit:1).
+        AttestationUnitSignRequest req = new AttestationUnitSignRequest(POLICY_AUTH_FLOW);
+        // VERBATIM CBOR via the byte[][] overload (NOT List<?>/Object — those re-CBOR-wrap
+        // each element through Jackson, corrupting the envelope).
+        req.SetUnits(new byte[][]{ unitCbor });
+        // Longer expiry than the 30s default — admin approval is a human round-trip. Set
+        // BEFORE materializing the draft / creation-auth (Expiry folds into both the
+        // data-to-authorize hash and InitializeTideRequestWithVrk's expireAtTime).
         req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
         // Embed the M0 admin Policy the enclave authorizes the request against.
         req.SetPolicy(adminPolicyBytes);
 
+        // Materialize Draft (the TideMemory unit framing) BEFORE the VRK creation-auth and
+        // Encode(): for an AttestationUnitSignRequest the units are lazily folded into Draft
+        // by SerializeDraft, which only runs via GetDataToAuthorize/GetDraft. Without this,
+        // InitializeTideRequestWithVrk would SHA512 an EMPTY Draft (seg-7 signed over nothing)
+        // and Encode() would persist an empty seg-3 — both breaking the ork round-trip.
+        try {
+            // GetDraft() runs SerializeDraft and returns the framed bytes (we don't need the
+            // return — the side effect of populating req.Draft is the point).
+            req.GetDraft();
+        } catch (Exception e) {
+            throw new RuntimeException("IGA multiAdmin approval: failed to serialize the "
+                    + "AttestationUnit draft framing for CR " + cr.getId() + ": " + e.getMessage(), e);
+        }
+
         // seg-7 creation-authorization via the realm's VRK — only on a real-signing-capable
         // realm (dev/test realms carry no real VRK; the un-initialized request still
-        // round-trips for the M1 carrier/threshold wiring). Fail-closed once capable.
+        // round-trips for the carrier/threshold wiring). Fail-closed once capable.
         if (isRealSigningCapable(realm)) {
             initializeApprovalRequestWithVrk(realm, req);
         }
@@ -1201,9 +1232,10 @@ public class TideAttestor implements IgaAttestor {
      *       the actual threshold check + combineFinal/dispatch.</li>
      * </ol>
      *
-     * <p>M1 does NOT do the real {@code Midgard.SignModel(Policy:1)} on the collected
-     * dokens — that is M2. The commit signature stays the existing
-     * {@link #DUMMY_SIG_PREFIX} stub ({@link #combineFinal}'s multiAdmin branch).
+     * <p>This (phase 2) only collects + persists the doken-embedded carrier and counts
+     * the approval toward threshold; the actual {@code Midgard.SignModel(Policy:1)} over
+     * the collected carrier runs at COMMIT time ({@link #signMultiAdminUnitViaPolicy},
+     * reached from {@link #combineFinal} via {@link #sign}), capability-gated + fail-closed.
      *
      * @param dokenEmbeddedModelB64 the Base64 of the doken-embedded {@code ModelRequest.Encode()}.
      * @param admin the approving admin (whose distinct approval counts toward threshold).
@@ -1516,8 +1548,13 @@ public class TideAttestor implements IgaAttestor {
      * <ul>
      *   <li>{@code firstAdmin} non-eligible (the tide-realm-admin POLICY bootstrap,
      *       and any non-{@code GRANT_ROLES} CR) → {@link #FIRSTADMIN_SIG_PREFIX} stub.</li>
-     *   <li>{@code multiAdmin} (and any non-firstAdmin mode) → {@link #DUMMY_SIG_PREFIX}
-     *       stub; the enclave-threshold {@code Midgard.signClaims()} swap lands later.</li>
+     *   <li>{@code multiAdmin} — when the realm is REAL-SIGNING-CAPABLE the collected-doken
+     *       carrier ({@code cr.requestModel}) is reloaded and signed via the real
+     *       {@code Midgard.SignModel(Policy:1)} ceremony ({@link #signMultiAdminUnitViaPolicy}),
+     *       fail-closed; the stamped value is the real ORK signature, NOT the
+     *       {@link #DUMMY_SIG_PREFIX} digest. A NON-capable dev/test realm keeps the
+     *       {@link #DUMMY_SIG_PREFIX} stub (no carrier / no orks). Any non-firstAdmin,
+     *       non-multiAdmin mode also keeps the stub.</li>
      * </ul>
      * The distinction between modes is NOT local-vs-network — both ceremonies go
      * Midgard → ORK in production; it is (a) admin quorum and (b) key /
@@ -1542,7 +1579,10 @@ public class TideAttestor implements IgaAttestor {
             }
             return stubSign(FIRSTADMIN_SIG_PREFIX, canonical);             // firstAdmin stub (not capable / policy bootstrap / other CRs)
         }
-        return stubSign(DUMMY_SIG_PREFIX, canonical);                     // multiAdmin / non-firstAdmin stub
+        if (MODE_MULTI_ADMIN.equals(mode) && isRealSigningCapable(realm)) {
+            return signMultiAdminUnitViaPolicy(session, realm, cr);        // REAL Midgard.SignModel(Policy:1) over the collected-doken carrier (fail-closed)
+        }
+        return stubSign(DUMMY_SIG_PREFIX, canonical);                     // multiAdmin (not capable) / non-firstAdmin stub
     }
 
     /**
@@ -1723,6 +1763,95 @@ public class TideAttestor implements IgaAttestor {
             // back to a fake stub on a real signing failure.
             throw new RuntimeException("IGA firstAdmin sign: Midgard VVK unit ceremony failed for realm "
                     + realm.getName() + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * <b>M2</b> — the REAL multiAdmin commit ceremony: sign the collected-doken
+     * {@code Policy:1} carrier via {@code Midgard.SignModel}, yielding the genuine ORK
+     * threshold signature over the attestation unit. This replaces the M1
+     * {@link #DUMMY_SIG_PREFIX} stub for a REAL-SIGNING-CAPABLE realm.
+     *
+     * <h3>What it does</h3>
+     * <ol>
+     *   <li><b>Reload</b> the doken-embedded serialized {@link ModelRequest} from the CR
+     *       carrier ({@link IgaChangeRequestEntity#getRequestModel()} — Base64 of
+     *       {@code Encode()}). After phase-2 ({@link #acceptMultiAdminApprovalModel}) this
+     *       carrier already holds the request the enclave authorized: seg-3 Draft = the
+     *       {@link AttestationUnitSignRequest} TideMemory unit framing, seg-6/7 = the
+     *       admin-quorum dokens + their Policy:1 approval signatures, seg-9 = the M0 admin
+     *       Policy. {@code FromBytes} reconstructs all of it verbatim.</li>
+     *   <li><b>Do NOT re-{@code SetPolicy}</b> (nor touch the authorizer/authorization) —
+     *       the carrier IS the doken-bound request; re-setting any of those segments would
+     *       invalidate the collected dokens (the same "would invalidate the doken" rule
+     *       phase-2 follows on accept-back). We sign the request AS-RELOADED.</li>
+     *   <li><b>{@code Midgard.SignModel}</b> with the realm's {@link #constructSignSettings}
+     *       (same settings build the firstAdmin / M0 ceremonies use) → the ORK runs the
+     *       {@code PolicyAuthorizationFlow} (verifying the embedded dokens against the M0
+     *       Policy) and returns the VVK signature over the unit. The bare
+     *       {@code Signatures[0]} is the stamped attestation — a REAL signature, distinct
+     *       from {@link #DUMMY_SIG_PREFIX}, so {@code IgaReplayDispatcher} writes it onto
+     *       the row's {@code attestation} column.</li>
+     * </ol>
+     *
+     * <p><b>Capability + fail-closed.</b> Reached ONLY from {@link #sign} after
+     * {@link #isRealSigningCapable} passed (a NON-capable dev/test realm keeps the
+     * {@link #DUMMY_SIG_PREFIX} stub), so the settings/material are present. A missing
+     * carrier (phase-1 never ran) or any signing FAILURE is fail-closed (throws) — a
+     * real-provisioned multiAdmin commit must never be stamped with a fake digest.
+     *
+     * <p><b>Note (M3).</b> The LIVE Policy:1 round-trip (real ORKs + real enclave dokens)
+     * is deferred to M3 — it needs the ork's {@code AttestationUnit:1} Policy-flow change,
+     * a 2-admin realm, and the admin-UI. This method is the iga-half seam: capability-gated
+     * and fail-closed, so on a provisioned realm it goes straight to the real ceremony.
+     *
+     * @throws RuntimeException if the carrier is absent/unparseable or the Midgard sign fails.
+     */
+    private String signMultiAdminUnitViaPolicy(KeycloakSession session, RealmModel realm,
+                                               IgaChangeRequestEntity cr) {
+        String carrier = cr.getRequestModel();
+        if (carrier == null || carrier.isBlank()) {
+            throw new RuntimeException("IGA multiAdmin sign: CR " + cr.getId() + " has no approval-model "
+                    + "carrier (phase-1 buildMultiAdminApprovalModel never ran) — cannot Policy:1-sign");
+        }
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException(
+                        "IGA multiAdmin sign: realm " + realm.getName()
+                                + " has no tide-vendor-key component (VRK not provisioned)"));
+        MultivaluedHashMap<String, String> config = vendorKey.getConfig();
+        if (config == null) {
+            throw new RuntimeException("IGA multiAdmin sign: tide-vendor-key component has no config (realm "
+                    + realm.getName() + ")");
+        }
+        try {
+            // Reload the doken-embedded request verbatim. NO SetPolicy / SetAuthorizer /
+            // SetAuthorization — the carrier already carries the doken-bound segments the
+            // ORK's PolicyAuthorizationFlow consumes; re-setting any would invalidate them.
+            ModelRequest req = ModelRequest.FromBytes(java.util.Base64.getDecoder().decode(carrier));
+            if (req == null) {
+                throw new RuntimeException("ModelRequest.FromBytes returned null for the CR carrier");
+            }
+
+            SignRequestSettingsMidgard settings = constructSignSettings(config);
+            SignatureResponse resp = Midgard.SignModel(settings, req);
+            if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
+                    || resp.Signatures[0] == null) {
+                throw new RuntimeException("IGA multiAdmin sign: Midgard.SignModel returned no signature "
+                        + "for realm " + realm.getName());
+            }
+            log.infof("IGA multiAdmin commit signed via Midgard Policy:1 ceremony (realm %s, CR %s).",
+                    realm.getName(), cr.getId());
+            // The bare ORK signature over the unit — the REAL attestation (NOT DUMMY_SIG_PREFIX).
+            return resp.Signatures[0];
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            // Fail-closed: a real-provisioned multiAdmin commit must not fall back to a
+            // fake stub on a real signing failure.
+            throw new RuntimeException("IGA multiAdmin sign: Midgard Policy:1 ceremony failed for realm "
+                    + realm.getName() + " (CR " + cr.getId() + "): " + e.getMessage(), e);
         }
     }
 

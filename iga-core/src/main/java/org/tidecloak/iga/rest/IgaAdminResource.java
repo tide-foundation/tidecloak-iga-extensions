@@ -424,9 +424,11 @@ public class IgaAdminResource {
     //
     // Both are multiAdmin-only — firstAdmin keeps its single-phase authorize/commit
     // path untouched. A firstAdmin / Tideless / simple realm gets 409 CONFLICT so the
-    // caller falls back to the single-phase flow. M1 does NOT do the real
-    // Midgard.SignModel(Policy:1) on the collected dokens — that is M2; the commit
-    // signature stays the existing stub.
+    // caller falls back to the single-phase flow. The real Midgard.SignModel(Policy:1)
+    // over the collected-doken carrier runs at COMMIT time (M2 —
+    // TideAttestor.combineFinal -> signMultiAdminUnitViaPolicy), capability-gated +
+    // fail-closed; these two endpoints only build + collect the carrier and count
+    // approvals toward threshold.
     // -------------------------------------------------------------------------
 
     /**
