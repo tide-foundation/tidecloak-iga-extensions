@@ -9,6 +9,8 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.AdminRoles;
+import org.keycloak.models.Constants;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
@@ -75,6 +77,27 @@ public class TideAdminCompatResource {
         auth.realm().requireManageRealm();
         boolean current = "true".equals(realm.getAttribute(IGA_ATTRIBUTE));
         boolean next = !current;
+        // OFF→ON, non-master: auto-create the tide-realm-admin approver
+        // role BEFORE the isIGAEnabled flip below. Creating it pre-flip means
+        // IGA is still OFF, so the addRole/addCompositeRole/setSingleAttribute
+        // writes are PLAIN model writes and are NOT captured as a CREATE_ROLE
+        // CR. After the flip, the IgaAdoptScan picks up this newly-created
+        // (still-unattested) role and emits an ADOPT_ROLE CR — the intended
+        // attestation path (firstAdmin commits it). Idempotency guard ported
+        // verbatim from the old createRealmAdminPolicy: only create when the
+        // role does not already exist on realm-management.
+        if (!current && next && !"master".equals(realm.getName())) {
+            ClientModel realmManagement = realm.getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
+            if (realmManagement != null
+                    && session.roles().getClientRole(realmManagement, "tide-realm-admin") == null) {
+                RoleModel tideRealmAdmin = realmManagement.addRole("tide-realm-admin");
+                tideRealmAdmin.addCompositeRole(realmManagement.getRole(AdminRoles.REALM_ADMIN));
+                tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
+                logger.infof("IGA toggle-on: created approver role 'tide-realm-admin' (composite of %s, tideThreshold=1) on realm-management for realm %s before isIGAEnabled flip",
+                        AdminRoles.REALM_ADMIN, realm.getName());
+            }
+        }
+
         // The toggle endpoint IS the governing action (gated by
         // requireManageRealm); routing the toggle attribute write through the
         // IGA capture interceptor would create a SET_REALM_ATTRIBUTE CR
