@@ -991,13 +991,14 @@ public class IgaUserAdapter extends UserAdapter {
         }
         IgaChangeRequestService service = getService();
         String userId = getId();
-        checkNoPendingCr(service, userId);
         Map<String, Object> row = new HashMap<>();
         row.put("USER_ID", userId);
         row.put("NAME", name);
         row.put("VALUE", value);
-        service.create(realm, "USER", userId, "SET_USER_ATTRIBUTE",
-                List.of(row), getCurrentUserId());
+        // Coalesce a same-request follow-up write into the CR this request
+        // already created for this user; a foreign pending CR still 409s.
+        service.coalesceOrCreate(realm, "USER", userId, "SET_USER_ATTRIBUTE",
+                List.of(row), getCurrentUserId(), java.util.Set.of(name));
     }
 
     @Override
@@ -1014,7 +1015,6 @@ public class IgaUserAdapter extends UserAdapter {
         }
         IgaChangeRequestService service = getService();
         String userId = getId();
-        checkNoPendingCr(service, userId);
         // Multi-value: emit one row per value so replay can persist each one.
         List<Map<String, Object>> rows = new ArrayList<>();
         if (values != null) {
@@ -1035,7 +1035,11 @@ public class IgaUserAdapter extends UserAdapter {
             row.put("VALUE", null);
             rows.add(row);
         }
-        service.create(realm, "USER", userId, "SET_USER_ATTRIBUTE", rows, getCurrentUserId());
+        // Multi-value write: on coalesce, drop every prior row for this NAME
+        // wholesale before appending the full new set (preserves the
+        // one-row-per-value contract).
+        service.coalesceOrCreate(realm, "USER", userId, "SET_USER_ATTRIBUTE",
+                rows, getCurrentUserId(), java.util.Set.of(name));
     }
 
     @Override
@@ -1060,12 +1064,11 @@ public class IgaUserAdapter extends UserAdapter {
         }
         IgaChangeRequestService service = getService();
         String userId = getId();
-        checkNoPendingCr(service, userId);
         Map<String, Object> row = new HashMap<>();
         row.put("USER_ID", userId);
         row.put("NAME", name);
-        service.create(realm, "USER", userId, "REMOVE_USER_ATTRIBUTE",
-                List.of(row), getCurrentUserId());
+        service.coalesceOrCreate(realm, "USER", userId, "REMOVE_USER_ATTRIBUTE",
+                List.of(row), getCurrentUserId(), java.util.Set.of(name));
     }
 
     /**

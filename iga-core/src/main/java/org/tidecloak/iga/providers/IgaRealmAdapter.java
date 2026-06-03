@@ -79,13 +79,14 @@ public class IgaRealmAdapter extends RealmAdapter {
         }
         IgaChangeRequestService service = getService();
         String realmId = getId();
-        checkNoPendingCr(service, realmId);
         Map<String, Object> row = new HashMap<>();
         row.put("REALM_ID", realmId);
         row.put("NAME", name);
         row.put("VALUE", value);
-        service.create(this, "REALM", realmId, "SET_REALM_ATTRIBUTE",
-                List.of(row), null);
+        // Coalesce same-request realm-attribute writes into one CR (a
+        // multi-field realm-settings save); a foreign pending CR still 409s.
+        service.coalesceOrCreate(this, "REALM", realmId, "SET_REALM_ATTRIBUTE",
+                List.of(row), null, java.util.Set.of(name));
     }
 
     @Override
@@ -96,12 +97,11 @@ public class IgaRealmAdapter extends RealmAdapter {
         }
         IgaChangeRequestService service = getService();
         String realmId = getId();
-        checkNoPendingCr(service, realmId);
         Map<String, Object> row = new HashMap<>();
         row.put("REALM_ID", realmId);
         row.put("NAME", name);
-        service.create(this, "REALM", realmId, "REMOVE_REALM_ATTRIBUTE",
-                List.of(row), null);
+        service.coalesceOrCreate(this, "REALM", realmId, "REMOVE_REALM_ATTRIBUTE",
+                List.of(row), null, java.util.Set.of(name));
     }
 
     private void checkNoPendingCr(IgaChangeRequestService service, String realmId) {
@@ -124,12 +124,14 @@ public class IgaRealmAdapter extends RealmAdapter {
     private void recordRealmConfig(String key, String value) {
         IgaChangeRequestService service = getService();
         String realmId = getId();
-        checkNoPendingCr(service, realmId);
         Map<String, Object> row = new HashMap<>();
         row.put("key", key);
         row.put("value", value);
-        service.create(this, "REALM", realmId, "SET_REALM_CONFIG",
-                List.of(row), null);
+        // Coalesce same-request realm-config setters into one SET_REALM_CONFIG
+        // CR (a realm save touching several Tier-1/Tier-2 columns); merge keys on
+        // the config "key". A foreign pending CR still 409s.
+        service.coalesceOrCreate(this, "REALM", realmId, "SET_REALM_CONFIG",
+                List.of(row), null, java.util.Set.of(key));
     }
 
     private static String s(Object v) {

@@ -471,6 +471,221 @@ public class IgaChangeRequestService {
     }
 
     /**
+     * Merge {@code newRows} into an existing PENDING change request's ROWS_JSON.
+     *
+     * <p>Used to <em>coalesce</em> multiple same-entity attribute writes that
+     * arrive within a SINGLE admin request (e.g. a realm-settings save that
+     * touches several config fields, or {@code LinkTideAccount} writing
+     * {@code tideUserKey} + {@code vuid}). The FIRST write for an entity creates
+     * the CR; each SUBSEQUENT write for the SAME entity in the SAME request folds
+     * its row(s) into that already-created CR instead of throwing a
+     * self-conflict. See the request-scoped marker in {@code IgaUserAdapter} /
+     * {@code IgaRealmAdapter}.</p>
+     *
+     * <p>Merge rule: a new row REPLACES an existing row that shares the same
+     * identity key (the row's {@code NAME} for attribute rows, or {@code key} for
+     * realm-config rows); otherwise the new row is APPENDED. Rows with no
+     * identity key are always appended (e.g. multi-value attribute rows that
+     * intentionally carry repeated {@code NAME}s — those are handled by the
+     * caller passing the full replacement set for that name; see below). This
+     * keeps "last write wins" semantics for a given attribute/config key within
+     * the request, matching how the un-governed (non-IGA) path would behave.</p>
+     *
+     * <p>Also clears any authorizations on the CR — exactly like
+     * {@link #updateRows} — because the CR's content changed and any prior
+     * approval no longer covers the new row set.</p>
+     *
+     * <p><b>Multi-value attributes:</b> when the caller writes a multi-value
+     * attribute (one CR row per value, all sharing one {@code NAME}), it passes
+     * the COMPLETE new row set for that name AND the name to clear via
+     * {@code namesToReplace} so this method first drops every existing row with a
+     * matching {@code NAME}, then appends the new rows. This preserves the
+     * one-row-per-value contract the replay relies on.</p>
+     *
+     * @param changeRequestId the existing PENDING CR id
+     * @param newRows         rows to merge in
+     * @param namesToReplace  identity-key values whose existing rows should be
+     *                        dropped wholesale before appending {@code newRows}
+     *                        (used for multi-value / removal writes); may be empty
+     */
+    public void appendRows(String changeRequestId, List<Map<String, Object>> newRows,
+                           java.util.Set<String> namesToReplace) {
+        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, changeRequestId);
+        if (cr == null) {
+            throw new IllegalArgumentException("Change request not found: " + changeRequestId);
+        }
+        List<Map<String, Object>> merged = new java.util.ArrayList<>(parseRows(cr.getRowsJson()));
+
+        // 1. Drop every existing row whose identity key is being replaced
+        //    wholesale (multi-value / removal writes pass the full new set).
+        if (namesToReplace != null && !namesToReplace.isEmpty()) {
+            merged.removeIf(r -> namesToReplace.contains(rowIdentityKey(r)));
+        }
+
+        // 2. Merge each new row: replace a single existing row with the same
+        //    identity key, else append. Rows already removed in step 1 fall
+        //    through to append.
+        for (Map<String, Object> nr : newRows) {
+            String nk = rowIdentityKey(nr);
+            boolean replaced = false;
+            if (nk != null && (namesToReplace == null || !namesToReplace.contains(nk))) {
+                for (int i = 0; i < merged.size(); i++) {
+                    if (nk.equals(rowIdentityKey(merged.get(i)))) {
+                        merged.set(i, nr);
+                        replaced = true;
+                        break;
+                    }
+                }
+            }
+            if (!replaced) {
+                merged.add(nr);
+            }
+        }
+
+        // Content changed → drop stale authorizations (mirror updateRows).
+        em.createNamedQuery("IgaAuthorization.deleteByChangeRequest")
+                .setParameter("changeRequestId", changeRequestId)
+                .executeUpdate();
+        cr.getAuthorizations().clear();
+        cr.setRowsJson(serializeRows(merged));
+        em.flush();
+    }
+
+    /**
+     * Identity key for coalescing: a CR row keys on {@code NAME} (attribute
+     * rows) or {@code key} (realm-config rows). Returns {@code null} when the
+     * row carries neither, in which case the row is treated as un-mergeable
+     * (always appended).
+     */
+    private static String rowIdentityKey(Map<String, Object> row) {
+        Object name = row.get("NAME");
+        if (name != null) return name.toString();
+        Object key = row.get("key");
+        if (key != null) return key.toString();
+        return null;
+    }
+
+    // -------------------------------------------------------------------------
+    // Request-scoped coalescing marker.
+    //
+    // Records, per KeycloakSession (== per admin request), which CR id this
+    // request created for a given entity, keyed "entityType|entityId". A
+    // SUBSEQUENT same-entity write in the SAME request whose pending CR id is in
+    // the marker coalesces into that CR (appendRows); a pending CR that is NOT
+    // in the marker is a genuine foreign/prior CR and still 409s. Keying by CR
+    // id (not just the entity) is the correctness invariant: an in-flight admin
+    // never folds their change into an unrelated admin's pending CR.
+    // -------------------------------------------------------------------------
+
+    private static final String MARKER_ATTR = "IGA_REQUEST_CR_MARKER";
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, String> markerMap(KeycloakSession session) {
+        Object m = session.getAttribute(MARKER_ATTR);
+        if (m instanceof Map) {
+            return (Map<String, String>) m;
+        }
+        Map<String, String> fresh = new java.util.HashMap<>();
+        session.setAttribute(MARKER_ATTR, fresh);
+        return fresh;
+    }
+
+    private static String markerKey(String entityType, String entityId, String actionType) {
+        return entityType + "|" + entityId + "|" + actionType;
+    }
+
+    /**
+     * Record that THIS request created {@code crId} for ({@code entityType},
+     * {@code entityId}, {@code actionType}).
+     *
+     * <p>The marker keys on {@code actionType} as well as the entity: a CR
+     * carries a SINGLE action type (the replay dispatches per-CR, not per-row),
+     * so a follow-up write of a DIFFERENT action type on the same entity (e.g.
+     * SET then REMOVE) must NOT fold into the first CR — it keys to a different
+     * (empty) marker slot, falls through to the foreign-pending-CR check, and
+     * 409s exactly as the pre-fix one-CR-per-entity rule did.</p>
+     */
+    public void markRequestCr(String entityType, String entityId, String actionType, String crId) {
+        markerMap(session).put(markerKey(entityType, entityId, actionType), crId);
+    }
+
+    /**
+     * Is {@code crId} a CR that THIS request created (under ANY action type)?
+     * Used to distinguish a genuinely foreign pending CR (→ 409) from one this
+     * same request created under a different action type on the same entity
+     * (e.g. SET_REALM_ATTRIBUTE then SET_REALM_CONFIG in one realm save) — the
+     * latter must NOT 409.
+     */
+    public boolean isRequestCr(String crId) {
+        if (crId == null) return false;
+        return markerMap(session).containsValue(crId);
+    }
+
+    /**
+     * The CR id THIS request created for ({@code entityType}, {@code entityId},
+     * {@code actionType}), or {@code null} if none.
+     */
+    public String getRequestCr(String entityType, String entityId, String actionType) {
+        return markerMap(session).get(markerKey(entityType, entityId, actionType));
+    }
+
+    /**
+     * Coalescing create: the single entry point the attribute-write seams use
+     * instead of {@code checkNoPendingCr} + {@code create}.
+     *
+     * <p>Behaviour (see the request-scoped marker doc above):</p>
+     * <ol>
+     *   <li>If THIS request already created a CR for ({@code entityType},
+     *       {@code entityId}) and that CR is still PENDING → fold {@code rows}
+     *       into it via {@link #appendRows} and return its id. NO conflict.</li>
+     *   <li>Else if a PENDING CR exists for the entity that this request did NOT
+     *       create (a foreign / prior CR) → throw {@link IgaConflictException}
+     *       (409), exactly as before.</li>
+     *   <li>Else create a fresh PENDING CR, record it in the request marker, and
+     *       return its id.</li>
+     * </ol>
+     *
+     * <p>The marker is keyed by CR id so step 1 can only ever extend a CR THIS
+     * request created — never an unrelated admin's in-flight CR (which always
+     * falls to step 2's 409).</p>
+     *
+     * @param namesToReplace identity-key values (NAME / config key) whose prior
+     *                       rows should be dropped wholesale before the new rows
+     *                       are appended on the coalesce path (multi-value /
+     *                       removal writes). May be empty/null for single-value
+     *                       last-write-wins.
+     * @return the CR id (new or coalesced-into)
+     */
+    public String coalesceOrCreate(RealmModel realm, String entityType, String entityId,
+                                   String actionType, List<Map<String, Object>> rows,
+                                   String requestedBy, java.util.Set<String> namesToReplace) {
+        String markedCrId = getRequestCr(entityType, entityId, actionType);
+        if (markedCrId != null) {
+            IgaChangeRequestEntity marked = em.find(IgaChangeRequestEntity.class, markedCrId);
+            if (marked != null && "PENDING".equals(marked.getStatus())) {
+                // Same-request, same-entity, same-action follow-up write → coalesce.
+                appendRows(markedCrId, rows, namesToReplace);
+                return markedCrId;
+            }
+            // Marked CR vanished or is no longer PENDING (committed/denied within
+            // the request) — fall through; a brand-new CR is correct.
+        }
+        // No CR from THIS request under THIS action type. A pending CR on the
+        // entity that this request did NOT create at all is genuinely foreign →
+        // 409. A pending CR this request created under a DIFFERENT action type
+        // (e.g. a realm save touching both SET_REALM_ATTRIBUTE and
+        // SET_REALM_CONFIG) is NOT foreign — let it create a second CR keyed to
+        // the new action type rather than 409.
+        IgaChangeRequestEntity existing = findPending(realm.getId(), entityType, entityId);
+        if (existing != null && !isRequestCr(existing.getId())) {
+            throw new IgaConflictException(existing.getId());
+        }
+        IgaChangeRequestEntity created = create(realm, entityType, entityId, actionType, rows, requestedBy);
+        markRequestCr(entityType, entityId, actionType, created.getId());
+        return created.getId();
+    }
+
+    /**
      * Deserialize rowsJson into a List<Map<String, Object>>.
      */
     public List<Map<String, Object>> parseRows(String rowsJson) {
