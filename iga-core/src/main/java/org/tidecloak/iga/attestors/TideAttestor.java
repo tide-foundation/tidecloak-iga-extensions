@@ -110,7 +110,7 @@ public class TideAttestor implements IgaAttestor {
      * VRK to sign with, so the seed is skipped and resolveMode's no-row branch
      * keeps reporting firstAdmin.
      */
-    private static final String TIDE_VENDOR_KEY_PROVIDER_ID = "tide-vendor-key";
+    public static final String TIDE_VENDOR_KEY_PROVIDER_ID = "tide-vendor-key";
     /** Component config keys carrying the VRK authorizer material. */
     private static final String CFG_GVRK = "gVRK";
     private static final String CFG_GVRK_CERTIFICATE = "gVRKCertificate";
@@ -129,8 +129,8 @@ public class TideAttestor implements IgaAttestor {
      * ORK's VRKAuthorizationFlow finds {@code AttestationUnit:1} among the authorizer's
      * allowed models and accepts the sign. {@code authorizer} is hex; its cert base64.
      */
-    private static final String CFG_FIRST_ADMIN_AUTHORIZER = "authorizer";
-    private static final String CFG_FIRST_ADMIN_AUTHORIZER_CERTIFICATE = "authorizerCertificate";
+    public static final String CFG_FIRST_ADMIN_AUTHORIZER = "authorizer";
+    public static final String CFG_FIRST_ADMIN_AUTHORIZER_CERTIFICATE = "authorizerCertificate";
     /** Vendor verifying-key id the admin policy artifact is keyed to. */
     private static final String CFG_VVK_ID = "vvkId";
     /**
@@ -1662,6 +1662,84 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
+     * Reusable BATCH unit-signer — the generalized firstAdmin {@code AttestationUnit:1}
+     * ceremony. Signs N verbatim CBOR attestation-unit envelopes under the firstAdmin
+     * authorizer pack (VRK:1 / AuthorizerPack) in a SINGLE {@code Midgard.SignModel}
+     * round-trip and returns the bare (prefix-free, Base64-decoded) 64-byte VVK
+     * signatures, one per unit, in order.
+     *
+     * <h3>Why one round-trip yields N sigs (batch)</h3>
+     * The ork {@code AttestationUnitSignRequest.Deserialize()} walks every Draft
+     * TideMemory segment, adds one unit per segment, and sets
+     * {@code AmountOfSignaturesRequested = <unit count>}; {@code PrepareDatasToSign()}
+     * emits one {@code PlainSignatureFormat} per unit. So a request whose Draft frames
+     * {@code units[0..N-1]} (via {@link AttestationUnitSignRequest#SetUnits(byte[][])})
+     * comes back as {@code Signatures[0..N-1]}, {@code Signatures[i]} being the VVK
+     * signature over {@code units[i]}'s verbatim CBOR. No per-unit loop needed.
+     *
+     * <h3>Verbatim-bytes contract</h3>
+     * The envelopes are passed through the {@code byte[][]} overload (stores bytes
+     * as-is); the {@code List<?>}/{@code Object} overloads MUST NOT be used (they
+     * re-CBOR-wrap each element through Jackson, corrupting the wire shape). The caller
+     * MUST sign and ship the SAME byte[] it serialized — the ork verifies over the
+     * literal envelope bytes.
+     *
+     * @param unitEnvelopes          one verbatim CBOR unit-envelope per requested sig (>=1)
+     * @param settings               the realm signing settings ({@link #constructSignSettings})
+     * @param firstAdminAuthorizer   hex of the firstAdmin AuthorizerPack ({@code authorizer})
+     * @param firstAdminAuthorizerCert Base64 of its VVK-signature cert ({@code authorizerCertificate})
+     * @param realmName              for log/error context only
+     * @return {@code byte[][]} of bare 64-byte VVK sigs, {@code sigs[i]} over {@code unitEnvelopes[i]}
+     * @throws Exception fail-closed on a missing/short signature response
+     */
+    public static byte[][] signUnitsWithFirstAdminVvk(byte[][] unitEnvelopes,
+                                                      SignRequestSettingsMidgard settings,
+                                                      String firstAdminAuthorizer,
+                                                      String firstAdminAuthorizerCert,
+                                                      String realmName) throws Exception {
+        if (unitEnvelopes == null || unitEnvelopes.length == 0) {
+            return new byte[0][];
+        }
+
+        AttestationUnitSignRequest req = new AttestationUnitSignRequest(VRK_AUTH_FLOW);
+        // VERBATIM CBOR via the byte[][] overload (NOT List<?>/Object — those re-CBOR-wrap
+        // each element through Jackson, corrupting the envelope). One Draft segment per unit.
+        req.SetUnits(unitEnvelopes);
+
+        // Override expiry BEFORE GetDataToAuthorize — the 30s Midgard default is too short
+        // for the ORK ceremony round-trip (+180s).
+        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
+
+        // Attach the firstAdmin authorization triplet (authorization computed LAST over
+        // GetDataToAuthorize, then the firstAdmin authorizer pack + its cert) — exactly the
+        // gold-reference ordering. The firstAdmin pack (AttestationUnit:1 in its ModelIds),
+        // NOT the gVRK/gVRKCertificate MAIN pack which the ORK's VRKAuthorizationFlow
+        // rejects for AttestationUnit:1.
+        req.SetAuthorization(
+                Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
+        req.SetAuthorizer(java.util.HexFormat.of().parseHex(firstAdminAuthorizer));
+        req.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(firstAdminAuthorizerCert));
+
+        SignatureResponse resp = Midgard.SignModel(settings, req);
+        if (resp == null || resp.Signatures == null || resp.Signatures.length < unitEnvelopes.length) {
+            throw new RuntimeException("IGA unit sign: Midgard.SignModel returned "
+                    + (resp == null || resp.Signatures == null ? "no" : String.valueOf(resp.Signatures.length))
+                    + " signatures for " + unitEnvelopes.length + " unit(s) (realm " + realmName + ")");
+        }
+        byte[][] out = new byte[unitEnvelopes.length][];
+        for (int i = 0; i < unitEnvelopes.length; i++) {
+            if (resp.Signatures[i] == null) {
+                throw new RuntimeException("IGA unit sign: null signature at index " + i
+                        + " (realm " + realmName + ")");
+            }
+            // Signatures[i] is Base64 (same form ModelRequest decodes for creation-auth) —
+            // decode to the bare 64-byte VVK sig the consumer ships verbatim.
+            out[i] = java.util.Base64.getDecoder().decode(resp.Signatures[i]);
+        }
+        return out;
+    }
+
+    /**
      * The REAL firstAdmin signing ceremony — single-signer (1-of-1 ADMIN quorum)
      * VVK signature over the producer's {@code user_role_mapping_set} unit-envelope
      * CBOR, routed Midgard → native core → ORK network. The settings build +
@@ -1728,34 +1806,19 @@ public class TideAttestor implements IgaAttestor {
             // re-derives. This IS the draft this ceremony attests.
             byte[] unitCbor = buildUserRoleMappingSetUnitCbor(session, realm, cr);
 
-            AttestationUnitSignRequest req = new AttestationUnitSignRequest(VRK_AUTH_FLOW);
-            // VERBATIM CBOR via the byte[][] overload (NOT List<?>/Object — those
-            // re-CBOR-wrap each element through Jackson, corrupting the envelope).
-            req.SetUnits(new byte[][]{ unitCbor });
+            // Delegate to the reusable batch unit-signer (single-unit case). It runs the
+            // identical firstAdmin VRK:1 / AttestationUnit:1 ceremony and returns one bare
+            // 64-byte VVK signature per unit (prefix-free). Signatures[0] is the VVK sig
+            // over unit[0]'s verbatim CBOR.
+            byte[][] sigs = signUnitsWithFirstAdminVvk(
+                    new byte[][]{ unitCbor }, settings, firstAdminAuthorizer, firstAdminAuthorizerCert,
+                    realm.getName());
 
-            // Override expiry BEFORE GetDataToAuthorize — the 30s Midgard default is
-            // too short for the ORK ceremony round-trip (+180s).
-            req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
-
-            // Attach the firstAdmin authorization triplet (authorization computed LAST
-            // over GetDataToAuthorize, then the firstAdmin authorizer pack + its cert)
-            // — exactly the gold-reference ordering.
-            req.SetAuthorization(
-                    Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
-            req.SetAuthorizer(java.util.HexFormat.of().parseHex(firstAdminAuthorizer));
-            req.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(firstAdminAuthorizerCert));
-
-            SignatureResponse resp = Midgard.SignModel(settings, req);
-            if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
-                    || resp.Signatures[0] == null) {
-                throw new RuntimeException("IGA firstAdmin sign: Midgard.SignModel returned no signature "
-                        + "for realm " + realm.getName());
-            }
             log.infof("IGA firstAdmin GRANT_ROLES signed via Midgard VVK unit ceremony (realm %s).",
                     realm.getName());
             // Preserve the firstAdmin stamp shape: prefix + the real ORK signature
-            // (the VVK signature over unit[0]'s CBOR).
-            return FIRSTADMIN_SIG_PREFIX + resp.Signatures[0];
+            // (the VVK signature over unit[0]'s CBOR), Base64 of the bare sig bytes.
+            return FIRSTADMIN_SIG_PREFIX + java.util.Base64.getEncoder().encodeToString(sigs[0]);
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
@@ -1945,7 +2008,7 @@ public class TideAttestor implements IgaAttestor {
      * come from env vars; a missing/zero value is fatal (the ORK ceremony is
      * undefined without a real threshold).
      */
-    private static SignRequestSettingsMidgard constructSignSettings(MultivaluedHashMap<String, String> config)
+    public static SignRequestSettingsMidgard constructSignSettings(MultivaluedHashMap<String, String> config)
             throws Exception {
         String clientSecret = config.getFirst(CFG_CLIENT_SECRET);
         if (clientSecret == null || clientSecret.isBlank()) {
