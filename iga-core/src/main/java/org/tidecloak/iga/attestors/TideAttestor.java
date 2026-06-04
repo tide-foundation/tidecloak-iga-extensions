@@ -1192,17 +1192,25 @@ public class TideAttestor implements IgaAttestor {
         }
         try {
             SignRequestSettingsMidgard settings = constructSignSettings(config);
-            String firstAdminAuthorizer = config.getFirst(CFG_FIRST_ADMIN_AUTHORIZER);
-            String firstAdminAuthorizerCert = config.getFirst(CFG_FIRST_ADMIN_AUTHORIZER_CERTIFICATE);
-            if (firstAdminAuthorizer == null || firstAdminAuthorizer.isBlank()
-                    || firstAdminAuthorizerCert == null || firstAdminAuthorizerCert.isBlank()) {
+            // The ORK's VRKAuthorizationFlow.AuthorizeAsync authorizes the OUTER request id
+            // that InitializeTideRequestWithVrk builds — "TideRequestInitialization:1" — NOT the
+            // inner APPROVAL_MODEL_ID ("AttestationUnit:1", which is only embedded as the seg-2
+            // draft modelId and merely existence-checked). The MAIN gVRK pack lists
+            // TideRequestInitialization:1 in its ModelIds; the firstAdmin pack does not. So the
+            // creation-auth wrapper must be authorized by the MAIN gVRK pack, not the firstAdmin
+            // pack. (signUnitsWithFirstAdminVvk stays on the firstAdmin pack — it signs a real
+            // AttestationUnit:1 OUTER request, which the firstAdmin pack does allow.)
+            String gVrk = config.getFirst(CFG_GVRK);
+            String gVrkCert = config.getFirst(CFG_GVRK_CERTIFICATE);
+            if (gVrk == null || gVrk.isBlank()
+                    || gVrkCert == null || gVrkCert.isBlank()) {
                 throw new RuntimeException("IGA multiAdmin approval: tide-vendor-key component is missing "
-                        + "firstAdmin authorizer material (authorizer/authorizerCertificate) for realm "
+                        + "MAIN gVRK authorizer material (gVRK/gVRKCertificate) for realm "
                         + realm.getName());
             }
             ModelRequest.InitializeTideRequestWithVrk(req, settings, APPROVAL_MODEL_ID,
-                    java.util.HexFormat.of().parseHex(firstAdminAuthorizer),
-                    java.util.Base64.getDecoder().decode(firstAdminAuthorizerCert));
+                    java.util.HexFormat.of().parseHex(gVrk),
+                    java.util.Base64.getDecoder().decode(gVrkCert));
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
