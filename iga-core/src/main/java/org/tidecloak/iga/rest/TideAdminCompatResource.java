@@ -1,5 +1,6 @@
 package org.tidecloak.iga.rest;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.inject.Vetoed;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
@@ -8,6 +9,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
+import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.AdminRoles;
@@ -27,6 +29,7 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.organization.OrganizationProvider;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.keycloak.storage.UserStorageUtil;
+import org.tidecloak.iga.crypto.SecretKeys;
 import org.tidecloak.iga.replay.SidecarCapExceededException;
 import org.tidecloak.iga.services.IgaAdoptCancel;
 import org.tidecloak.iga.services.IgaAdoptScan;
@@ -60,6 +63,12 @@ public class TideAdminCompatResource {
     private static final Logger logger = Logger.getLogger(TideAdminCompatResource.class);
     private static final String IGA_ATTRIBUTE = "isIGAEnabled";
     private static final String INCLUDE_SYSTEM_ATTRIBUTE = "iga.adopt.includeSystem";
+    private static final String IGA_ATTESTOR_ATTRIBUTE = "iga.attestor";
+    private static final String TIDE_VENDOR_KEY_PROVIDER_ID = "tide-vendor-key";
+    private static final String CFG_CLIENT_ID = "clientId";
+    private static final String CFG_CLIENT_SECRET = "clientSecret";
+    private static final String CFG_VVK_ID = "vvkId";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final KeycloakSession session;
     private final RealmModel realm;
@@ -96,6 +105,57 @@ public class TideAdminCompatResource {
                 tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
                 logger.infof("IGA toggle-on: created approver role 'tide-realm-admin' (composite of %s, tideThreshold=1) on realm-management for realm %s before isIGAEnabled flip",
                         AdminRoles.REALM_ADMIN, realm.getName());
+            }
+        }
+
+        // OFF→ON, Tide realm: a realm's defaultSignatureAlgorithm = EdDSA iff
+        // (a `tide` IdP exists) AND (IGA is on). The IGA toggle is therefore the
+        // single place that sets EdDSA on enable (and reverts it to RS256 on
+        // disable — see the ON→OFF branch below). This also sets
+        // iga.attestor=tide so the realm enters firstAdmin/multiAdmin Tide mode
+        // (no production code set this before — it was a manual step). Both
+        // writes happen BEFORE the isIGAEnabled flip (so they are plain model
+        // writes, not captured as CRs) and BEFORE the ADOPT scan (so the
+        // firstAdmin authorizer can seed against attestor=tide). Idempotent: a
+        // re-run on an already-tide realm is a no-op for both. Tide detection
+        // mirrors the ON→OFF branch (tide IdP + tide-vendor-key component).
+        if (!current && next) {
+            IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
+            ComponentModel tideVendorKey = realm.getComponentsStream()
+                    .filter(x -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(x.getProviderId()))
+                    .findFirst()
+                    .orElse(null);
+            if (tideIdp != null && tideVendorKey != null) {
+                // (a) iga.attestor=tide — must be set before the ADOPT scan so
+                // the firstAdmin authorizer can seed. Write via the suppressed
+                // helper for consistency (IGA is still OFF here, so it is a
+                // plain realm.setAttribute under the IGA_REPLAY_ACTIVE guard).
+                if (!"tide".equals(realm.getAttribute(IGA_ATTESTOR_ATTRIBUTE))) {
+                    writeIgaAttributeDirect(IGA_ATTESTOR_ATTRIBUTE, "tide");
+                    logger.infof("IGA toggle-on: set iga.attestor=tide for realm %s (firstAdmin/multiAdmin Tide mode)",
+                            realm.getName());
+                }
+
+                // (b) defaultSignatureAlgorithm=EdDSA — GUARDED on the VRK
+                // being ACTIVE. EdDSA with an empty/unprovisioned active key
+                // breaks all signing, so we only switch when the tide-vendor-key
+                // config carries live active-key material: a non-empty clientId
+                // (the active EdDSA public point), a non-empty vvkId (the
+                // active-VRK proxy), AND a non-blank activeVrk parsed from the
+                // clientSecret SecretKeys blob. If active → switch to EdDSA
+                // (only if not already EdDSA). If not active → keep
+                // iga.attestor=tide set, but defer the EdDSA switch and warn.
+                if (isVrkActive(tideVendorKey)) {
+                    String currentAlgorithm = realm.getDefaultSignatureAlgorithm();
+                    if (!"EdDSA".equalsIgnoreCase(currentAlgorithm)) {
+                        writeDefaultSignatureAlgorithmDirect("EdDSA");
+                        logger.infof("IGA toggle-on: VRK active, default signature algorithm set to EdDSA for realm %s",
+                                realm.getName());
+                    }
+                } else {
+                    logger.warnf("IGA toggle-on: VRK not yet active for realm %s, deferring EdDSA switch (iga.attestor=tide still set)",
+                            realm.getName());
+                }
             }
         }
 
@@ -388,6 +448,51 @@ public class TideAdminCompatResource {
             } else {
                 session.setAttribute("IGA_REPLAY_ACTIVE", prior);
             }
+        }
+    }
+
+    /**
+     * VRK-active gate for the OFF→ON EdDSA switch. Switching a realm's default
+     * signature algorithm to EdDSA before the realm's active VRK is
+     * provisioned breaks ALL signing (EdDSA selected with an empty active key),
+     * so the toggle only flips to EdDSA when the {@code tide-vendor-key}
+     * component config proves the active key material is present:
+     *
+     * <ul>
+     *   <li>{@code clientId} non-empty — the active EdDSA public point;</li>
+     *   <li>{@code vvkId} non-empty — the active-VRK proxy;</li>
+     *   <li>{@code activeVrk} non-blank — parsed from the {@code clientSecret}
+     *       {@link SecretKeys} JSON blob (mirrors how
+     *       {@code TideAttestor.isRealSigningCapable} reads it); a
+     *       {@code clientSecret='{}'} fails here.</li>
+     * </ul>
+     *
+     * <p>Non-throwing: a missing config or an unparseable {@code clientSecret}
+     * is treated as "not active" (defer EdDSA), never an error — consistent
+     * with the firstAdmin capability probe.</p>
+     */
+    private static boolean isVrkActive(ComponentModel tideVendorKey) {
+        if (tideVendorKey == null || tideVendorKey.getConfig() == null) {
+            return false;
+        }
+        MultivaluedHashMap<String, String> config = tideVendorKey.getConfig();
+        String clientId = config.getFirst(CFG_CLIENT_ID);
+        if (clientId == null || clientId.isBlank()) {
+            return false;
+        }
+        String vvkId = config.getFirst(CFG_VVK_ID);
+        if (vvkId == null || vvkId.isBlank()) {
+            return false;
+        }
+        String clientSecret = config.getFirst(CFG_CLIENT_SECRET);
+        if (clientSecret == null || clientSecret.isBlank()) {
+            return false;
+        }
+        try {
+            SecretKeys secretKeys = MAPPER.readValue(clientSecret, SecretKeys.class);
+            return secretKeys != null && secretKeys.activeVrk != null && !secretKeys.activeVrk.isBlank();
+        } catch (Exception parseFail) {
+            return false; // unparseable clientSecret → treat as not-active (defer EdDSA).
         }
     }
 
