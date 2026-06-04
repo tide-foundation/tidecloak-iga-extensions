@@ -8,6 +8,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
+import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.AdminRoles;
 import org.keycloak.models.Constants;
@@ -287,6 +288,21 @@ public class TideAdminCompatResource {
             // state. Symmetric to the OFF→ON call above and the user-cache
             // eviction on this same branch.
             evictRealmCache(session, realm);
+
+            // Restore old IGA behavior (dropped during decoupling): when IGA is disabled on a Tide realm,
+            // default signature algorithm cannot remain EdDSA (no Tide signing path) -> revert to RS256.
+            IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
+            ComponentModel tideVendorKey = realm.getComponentsStream()
+                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))
+                    .findFirst()
+                    .orElse(null);
+            if (tideIdp != null && tideVendorKey != null) {
+                String currentAlgorithm = realm.getDefaultSignatureAlgorithm();
+                if ("EdDSA".equalsIgnoreCase(currentAlgorithm)) {
+                    writeDefaultSignatureAlgorithmDirect("RS256");
+                    logger.info("IGA disabled, default signature algorithm reverted to RS256");
+                }
+            }
         }
 
         return Response.ok(body).build();
@@ -334,6 +350,38 @@ public class TideAdminCompatResource {
         session.setAttribute("IGA_REPLAY_ACTIVE", "true");
         try {
             realm.setAttribute(name, value);
+        } finally {
+            if (prior == null) {
+                session.removeAttribute("IGA_REPLAY_ACTIVE");
+            } else {
+                session.setAttribute("IGA_REPLAY_ACTIVE", prior);
+            }
+        }
+    }
+
+    /**
+     * Sibling of {@link #writeIgaAttributeDirect}: write the realm's default
+     * signature algorithm while bypassing the IGA realm-adapter capture
+     * interceptor.
+     *
+     * <p>Prior investigation found {@link
+     * org.tidecloak.iga.providers.IgaRealmAdapter} does NOT override
+     * {@code setDefaultSignatureAlgorithm}, so this write would pass straight
+     * through and is not captured. We still wrap it under the same
+     * {@code IGA_REPLAY_ACTIVE} suppression as {@link #writeIgaAttributeDirect}
+     * for safety and consistency: should the adapter ever start intercepting
+     * this setter, the bypass already declares "this write is the act of
+     * governance itself; do not capture it". The try/finally restore is
+     * mandatory for the same reason documented on {@link
+     * #writeIgaAttributeDirect} — a lingering IGA_REPLAY_ACTIVE on this
+     * request-scoped session would silently disable all subsequent IGA
+     * capture for the rest of the request.</p>
+     */
+    private void writeDefaultSignatureAlgorithmDirect(String value) {
+        Object prior = session.getAttribute("IGA_REPLAY_ACTIVE");
+        session.setAttribute("IGA_REPLAY_ACTIVE", "true");
+        try {
+            realm.setDefaultSignatureAlgorithm(value);
         } finally {
             if (prior == null) {
                 session.removeAttribute("IGA_REPLAY_ACTIVE");
