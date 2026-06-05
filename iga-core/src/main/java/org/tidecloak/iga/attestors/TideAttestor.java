@@ -486,15 +486,39 @@ public class TideAttestor implements IgaAttestor {
                 && ACTION_GRANT_ROLES.equals(cr.getActionType());
         String sig = sign(session, realm, mode, realCeremonyEligible, cr, canonical);
 
-        // Transition trigger: on a successful firstAdmin-mode sign
-        // of the tide-realm-admin policy CR, write back policySig AND flip the
-        // realm's authorizer mode to multiAdmin — in the SAME JPA transaction as
-        // the dispatcher's ATTESTATION write. Null-safe + idempotent:
-        // already-multiAdmin never reaches here (gated on firstAdmin), and a
-        // redundant flip is a harmless no-op.
+        // Transition trigger: on a successful firstAdmin-mode sign of the
+        // tide-realm-admin policy CR, sign+commit the M0 admin Policy and ONLY
+        // THEN flip the realm's authorizer mode to multiAdmin — in the SAME JPA
+        // transaction as the dispatcher's ATTESTATION write.
+        //
+        // ★ FLIP IS NOW GATED ON A COMMITTED, SIGNED M0 POLICY. The flip burns
+        // the firstAdmin AuthorizerPack on the ORK side (ork PolicySignRequest.cs:102
+        // revokes it), and that pack is the ONLY pack carrying Policy:1 — i.e. the
+        // ONLY pack that can sign the M0 admin Policy. So the ordering is strict:
+        //   sign M0 policy (firstAdmin pack, ALIVE) -> commit/persist the policy row
+        //   -> THEN flip (which burns the pack).
+        // The pack must NEVER be burned before the policy is committed, and the realm
+        // must NEVER flip without a signed+committed M0 policy (that exact mis-order
+        // produced myrealm's broken state: flipped, no M0 policy, every subsequent
+        // multiAdmin approval-model build threw APPROVAL_MODEL_BUILD_FAILED, and the
+        // pack was gone so it could never be re-signed). writeBackPolicySig now
+        // RETURNS whether a signed M0 policy was actually committed: if it was not
+        // (the non-capable role-unresolvable skip path), the realm STAYS firstAdmin
+        // — the pack is preserved so a later attempt can still sign+commit+flip. A
+        // capable-realm sign FAILURE throws out of writeBackPolicySig (fail-closed)
+        // and aborts combineFinal before the flip — the realm stays firstAdmin and
+        // the error surfaces. Idempotent: already-multiAdmin never reaches here
+        // (gated on firstAdmin).
         if (isPolicyBootstrap) {
-            writeBackPolicySig(session, realm, cr, sig);
-            flipModeToMultiAdmin(session, realm);
+            boolean policyCommitted = writeBackPolicySig(session, realm, cr, sig);
+            if (policyCommitted) {
+                flipModeToMultiAdmin(session, realm);
+            } else {
+                log.warnf("IGA firstAdmin policy bootstrap: realm %s did NOT commit a signed M0 admin "
+                        + "Policy (no tide-realm-admin role to key the row); STAYING firstAdmin — the "
+                        + "firstAdmin pack is preserved so the flip can be retried once the policy commits.",
+                        realm.getName());
+            }
         } else if (MODE_MULTI_ADMIN.equals(mode)) {
             // multiAdmin steady-state. If this committing CR
             // changes the active tide-realm-admin set (grant/revoke of the role), the
@@ -610,8 +634,19 @@ public class TideAttestor implements IgaAttestor {
      *       (the VVK-unit / stub GRANT signature produced by {@link #combineFinal}),
      *       leaving {@code POLICY} as upserted.</li>
      * </ul>
+     *
+     * <h3>Flip gate (return contract)</h3>
+     * Returns {@code true} iff a signed M0 admin Policy row was actually committed
+     * (capable: real VVK-signed; non-capable: stub-bodied + bootstrap-sig). The caller
+     * ({@link #combineFinal}) flips firstAdmin→multiAdmin ONLY on {@code true} — the flip
+     * burns the firstAdmin pack (the only Policy:1 signer), so it must never fire without
+     * a committed policy. Returns {@code false} ONLY on the one non-fatal skip: a
+     * NON-capable realm whose tide-realm-admin role cannot be resolved to key the row — no
+     * policy committed, so the realm STAYS firstAdmin (pack preserved for a retry). A
+     * CAPABLE-realm sign/key failure THROWS (fail-closed) rather than returning, aborting
+     * combineFinal before any flip.
      */
-    private void writeBackPolicySig(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr,
+    boolean writeBackPolicySig(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr,
                                     String sig) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
@@ -643,7 +678,7 @@ public class TideAttestor implements IgaAttestor {
             em.flush();
             log.infof("IGA firstAdmin policy bootstrap: realm %s installed REAL VVK-signed admin "
                     + "threshold Policy (threshold %d).", realm.getName(), threshold);
-            return;
+            return true; // signed M0 policy committed → caller may flip
         }
 
         // NON-capable: pre-M0 behaviour — stamp the bootstrap GRANT signature only.
@@ -660,15 +695,16 @@ public class TideAttestor implements IgaAttestor {
                 log.infof("IGA firstAdmin policy bootstrap (non-capable): realm %s has no "
                         + "tide-realm-admin role to key the admin Policy row; policySig write-back skipped.",
                         realm.getName());
-                return;
+                return false; // NO policy committed → caller must NOT flip; stay firstAdmin
             }
             em.flush();
-            return;
+            return true; // stub M0 policy row committed → caller may flip
         }
         policy.setPolicySig(sig);
         policy.setUpdatedAt(System.currentTimeMillis());
         // managed entity — no explicit persist needed; flush keeps it in-tx.
         em.flush();
+        return true; // existing M0 policy row re-stamped + committed → caller may flip
     }
 
     /**
@@ -722,7 +758,7 @@ public class TideAttestor implements IgaAttestor {
      * The lazy seed guarantees the row exists by the time
      * this runs (record() fires before combineFinal), but we guard defensively.
      */
-    private void flipModeToMultiAdmin(KeycloakSession session, RealmModel realm) {
+    void flipModeToMultiAdmin(KeycloakSession session, RealmModel realm) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         IgaAuthorizerEntity row = em.createNamedQuery("IgaAuthorizer.findByRealm", IgaAuthorizerEntity.class)
                 .setParameter("realmId", realm.getId())
@@ -814,6 +850,17 @@ public class TideAttestor implements IgaAttestor {
         // pre-M0 stub (hand-rolled JSON body + DUMMY_SIG_PREFIX digest) — byte-for-byte
         // the previous behaviour. This regen fires ONLY from combineFinal's multiAdmin
         // branch, so when not capable the sig is the multiAdmin DUMMY_SIG_PREFIX as before.
+        //
+        // ★★ M3 GAP (KNOWN — do NOT fix here) ★★
+        // On a REAL-SIGNING-CAPABLE realm, buildSignedAdminPolicyArtifact -> signAdminPolicyWithVvk
+        // signs the Policy:1 admin Policy with the firstAdmin AuthorizerPack (CFG_FIRST_ADMIN_AUTHORIZER /
+        // CFG_FIRST_ADMIN_AUTHORIZER_CERTIFICATE — the only pack carrying Policy:1). But this regen runs
+        // ONLY in multiAdmin mode, AFTER the flip BURNED that pack (ork PolicySignRequest.cs:102 revokes
+        // it). So on a provisioned realm the threshold-change re-sign would attempt Policy:1 with a
+        // REVOKED pack → ORK rejects → fail-closed throw → the membership CR commit fails. The M3 fix
+        // needs a quorum/Policy-flow signer (NOT the firstAdmin pack) for the steady-state re-sign.
+        // Today this is latent because real-signing-capable multiAdmin realms with a moving threshold
+        // are not yet exercised; flagged for the M3 work item.
         AdminPolicyArtifact artifact = buildSignedAdminPolicyArtifact(session, realm, newThreshold, vvkId);
 
         IgaRolePolicyEntity result = upsertAdminPolicyRow(session, realm, policy,
