@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.9.0: Per-unit-type ATTESTATION columns for the uniform Design B (PR-A).
+
+      Until now an owner row carried a SINGLE shared ATTESTATION column even
+      though several producer attestation-units are owned by the same row
+      (e.g. a CLIENT row owns the client_config NODE, the client_mapper_set,
+      the client_scope_assignment_set and a client-owned scope_role_allowlist).
+      A single column cannot hold per-unit-type signatures. This changelog adds
+      one clearly-named column per still-column-less producer unit type, on its
+      OWNER entity, so commit-time signing can stamp each unit independently.
+
+      Columns added (unit number = producer AttestationUnitType ordinal):
+        REALM        : REALM_CONFIG_ATTESTATION          (unit 0  realm_config)
+        REALM        : REALM_DEFAULT_GROUPS_ATTESTATION  (unit 15 realm_default_groups_set)
+        CLIENT       : CLIENT_MAPPER_SET_ATTESTATION     (unit 12 client_mapper_set)
+        CLIENT       : CLIENT_SCOPE_ASSIGNMENT_ATTESTATION (unit 11 client_scope_assignment_set)
+        CLIENT       : SCOPE_ROLE_ALLOWLIST_ATTESTATION  (unit 14 scope_role_allowlist, client-owned)
+        CLIENT_SCOPE : CLIENT_SCOPE_MAPPER_SET_ATTESTATION (unit 13 client_scope_mapper_set)
+        CLIENT_SCOPE : SCOPE_ROLE_ALLOWLIST_ATTESTATION  (unit 14 scope_role_allowlist, scope-owned)
+        ORG          : ORG_DOMAIN_ATTESTATION            (unit 17 org_domain_set)
+
+      Unit 14 (scope_role_allowlist) has TWO owners (a client parent and a
+      client-scope parent in the producer), so it gets a physical column on
+      BOTH the CLIENT and CLIENT_SCOPE tables — 8 physical columns for 7
+      column-less unit types.
+
+      The matching JPA fields on CLIENT/CLIENT_SCOPE/ORG are added in
+      tidecloak-override (ClientEntity / ClientScopeEntity / OrganizationEntity).
+      The REALM table's two columns are DDL-only here: RealmEntity is NOT forked
+      in tidecloak-override, and the realm-scoped units (0, 15) are deferred to
+      PR-A.2 for both signing and the entity-field mapping — the columns are
+      provisioned now so PR-A.2 only adds the field + the commit/login wiring.
+
+      All columns mirror the existing ATTESTATION column shape: VARCHAR(2048),
+      nullable.
+    -->
+
+    <changeSet id="iga-2.9.0-1" author="tidecloak-iga">
+        <addColumn tableName="REALM">
+            <column name="REALM_CONFIG_ATTESTATION" type="VARCHAR(2048)"/>
+            <column name="REALM_DEFAULT_GROUPS_ATTESTATION" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <changeSet id="iga-2.9.0-2" author="tidecloak-iga">
+        <addColumn tableName="CLIENT">
+            <column name="CLIENT_MAPPER_SET_ATTESTATION" type="VARCHAR(2048)"/>
+            <column name="CLIENT_SCOPE_ASSIGNMENT_ATTESTATION" type="VARCHAR(2048)"/>
+            <column name="SCOPE_ROLE_ALLOWLIST_ATTESTATION" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <changeSet id="iga-2.9.0-3" author="tidecloak-iga">
+        <addColumn tableName="CLIENT_SCOPE">
+            <column name="CLIENT_SCOPE_MAPPER_SET_ATTESTATION" type="VARCHAR(2048)"/>
+            <column name="SCOPE_ROLE_ALLOWLIST_ATTESTATION" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <changeSet id="iga-2.9.0-4" author="tidecloak-iga">
+        <addColumn tableName="ORG">
+            <column name="ORG_DOMAIN_ATTESTATION" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>

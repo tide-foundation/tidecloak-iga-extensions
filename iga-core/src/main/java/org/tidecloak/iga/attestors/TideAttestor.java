@@ -22,6 +22,10 @@ import org.midgard.models.RequestExtensions.PolicySignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
 import org.tidecloak.iga.crypto.SecretKeys;
+import org.tidecloak.iga.producer.RealmAttestationExporter;
+import org.tidecloak.iga.producer.units.GroupRoleMappingSetUnit;
+import org.tidecloak.iga.producer.units.RoleCompositeChildrenSetUnit;
+import org.tidecloak.iga.producer.units.UserGroupMembershipSetUnit;
 import org.tidecloak.iga.producer.units.UserRoleMappingSetUnit;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaAuthorizerEntity;
@@ -159,6 +163,21 @@ public class TideAttestor implements IgaAttestor {
     /** GRANT_ROLES CR row keys. */
     private static final String ROW_USER_ID = "USER_ID";
     private static final String ROW_ROLE_ID = "ROLE_ID";
+
+    // SET-unit CR row keys (mirror IgaReplayDispatcher / TideSetResolver linkages).
+    private static final String ROW_USER = "USER";            // JOIN/LEAVE_GROUPS owner
+    private static final String ROW_GROUP = "GROUP";          // JOIN/LEAVE_GROUPS member, GROUP_*_ROLES owner
+    private static final String ROW_ROLE = "ROLE";            // GROUP_*_ROLES member
+    private static final String ROW_COMPOSITE = "COMPOSITE";  // ADD/REMOVE_COMPOSITE owner (parent role)
+    private static final String ROW_CHILD_ROLE = "CHILD_ROLE";// ADD/REMOVE_COMPOSITE member (child role)
+
+    // SET-unit actionTypes whose commit signs the producer set-envelope CBOR.
+    private static final String ACTION_JOIN_GROUPS = "JOIN_GROUPS";
+    private static final String ACTION_LEAVE_GROUPS = "LEAVE_GROUPS";
+    private static final String ACTION_GROUP_GRANT_ROLES = "GROUP_GRANT_ROLES";
+    private static final String ACTION_GROUP_REVOKE_ROLES = "GROUP_REVOKE_ROLES";
+    private static final String ACTION_ADD_COMPOSITE = "ADD_COMPOSITE";
+    private static final String ACTION_REMOVE_COMPOSITE = "REMOVE_COMPOSITE";
 
     // -------------------------------------------------------------------------
     // M1: multiAdmin two-phase approval ModelRequest (doken-collection seam)
@@ -483,7 +502,7 @@ public class TideAttestor implements IgaAttestor {
         // is GRANT_ROLES. The ceremony rebuilds its OWN unit CBOR from `cr`; `canonical`
         // is only the stub fallback's input (and every non-eligible path's bytes).
         boolean realCeremonyEligible = !isPolicyBootstrap
-                && ACTION_GRANT_ROLES.equals(cr.getActionType());
+                && isProducerEnvelopeSignedAction(cr.getActionType());
         String sig = sign(session, realm, mode, realCeremonyEligible, cr, canonical);
 
         // Transition trigger: on a successful firstAdmin-mode sign of the
@@ -1221,12 +1240,12 @@ public class TideAttestor implements IgaAttestor {
                     + "Policy:1 approval request for CR " + cr.getId());
         }
 
-        // The action's draft: reuse the firstAdmin unit-CBOR for GRANT_ROLES so the ork
-        // TVE re-derives identical bytes; otherwise the regular canonical (the latter is
-        // a dev/non-real-signing carry-through — only GRANT_ROLES is exercised by the live
-        // Policy:1 round-trip).
-        byte[] unitCbor = ACTION_GRANT_ROLES.equals(cr.getActionType())
-                ? buildUserRoleMappingSetUnitCbor(session, realm, cr)
+        // The action's draft: reuse the producer unit-CBOR for any producer-envelope-
+        // signed action (set units) so the ork TVE re-derives identical bytes; otherwise
+        // the regular canonical (a dev/non-real-signing carry-through — only the
+        // producer-envelope actions are exercised by the live Policy:1 round-trip).
+        byte[] unitCbor = isProducerEnvelopeSignedAction(cr.getActionType())
+                ? buildUnitCbor(session, realm, cr)
                 : canonicalForRegularCr(session, cr);
 
         // M2: frame the draft via the proper Midgard AttestationUnitSignRequest (NOT a raw
@@ -1920,10 +1939,12 @@ public class TideAttestor implements IgaAttestor {
                         + realm.getName());
             }
 
-            // The producer's user_role_mapping_set unit-envelope CBOR for the CR's
-            // affected user (POST-change role set) — the exact bytes the ork TVE
-            // re-derives. This IS the draft this ceremony attests.
-            byte[] unitCbor = buildUserRoleMappingSetUnitCbor(session, realm, cr);
+            // The producer's unit-envelope CBOR for the CR's affected owner
+            // (POST-change set) — the exact bytes the ork TVE re-derives. This IS the
+            // draft this ceremony attests. Dispatched per actionType
+            // (user_role_mapping_set, user_group_membership_set, group_role_mapping_set,
+            // role_composite_children_set), each reusing the producer's own builder.
+            byte[] unitCbor = buildUnitCbor(session, realm, cr);
 
             // Delegate to the reusable batch unit-signer (single-unit case). It runs the
             // identical firstAdmin VRK:1 / AttestationUnit:1 ceremony and returns one bare
@@ -2116,6 +2137,201 @@ public class TideAttestor implements IgaAttestor {
         roleIds.sort(Comparator.naturalOrder());
 
         return new UserRoleMappingSetUnit(realm.getId(), userId, roleIds).serialize();
+    }
+
+    // -------------------------------------------------------------------------
+    // Generalized producer-envelope CBOR builder (PR-A: SET units)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Is this actionType signed at commit by re-building + signing the PRODUCER's own
+     * unit-envelope CBOR (so the ork TVE re-derives byte-identical bytes), rather than
+     * by the legacy SHA-256 stub over a hand-rolled canonical?
+     *
+     * <p>Covered today (PR-A): the {@code user_role_mapping_set} template plus the three
+     * SET units whose OWNER entity already exists at commit time (the edge is what the CR
+     * adds/removes) — so the post-change member set is {@code pre-set ± delta}, exactly
+     * like the proven {@code GRANT_ROLES} path. NODE creates (whose entity does NOT exist
+     * until replay) and the DERIVED/realm-scoped sets are deferred to PR-A.2.
+     */
+    static boolean isProducerEnvelopeSignedAction(String actionType) {
+        if (actionType == null) {
+            return false;
+        }
+        switch (actionType) {
+            case ACTION_GRANT_ROLES:            // user_role_mapping_set (template)
+            case ACTION_JOIN_GROUPS:            // user_group_membership_set (add)
+            case ACTION_LEAVE_GROUPS:           // user_group_membership_set (remove)
+            case ACTION_GROUP_GRANT_ROLES:      // group_role_mapping_set (add)
+            case ACTION_GROUP_REVOKE_ROLES:     // group_role_mapping_set (remove)
+            case ACTION_ADD_COMPOSITE:          // role_composite_children_set (add)
+            case ACTION_REMOVE_COMPOSITE:       // role_composite_children_set (remove)
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Build the producer unit-envelope CBOR for a producer-envelope-signed CR, reusing
+     * the SAME {@link RealmAttestationExporter} builder the login/export path uses so the
+     * bytes are byte-identical to the ork-side re-derivation. Dispatched per actionType.
+     */
+    byte[] buildUnitCbor(KeycloakSession session, RealmModel realm,
+                                 IgaChangeRequestEntity cr) {
+        String actionType = cr.getActionType();
+        switch (actionType) {
+            case ACTION_GRANT_ROLES:
+                return buildUserRoleMappingSetUnitCbor(session, realm, cr);
+            case ACTION_JOIN_GROUPS:
+            case ACTION_LEAVE_GROUPS:
+                return buildUserGroupMembershipSetUnitCbor(session, realm, cr);
+            case ACTION_GROUP_GRANT_ROLES:
+            case ACTION_GROUP_REVOKE_ROLES:
+                return buildGroupRoleMappingSetUnitCbor(session, realm, cr);
+            case ACTION_ADD_COMPOSITE:
+            case ACTION_REMOVE_COMPOSITE:
+                return buildRoleCompositeChildrenSetUnitCbor(session, realm, cr);
+            default:
+                throw new RuntimeException("IGA firstAdmin sign: actionType " + actionType
+                        + " has no producer-envelope unit builder (CR " + cr.getId() + ")");
+        }
+    }
+
+    /**
+     * Apply the CR's per-row member delta to a pre-change owner set, in PRODUCER sort
+     * order. {@code addAction=true} → JOIN/GRANT/ADD (member ids appended iff absent);
+     * {@code addAction=false} → LEAVE/REVOKE/REMOVE (member ids dropped). The result is
+     * sorted ascending to byte-match the producer's {@code ORDER BY} emission (the VVK
+     * sig is verified over the LITERAL envelope bytes, so member ORDER is load-bearing).
+     */
+    private static List<String> applyMemberDelta(List<String> preSet,
+                                                 LinkedHashSet<String> deltaMembers,
+                                                 boolean addAction) {
+        List<String> members = new ArrayList<>(preSet);
+        if (addAction) {
+            for (String m : deltaMembers) {
+                if (!members.contains(m)) {
+                    members.add(m);
+                }
+            }
+        } else {
+            members.removeAll(deltaMembers);
+        }
+        members.sort(Comparator.naturalOrder());
+        return members;
+    }
+
+    /**
+     * {@code user_group_membership_set} (unit 14) — owner = user; member = group id.
+     * Pre-set read via {@link RealmAttestationExporter#userGroupMembershipSet} (unfiltered,
+     * onlyAttested=false) ± the CR's JOIN/LEAVE delta, then re-serialized.
+     */
+    byte[] buildUserGroupMembershipSetUnitCbor(KeycloakSession session, RealmModel realm,
+                                                       IgaChangeRequestEntity cr) {
+        List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
+        boolean addAction = ACTION_JOIN_GROUPS.equals(cr.getActionType());
+
+        String userId = cr.getEntityId();
+        LinkedHashSet<String> deltaGroups = new LinkedHashSet<>();
+        for (Map<String, Object> row : rows) {
+            String rowUser = str(row, ROW_USER);
+            if (userId == null) {
+                userId = rowUser;
+            }
+            if (rowUser != null && rowUser.equals(userId)) {
+                String groupId = str(row, ROW_GROUP);
+                if (groupId != null) {
+                    deltaGroups.add(groupId);
+                }
+            }
+        }
+        if (userId == null) {
+            throw new RuntimeException("IGA firstAdmin sign: " + cr.getActionType() + " CR "
+                    + cr.getId() + " carries no resolvable USER for user_group_membership_set");
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<String> groupIds = applyMemberDelta(
+                RealmAttestationExporter.userGroupMembershipSet(em, userId, false),
+                deltaGroups, addAction);
+        return new UserGroupMembershipSetUnit(realm.getId(), userId, groupIds).serialize();
+    }
+
+    /**
+     * {@code group_role_mapping_set} (unit 10) — owner = group; member = role id.
+     * Pre-set via {@link RealmAttestationExporter#groupRoleMappingSet} ± the CR's
+     * GROUP_GRANT/REVOKE_ROLES delta, re-serialized.
+     */
+    byte[] buildGroupRoleMappingSetUnitCbor(KeycloakSession session, RealmModel realm,
+                                                    IgaChangeRequestEntity cr) {
+        List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
+        boolean addAction = ACTION_GROUP_GRANT_ROLES.equals(cr.getActionType());
+
+        String groupId = cr.getEntityId();
+        LinkedHashSet<String> deltaRoles = new LinkedHashSet<>();
+        for (Map<String, Object> row : rows) {
+            String rowGroup = str(row, ROW_GROUP);
+            if (groupId == null) {
+                groupId = rowGroup;
+            }
+            if (rowGroup != null && rowGroup.equals(groupId)) {
+                String roleId = str(row, ROW_ROLE);
+                if (roleId != null) {
+                    deltaRoles.add(roleId);
+                }
+            }
+        }
+        if (groupId == null) {
+            throw new RuntimeException("IGA firstAdmin sign: " + cr.getActionType() + " CR "
+                    + cr.getId() + " carries no resolvable GROUP for group_role_mapping_set");
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        GroupRoleMappingSetUnit preUnit = RealmAttestationExporter.groupRoleMappingSet(
+                em, groupId, realm.getId());
+        List<String> roleIds = applyMemberDelta(preUnit.roleIds(), deltaRoles, addAction);
+        return new GroupRoleMappingSetUnit(realm.getId(), groupId, roleIds).serialize();
+    }
+
+    /**
+     * {@code role_composite_children_set} (unit 9) — owner = parent (composite) role;
+     * member = child role id. Pre-set read live from the model via
+     * {@link RealmAttestationExporter#roleCompositeChildrenSet} ± the CR's
+     * ADD/REMOVE_COMPOSITE delta, re-serialized. The parent role already exists at commit
+     * time; only the composite edge is being added/removed, so the model read is valid.
+     */
+    byte[] buildRoleCompositeChildrenSetUnitCbor(KeycloakSession session, RealmModel realm,
+                                                         IgaChangeRequestEntity cr) {
+        List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
+        boolean addAction = ACTION_ADD_COMPOSITE.equals(cr.getActionType());
+
+        String parentRoleId = cr.getEntityId();
+        LinkedHashSet<String> deltaChildren = new LinkedHashSet<>();
+        for (Map<String, Object> row : rows) {
+            String rowParent = str(row, ROW_COMPOSITE);
+            if (parentRoleId == null) {
+                parentRoleId = rowParent;
+            }
+            if (rowParent != null && rowParent.equals(parentRoleId)) {
+                String childRoleId = str(row, ROW_CHILD_ROLE);
+                if (childRoleId != null) {
+                    deltaChildren.add(childRoleId);
+                }
+            }
+        }
+        if (parentRoleId == null) {
+            throw new RuntimeException("IGA firstAdmin sign: " + cr.getActionType() + " CR "
+                    + cr.getId() + " carries no resolvable COMPOSITE parent role for "
+                    + "role_composite_children_set");
+        }
+        RoleModel parent = realm.getRoleById(parentRoleId);
+        if (parent == null) {
+            throw new RuntimeException("IGA firstAdmin sign: " + cr.getActionType() + " CR "
+                    + cr.getId() + " parent role " + parentRoleId + " not found");
+        }
+        RoleCompositeChildrenSetUnit preUnit =
+                RealmAttestationExporter.roleCompositeChildrenSet(parent, realm.getId());
+        List<String> childIds = applyMemberDelta(preUnit.childRoleIds(), deltaChildren, addAction);
+        return new RoleCompositeChildrenSetUnit(realm.getId(), parentRoleId, childIds).serialize();
     }
 
     /**

@@ -20,6 +20,11 @@ public final class GroupRoleMappingSetUnit extends AttestationUnit {
         this.roleIds = roleIds;
     }
 
+    /** The complete GROUP_ROLE_MAPPING child set (role ids) — used by the commit-time signer. */
+    public List<String> roleIds() {
+        return roleIds;
+    }
+
     @Override
     public AttestationUnitType type() {
         return AttestationUnitType.GROUP_ROLE_MAPPING_SET;

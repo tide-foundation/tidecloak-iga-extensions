@@ -375,8 +375,7 @@ public final class RealmAttestationExporter {
                 continue;
             }
             // organization_definition (unit 17).
-            out.add(new OrganizationDefinitionUnit(realmId, orgId, org.getAlias(),
-                    org.isEnabled(), groupId));
+            out.add(organizationDefinition(org, groupId, realmId));
             added++;
 
             // organization_domain_set (unit 18) — the complete (name, verified) set
@@ -405,6 +404,18 @@ public final class RealmAttestationExporter {
 
     /** Per-user RAW USER_GROUP_MEMBERSHIP child set (group ids). Mirrors userRoleMappingSet JPQL. */
     private List<String> userGroupMembershipSet(EntityManager em, String userId) {
+        return userGroupMembershipSet(em, userId, onlyAttested);
+    }
+
+    /**
+     * Shared, single-source per-user RAW USER_GROUP_MEMBERSHIP child set (group ids).
+     * The commit-time signer ({@code TideAttestor}) calls this with
+     * {@code onlyAttested=false} so it signs the same unfiltered post-change set the
+     * producer's default export emits — guaranteeing byte-identical
+     * {@link UserGroupMembershipSetUnit#serialize()} output at commit and at login.
+     */
+    public static List<String> userGroupMembershipSet(EntityManager em, String userId,
+                                                      boolean onlyAttested) {
         String jpql = "SELECT m.groupId FROM UserGroupMembershipEntity m WHERE m.user.id = :owner";
         if (onlyAttested) {
             // UserGroupMembershipEntity does not currently carry an attestation column
@@ -412,15 +423,24 @@ public final class RealmAttestationExporter {
             // mirror the userRoleMappingSet pattern in case the column is added.
             jpql += " AND m.attestation IS NOT NULL";
         }
+        // Deterministic group-id ordering: the VVK sig is verified over the LITERAL
+        // envelope bytes (no re-canonicalization), so the set ORDER is load-bearing.
+        // Must mirror the commit-time signer's final sort
+        // (TideAttestor#buildUserGroupMembershipSetUnitCbor) so commit and login emit
+        // an identical set. (See the user_role_mapping_set precedent.)
+        jpql += " ORDER BY m.groupId";
         @SuppressWarnings("unchecked")
         List<String> ids = em.createQuery(jpql).setParameter("owner", userId).getResultList();
         return new ArrayList<>(ids);
     }
 
     /** Per-group RAW GROUP_ROLE_MAPPING child set (role ids). Mirrors userRoleMappingSet JPQL. */
-    private GroupRoleMappingSetUnit groupRoleMappingSet(EntityManager em, String groupId,
+    public static GroupRoleMappingSetUnit groupRoleMappingSet(EntityManager em, String groupId,
                                                         String realmId) {
-        String jpql = "SELECT m.roleId FROM GroupRoleMappingEntity m WHERE m.group.id = :gid";
+        // Deterministic role-id ordering (ORDER BY) — load-bearing for the literal-bytes
+        // VVK verification; mirrors the commit-time signer's sort.
+        String jpql = "SELECT m.roleId FROM GroupRoleMappingEntity m WHERE m.group.id = :gid"
+                + " ORDER BY m.roleId";
         @SuppressWarnings("unchecked")
         List<String> ids = em.createQuery(jpql).setParameter("gid", groupId).getResultList();
         return new GroupRoleMappingSetUnit(realmId, groupId, new ArrayList<>(ids));
@@ -445,6 +465,19 @@ public final class RealmAttestationExporter {
      * {@code OrganizationModel.getDomains()} surface — the complete
      * {@code (name, verified)} ORG_DOMAIN set for the org, target = org id.
      */
+    /**
+     * Build an {@code organization_definition} NODE unit (unit 16). The backing
+     * ORGANIZATION-type group id is resolved by the caller (it lives on the JPA
+     * adapter, not the public {@code OrganizationModel} surface). Shared so the
+     * commit-time signer emits byte-identical bytes to this export path.
+     */
+    public static OrganizationDefinitionUnit organizationDefinition(OrganizationModel org,
+                                                                    String backingGroupId,
+                                                                    String realmId) {
+        return new OrganizationDefinitionUnit(realmId, org.getId(), org.getAlias(),
+                org.isEnabled(), backingGroupId);
+    }
+
     private OrganizationDomainSetUnit organizationDomainSet(OrganizationModel org, String realmId) {
         List<OrgDomain> domains = new ArrayList<>();
         org.getDomains().forEach((OrganizationDomainModel d) ->
@@ -458,7 +491,7 @@ public final class RealmAttestationExporter {
      * returns null for top-level groups; ORGANIZATION-type backing groups are always
      * top-level, so {@code parent_group_id} is null in practice.
      */
-    private GroupDefinitionUnit groupDefinition(GroupModel group, String realmId) {
+    public static GroupDefinitionUnit groupDefinition(GroupModel group, String realmId) {
         GroupModel.Type t = group.getType();
         GroupType type = (t == GroupModel.Type.ORGANIZATION) ? GroupType.ORGANIZATION : GroupType.REALM;
         return new GroupDefinitionUnit(realmId, group.getId(), group.getName(),
@@ -592,7 +625,7 @@ public final class RealmAttestationExporter {
         return attrs;
     }
 
-    private ClientConfigUnit clientConfig(ClientModel client, String realmId) {
+    public static ClientConfigUnit clientConfig(ClientModel client, String realmId) {
         return new ClientConfigUnit(realmId,
                 client.getId(),
                 client.getClientId(),
@@ -603,7 +636,7 @@ public final class RealmAttestationExporter {
                 attributeNameValues(client.getAttributes()));
     }
 
-    private ClientScopeConfigUnit clientScopeConfig(ClientScopeModel scope, String realmId) {
+    public static ClientScopeConfigUnit clientScopeConfig(ClientScopeModel scope, String realmId) {
         return new ClientScopeConfigUnit(realmId,
                 scope.getId(),
                 scope.getName(),
@@ -611,7 +644,7 @@ public final class RealmAttestationExporter {
                 attributeNameValues(scope.getAttributes()));
     }
 
-    private UserIdentityUnit userIdentity(UserModel user, String realmId) {
+    public static UserIdentityUnit userIdentity(UserModel user, String realmId) {
         return new UserIdentityUnit(realmId,
                 user.getId(),
                 user.getUsername(),
@@ -622,17 +655,22 @@ public final class RealmAttestationExporter {
                 userAttributeNameValues(user.getAttributes()));
     }
 
-    private RoleDefinitionUnit roleDefinition(RoleModel role, String realmId) {
+    public static RoleDefinitionUnit roleDefinition(RoleModel role, String realmId) {
         // container_id = owning client UUID for client roles, else the realm id.
         return new RoleDefinitionUnit(realmId, role.getId(), role.getName(),
                 role.isClientRole(), role.getContainerId());
     }
 
-    private RoleCompositeChildrenSetUnit roleCompositeChildrenSet(RoleModel role, String realmId) {
+    public static RoleCompositeChildrenSetUnit roleCompositeChildrenSet(RoleModel role, String realmId) {
         List<String> childIds = new ArrayList<>();
         if (role.isComposite()) {
             role.getCompositesStream().forEach(c -> childIds.add(c.getId()));
         }
+        // Deterministic child-id ordering: getCompositesStream() has no defined order,
+        // so the literal-bytes VVK verification would be non-reproducible without a sort.
+        // The commit-time signer (TideAttestor#buildRoleCompositeChildrenSetUnitCbor)
+        // applies the SAME ascending sort so commit and login emit identical bytes.
+        childIds.sort(java.util.Comparator.naturalOrder());
         return new RoleCompositeChildrenSetUnit(realmId, role.getId(), childIds);
     }
 

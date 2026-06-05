@@ -22,6 +22,11 @@ public final class RoleCompositeChildrenSetUnit extends AttestationUnit {
         this.childRoleIds = childRoleIds;
     }
 
+    /** The composite child set (child role ids) — used by the commit-time signer. */
+    public List<String> childRoleIds() {
+        return childRoleIds;
+    }
+
     @Override
     public AttestationUnitType type() {
         return AttestationUnitType.ROLE_COMPOSITE_CHILDREN_SET;
