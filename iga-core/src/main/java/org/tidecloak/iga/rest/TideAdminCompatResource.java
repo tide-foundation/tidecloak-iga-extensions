@@ -65,6 +65,7 @@ public class TideAdminCompatResource {
     private static final String IGA_ATTRIBUTE = "isIGAEnabled";
     private static final String INCLUDE_SYSTEM_ATTRIBUTE = "iga.adopt.includeSystem";
     private static final String IGA_ATTESTOR_ATTRIBUTE = "iga.attestor";
+    private static final String ATTESTOR_TIDE = "tide";
     private static final String TIDE_VENDOR_KEY_PROVIDER_ID = "tide-vendor-key";
     private static final String CFG_CLIENT_ID = "clientId";
     private static final String CFG_CLIENT_SECRET = "clientSecret";
@@ -303,6 +304,22 @@ public class TideAdminCompatResource {
                                     throw new IllegalStateException("IGA toggle-on backfill: realm "
                                             + backfillRealmId + " not loadable in backfill session");
                                 }
+                                // Cross-transaction visibility fix: the iga.attestor=tide write
+                                // above (writeIgaAttributeDirect) lives on the OUTER request
+                                // session and is NOT yet committed when this nested job tx reads
+                                // bfRealm. Without it, IgaToggleOnBackfill's isFirstAdminMode gate
+                                // (resolveMode no-row branch keys on iga.attestor==tide) returns
+                                // false and the backfill silently skips with reason "not_first_admin"
+                                // — exactly how a first-time-tide realm (no pre-committed attestor)
+                                // is born with NULL provisioning columns (realm_config etc.) and
+                                // fail-closes the uniform login read, while a realm whose attestor
+                                // was already tide pre-toggle backfills fine. Re-assert the
+                                // attestor on bfRealm here (idempotent; this IS the governing
+                                // enable action) so resolveMode sees firstAdmin within THIS tx.
+                                if (!ATTESTOR_TIDE.equals(bfRealm.getAttribute(IGA_ATTESTOR_ATTRIBUTE))
+                                        && ATTESTOR_TIDE.equals(realm.getAttribute(IGA_ATTESTOR_ATTRIBUTE))) {
+                                    bfRealm.setAttribute(IGA_ATTESTOR_ATTRIBUTE, ATTESTOR_TIDE);
+                                }
                                 bfHolder[0] = IgaToggleOnBackfill.backfill(bfSession, bfRealm);
                             });
                 } catch (RuntimeException ex) {
@@ -312,6 +329,17 @@ public class TideAdminCompatResource {
                             + "are stamped (re-toggle or commit the units).", realm.getName());
                 }
                 if (bfHolder[0] != null) {
+                    // A skip on a tide realm is anomalous (a tide realm IS firstAdmin and,
+                    // if VRK-provisioned, real-signing-capable): surface it at WARN so the
+                    // uniform-login-read coverage gap is observable, not buried in a debug
+                    // log. This is the trap that let a first-time-tide realm be born with
+                    // NULL provisioning columns silently.
+                    if (!bfHolder[0].ran && ATTESTOR_TIDE.equals(realm.getAttribute(IGA_ATTESTOR_ATTRIBUTE))) {
+                        logger.warnf("IGA toggle-on backfill SKIPPED for tide realm %s (reason=%s) — "
+                                + "provisioning columns (realm_config etc.) stay NULL and the uniform "
+                                + "login read will fail-close. Re-toggle once the realm is firstAdmin + "
+                                + "real-signing-capable.", realm.getName(), bfHolder[0].skipReason);
+                    }
                     Map<String, Object> bf = new LinkedHashMap<>();
                     bf.put("ran", bfHolder[0].ran);
                     if (bfHolder[0].skipReason != null) bf.put("skipped", bfHolder[0].skipReason);

@@ -71,6 +71,26 @@ class IgaToggleOnBackfillTest {
     }
 
     @Test
+    void skippedResult_carriesReasonAndDidNotRun() {
+        // The root cause of the first-time-tide login fail-close: backfill() returns a
+        // Result.skipped("not_first_admin") when its firstAdmin gate (TideAttestor
+        // .isFirstAdminMode, whose no-row branch keys on iga.attestor==tide) sees the
+        // attestor as not-yet-tide — exactly what happens when the toggle's
+        // iga.attestor=tide write is still uncommitted on the OUTER session and the
+        // backfill runs in a nested job tx that reads stale DB state. A skipped pass
+        // signs NOTHING, so the provisioning columns (realm_config etc.) stay NULL.
+        // The TideAdminCompatResource fix re-asserts iga.attestor=tide on the reloaded
+        // bfRealm inside the nested tx so the gate sees firstAdmin and ran==true.
+        IgaToggleOnBackfill.Result skipped = IgaToggleOnBackfill.Result.skipped("not_first_admin");
+        assertFalse(skipped.ran, "a gated-out backfill must report ran=false");
+        assertEquals("not_first_admin", skipped.skipReason);
+        assertEquals(0, skipped.unitsSigned, "a skipped pass signs zero units (columns stay NULL)");
+        assertEquals(0, skipped.unitsSkipped);
+        assertEquals(0, skipped.usersCovered);
+        assertEquals(0, skipped.clientsCovered);
+    }
+
+    @Test
     void maximalScope_isUnionOfOptionalScopeNames() {
         ClientModel c1 = clientWithOptionalScopes("a", "b");
         ClientModel c2 = clientWithOptionalScopes("b", "c");   // "b" overlaps -> deduped
