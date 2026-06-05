@@ -1,0 +1,161 @@
+package org.tidecloak.iga.producer;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.keycloak.models.ClientScopeModel;
+import org.keycloak.models.GroupModel;
+import org.keycloak.models.RoleModel;
+import org.keycloak.models.UserModel;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+/**
+ * Tests the widened ROLE-METADATA seed
+ * ({@link RealmAttestationExporter#metadataRoleSeed}) that drives
+ * {@code role_definition} (U5) + {@code role_composite_children_set} (U11)
+ * emission so the ORK can expand the composites it walks.
+ *
+ * <p>The seed is the UNION of the user's direct grants, every role mapped to a
+ * group the user belongs to, the request client's own scope-mapping allowlist,
+ * and each assigned client_scope's allowlist. Two scenarios are exercised:
+ *
+ * <ul>
+ *   <li><b>(a)</b> a {@code full_scope_allowed=false} client whose scope-mapping
+ *       allowlist contains a composite role the user does NOT directly hold — the
+ *       allowlist composite must enter the metadata seed (so its U5/U11, and after
+ *       transitive expansion its children's, get emitted).</li>
+ *   <li><b>(a2)</b> a group-inherited composite role — a role mapped only to a
+ *       group the user belongs to must enter the seed too.</li>
+ * </ul>
+ *
+ * <p><b>Guardrail assertion:</b> the user's direct-grant list passed in
+ * (the U8 {@code user_role_mapping_set} payload) is NOT mutated, and the only
+ * roles the helper ADDS beyond the grants are metadata roles (allowlist / group),
+ * never folded back into membership. Membership (U8/U9/U10) is produced elsewhere
+ * from raw JPQL and is untouched by this helper.
+ */
+@ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
+class RealmAttestationExporterMetadataSeedTest {
+
+    private static RoleModel role(String id) {
+        RoleModel r = mock(RoleModel.class);
+        when(r.getId()).thenReturn(id);
+        return r;
+    }
+
+    private static GroupModel groupWithRoles(RoleModel... roles) {
+        GroupModel g = mock(GroupModel.class);
+        when(g.getRoleMappingsStream()).thenReturn(Stream.of(roles));
+        return g;
+    }
+
+    private static ClientScopeModel scopeWithAllowlist(RoleModel... roles) {
+        ClientScopeModel s = mock(ClientScopeModel.class);
+        when(s.getScopeMappingsStream()).thenReturn(Stream.of(roles));
+        return s;
+    }
+
+    private static UserModel userInGroups(GroupModel... groups) {
+        UserModel u = mock(UserModel.class);
+        when(u.getGroupsStream()).thenReturn(Stream.of(groups));
+        return u;
+    }
+
+    private static final String GRANT_ROLE = "11111111-1111-1111-1111-111111111111";
+    private static final String ALLOWLIST_COMPOSITE = "22222222-2222-2222-2222-222222222222";
+    private static final String GROUP_COMPOSITE = "33333333-3333-3333-3333-333333333333";
+    private static final String SCOPE_ALLOWLIST_ROLE = "44444444-4444-4444-4444-444444444444";
+
+    /**
+     * (a): a client whose own SCOPE_MAPPING allowlist names a composite the user
+     * does not directly hold widens the metadata seed to include that composite.
+     */
+    @Test
+    void clientAllowlistCompositeEntersSeed() {
+        List<String> userGrants = List.of(GRANT_ROLE);
+        UserModel user = userInGroups(); // no groups
+
+        Set<String> seed = RealmAttestationExporter.metadataRoleSeed(
+                userGrants, user,
+                List.of(ALLOWLIST_COMPOSITE),   // client SCOPE_MAPPING allowlist
+                List.of());                      // no assigned scopes
+
+        assertTrue(seed.contains(GRANT_ROLE), "user's own grant is in the seed");
+        assertTrue(seed.contains(ALLOWLIST_COMPOSITE),
+                "allowlist composite the user does NOT hold must enter the metadata seed (a)");
+    }
+
+    /**
+     * (a2): a composite role mapped only to a group the user belongs to (not a
+     * direct grant) widens the metadata seed.
+     */
+    @Test
+    void groupInheritedCompositeEntersSeed() {
+        List<String> userGrants = List.of(GRANT_ROLE);
+        UserModel user = userInGroups(groupWithRoles(role(GROUP_COMPOSITE)));
+
+        Set<String> seed = RealmAttestationExporter.metadataRoleSeed(
+                userGrants, user, List.of(), List.of());
+
+        assertTrue(seed.contains(GROUP_COMPOSITE),
+                "group-mapped composite must enter the metadata seed (a2)");
+    }
+
+    /**
+     * Each assigned client_scope's CLIENT_SCOPE_ROLE_MAPPING allowlist also
+     * contributes to the metadata seed.
+     */
+    @Test
+    void assignedScopeAllowlistEntersSeed() {
+        UserModel user = userInGroups();
+        ClientScopeModel scope = scopeWithAllowlist(role(SCOPE_ALLOWLIST_ROLE));
+
+        Set<String> seed = RealmAttestationExporter.metadataRoleSeed(
+                List.of(GRANT_ROLE), user, List.of(), List.of(scope));
+
+        assertTrue(seed.contains(SCOPE_ALLOWLIST_ROLE),
+                "assigned scope allowlist role must enter the metadata seed");
+    }
+
+    /**
+     * Full union, plus the GUARDRAIL: the input user-grant list (the U8 payload)
+     * is NOT mutated by the helper — membership stays exactly the direct grants.
+     */
+    @Test
+    void seedIsUnionAndDoesNotMutateMembership() {
+        List<String> userGrants = new ArrayList<>(List.of(GRANT_ROLE));
+        UserModel user = userInGroups(groupWithRoles(role(GROUP_COMPOSITE)));
+        ClientScopeModel scope = scopeWithAllowlist(role(SCOPE_ALLOWLIST_ROLE));
+
+        Set<String> seed = RealmAttestationExporter.metadataRoleSeed(
+                userGrants, user, List.of(ALLOWLIST_COMPOSITE), List.of(scope));
+
+        // Union of all four sources.
+        assertTrue(seed.contains(GRANT_ROLE));
+        assertTrue(seed.contains(ALLOWLIST_COMPOSITE));
+        assertTrue(seed.contains(GROUP_COMPOSITE));
+        assertTrue(seed.contains(SCOPE_ALLOWLIST_ROLE));
+        assertEquals(4, seed.size());
+
+        // GUARDRAIL: the user-membership list (U8 user_role_mapping_set payload) is
+        // untouched — the helper never folds allowlist/group roles back into the
+        // user's held set. Only the metadata closure widened.
+        assertEquals(List.of(GRANT_ROLE), userGrants, "user-grant (U8) list must be unchanged");
+        assertFalse(userGrants.contains(ALLOWLIST_COMPOSITE));
+        assertFalse(userGrants.contains(GROUP_COMPOSITE));
+        assertFalse(userGrants.contains(SCOPE_ALLOWLIST_ROLE));
+    }
+}

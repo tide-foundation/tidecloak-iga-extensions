@@ -204,11 +204,31 @@ public final class RealmAttestationExporter {
         out.add(new UserRoleMappingSetUnit(realmId, req.userId(), seedRoleIds));
 
         // 7) role_definition + 8) role_composite_children_set for the FULL TRANSITIVE
-        //    role closure (mirrors the engine's GrantedRoles composite expansion).
-        //    Built-ins are INCLUDED — a role surfacing in the token via the
+        //    role-METADATA closure (mirrors the engine's GrantedRoles composite
+        //    expansion). Built-ins are INCLUDED — a role surfacing in the token via the
         //    default-roles composite must have a definition regardless of onlyAttested
         //    / includeSystem (the role-closure rule).
-        Set<RoleModel> roleClosure = transitiveRoleClosure(realm, seedRoleIds, req.userId());
+        //
+        //    GUARDRAIL: this closure drives ONLY role-metadata emission (role_definition
+        //    + role_composite_children_set) and the owning-client_config fan-out. It does
+        //    NOT feed the user's effective-membership units (U8 user_role_mapping_set is
+        //    `seedRoleIds` above; U9/U10 group sets are emitted in emitOrganizationClosure
+        //    from raw JPQL). So widening it adds metadata units ONLY and cannot add roles
+        //    to the user's held set.
+        //
+        //    The metadata seed is widened beyond the user's grant closure to the union of:
+        //      (i)  the user's direct grants (seedRoleIds),
+        //      (ii) every role mapped to a group the user belongs to (group roles the ORK
+        //           folds into its closure — fixes (a2) group-inherited composites),
+        //      (iii) the request client's own scope→role allowlist (SCOPE_MAPPING),
+        //      (iv) every assigned client_scope's allowlist (CLIENT_SCOPE_ROLE_MAPPING),
+        //    each then composite-expanded. This lets the ORK expand allowlist/group
+        //    composites it walks even when the user does not transitively hold them
+        //    (fixes (a)). U15 allowlist sets stay RAW (unexpanded) — the ORK expands.
+        Set<String> metadataRoleSeed = metadataRoleSeed(seedRoleIds, user,
+                scopeMappingRoleIds(client), assigned.values());
+        Set<RoleModel> roleClosure = transitiveRoleClosure(realm, new ArrayList<>(metadataRoleSeed),
+                req.userId());
         Set<String> ownerClientUuids = new LinkedHashSet<>();
         for (RoleModel role : roleClosure) {
             out.add(roleDefinition(role, realmId));
@@ -450,8 +470,58 @@ public final class RealmAttestationExporter {
     // -------------------------------------------------------------------------
 
     /**
-     * The full transitive role closure of the user's stored grants: the seed role
-     * ids, each COMPOSITE-EXPANDED via {@link RoleModel#getCompositesStream()}
+     * Build the widened ROLE-METADATA seed (pre composite-expansion) whose
+     * {@link #transitiveRoleClosure} drives {@code role_definition} (unit 5) +
+     * {@code role_composite_children_set} (unit 11) emission, so the ORK can expand
+     * every composite it walks. The seed is the UNION of:
+     * <ol>
+     *   <li>{@code userGrantRoleIds} — the user's direct USER_ROLE_MAPPING grants
+     *       (same ids as the U8 {@code user_role_mapping_set} payload);</li>
+     *   <li>group-role ids — every role mapped to a group the user is a member of
+     *       (via {@code user.getGroupsStream()} → {@code group.getRoleMappingsStream()};
+     *       the group roles the ORK folds into its closure) — fixes (a2);</li>
+     *   <li>{@code clientAllowlistRoleIds} — the request client's own SCOPE_MAPPING
+     *       allowlist (used by {@code getAccess} when {@code full_scope_allowed=false});</li>
+     *   <li>per assigned {@code client_scope} — its CLIENT_SCOPE_ROLE_MAPPING
+     *       allowlist — fixes (a).</li>
+     * </ol>
+     *
+     * <p><b>GUARDRAIL:</b> this is a METADATA seed only. It is NOT emitted as, and does
+     * not feed, any user-effective-membership unit (U8/U9/U10). Widening it adds only
+     * which {@code role_definition}/{@code role_composite_children_set} units appear —
+     * never which roles the user holds. Package-private + static for direct unit testing.
+     */
+    static Set<String> metadataRoleSeed(List<String> userGrantRoleIds, UserModel user,
+                                        List<String> clientAllowlistRoleIds,
+                                        java.util.Collection<ClientScopeModel> assignedScopes) {
+        Set<String> seed = new LinkedHashSet<>();
+        if (userGrantRoleIds != null) {
+            seed.addAll(userGrantRoleIds);
+        }
+        // (ii) group-role ids — every role mapped to a group the user belongs to. The
+        //      ORK consumes group roles into its GrantedRoles closure, so their
+        //      definitions/composite-children must be attested too. Membership itself is
+        //      untouched (U9/U10 emission is unchanged).
+        if (user != null) {
+            user.getGroupsStream().forEach(g ->
+                    g.getRoleMappingsStream().forEach(r -> seed.add(r.getId())));
+        }
+        // (iii) request client's own SCOPE_MAPPING allowlist.
+        if (clientAllowlistRoleIds != null) {
+            seed.addAll(clientAllowlistRoleIds);
+        }
+        // (iv) every assigned client_scope's CLIENT_SCOPE_ROLE_MAPPING allowlist.
+        if (assignedScopes != null) {
+            for (ClientScopeModel scope : assignedScopes) {
+                scope.getScopeMappingsStream().forEach(r -> seed.add(r.getId()));
+            }
+        }
+        return seed;
+    }
+
+    /**
+     * The full transitive role closure of the seed role ids, each COMPOSITE-EXPANDED
+     * via {@link RoleModel#getCompositesStream()}
      * recursively, with a {@code seen} set guarding cycles/diamonds. Built-in /
      * system roles are INCLUDED — every role id that can surface in the token must
      * have a definition. Mirrors, in reverse, the engine's GrantedRoles.
