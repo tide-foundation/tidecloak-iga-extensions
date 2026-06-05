@@ -2374,7 +2374,7 @@ public class TideAttestor implements IgaAttestor {
                 case "CREATE_CLIENT", "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
                      "UPDATE_CLIENT_REDIRECT_URIS" ->
                         stampClientConfig(session, realm, mode, em, cr);
-                case "CREATE_CLIENT_SCOPE" ->
+                case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE" ->
                         stampClientScopeConfig(session, realm, mode, em, cr);
                 case "CREATE_ROLE", "SET_ROLE_ATTRIBUTE" ->
                         stampRoleDefinition(session, realm, mode, em, cr);
@@ -2471,7 +2471,8 @@ public class TideAttestor implements IgaAttestor {
     private void stampClientScopeConfig(KeycloakSession session, RealmModel realm, String mode,
                                         EntityManager em, IgaChangeRequestEntity cr) {
         try {
-            String scopeId = firstRowId(cr);
+            // CREATE_CLIENT_SCOPE keys on ID; SET_CLIENT_SCOPE_ATTRIBUTE keys on SCOPE_ID.
+            String scopeId = firstRowKeyOr(cr, "SCOPE_ID", "ID");
             if (scopeId == null) return;
             ClientScopeModel scope = realm.getClientScopeById(scopeId);
             if (scope == null) return;
@@ -2485,7 +2486,8 @@ public class TideAttestor implements IgaAttestor {
     private void stampRoleDefinition(KeycloakSession session, RealmModel realm, String mode,
                                      EntityManager em, IgaChangeRequestEntity cr) {
         try {
-            String roleId = firstRowId(cr);
+            // CREATE_ROLE keys the new row on ID; SET_ROLE_ATTRIBUTE keys on ROLE_ID.
+            String roleId = firstRowKeyOr(cr, "ROLE_ID", "ID");
             if (roleId == null) return;
             RoleModel role = realm.getRoleById(roleId);
             if (role == null) return;
@@ -2499,7 +2501,8 @@ public class TideAttestor implements IgaAttestor {
     private void stampGroupDefinition(KeycloakSession session, RealmModel realm, String mode,
                                       EntityManager em, IgaChangeRequestEntity cr) {
         try {
-            String groupId = firstRowId(cr);
+            // CREATE_GROUP keys on ID; SET_GROUP_ATTRIBUTE keys on GROUP_ID.
+            String groupId = firstRowKeyOr(cr, "GROUP_ID", "ID");
             if (groupId == null) return;
             org.keycloak.models.GroupModel group = realm.getGroupById(groupId);
             if (group == null) return;
@@ -2513,7 +2516,8 @@ public class TideAttestor implements IgaAttestor {
     private void stampUserIdentity(KeycloakSession session, RealmModel realm, String mode,
                                    EntityManager em, IgaChangeRequestEntity cr) {
         try {
-            String userId = firstRowId(cr);
+            // CREATE_USER keys on ID; SET_USER_ATTRIBUTE keys on USER_ID.
+            String userId = firstRowKeyOr(cr, "USER_ID", "ID");
             if (userId == null) return;
             UserModel user = session.users().getUserById(realm, userId);
             if (user == null) return;
@@ -2670,9 +2674,10 @@ public class TideAttestor implements IgaAttestor {
         log.warnf(e, "IGA unit-column stamp: skipped a per-unit-type column stamp (%s)", m);
     }
 
-    /** The first row's {@code ID} key (the affected entity's own PK), or null. */
-    private static String firstRowId(IgaChangeRequestEntity cr) {
-        return firstRowKey(cr, "ID");
+    /** The first row's value for {@code primary}, falling back to {@code secondary}, or null. */
+    private static String firstRowKeyOr(IgaChangeRequestEntity cr, String primary, String secondary) {
+        String v = firstRowKey(cr, primary);
+        return v != null ? v : firstRowKey(cr, secondary);
     }
 
     /** The first row's value for {@code key}, or null. */
