@@ -31,6 +31,17 @@ public final class ScopeRoleAllowlistSetUnit extends AttestationUnit {
         return AttestationUnitType.SCOPE_ROLE_ALLOWLIST_SET;
     }
 
+    /**
+     * The {@code parent_type} discriminator (client vs client_scope). The uniform
+     * Design B unit→column resolver needs this to pick the owner's
+     * {@code SCOPE_ROLE_ALLOWLIST_ATTESTATION} column on the right entity
+     * ({@code ClientEntity} vs {@code ClientScopeEntity}), since both share the
+     * {@code target_id == parent_id} key.
+     */
+    public ParentType parentType() {
+        return parentType;
+    }
+
     @Override
     public Map<String, Object> payload() {
         Map<String, Object> p = new LinkedHashMap<>();

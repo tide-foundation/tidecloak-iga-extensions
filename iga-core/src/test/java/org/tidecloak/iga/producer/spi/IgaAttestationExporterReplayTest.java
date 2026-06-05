@@ -1,12 +1,20 @@
 package org.tidecloak.iga.producer.spi;
 
 import org.junit.jupiter.api.Test;
+import org.keycloak.tide.attestation.SignedUnit;
 import org.tidecloak.iga.attestors.TideAttestor;
+import org.tidecloak.iga.producer.units.AttestationUnit;
+import org.tidecloak.iga.producer.units.AttestationUnitType;
 
 import java.util.Base64;
+import java.util.Collections;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Design B, Phase 1 — the login REPLAY contract for the {@code user_role_mapping_set}
@@ -78,5 +86,52 @@ class IgaAttestationExporterReplayTest {
         assertNull(IgaAttestationExporterProvider.decodeReplayableSig(null));
         assertNull(IgaAttestationExporterProvider.decodeReplayableSig(""));
         assertNull(IgaAttestationExporterProvider.decodeReplayableSig("   "));
+    }
+
+    // ---- PR-B: the UNIFORM read attaches the decoded sig OR fail-closes by unit ----
+
+    private static AttestationUnit unit(AttestationUnitType type, String targetId) {
+        return new AttestationUnit("realm-uuid", targetId) {
+            @Override public AttestationUnitType type() { return type; }
+            @Override public Map<String, Object> payload() { return Collections.emptyMap(); }
+        };
+    }
+
+    @Test
+    void uniformRead_attachesDecodedSig_whenColumnIsReal() {
+        byte[] vvkSig = bytes(64, 9);
+        AttestationUnit u = unit(AttestationUnitType.CLIENT_CONFIG, "client-uuid");
+
+        SignedUnit signed = IgaAttestationExporterProvider.replayOrFailClosed(u, prefixed(vvkSig), "myrealm");
+
+        assertNotNull(signed);
+        assertArrayEquals(u.serialize(), signed.getEnvelope(),
+                "the shipped envelope must be the verbatim producer serialize() bytes");
+        assertArrayEquals(vvkSig, signed.getSignature(),
+                "the shipped sig must be the decoded 64-byte VVK sig from the column");
+    }
+
+    @Test
+    void uniformRead_failsClosed_namingUnitTypeAndTarget_onMissingSig() {
+        AttestationUnit u = unit(AttestationUnitType.USER_ROLE_MAPPING_SET, "user-123");
+        RuntimeException ex = assertThrows(RuntimeException.class,
+                () -> IgaAttestationExporterProvider.replayOrFailClosed(u, null, "myrealm"));
+        assertTrue(ex.getMessage().contains("user_role_mapping_set"),
+                "fail-closed error must name the unit type");
+        assertTrue(ex.getMessage().contains("user-123"),
+                "fail-closed error must name the target id");
+        assertTrue(ex.getMessage().contains("myrealm"));
+    }
+
+    @Test
+    void uniformRead_failsClosed_onStubAndWrongPrefix() {
+        AttestationUnit u = unit(AttestationUnitType.REALM_CONFIG, "realm-uuid");
+        // 32-byte firstAdmin stub
+        assertThrows(RuntimeException.class,
+                () -> IgaAttestationExporterProvider.replayOrFailClosed(u, prefixed(bytes(32, 1)), "r"));
+        // wrong prefix (multiAdmin dummy)
+        assertThrows(RuntimeException.class,
+                () -> IgaAttestationExporterProvider.replayOrFailClosed(u,
+                        "TIDE-DUMMY-v1:" + Base64.getEncoder().encodeToString(bytes(64, 2)), "r"));
     }
 }

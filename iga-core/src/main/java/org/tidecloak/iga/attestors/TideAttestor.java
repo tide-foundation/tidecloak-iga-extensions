@@ -1751,6 +1751,26 @@ public class TideAttestor implements IgaAttestor {
      * throw on the settings it builds. (It does not pre-dial the ORKs; an actually
      * unreachable ORK surfaces inside the ceremony and is fail-closed there.)
      */
+    /**
+     * Public façade over {@link #isRealSigningCapable} for the uniform Design B
+     * toggle-on/ADOPT full-closure backfill (PR-B): the backfill only signs real
+     * 64-byte VVK envelopes on a realm that carries the full firstAdmin signing
+     * material, exactly the gate the per-CR-commit stampers use.
+     */
+    public static boolean isRealSigningCapableRealm(RealmModel realm) {
+        return isRealSigningCapable(realm);
+    }
+
+    /**
+     * Is this realm in firstAdmin mode? Public façade over {@link #resolveMode} so
+     * the toggle-on backfill (PR-B) signs only while the firstAdmin pack is ALIVE
+     * (pre-flip) — once the realm flips to multiAdmin the firstAdmin pack is burned
+     * and {@link #signEnvelopeWithFirstAdminVvk} would fail.
+     */
+    public static boolean isFirstAdminMode(KeycloakSession session, RealmModel realm) {
+        return MODE_FIRST_ADMIN.equals(resolveMode(session, realm));
+    }
+
     private static boolean isRealSigningCapable(RealmModel realm) {
         ComponentModel vendorKey = realm.getComponentsStream()
                 .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
@@ -2431,8 +2451,15 @@ public class TideAttestor implements IgaAttestor {
     /**
      * Real single-unit firstAdmin VVK ceremony over an arbitrary producer envelope,
      * reusing {@link #signUnitsWithFirstAdminVvk} (the batch signer). Fail-closed.
+     *
+     * <p>{@code public static} so the uniform Design B toggle-on/ADOPT full-closure
+     * backfill (PR-B) can sign every producer unit envelope with the firstAdmin pack
+     * and stamp the same {@link #FIRSTADMIN_SIG_PREFIX}+b64(64B) shape the login read
+     * replays. The returned string is byte-identical to what the per-CR-commit
+     * stampers produce, so the column the backfill writes and the column a later
+     * commit would write are interchangeable.
      */
-    private String signEnvelopeWithFirstAdminVvk(RealmModel realm, byte[] envelope) {
+    public static String signEnvelopeWithFirstAdminVvk(RealmModel realm, byte[] envelope) {
         ComponentModel vendorKey = realm.getComponentsStream()
                 .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
                 .findFirst()

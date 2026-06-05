@@ -33,6 +33,7 @@ import org.tidecloak.iga.crypto.SecretKeys;
 import org.tidecloak.iga.replay.SidecarCapExceededException;
 import org.tidecloak.iga.services.IgaAdoptCancel;
 import org.tidecloak.iga.services.IgaAdoptScan;
+import org.tidecloak.iga.services.IgaToggleOnBackfill;
 
 import jakarta.persistence.EntityManager;
 import java.util.LinkedHashMap;
@@ -277,6 +278,55 @@ public class TideAdminCompatResource {
                 evictRealmCache(session, realm);
                 body.put("scan", resultHolder[0]
                         .withSessionsInvalidated(invalidated).toMap());
+
+                // Uniform Design B (PR-B): full-closure signing backfill. The ADOPT
+                // scan above only EMITS PENDING ADOPT CRs (pre-existing edges/nodes
+                // get an ADOPT path) — it does NOT stamp the per-unit producer columns
+                // the uniform login read replays. Sign EVERY producer unit for the
+                // realm with the firstAdmin pack now, while it is ALIVE and pre-flip,
+                // so the provisioning / no-CR units (realm_config, built-in roles +
+                // composites, derived mapper/allowlist/assignment sets, default
+                // scopes/groups, existing users' identity/role/group sets) carry a real
+                // 64-byte VVK sig in their column. Runs in its own job tx so a partial
+                // failure cannot corrupt the just-committed toggle; fail-closed for a
+                // real-signing-capable realm (a half-signed closure would break the
+                // uniform login read). Surfaced in the response either way.
+                String backfillRealmId = realm.getId();
+                IgaToggleOnBackfill.Result[] bfHolder = new IgaToggleOnBackfill.Result[1];
+                Throwable[] bfErr = new Throwable[1];
+                try {
+                    KeycloakModelUtils.runJobInTransaction(
+                            session.getKeycloakSessionFactory(),
+                            bfSession -> {
+                                RealmModel bfRealm = bfSession.realms().getRealm(backfillRealmId);
+                                if (bfRealm == null) {
+                                    throw new IllegalStateException("IGA toggle-on backfill: realm "
+                                            + backfillRealmId + " not loadable in backfill session");
+                                }
+                                bfHolder[0] = IgaToggleOnBackfill.backfill(bfSession, bfRealm);
+                            });
+                } catch (RuntimeException ex) {
+                    bfErr[0] = ex;
+                    logger.errorf(ex, "IGA toggle-on backfill FAILED for realm %s — toggle remains "
+                            + "enabled, but the uniform login read may fail-close until the columns "
+                            + "are stamped (re-toggle or commit the units).", realm.getName());
+                }
+                if (bfHolder[0] != null) {
+                    Map<String, Object> bf = new LinkedHashMap<>();
+                    bf.put("ran", bfHolder[0].ran);
+                    if (bfHolder[0].skipReason != null) bf.put("skipped", bfHolder[0].skipReason);
+                    bf.put("unitsSigned", bfHolder[0].unitsSigned);
+                    bf.put("unitsAlreadyReal", bfHolder[0].unitsSkipped);
+                    bf.put("usersCovered", bfHolder[0].usersCovered);
+                    bf.put("clientsCovered", bfHolder[0].clientsCovered);
+                    body.put("backfill", bf);
+                } else if (bfErr[0] != null) {
+                    Map<String, Object> bfe = new LinkedHashMap<>();
+                    bfe.put("error", bfErr[0].getClass().getSimpleName());
+                    bfe.put("message", String.valueOf(bfErr[0].getMessage()));
+                    body.put("backfill", bfe);
+                }
+
                 String warning = buildAdminCoverageWarning(session, realm);
                 if (warning != null) {
                     body.put("warning", warning);
