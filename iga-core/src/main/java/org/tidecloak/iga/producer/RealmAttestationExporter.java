@@ -478,8 +478,11 @@ public final class RealmAttestationExporter {
      *   <li>{@code userGrantRoleIds} — the user's direct USER_ROLE_MAPPING grants
      *       (same ids as the U8 {@code user_role_mapping_set} payload);</li>
      *   <li>group-role ids — every role mapped to a group the user is a member of
-     *       (via {@code user.getGroupsStream()} → {@code group.getRoleMappingsStream()};
-     *       the group roles the ORK folds into its closure) — fixes (a2);</li>
+     *       AND to every ancestor group on that group's {@code parent_group_id} chain
+     *       (via {@code user.getGroupsStream()} → ascend {@code GroupModel.getParent()}
+     *       → {@code group.getRoleMappingsStream()}). The ORK enumerates group roles
+     *       ancestor-inclusively (a role on a parent reaches a child member), so the
+     *       seed walks the same parent chain — fixes (a2) incl. ancestor composites;</li>
      *   <li>{@code clientAllowlistRoleIds} — the request client's own SCOPE_MAPPING
      *       allowlist (used by {@code getAccess} when {@code full_scope_allowed=false});</li>
      *   <li>per assigned {@code client_scope} — its CLIENT_SCOPE_ROLE_MAPPING
@@ -498,13 +501,23 @@ public final class RealmAttestationExporter {
         if (userGrantRoleIds != null) {
             seed.addAll(userGrantRoleIds);
         }
-        // (ii) group-role ids — every role mapped to a group the user belongs to. The
-        //      ORK consumes group roles into its GrantedRoles closure, so their
-        //      definitions/composite-children must be attested too. Membership itself is
-        //      untouched (U9/U10 emission is unchanged).
+        // (ii) group-role ids — every role mapped to a group the user belongs to, AND
+        //      every ANCESTOR group reached by ascending the parent_group_id chain. The
+        //      ORK enumerates group roles ancestor-inclusively (MapperContext.GrantedRoles
+        //      → GroupAndAncestors walks parent_group_id until a top-level group), folding
+        //      roles on a PARENT of a joined group into a child member's GrantedRoles
+        //      closure. So a COMPOSITE role sitting on an ancestor group must have its
+        //      definition/composite-children attested too, or the ORK can't expand it and
+        //      resource_access/realm_access under-reports (false reject). Mirror that
+        //      ascent here. Membership itself is untouched (U9/U10 emission is unchanged):
+        //      this only widens which role_definition/role_composite_children_set units are
+        //      emitted, never which roles the user holds.
         if (user != null) {
-            user.getGroupsStream().forEach(g ->
-                    g.getRoleMappingsStream().forEach(r -> seed.add(r.getId())));
+            user.getGroupsStream().forEach(g -> {
+                for (GroupModel grp = g; grp != null; grp = grp.getParent()) {
+                    grp.getRoleMappingsStream().forEach(r -> seed.add(r.getId()));
+                }
+            });
         }
         // (iii) request client's own SCOPE_MAPPING allowlist.
         if (clientAllowlistRoleIds != null) {

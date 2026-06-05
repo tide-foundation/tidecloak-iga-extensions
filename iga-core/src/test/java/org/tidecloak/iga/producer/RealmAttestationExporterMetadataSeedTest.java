@@ -62,6 +62,18 @@ class RealmAttestationExporterMetadataSeedTest {
         return g;
     }
 
+    /**
+     * A group with a parent in its {@code getParent()} chain (top-level groups
+     * return null). The role mappings stream is rebuildable on each access because
+     * the ancestor walk reads {@code getRoleMappingsStream()} once per group.
+     */
+    private static GroupModel groupWithParentAndRoles(GroupModel parent, RoleModel... roles) {
+        GroupModel g = mock(GroupModel.class);
+        when(g.getRoleMappingsStream()).thenReturn(Stream.of(roles));
+        when(g.getParent()).thenReturn(parent);
+        return g;
+    }
+
     private static ClientScopeModel scopeWithAllowlist(RoleModel... roles) {
         ClientScopeModel s = mock(ClientScopeModel.class);
         when(s.getScopeMappingsStream()).thenReturn(Stream.of(roles));
@@ -78,6 +90,9 @@ class RealmAttestationExporterMetadataSeedTest {
     private static final String ALLOWLIST_COMPOSITE = "22222222-2222-2222-2222-222222222222";
     private static final String GROUP_COMPOSITE = "33333333-3333-3333-3333-333333333333";
     private static final String SCOPE_ALLOWLIST_ROLE = "44444444-4444-4444-4444-444444444444";
+    private static final String ANCESTOR_A_COMPOSITE = "55555555-5555-5555-5555-555555555555";
+    private static final String PARENT_B_ROLE = "66666666-6666-6666-6666-666666666666";
+    private static final String SUBGROUP_C_ROLE = "77777777-7777-7777-7777-777777777777";
 
     /**
      * (a): a client whose own SCOPE_MAPPING allowlist names a composite the user
@@ -112,6 +127,45 @@ class RealmAttestationExporterMetadataSeedTest {
 
         assertTrue(seed.contains(GROUP_COMPOSITE),
                 "group-mapped composite must enter the metadata seed (a2)");
+    }
+
+    /**
+     * (a2, nested): the user is in subgroup C (child of B, child of A). A COMPOSITE
+     * role sits on ANCESTOR group A. The ORK enumerates group roles
+     * ancestor-inclusively (GroupAndAncestors ascends parent_group_id), so a role on
+     * an ancestor of a joined group reaches the member. The metadata seed must walk
+     * the same parent chain so that ancestor composite (and roles on every ancestor)
+     * enter the seed — otherwise its U5/U11 are never emitted and the ORK can't
+     * expand it → resource_access/realm_access under-reports (false reject).
+     *
+     * <p>GUARDRAIL: the user's direct-grant (U8) list is NOT mutated; the ancestor
+     * roles are metadata-seed only, never folded into the user's held set.
+     */
+    @Test
+    void ancestorGroupCompositeEntersSeedNestedGroups() {
+        GroupModel groupA = groupWithRoles(role(ANCESTOR_A_COMPOSITE)); // top-level (getParent()==null)
+        GroupModel groupB = groupWithParentAndRoles(groupA, role(PARENT_B_ROLE));
+        GroupModel groupC = groupWithParentAndRoles(groupB, role(SUBGROUP_C_ROLE));
+
+        List<String> userGrants = new ArrayList<>(List.of(GRANT_ROLE));
+        UserModel user = userInGroups(groupC); // user is a DIRECT member of subgroup C only
+
+        Set<String> seed = RealmAttestationExporter.metadataRoleSeed(
+                userGrants, user, List.of(), List.of());
+
+        // The joined subgroup's role plus every ancestor group's roles enter the seed.
+        assertTrue(seed.contains(SUBGROUP_C_ROLE), "joined subgroup C role in seed");
+        assertTrue(seed.contains(PARENT_B_ROLE), "parent group B role in seed (ancestor-inclusive)");
+        assertTrue(seed.contains(ANCESTOR_A_COMPOSITE),
+                "ancestor group A composite must enter the metadata seed (nested ancestor walk)");
+        assertTrue(seed.contains(GRANT_ROLE), "user's own direct grant still in seed");
+
+        // GUARDRAIL: membership (U8 user_role_mapping_set payload) is unchanged — none of
+        // the group/ancestor roles get folded into the user's held set.
+        assertEquals(List.of(GRANT_ROLE), userGrants, "user-grant (U8) list must be unchanged");
+        assertFalse(userGrants.contains(SUBGROUP_C_ROLE));
+        assertFalse(userGrants.contains(PARENT_B_ROLE));
+        assertFalse(userGrants.contains(ANCESTOR_A_COMPOSITE));
     }
 
     /**
