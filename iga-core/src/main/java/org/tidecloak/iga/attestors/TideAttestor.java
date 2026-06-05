@@ -823,11 +823,12 @@ public class TideAttestor implements IgaAttestor {
      *   <li>Rebuild the policy artifact at {@code newThreshold},
      *       re-sign it with the realm's CURRENT authorizer mode (the invariant:
      *       admin policy signed with the mode the realm is in). This regen fires
-     *       only while the realm is already multiAdmin, so {@code policySig} carries
-     *       the multiAdmin {@link #DUMMY_SIG_PREFIX} (enclave path) — distinct from
-     *       the firstAdmin/VRK {@link #FIRSTADMIN_SIG_PREFIX} the bootstrap
-     *       transition stamps. Write {@code policy}/{@code policySig} in the same JPA
-     *       transaction as the CR commit (fail-closed + atomic).</li>
+     *       only while the realm is already multiAdmin: on a REAL-SIGNING-CAPABLE
+     *       realm the re-sign is the REAL Policy:1 quorum ceremony bootstrapped by the
+     *       existing M0 policy ({@link #signAdminPolicyViaPolicyFlow}); on a
+     *       non-capable dev/test realm it is the {@link #DUMMY_SIG_PREFIX} stub. Write
+     *       {@code policy}/{@code policySig} in the same JPA transaction as the CR
+     *       commit (fail-closed + atomic).</li>
      * </ol>
      *
      * <h3>Who signs</h3>
@@ -872,16 +873,15 @@ public class TideAttestor implements IgaAttestor {
         // the previous behaviour. This regen fires ONLY from combineFinal's multiAdmin
         // branch, so when not capable the sig is the multiAdmin DUMMY_SIG_PREFIX as before.
         //
-        // ★★ M3 GAP (KNOWN — do NOT fix here) ★★
-        // On a REAL-SIGNING-CAPABLE realm, buildSignedAdminPolicyArtifact -> signAdminPolicyWithVvk
-        // signs the Policy:1 admin Policy with the firstAdmin AuthorizerPack (CFG_FIRST_ADMIN_AUTHORIZER /
-        // CFG_FIRST_ADMIN_AUTHORIZER_CERTIFICATE — the only pack carrying Policy:1). But this regen runs
-        // ONLY in multiAdmin mode, AFTER the flip BURNED that pack (ork PolicySignRequest.cs:102 revokes
-        // it). So on a provisioned realm the threshold-change re-sign would attempt Policy:1 with a
-        // REVOKED pack → ORK rejects → fail-closed throw → the membership CR commit fails. The M3 fix
-        // needs a quorum/Policy-flow signer (NOT the firstAdmin pack) for the steady-state re-sign.
-        // Today this is latent because real-signing-capable multiAdmin realms with a moving threshold
-        // are not yet exercised; flagged for the M3 work item.
+        // ★★ M3 GAP — FIXED (P4) ★★
+        // On a REAL-SIGNING-CAPABLE realm, buildSignedAdminPolicyArtifact now branches the
+        // policy SIGNER on the realm's mode: this regen fires ONLY in multiAdmin (post-flip),
+        // so it routes through signAdminPolicyViaPolicyFlow — the Policy:1 quorum re-sign
+        // bootstrapped by the EXISTING M0 policy — NOT signAdminPolicyWithVvk (VRK:1 +
+        // firstAdmin pack), whose pack the flip BURNED (ork PolicySignRequest.cs:102). The
+        // existing admin Policy authorizes the tide-realm-admin quorum to sign the UPDATED
+        // Policy; OLD quorum installs the NEW threshold. (The live per-CR doken collection for
+        // the regen is the remaining interactive M3 step — see signAdminPolicyViaPolicyFlow.)
         AdminPolicyArtifact artifact = buildSignedAdminPolicyArtifact(session, realm, newThreshold, vvkId);
 
         IgaRolePolicyEntity result = upsertAdminPolicyRow(session, realm, policy,
@@ -997,7 +997,19 @@ public class TideAttestor implements IgaAttestor {
     private AdminPolicyArtifact buildSignedAdminPolicyArtifact(KeycloakSession session, RealmModel realm,
                                                                int threshold, String vvkId) {
         if (isRealSigningCapable(realm)) {
-            SignedPolicy signed = signAdminPolicyWithVvk(session, realm, threshold, vvkId);
+            // ★ P4 (M3 fix): branch the policy SIGNER on the realm's authorizer mode.
+            //   firstAdmin (pre-flip)  → the firstAdmin AuthorizerPack VRK:1 ceremony
+            //                            (signAdminPolicyWithVvk) — the pack is ALIVE.
+            //   multiAdmin (post-flip) → the Policy:1 quorum re-sign bootstrapped by the
+            //                            EXISTING M0 policy (signAdminPolicyViaPolicyFlow) —
+            //                            the firstAdmin pack is BURNED, so VRK:1 would be
+            //                            rejected by the ORK. The existing admin Policy
+            //                            authorizes the tide-realm-admin quorum to sign the
+            //                            UPDATED Policy (the policy bootstraps its own re-sign).
+            boolean multiAdmin = MODE_MULTI_ADMIN.equals(resolveMode(session, realm));
+            SignedPolicy signed = multiAdmin
+                    ? signAdminPolicyViaPolicyFlow(session, realm, threshold, vvkId)
+                    : signAdminPolicyWithVvk(session, realm, threshold, vvkId);
             // Store the SIGNED Policy bytes Base64-encoded into the TEXT POLICY column,
             // exactly as the gold reference persists it
             // (TideRoleRequests: Base64.encode(policy.ToBytes())).
@@ -1135,6 +1147,102 @@ public class TideAttestor implements IgaAttestor {
             // Fail-closed: a real-provisioned admin policy must not fall back to a
             // fake stub on a real signing failure.
             throw new RuntimeException("IGA admin-policy sign: Midgard VVK ceremony failed for realm "
+                    + realm.getName() + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * <b>★ P4 (M3 fix)</b> — the steady-state (multiAdmin) admin-policy re-sign, routed
+     * through the <b>Policy:1 quorum flow bootstrapped by the EXISTING M0 admin Policy</b>
+     * instead of the firstAdmin AuthorizerPack.
+     *
+     * <h3>Why the firstAdmin pack cannot be used here</h3>
+     * After the firstAdmin→multiAdmin flip, the ORK revokes the firstAdmin AuthorizerPack
+     * ({@code PolicySignRequest.cs:102}). That pack was the ONLY VRK:1 authorizer for a
+     * Policy sign, so {@link #signAdminPolicyWithVvk} (VRK:1 + firstAdmin pack) would be
+     * rejected by the ORK on a provisioned multiAdmin realm — the latent M3 fail-closed bug.
+     *
+     * <h3>How the existing M0 policy bootstraps the re-sign</h3>
+     * The EXISTING (current-threshold) M0 admin Policy authorizes a quorum of
+     * {@code tide-realm-admin}s to perform admin operations. We build the UPDATED Policy
+     * (at {@code newThreshold}), wrap it in a {@link PolicySignRequest} on the
+     * {@code Policy:1} auth flow, and embed the CURRENT M0 policy via {@code SetPolicy} —
+     * so the ORK's {@code PolicyAuthorizationFlow} authorizes the re-sign against the
+     * EXISTING admin quorum (the same bootstrap the {@code AttestationUnit:1} multiAdmin
+     * commit uses). OLD quorum installs the NEW threshold — no circular dependency.
+     *
+     * <h3>Coverage note (interactive ceremony)</h3>
+     * The Policy:1 flow requires collected admin dokens authorizing THIS re-sign request.
+     * Like the {@code AttestationUnit:1} multiAdmin commit, the live doken collection is the
+     * interactive M3 piece (a 2-admin enclave round-trip). This method is the iga-half seam:
+     * it routes the re-sign through the EXISTING-M0-policy Policy:1 flow (NOT the burned
+     * firstAdmin pack), so the SIGNER is correct; wiring the per-membership-CR doken
+     * collection for the regen is the remaining interactive step (see report). Fail-closed.
+     *
+     * @return the real Policy:1-signed {@link Policy#ToBytes()} + the Base64 VVK signature.
+     * @throws RuntimeException if the existing M0 policy is missing or the Midgard sign fails.
+     */
+    private SignedPolicy signAdminPolicyViaPolicyFlow(KeycloakSession session, RealmModel realm,
+                                                      int threshold, String vvkId) {
+        // The EXISTING M0 admin Policy that authorizes the re-sign quorum.
+        byte[] existingM0 = readM0AdminPolicyBytes(session, realm);
+        if (existingM0 == null) {
+            throw new RuntimeException("IGA admin-policy re-sign: realm " + realm.getName()
+                    + " is multiAdmin but has no existing M0 admin Policy to bootstrap the "
+                    + "Policy:1 threshold re-sign");
+        }
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException(
+                        "IGA admin-policy re-sign: realm " + realm.getName()
+                                + " has no tide-vendor-key component (VRK not provisioned)"));
+        MultivaluedHashMap<String, String> config = vendorKey.getConfig();
+        if (config == null) {
+            throw new RuntimeException("IGA admin-policy re-sign: tide-vendor-key component has no config "
+                    + "(realm " + realm.getName() + ")");
+        }
+        try {
+            SignRequestSettingsMidgard settings = constructSignSettings(config);
+
+            // The UPDATED admin-threshold Policy (same shape as the firstAdmin path —
+            // only the threshold parameter moves).
+            PolicyParameters params = new PolicyParameters();
+            params.put("threshold", threshold);
+            params.put("role", TIDE_REALM_ADMIN_ROLE);
+            params.put("resource", POLICY_RESOURCE);
+            Policy policy = new Policy(POLICY_TYPE, "any", vvkId,
+                    ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params);
+
+            // Policy:1 auth flow (admin quorum) — NOT VRK:1 (firstAdmin pack). The
+            // existing M0 policy is embedded so the ORK authorizes the re-sign against
+            // the CURRENT admin quorum (the policy bootstraps its own re-sign).
+            PolicySignRequest req = new PolicySignRequest(policy.ToBytes(), POLICY_AUTH_FLOW);
+            req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
+            req.SetPolicy(existingM0);
+            // NOTE: the collected admin dokens authorizing this re-sign are the interactive
+            // M3 step (see javadoc). On a provisioned realm WITHOUT them the ORK's
+            // PolicyAuthorizationFlow rejects — fail-closed (the catch below), which is
+            // CORRECT: we never stamp a fake re-signed admin policy.
+
+            SignatureResponse resp = Midgard.SignModel(settings, req);
+            if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
+                    || resp.Signatures[0] == null) {
+                throw new RuntimeException("IGA admin-policy re-sign: Midgard.SignModel returned no signature "
+                        + "for realm " + realm.getName());
+            }
+            String vvkSig = resp.Signatures[0];
+            policy.AddSignature(java.util.Base64.getDecoder().decode(vvkSig));
+            log.infof("IGA admin threshold Policy RE-SIGNED via Midgard Policy:1 quorum ceremony "
+                    + "(realm %s, threshold %d) — bootstrapped by the existing M0 policy.",
+                    realm.getName(), threshold);
+            return new SignedPolicy(policy.ToBytes(), vvkSig);
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            // Fail-closed: a real-provisioned multiAdmin admin policy must not fall back
+            // to a fake stub on a real signing failure (incl. a burned firstAdmin pack).
+            throw new RuntimeException("IGA admin-policy re-sign: Midgard Policy:1 ceremony failed for realm "
                     + realm.getName() + ": " + e.getMessage(), e);
         }
     }
@@ -2034,6 +2142,35 @@ public class TideAttestor implements IgaAttestor {
      */
     private String signMultiAdminUnitViaPolicy(KeycloakSession session, RealmModel realm,
                                                IgaChangeRequestEntity cr) {
+        // The edge-set path signs ONE unit per CR (the post-change owner set), so the
+        // sig the dispatcher fans out is unit index 0. The node/derived/realm units
+        // (stamped POST-replay) read their own index via signMultiAdminUnitsViaPolicy.
+        return signMultiAdminUnitsViaPolicy(session, realm, cr).get(0);
+    }
+
+    /**
+     * <b>M2 (multi-unit).</b> Sign the collected-doken {@code Policy:1} carrier via
+     * {@code Midgard.SignModel} and return the REPLAYABLE per-unit attestation strings
+     * (one per unit the phase-1 carrier framed, in carrier order).
+     *
+     * <p>The ORK's {@code AttestationUnitSignRequest} signs ONE VVK signature per unit
+     * (its {@code Deserialize} sets {@code AmountOfSignaturesRequested = unitCount}, and
+     * {@code PrepareDatasToSign} adds one {@code PlainSignatureFormat} per unit), so for an
+     * N-unit carrier {@code resp.Signatures} carries N entries in unit order —
+     * {@code Signatures[i]} is the VVK sig over {@code unit[i]}'s verbatim CBOR. We wrap
+     * each in the {@link #FIRSTADMIN_SIG_PREFIX}+b64(64B) shape the login read replays
+     * ({@code IgaAttestationExporterProvider.decodeReplayableSig}) — the prefix is
+     * SIGNER-AGNOSTIC (it marks "a real replayable 64-byte VVK sig", whether produced by
+     * the firstAdmin VRK pack or the multiAdmin admin quorum), so a post-flip multiAdmin
+     * column is byte-shape-identical to a pre-flip firstAdmin column and the uniform login
+     * replay accepts both.
+     *
+     * <p>Reached ONLY from {@link #sign} / the multiAdmin column stampers after
+     * {@link #isRealSigningCapable} passed; fail-closed (throws) on a missing carrier or
+     * any signing failure.
+     */
+    private List<String> signMultiAdminUnitsViaPolicy(KeycloakSession session, RealmModel realm,
+                                                      IgaChangeRequestEntity cr) {
         String carrier = cr.getRequestModel();
         if (carrier == null || carrier.isBlank()) {
             throw new RuntimeException("IGA multiAdmin sign: CR " + cr.getId() + " has no approval-model "
@@ -2061,15 +2198,23 @@ public class TideAttestor implements IgaAttestor {
 
             SignRequestSettingsMidgard settings = constructSignSettings(config);
             SignatureResponse resp = Midgard.SignModel(settings, req);
-            if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
-                    || resp.Signatures[0] == null) {
+            if (resp == null || resp.Signatures == null || resp.Signatures.length == 0) {
                 throw new RuntimeException("IGA multiAdmin sign: Midgard.SignModel returned no signature "
                         + "for realm " + realm.getName());
             }
-            log.infof("IGA multiAdmin commit signed via Midgard Policy:1 ceremony (realm %s, CR %s).",
-                    realm.getName(), cr.getId());
-            // The bare ORK signature over the unit — the REAL attestation (NOT DUMMY_SIG_PREFIX).
-            return resp.Signatures[0];
+            // One sig per unit, in carrier order. Wrap each in the replayable
+            // FIRSTADMIN_SIG_PREFIX+b64(64B) shape so the uniform login replays it.
+            List<String> out = new ArrayList<>(resp.Signatures.length);
+            for (String sig : resp.Signatures) {
+                if (sig == null) {
+                    throw new RuntimeException("IGA multiAdmin sign: Midgard.SignModel returned a null "
+                            + "per-unit signature for realm " + realm.getName());
+                }
+                out.add(FIRSTADMIN_SIG_PREFIX + sig);
+            }
+            log.infof("IGA multiAdmin commit signed via Midgard Policy:1 ceremony (realm %s, CR %s, %d unit(s)).",
+                    realm.getName(), cr.getId(), out.size());
+            return out;
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
@@ -2432,12 +2577,26 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * Sign a producer unit-envelope for the POST-replay column stampers. firstAdmin +
-     * real-signing-capable → the REAL single-unit VVK ceremony (fail-closed); every other
-     * case → the deterministic stub under the mode-appropriate prefix (firstAdmin →
-     * {@link #FIRSTADMIN_SIG_PREFIX}, else {@link #DUMMY_SIG_PREFIX}). Mirrors
-     * {@link #sign}'s mode dispatch but is envelope-driven (no CR canonical), so the same
-     * byte-shape is produced for the per-unit columns.
+     * Sign a producer unit-envelope for the POST-replay column stampers (the NODE /
+     * DERIVED / REALM units). firstAdmin + real-signing-capable → the REAL single-unit
+     * VVK ceremony (fail-closed); every other case → the deterministic stub under the
+     * mode-appropriate prefix (firstAdmin → {@link #FIRSTADMIN_SIG_PREFIX}, else
+     * {@link #DUMMY_SIG_PREFIX}). Mirrors {@link #sign}'s mode dispatch but is
+     * envelope-driven (no CR canonical), so the same byte-shape is produced for the
+     * per-unit columns.
+     *
+     * <p><b>★ P4 coverage boundary (multiAdmin node/derived/realm).</b> Post-flip
+     * multiAdmin REAL signing is wired today for the EDGE-SET actions (the 7 in
+     * {@link #isProducerEnvelopeSignedAction}) via the phase-1 carrier + {@link #sign}'s
+     * {@code signMultiAdminUnitViaPolicy}, replayable into the edge columns. The
+     * node/derived/realm units stamped HERE run POST-replay and have NO collected-doken
+     * carrier authorizing their specific unit request (the phase-1 carrier frames the
+     * edge-set unit, and a CREATE_* node entity does not exist pre-replay to frame at
+     * phase-1 at all), so on a multiAdmin realm they keep the {@link #DUMMY_SIG_PREFIX}
+     * stub — i.e. they are NOT yet login-replayable post-flip. Closing this needs the
+     * interactive multi-unit carrier (phase-1 frames every node/derived/realm unit the CR
+     * will produce, signed per-unit at commit) — the remaining M3/P4-followup work item.
+     * The firstAdmin (pre-flip) real path here is unchanged.
      */
     private String signProducerEnvelope(KeycloakSession session, RealmModel realm, String mode,
                                         byte[] envelope) {

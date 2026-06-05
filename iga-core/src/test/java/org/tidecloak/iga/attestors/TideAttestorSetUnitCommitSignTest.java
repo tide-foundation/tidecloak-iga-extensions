@@ -111,6 +111,27 @@ class TideAttestorSetUnitCommitSignTest {
         }
     }
 
+    /**
+     * ★ P4 — the SAME {@link TideAttestor#isProducerEnvelopeSignedAction} gate is what
+     * phase-1 ({@code buildMultiAdminApprovalModel}) uses to frame the producer unit-CBOR
+     * onto the multiAdmin carrier (vs the regular-canonical dev carry-through). So the 7
+     * edge-set actions are EXACTLY the unit types real post-flip multiAdmin signing covers:
+     * phase-1 frames the identical producer envelope the login replays, and the commit's
+     * {@code signMultiAdminUnitViaPolicy} signs it. The node/derived/realm actions are
+     * stamped POST-replay with no carrier (NOT covered post-flip yet — documented TODO),
+     * which is exactly the {@code false} set above.
+     */
+    @Test
+    void postFlipMultiAdminCoverage_isTheEdgeSetActionSet() {
+        for (String a : new String[]{"GRANT_ROLES",
+                "JOIN_GROUPS", "LEAVE_GROUPS",
+                "GROUP_GRANT_ROLES", "GROUP_REVOKE_ROLES",
+                "ADD_COMPOSITE", "REMOVE_COMPOSITE"}) {
+            assertTrue(TideAttestor.isProducerEnvelopeSignedAction(a),
+                    a + " must be framed onto the phase-1 carrier (post-flip multiAdmin real signing)");
+        }
+    }
+
     // -------------------------------------------------------------------------
     // user_group_membership_set (JOIN / LEAVE)
     // -------------------------------------------------------------------------
