@@ -2,9 +2,11 @@ package org.tidecloak.iga.producer.spi;
 
 import java.util.ArrayList;
 import java.util.List;
+import jakarta.persistence.EntityManager;
 import org.jboss.logging.Logger;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.tide.attestation.AttestationExporterProvider;
@@ -14,9 +16,18 @@ import org.tidecloak.iga.attestors.TideAttestor;
 import org.tidecloak.iga.producer.ExportRequest;
 import org.tidecloak.iga.producer.RealmAttestationExporter;
 import org.tidecloak.iga.producer.units.AttestationUnit;
+import org.tidecloak.iga.producer.units.AttestationUnitType;
 
 public class IgaAttestationExporterProvider implements AttestationExporterProvider {
     private static final Logger log = Logger.getLogger(IgaAttestationExporterProvider.class);
+
+    /**
+     * The bare VVK signature is always EXACTLY 64 bytes (Ed25519). A stored
+     * {@code TIDE-FIRSTADMIN-v1:}+b64 attestation whose decoded body is not 64 bytes
+     * is NOT a replayable envelope signature (e.g. the firstAdmin/policy STUB, which
+     * is {@code base64(sha256(...))} = 32 bytes) — those fall back to re-sign.
+     */
+    static final int VVK_SIG_LEN = 64;
 
     private final KeycloakSession session;
 
@@ -34,9 +45,25 @@ public class IgaAttestationExporterProvider implements AttestationExporterProvid
         return out;
     }
 
+    /**
+     * HYBRID replay/re-sign (Design B, Phase 1 — {@code user_role_mapping_set} only).
+     *
+     * <p>The {@code user_role_mapping_set} unit's final VVK signature is stamped onto
+     * the user's {@code USER_ROLE_MAPPING.attestation} column at GRANT_ROLES commit time
+     * (see {@link TideAttestor#signFirstAdminUnitWithVvk}). On a capable firstAdmin realm
+     * that column holds {@code TIDE-FIRSTADMIN-v1:}+base64(64-byte VVK sig) over the EXACT
+     * producer {@code UserRoleMappingSetUnit.serialize()} envelope. Login REPLAYS that
+     * stored sig instead of re-signing — proving the sign-at-commit / replay-at-login
+     * architecture on one unit.
+     *
+     * <p>All OTHER units are still re-signed in one Midgard round-trip (unchanged
+     * behaviour). The {@code user_role_mapping_set} unit ALSO re-signs when its stored
+     * attestation is a stub / missing (non-capable / dev / pre-flip realms) so pre-flip
+     * login keeps working.
+     */
     @Override
     public List<SignedUnit> exportSignedAccessTokenUnits(RealmModel realm, String clientId, String userId, String scope) {
-        // 1. Build the units and serialize each ONCE — these are the exact bytes we sign AND ship.
+        // 1. Build the units and serialize each ONCE — these are the exact bytes we sign/replay AND ship.
         List<AttestationUnit> units = exportUnits(realm, clientId, userId, scope);
         if (units.isEmpty()) {
             // No units to attest — nothing to sign.
@@ -45,6 +72,32 @@ public class IgaAttestationExporterProvider implements AttestationExporterProvid
         byte[][] envelopes = new byte[units.size()][];
         for (int i = 0; i < units.size(); i++) {
             envelopes[i] = units.get(i).serialize();
+        }
+
+        // 1a. Locate the user_role_mapping_set unit (the user's owner-set) and try to
+        //     REPLAY its stored VVK sig from USER_ROLE_MAPPING.attestation. The producer
+        //     envelope (envelopes[urmIdx]) is byte-identical to what the commit signed
+        //     (both = sorted UserRoleMappingSetUnit.serialize()), so we attach it verbatim
+        //     with the decoded 64-byte sig — no re-sign.
+        int urmIdx = -1;
+        for (int i = 0; i < units.size(); i++) {
+            if (units.get(i).type() == AttestationUnitType.USER_ROLE_MAPPING_SET) {
+                urmIdx = i;
+                break;
+            }
+        }
+        byte[] replayedUrmSig = null;
+        if (urmIdx >= 0) {
+            String storedAttestation = lookupUserRoleMappingSetSig(userId);
+            replayedUrmSig = decodeReplayableSig(storedAttestation);
+            if (replayedUrmSig != null) {
+                log.debugf("IGA signed unit export: REPLAYING user_role_mapping_set VVK sig from "
+                        + "USER_ROLE_MAPPING.attestation for user %s (realm %s) — no re-sign.",
+                        userId, realm.getName());
+            } else {
+                log.debugf("IGA signed unit export: user_role_mapping_set attestation for user %s (realm %s) "
+                        + "is a stub/missing — re-signing it with the other units.", userId, realm.getName());
+            }
         }
 
         // 2. Derive signing settings + the firstAdmin authorizer pack from the realm's
@@ -78,28 +131,107 @@ public class IgaAttestationExporterProvider implements AttestationExporterProvid
                     + "sign AttestationUnit:1; refusing to ship unsigned attestation units");
         }
 
-        // 3. Batch-sign all envelopes in ONE Midgard.SignModel round-trip (the ork's
-        //    AttestationUnitSignRequest returns Signatures[0..N-1], one per unit in order).
-        try {
-            SignRequestSettingsMidgard settings = TideAttestor.constructSignSettings(config);
-            byte[][] sigs = TideAttestor.signUnitsWithFirstAdminVvk(
-                    envelopes, settings, firstAdminAuthorizer, firstAdminAuthorizerCert, realm.getName());
-
-            // 4. Pair each ORIGINAL envelope byte[] (the one we serialized and signed) with its
-            //    sig — never re-serialize between signing and shipping.
-            List<SignedUnit> out = new ArrayList<>(envelopes.length);
-            for (int i = 0; i < envelopes.length; i++) {
-                out.add(new SignedUnit(envelopes[i], sigs[i]));
+        // 3. Collect the envelopes that still need a FRESH re-sign — everything except a
+        //    successfully replayed user_role_mapping_set. The replayed index (if any) is
+        //    skipped here and stitched back in at step 5 from the column.
+        List<byte[]> toSign = new ArrayList<>(envelopes.length);
+        List<Integer> toSignIdx = new ArrayList<>(envelopes.length);
+        for (int i = 0; i < envelopes.length; i++) {
+            if (i == urmIdx && replayedUrmSig != null) {
+                continue; // replayed from the column — not re-signed
             }
-            log.debugf("IGA signed unit export: signed %d attestation unit(s) for realm %s.",
-                    envelopes.length, realm.getName());
-            return out;
+            toSign.add(envelopes[i]);
+            toSignIdx.add(i);
+        }
+
+        // 4. Batch-sign the still-re-signed envelopes in ONE Midgard.SignModel round-trip
+        //    (Signatures[0..M-1], one per unit in order). If everything was replayed
+        //    (only possible if the URM-set were the sole unit — not the case today), skip.
+        byte[][] freshSigs;
+        try {
+            if (toSign.isEmpty()) {
+                freshSigs = new byte[0][];
+            } else {
+                SignRequestSettingsMidgard settings = TideAttestor.constructSignSettings(config);
+                freshSigs = TideAttestor.signUnitsWithFirstAdminVvk(
+                        toSign.toArray(new byte[0][]), settings,
+                        firstAdminAuthorizer, firstAdminAuthorizerCert, realm.getName());
+            }
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
             throw new RuntimeException("IGA signed unit export: per-unit VVK signing failed for realm "
                     + realm.getName() + ": " + e.getMessage(), e);
         }
+
+        // 5. Reassemble the per-unit sigs in original order: the replayed URM-set sig from
+        //    the column, the rest from the fresh batch. Pair each with its ORIGINAL envelope
+        //    byte[] (never re-serialize between signing/replay and shipping).
+        byte[][] perUnitSig = new byte[envelopes.length][];
+        for (int j = 0; j < toSignIdx.size(); j++) {
+            perUnitSig[toSignIdx.get(j)] = freshSigs[j];
+        }
+        if (urmIdx >= 0 && replayedUrmSig != null) {
+            perUnitSig[urmIdx] = replayedUrmSig;
+        }
+
+        List<SignedUnit> out = new ArrayList<>(envelopes.length);
+        for (int i = 0; i < envelopes.length; i++) {
+            out.add(new SignedUnit(envelopes[i], perUnitSig[i]));
+        }
+        log.debugf("IGA signed unit export: %d unit(s) for realm %s (%d re-signed, %d replayed).",
+                envelopes.length, realm.getName(), toSign.size(),
+                (urmIdx >= 0 && replayedUrmSig != null) ? 1 : 0);
+        return out;
+    }
+
+    /**
+     * Decode a stored {@code USER_ROLE_MAPPING.attestation} into a replayable bare VVK
+     * signature, or {@code null} if it is not a real replayable firstAdmin envelope sig
+     * (null/blank, wrong prefix, undecodable, or wrong length — e.g. the 32-byte
+     * {@code base64(sha256)} firstAdmin STUB). A non-null return is the EXACT 64-byte VVK
+     * signature the commit stamped over the producer's {@code UserRoleMappingSetUnit}
+     * envelope; the ork verifies it over the literal envelope bytes.
+     *
+     * <p>Pure + side-effect-free so the replay contract is unit-testable without a session.
+     */
+    static byte[] decodeReplayableSig(String attestation) {
+        if (attestation == null || attestation.isBlank()) {
+            return null;
+        }
+        if (!attestation.startsWith(TideAttestor.FIRSTADMIN_SIG_PREFIX)) {
+            return null;
+        }
+        String b64 = attestation.substring(TideAttestor.FIRSTADMIN_SIG_PREFIX.length());
+        byte[] sig;
+        try {
+            sig = java.util.Base64.getDecoder().decode(b64);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        if (sig.length != VVK_SIG_LEN) {
+            // The firstAdmin STUB shares the prefix but is base64(sha256(...)) = 32 bytes.
+            return null;
+        }
+        return sig;
+    }
+
+    /**
+     * The stored per-set VVK sig for the user's owner-set: any of the user's
+     * {@code USER_ROLE_MAPPING} rows carries the same per-set {@code attestation}, so we
+     * read the first non-null one (preferring a real prefixed sig over a bare/null).
+     * Returns {@code null} if the user has no attested URM row.
+     */
+    private String lookupUserRoleMappingSetSig(String userId) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        @SuppressWarnings("unchecked")
+        List<String> atts = em.createQuery(
+                        "SELECT urm.attestation FROM UserRoleMappingEntity urm "
+                                + "WHERE urm.user.id = :owner AND urm.attestation IS NOT NULL")
+                .setParameter("owner", userId)
+                .setMaxResults(1)
+                .getResultList();
+        return atts.isEmpty() ? null : atts.get(0);
     }
 
     private List<AttestationUnit> exportUnits(RealmModel realm, String clientId, String userId, String scope) {
