@@ -407,6 +407,17 @@ public class IgaAdminResource {
                             "realmId", ev.getRealmId()))
                     .build();
         }
+
+        // POST-replay per-unit-type column stamp (uniform Design B). The dispatcher /
+        // extension has now applied the CR and the live entity exists, so the
+        // node/derived/realm producer attestation-units can be signed from committed
+        // state and stamped into their DEDICATED per-unit columns (commit bytes ==
+        // login bytes by construction). Set-signing (tide) only; a no-op on simple.
+        // Runs in the SAME JPA transaction as the replay above.
+        if (attestor instanceof org.tidecloak.iga.attestors.TideAttestor tideAttestor) {
+            tideAttestor.stampProducerUnitColumns(session, realm, cr);
+        }
+
         IgaChangeRequestService service = getService();
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
         return Response.ok(toRepresentation(updated, service)).build();

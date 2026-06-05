@@ -7,7 +7,9 @@ import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.ClientModel;
+import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.OrganizationModel;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
@@ -2332,6 +2334,363 @@ public class TideAttestor implements IgaAttestor {
                 RealmAttestationExporter.roleCompositeChildrenSet(parent, realm.getId());
         List<String> childIds = applyMemberDelta(preUnit.childRoleIds(), deltaChildren, addAction);
         return new RoleCompositeChildrenSetUnit(realm.getId(), parentRoleId, childIds).serialize();
+    }
+
+    // -------------------------------------------------------------------------
+    // PR-A.2: POST-replay per-unit-type column stamping (uniform Design B)
+    // -------------------------------------------------------------------------
+
+    /**
+     * <b>POST-replay producer-envelope column stamping.</b> Called from
+     * {@code IgaAdminResource.commit} AFTER the dispatcher/extension has applied the CR
+     * (the live entity now exists), in the SAME JPA transaction as the replay. For the
+     * remaining producer attestation-unit types (the NODE units, the DERIVED owner-sets,
+     * and the realm-scoped units), this signs the SAME shared
+     * {@link RealmAttestationExporter} producer envelope the login/export path emits and
+     * stamps it onto that unit type's DEDICATED attestation column (added in PR-A) —
+     * so commit bytes == login bytes by construction and the ork TVE re-derives identical
+     * bytes.
+     *
+     * <p>Distinct from {@link #combineFinal}, which runs PRE-replay and returns the ONE
+     * signature the dispatcher fans onto the edge/node {@code ATTESTATION} column. The
+     * node/derived/realm units have NO clean PRE-replay seam (a {@code CREATE_*} entity
+     * does not exist yet, and a derived set's owner-side column is separate from the
+     * edge), so they are stamped here instead, from the committed live state.
+     *
+     * <p>No-op unless the resolved attestor is set-signing (tide). Best-effort per unit
+     * type — a build/stamp failure for one unit type is logged and skipped rather than
+     * aborting an already-applied commit (the row simply keeps a NULL per-unit column),
+     * EXCEPT a real-signing-capable VVK ceremony failure, which is fail-closed inside
+     * {@link #signProducerEnvelope}.
+     */
+    public void stampProducerUnitColumns(KeycloakSession session, RealmModel realm,
+                                         IgaChangeRequestEntity cr) {
+        String mode = resolveMode(session, realm);
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        String action = cr.getActionType();
+        try {
+            switch (action) {
+                // ---- NODE units: re-stamp the owner's node column with the real envelope ----
+                case "CREATE_CLIENT", "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
+                     "UPDATE_CLIENT_REDIRECT_URIS" ->
+                        stampClientConfig(session, realm, mode, em, cr);
+                case "CREATE_CLIENT_SCOPE" ->
+                        stampClientScopeConfig(session, realm, mode, em, cr);
+                case "CREATE_ROLE", "SET_ROLE_ATTRIBUTE" ->
+                        stampRoleDefinition(session, realm, mode, em, cr);
+                case "CREATE_GROUP", "SET_GROUP_ATTRIBUTE" ->
+                        stampGroupDefinition(session, realm, mode, em, cr);
+                case "CREATE_USER", "SET_USER_ATTRIBUTE" ->
+                        stampUserIdentity(session, realm, mode, em, cr);
+                case "CREATE_ORGANIZATION", "UPDATE_ORGANIZATION" ->
+                        stampOrganizationNode(session, realm, mode, em, cr);
+
+                // ---- DERIVED sets: re-sign the owner's set into the owner's set column ----
+                case "ASSIGN_SCOPE", "REMOVE_SCOPE" ->
+                        stampClientScopeAssignmentSet(session, realm, mode, em, cr);
+                case "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER", "REMOVE_PROTOCOL_MAPPER" ->
+                        stampMapperSet(session, realm, mode, em, cr);
+                case "SCOPE_MAPPING_ADD", "SCOPE_MAPPING_REMOVE" ->
+                        stampScopeRoleAllowlistClient(session, realm, mode, em, cr);
+                case "SCOPE_ADD_ROLE", "SCOPE_REMOVE_ROLE" ->
+                        stampScopeRoleAllowlistScope(session, realm, mode, em, cr);
+
+                // ---- REALM-scoped units ----
+                case "SET_REALM_ATTRIBUTE", "SET_REALM_CONFIG" ->
+                        stampRealmConfig(session, realm, mode, em, cr);
+                case "ADD_REALM_DEFAULT_GROUP", "REMOVE_REALM_DEFAULT_GROUP" ->
+                        stampRealmDefaultGroupsSet(session, realm, mode, em, cr);
+                case "ORG_INVITE_MEMBER", "ORG_RESEND_INVITE" ->
+                        stampOrgDomainSet(session, realm, mode, em, cr);
+                default -> { /* edge sets already covered by combineFinal fan-out; no-op */ }
+            }
+        } catch (RuntimeException fatal) {
+            // Fail-closed VVK ceremony failures (real-signing realm) propagate; everything
+            // else was already swallowed inside the per-unit stampers.
+            throw fatal;
+        }
+    }
+
+    /**
+     * Sign a producer unit-envelope for the POST-replay column stampers. firstAdmin +
+     * real-signing-capable → the REAL single-unit VVK ceremony (fail-closed); every other
+     * case → the deterministic stub under the mode-appropriate prefix (firstAdmin →
+     * {@link #FIRSTADMIN_SIG_PREFIX}, else {@link #DUMMY_SIG_PREFIX}). Mirrors
+     * {@link #sign}'s mode dispatch but is envelope-driven (no CR canonical), so the same
+     * byte-shape is produced for the per-unit columns.
+     */
+    private String signProducerEnvelope(KeycloakSession session, RealmModel realm, String mode,
+                                        byte[] envelope) {
+        if (MODE_FIRST_ADMIN.equals(mode) && isRealSigningCapable(realm)) {
+            return signEnvelopeWithFirstAdminVvk(realm, envelope);
+        }
+        String prefix = MODE_FIRST_ADMIN.equals(mode) ? FIRSTADMIN_SIG_PREFIX : DUMMY_SIG_PREFIX;
+        return stubSign(prefix, envelope);
+    }
+
+    /**
+     * Real single-unit firstAdmin VVK ceremony over an arbitrary producer envelope,
+     * reusing {@link #signUnitsWithFirstAdminVvk} (the batch signer). Fail-closed.
+     */
+    private String signEnvelopeWithFirstAdminVvk(RealmModel realm, byte[] envelope) {
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException("IGA unit-column stamp: realm "
+                        + realm.getName() + " has no tide-vendor-key component (VRK not provisioned)"));
+        MultivaluedHashMap<String, String> config = vendorKey.getConfig();
+        try {
+            SignRequestSettingsMidgard settings = constructSignSettings(config);
+            String authorizer = config.getFirst(CFG_FIRST_ADMIN_AUTHORIZER);
+            String authorizerCert = config.getFirst(CFG_FIRST_ADMIN_AUTHORIZER_CERTIFICATE);
+            byte[][] sigs = signUnitsWithFirstAdminVvk(new byte[][]{ envelope }, settings,
+                    authorizer, authorizerCert, realm.getName());
+            return FIRSTADMIN_SIG_PREFIX + java.util.Base64.getEncoder().encodeToString(sigs[0]);
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("IGA unit-column stamp: VVK ceremony failed for realm "
+                    + realm.getName() + ": " + e.getMessage(), e);
+        }
+    }
+
+    // ---- NODE stampers (owner exists post-replay; re-stamp the node ATTESTATION column) ----
+
+    private void stampClientConfig(KeycloakSession session, RealmModel realm, String mode,
+                                   EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            ClientModel client = resolveClientForStamp(realm, cr);
+            if (client == null) return;
+            byte[] env = RealmAttestationExporter.clientConfig(client, realm.getId()).serialize();
+            String sig = signProducerEnvelope(session, realm, mode, env);
+            em.createQuery("UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig).setParameter("id", client.getId()).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampClientScopeConfig(KeycloakSession session, RealmModel realm, String mode,
+                                        EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String scopeId = firstRowId(cr);
+            if (scopeId == null) return;
+            ClientScopeModel scope = realm.getClientScopeById(scopeId);
+            if (scope == null) return;
+            byte[] env = RealmAttestationExporter.clientScopeConfig(scope, realm.getId()).serialize();
+            String sig = signProducerEnvelope(session, realm, mode, env);
+            em.createQuery("UPDATE ClientScopeEntity e SET e.attestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig).setParameter("id", scopeId).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampRoleDefinition(KeycloakSession session, RealmModel realm, String mode,
+                                     EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String roleId = firstRowId(cr);
+            if (roleId == null) return;
+            RoleModel role = realm.getRoleById(roleId);
+            if (role == null) return;
+            byte[] env = RealmAttestationExporter.roleDefinition(role, realm.getId()).serialize();
+            String sig = signProducerEnvelope(session, realm, mode, env);
+            em.createQuery("UPDATE RoleEntity e SET e.attestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig).setParameter("id", roleId).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampGroupDefinition(KeycloakSession session, RealmModel realm, String mode,
+                                      EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String groupId = firstRowId(cr);
+            if (groupId == null) return;
+            org.keycloak.models.GroupModel group = realm.getGroupById(groupId);
+            if (group == null) return;
+            byte[] env = RealmAttestationExporter.groupDefinition(group, realm.getId()).serialize();
+            String sig = signProducerEnvelope(session, realm, mode, env);
+            em.createQuery("UPDATE GroupEntity e SET e.attestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig).setParameter("id", groupId).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampUserIdentity(KeycloakSession session, RealmModel realm, String mode,
+                                   EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String userId = firstRowId(cr);
+            if (userId == null) return;
+            UserModel user = session.users().getUserById(realm, userId);
+            if (user == null) return;
+            byte[] env = RealmAttestationExporter.userIdentity(user, realm.getId()).serialize();
+            String sig = signProducerEnvelope(session, realm, mode, env);
+            em.createQuery("UPDATE UserEntity e SET e.attestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig).setParameter("id", userId).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampOrganizationNode(KeycloakSession session, RealmModel realm, String mode,
+                                       EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String orgId = firstRowKey(cr, "ORG_ID");
+            org.keycloak.organization.OrganizationProvider orgs =
+                    session.getProvider(org.keycloak.organization.OrganizationProvider.class);
+            if (orgs == null) return;
+            // CREATE_ORGANIZATION rows carry ORG_NAME not ORG_ID; resolve by name then.
+            OrganizationModel org = orgId != null ? orgs.getById(orgId) : null;
+            if (org == null) {
+                String name = firstRowKey(cr, "ORG_NAME");
+                if (name != null) {
+                    org = orgs.getAllStream().filter(o -> name.equals(o.getName())).findFirst().orElse(null);
+                }
+            }
+            if (org == null) return;
+            String groupId = RealmAttestationExporter.organizationBackingGroupId(em, org.getId());
+            byte[] env = RealmAttestationExporter.organizationDefinition(org, groupId, realm.getId()).serialize();
+            String sig = signProducerEnvelope(session, realm, mode, env);
+            em.createQuery("UPDATE OrganizationEntity e SET e.attestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig).setParameter("id", org.getId()).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    // ---- DERIVED set stampers (owner exists; re-sign owner set into owner set column) ----
+
+    private void stampClientScopeAssignmentSet(KeycloakSession session, RealmModel realm, String mode,
+                                               EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+            if (clientUuid == null) return;
+            ClientModel client = realm.getClientById(clientUuid);
+            if (client == null) return;
+            byte[] env = RealmAttestationExporter.clientScopeAssignmentSet(client, realm.getId()).serialize();
+            String sig = signProducerEnvelope(session, realm, mode, env);
+            em.createQuery("UPDATE ClientEntity e SET e.clientScopeAssignmentAttestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig).setParameter("id", clientUuid).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampMapperSet(KeycloakSession session, RealmModel realm, String mode,
+                                EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            // The mapper's parent is a client (CLIENT_UUID) OR a client_scope (CLIENT_SCOPE_ID).
+            String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+            String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
+            if (clientUuid != null) {
+                ClientModel client = realm.getClientById(clientUuid);
+                if (client == null) return;
+                byte[] env = RealmAttestationExporter.clientMapperSet(client, realm.getId()).serialize();
+                String sig = signProducerEnvelope(session, realm, mode, env);
+                em.createQuery("UPDATE ClientEntity e SET e.clientMapperSetAttestation = :sig WHERE e.id = :id")
+                        .setParameter("sig", sig).setParameter("id", clientUuid).executeUpdate();
+            } else if (scopeId != null) {
+                ClientScopeModel scope = realm.getClientScopeById(scopeId);
+                if (scope == null) return;
+                byte[] env = RealmAttestationExporter.clientScopeMapperSet(scope, realm.getId()).serialize();
+                String sig = signProducerEnvelope(session, realm, mode, env);
+                em.createQuery("UPDATE ClientScopeEntity e SET e.clientScopeMapperSetAttestation = :sig WHERE e.id = :id")
+                        .setParameter("sig", sig).setParameter("id", scopeId).executeUpdate();
+            }
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampScopeRoleAllowlistClient(KeycloakSession session, RealmModel realm, String mode,
+                                               EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+            if (clientUuid == null) return;
+            ClientModel client = realm.getClientById(clientUuid);
+            if (client == null) return;
+            byte[] env = RealmAttestationExporter.scopeRoleAllowlistSet(
+                    org.tidecloak.iga.producer.units.ParentType.client, client.getId(),
+                    client, realm.getId()).serialize();
+            String sig = signProducerEnvelope(session, realm, mode, env);
+            em.createQuery("UPDATE ClientEntity e SET e.scopeRoleAllowlistAttestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig).setParameter("id", clientUuid).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampScopeRoleAllowlistScope(KeycloakSession session, RealmModel realm, String mode,
+                                              EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String scopeId = firstRowKey(cr, "SCOPE_ID");
+            if (scopeId == null) return;
+            ClientScopeModel scope = realm.getClientScopeById(scopeId);
+            if (scope == null) return;
+            byte[] env = RealmAttestationExporter.scopeRoleAllowlistSet(
+                    org.tidecloak.iga.producer.units.ParentType.client_scope, scope.getId(),
+                    scope, realm.getId()).serialize();
+            String sig = signProducerEnvelope(session, realm, mode, env);
+            em.createQuery("UPDATE ClientScopeEntity e SET e.scopeRoleAllowlistAttestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig).setParameter("id", scopeId).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    // ---- REALM-scoped stampers (forked RealmEntity fields in tidecloak-override) ----
+
+    private void stampRealmConfig(KeycloakSession session, RealmModel realm, String mode,
+                                  EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            byte[] env = RealmAttestationExporter.realmConfig(realm, realm.getId()).serialize();
+            String sig = signProducerEnvelope(session, realm, mode, env);
+            em.createQuery("UPDATE RealmEntity e SET e.realmConfigAttestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig).setParameter("id", realm.getId()).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampRealmDefaultGroupsSet(KeycloakSession session, RealmModel realm, String mode,
+                                            EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            byte[] env = RealmAttestationExporter.realmDefaultGroupsSetStatic(realm, realm.getId()).serialize();
+            String sig = signProducerEnvelope(session, realm, mode, env);
+            em.createQuery("UPDATE RealmEntity e SET e.realmDefaultGroupsAttestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig).setParameter("id", realm.getId()).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampOrgDomainSet(KeycloakSession session, RealmModel realm, String mode,
+                                   EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String orgId = firstRowKey(cr, "ORG_ID");
+            if (orgId == null) return;
+            org.keycloak.organization.OrganizationProvider orgs =
+                    session.getProvider(org.keycloak.organization.OrganizationProvider.class);
+            if (orgs == null) return;
+            OrganizationModel org = orgs.getById(orgId);
+            if (org == null) return;
+            byte[] env = RealmAttestationExporter.organizationDomainSet(org, realm.getId()).serialize();
+            String sig = signProducerEnvelope(session, realm, mode, env);
+            em.createQuery("UPDATE OrganizationEntity e SET e.orgDomainAttestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig).setParameter("id", orgId).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    // ---- small helpers for the stampers ----
+
+    /** Re-throw only the fail-closed VVK ceremony failures; swallow build/lookup misses. */
+    private static void rethrowIfFailClosed(RuntimeException e) {
+        String m = e.getMessage();
+        if (m != null && m.startsWith("IGA unit-column stamp: VVK ceremony failed")) {
+            throw e;
+        }
+        log.warnf(e, "IGA unit-column stamp: skipped a per-unit-type column stamp (%s)", m);
+    }
+
+    /** The first row's {@code ID} key (the affected entity's own PK), or null. */
+    private static String firstRowId(IgaChangeRequestEntity cr) {
+        return firstRowKey(cr, "ID");
+    }
+
+    /** The first row's value for {@code key}, or null. */
+    private static String firstRowKey(IgaChangeRequestEntity cr, String key) {
+        List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
+        for (Map<String, Object> row : rows) {
+            String v = str(row, key);
+            if (v != null) return v;
+        }
+        return null;
+    }
+
+    /** Resolve the client a CREATE_CLIENT / SET_CLIENT_ATTRIBUTE / web-origins CR targets. */
+    private static ClientModel resolveClientForStamp(RealmModel realm, IgaChangeRequestEntity cr) {
+        // CREATE_CLIENT carries ID (own UUID); attribute/web-origins CRs carry CLIENT_UUID.
+        String uuid = firstRowKey(cr, "ID");
+        if (uuid == null) uuid = firstRowKey(cr, "CLIENT_UUID");
+        return uuid == null ? null : realm.getClientById(uuid);
     }
 
     /**

@@ -48,6 +48,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /**
  * Emits the closure of typed {@link AttestationUnit} instances (plain CBOR/JSON,
@@ -452,7 +453,7 @@ public final class RealmAttestationExporter {
      * {@code OrganizationModel} interface — only on the JPA adapter). JPQL keeps the
      * producer interface-clean.
      */
-    private String organizationBackingGroupId(EntityManager em, String orgId) {
+    public static String organizationBackingGroupId(EntityManager em, String orgId) {
         @SuppressWarnings("unchecked")
         List<String> rows = em.createQuery(
                 "SELECT o.groupId FROM OrganizationEntity o WHERE o.id = :oid")
@@ -478,10 +479,22 @@ public final class RealmAttestationExporter {
                 org.isEnabled(), backingGroupId);
     }
 
-    private OrganizationDomainSetUnit organizationDomainSet(OrganizationModel org, String realmId) {
+    /**
+     * The {@code organization_domain_set} (unit 17) from the public
+     * {@code OrganizationModel.getDomains()} surface — the complete
+     * {@code (name, verified)} ORG_DOMAIN set for the org, target = org id. Shared
+     * {@code public static} so the commit-time signer emits byte-identical bytes.
+     *
+     * <p><b>Deterministic ordering.</b> {@code getDomains()} has no defined order;
+     * the domains are sorted ascending by name so the literal-bytes VVK verification
+     * is reproducible.
+     */
+    public static OrganizationDomainSetUnit organizationDomainSet(OrganizationModel org, String realmId) {
         List<OrgDomain> domains = new ArrayList<>();
         org.getDomains().forEach((OrganizationDomainModel d) ->
                 domains.add(new OrgDomain(d.getName(), d.isVerified())));
+        domains.sort(java.util.Comparator.comparing(OrgDomain::name,
+                java.util.Comparator.nullsFirst(java.util.Comparator.naturalOrder())));
         return new OrganizationDomainSetUnit(realmId, org.getId(), domains);
     }
 
@@ -600,7 +613,13 @@ public final class RealmAttestationExporter {
     // Node units (definition bundles)
     // -------------------------------------------------------------------------
 
-    private RealmConfigUnit realmConfig(RealmModel realm, String realmId) {
+    /**
+     * The {@code realm_config} NODE unit (unit 0), target = realm UUID. Shared
+     * {@code public static} so the commit-time signer ({@code TideAttestor}) emits
+     * byte-identical bytes to this export path (commit bytes == login bytes by
+     * construction).
+     */
+    public static RealmConfigUnit realmConfig(RealmModel realm, String realmId) {
         return new RealmConfigUnit(realmId,
                 realm.getName(),
                 realm.getAccessTokenLifespan(),
@@ -616,7 +635,7 @@ public final class RealmAttestationExporter {
     }
 
     /** The producer-filtered realm attributes ({name,value} list; null → ""). */
-    private List<NameValue> realmConfigAttributes(RealmModel realm) {
+    private static List<NameValue> realmConfigAttributes(RealmModel realm) {
         List<NameValue> attrs = new ArrayList<>();
         for (String key : REALM_CONFIG_ATTR_KEYS) {
             String val = realm.getAttribute(key);
@@ -680,9 +699,34 @@ public final class RealmAttestationExporter {
 
     private ClientScopeAssignmentSetUnit clientScopeAssignmentSet(
             ClientModel client, Map<String, ClientScopeModel> assigned, String realmId) {
+        return clientScopeAssignmentSet(client, realmId);
+    }
+
+    /**
+     * The {@code client_scope_assignment_set} (unit 11) for a client, target =
+     * client UUID. Shared {@code public static} so the commit-time signer
+     * ({@code TideAttestor}) emits byte-identical bytes to this export path.
+     *
+     * <p><b>Deterministic ordering.</b> The VVK sig is verified over the LITERAL
+     * envelope bytes, so the assignment ORDER is load-bearing. The assignments are
+     * sorted ascending by {@code clientScopeId} so commit and login emit an identical
+     * set regardless of {@code getClientScopes()} iteration order. (Mirrors the URM
+     * precedent's {@code ORDER BY}.)
+     */
+    public static ClientScopeAssignmentSetUnit clientScopeAssignmentSet(
+            ClientModel client, String realmId) {
         // default=true for default scopes, false for optional.
         Set<String> defaultIds = client.getClientScopes(true).values().stream()
                 .map(ClientScopeModel::getId).collect(java.util.stream.Collectors.toSet());
+        // Union of default + optional assignments, keyed + sorted by scope id for a
+        // deterministic, byte-stable emission.
+        Map<String, ClientScopeModel> assigned = new java.util.TreeMap<>();
+        for (ClientScopeModel s : client.getClientScopes(true).values()) {
+            assigned.put(s.getId(), s);
+        }
+        for (ClientScopeModel s : client.getClientScopes(false).values()) {
+            assigned.put(s.getId(), s);
+        }
         List<ScopeAssignment> assignments = new ArrayList<>();
         for (ClientScopeModel scope : assigned.values()) {
             assignments.add(new ScopeAssignment(scope.getId(), defaultIds.contains(scope.getId())));
@@ -692,8 +736,21 @@ public final class RealmAttestationExporter {
 
     /** The realm's REALM_DEFAULT_GROUPS set (unit 16), target = realm UUID. */
     private RealmDefaultGroupsSetUnit realmDefaultGroupsSet(RealmModel realm, String realmId) {
+        return realmDefaultGroupsSetStatic(realm, realmId);
+    }
+
+    /**
+     * The realm's REALM_DEFAULT_GROUPS set (unit 15), target = realm UUID. Shared
+     * {@code public static} so the commit-time signer emits byte-identical bytes.
+     *
+     * <p><b>Deterministic ordering.</b> {@code getDefaultGroupsStream()} has no
+     * defined order; the group ids are sorted ascending so the literal-bytes VVK
+     * verification is reproducible and the commit-time signer can mirror the sort.
+     */
+    public static RealmDefaultGroupsSetUnit realmDefaultGroupsSetStatic(RealmModel realm, String realmId) {
         List<String> groupIds = new ArrayList<>();
         realm.getDefaultGroupsStream().forEach(g -> groupIds.add(g.getId()));
+        groupIds.sort(java.util.Comparator.naturalOrder());
         return new RealmDefaultGroupsSetUnit(realmId, groupIds);
     }
 
@@ -742,10 +799,7 @@ public final class RealmAttestationExporter {
                                       ExportRequest req, String realmId,
                                       List<AttestationUnit> out) {
         // Client-owned (dedicated) mappers — the client-as-scope participant.
-        // Filter out JWT-body-irrelevant factories (engine contract: the TVE
-        // ClaimMapperRegistry REJECTS these as session-note-only / base-claim-handled;
-        // see JWT_BODY_IRRELEVANT_FACTORIES). Skip emission AND set membership.
-        List<String> clientMapperIds = new ArrayList<>();
+        List<String> clientMapperIds = jwtRelevantMapperIds(client.getProtocolMappersStream());
         client.getProtocolMappersStream().forEach(pm -> {
             if (JWT_BODY_IRRELEVANT_FACTORIES.contains(pm.getProtocolMapper())) {
                 log.debugf("producer: skipping JWT-body-irrelevant client mapper %s (factory=%s)",
@@ -753,7 +807,6 @@ public final class RealmAttestationExporter {
                 return;
             }
             out.add(protocolMapper(pm, ParentType.client, client.getId(), realmId));
-            clientMapperIds.add(pm.getId());
         });
         if (!clientMapperIds.isEmpty()) {
             out.add(new ClientMapperSetUnit(realmId, client.getId(), clientMapperIds));
@@ -762,7 +815,7 @@ public final class RealmAttestationExporter {
         // visits an unresolved optional scope's mapper set). Same factory filter.
         Map<String, ClientScopeModel> active = resolveActiveScopes(client, req);
         for (ClientScopeModel scope : active.values()) {
-            List<String> scopeMapperIds = new ArrayList<>();
+            List<String> scopeMapperIds = jwtRelevantMapperIds(scope.getProtocolMappersStream());
             scope.getProtocolMappersStream().forEach(pm -> {
                 if (JWT_BODY_IRRELEVANT_FACTORIES.contains(pm.getProtocolMapper())) {
                     log.debugf("producer: skipping JWT-body-irrelevant scope mapper %s "
@@ -771,12 +824,51 @@ public final class RealmAttestationExporter {
                     return;
                 }
                 out.add(protocolMapper(pm, ParentType.client_scope, scope.getId(), realmId));
-                scopeMapperIds.add(pm.getId());
             });
             if (!scopeMapperIds.isEmpty()) {
                 out.add(new ClientScopeMapperSetUnit(realmId, scope.getId(), scopeMapperIds));
             }
         }
+    }
+
+    /**
+     * The JWT-relevant protocol-mapper ids of a container (client OR client-scope),
+     * with the {@link #JWT_BODY_IRRELEVANT_FACTORIES} filtered out and the surviving
+     * ids sorted ascending. Shared so the {@code client_mapper_set} /
+     * {@code client_scope_mapper_set} membership lists are deterministic + byte-stable
+     * for the literal-bytes VVK verification, and the commit-time signer mirrors the
+     * exact same filter + sort.
+     */
+    public static List<String> jwtRelevantMapperIds(
+            Stream<ProtocolMapperModel> mappers) {
+        List<String> ids = new ArrayList<>();
+        mappers.forEach(pm -> {
+            if (!JWT_BODY_IRRELEVANT_FACTORIES.contains(pm.getProtocolMapper())) {
+                ids.add(pm.getId());
+            }
+        });
+        ids.sort(java.util.Comparator.naturalOrder());
+        return ids;
+    }
+
+    /** Build a {@code client_mapper_set} (unit 12) for a client, deterministic + shared. */
+    public static ClientMapperSetUnit clientMapperSet(ClientModel client, String realmId) {
+        return new ClientMapperSetUnit(realmId, client.getId(),
+                jwtRelevantMapperIds(client.getProtocolMappersStream()));
+    }
+
+    /** Build a {@code client_scope_mapper_set} (unit 13) for a scope, deterministic + shared. */
+    public static ClientScopeMapperSetUnit clientScopeMapperSet(ClientScopeModel scope, String realmId) {
+        return new ClientScopeMapperSetUnit(realmId, scope.getId(),
+                jwtRelevantMapperIds(scope.getProtocolMappersStream()));
+    }
+
+    /** Build a {@code scope_role_allowlist_set} (unit 14) for a scope container, deterministic + shared. */
+    public static ScopeRoleAllowlistSetUnit scopeRoleAllowlistSet(
+            ParentType parentType, String parentId,
+            org.keycloak.models.ScopeContainerModel container, String realmId) {
+        return new ScopeRoleAllowlistSetUnit(realmId, parentType, parentId,
+                scopeMappingRoleIds(container));
     }
 
     private ProtocolMapperUnit protocolMapper(ProtocolMapperModel pm, ParentType parentType,
@@ -831,10 +923,21 @@ public final class RealmAttestationExporter {
         return all;
     }
 
-    /** scope→role allowlist (SCOPE_MAPPING / CLIENT_SCOPE_ROLE_MAPPING) role ids. */
-    private List<String> scopeMappingRoleIds(org.keycloak.models.ScopeContainerModel container) {
+    /**
+     * scope→role allowlist (SCOPE_MAPPING / CLIENT_SCOPE_ROLE_MAPPING) role ids.
+     * Shared {@code public static} so the commit-time signer emits byte-identical
+     * bytes to this export path.
+     *
+     * <p><b>Deterministic ordering.</b> {@code getScopeMappingsStream()} has no
+     * defined order; the ids are sorted ascending so the literal-bytes VVK
+     * verification is reproducible (load-bearing for the {@code scope_role_allowlist_set}
+     * unit). The metadata-seed callers (which union the ids into a Set) are order-
+     * insensitive, so the sort is harmless there.
+     */
+    public static List<String> scopeMappingRoleIds(org.keycloak.models.ScopeContainerModel container) {
         List<String> ids = new ArrayList<>();
         container.getScopeMappingsStream().forEach(r -> ids.add(r.getId()));
+        ids.sort(java.util.Comparator.naturalOrder());
         return ids;
     }
 
