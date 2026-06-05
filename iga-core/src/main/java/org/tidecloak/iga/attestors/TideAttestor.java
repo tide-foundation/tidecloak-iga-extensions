@@ -613,8 +613,8 @@ public class TideAttestor implements IgaAttestor {
      */
     private void writeBackPolicySig(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr,
                                     String sig) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
-        if (policy == null) return;
 
         if (isRealSigningCapable(realm)) {
             // POST-bootstrap admin threshold: combineFinal runs PRE-replay, so the live
@@ -626,23 +626,93 @@ public class TideAttestor implements IgaAttestor {
             int threshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
             String vvkId = realmVvkId(realm);
             AdminPolicyArtifact artifact = buildSignedAdminPolicyArtifact(session, realm, threshold, vvkId);
-            policy.setPolicy(artifact.policyBody);
-            policy.setPolicySig(artifact.policySig);
-            policy.setThreshold(threshold);
-            policy.setApprovalType(POLICY_APPROVAL_TYPE);
-            policy.setExecutionType(POLICY_EXECUTION_TYPE);
-            policy.setUpdatedAt(System.currentTimeMillis());
-            session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
+            // M0 FIX: the policy row MUST exist after the flip. On a real-signing-capable
+            // realm the firstAdmin->multiAdmin transition is the moment the admin Policy is
+            // generated + VVK-signed, so INSERT it if no row was pre-seeded via the separate
+            // POST /iga/role-policies path. Previously this returned early when the row was
+            // missing, flipping the realm to multiAdmin with NO signed M0 Policy — every
+            // subsequent multiAdmin approval-model build then threw APPROVAL_MODEL_BUILD_FAILED.
+            policy = upsertAdminPolicyRow(session, realm, policy,
+                    artifact.policyBody, artifact.policySig, threshold);
+            if (policy == null) {
+                // tide-realm-admin role id unresolvable — cannot key a row. The flip should
+                // not proceed without a signed policy on a capable realm: fail-closed.
+                throw new RuntimeException("IGA firstAdmin policy bootstrap: realm " + realm.getName()
+                        + " has no realm-management tide-realm-admin role to key the admin Policy (M0)");
+            }
+            em.flush();
             log.infof("IGA firstAdmin policy bootstrap: realm %s installed REAL VVK-signed admin "
                     + "threshold Policy (threshold %d).", realm.getName(), threshold);
             return;
         }
 
         // NON-capable: pre-M0 behaviour — stamp the bootstrap GRANT signature only.
+        // Still create the row if absent so the multiAdmin approval-model build has an
+        // M0 Policy to embed (stub body + the bootstrap GRANT sig). Threshold mirrors the
+        // capable path: max(1, floor(0.7 x post-commit admins)).
+        if (policy == null) {
+            int postCommitCount = Math.max(0,
+                    countActiveTideRealmAdmins(realm, session) + tideRealmAdminMembershipDelta(realm, cr));
+            int threshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
+            String stubBody = buildAdminPolicyArtifact(threshold, realmVvkId(realm));
+            policy = upsertAdminPolicyRow(session, realm, null, stubBody, sig, threshold);
+            if (policy == null) {
+                log.infof("IGA firstAdmin policy bootstrap (non-capable): realm %s has no "
+                        + "tide-realm-admin role to key the admin Policy row; policySig write-back skipped.",
+                        realm.getName());
+                return;
+            }
+            em.flush();
+            return;
+        }
         policy.setPolicySig(sig);
         policy.setUpdatedAt(System.currentTimeMillis());
         // managed entity — no explicit persist needed; flush keeps it in-tx.
-        session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
+        em.flush();
+    }
+
+    /**
+     * M0 FIX — insert-or-update the tide-realm-admin {@link IgaRolePolicyEntity}.
+     * The firstAdmin bootstrap and the threshold-change regen both need the row to
+     * EXIST after they run (the previous update-only behaviour silently no-op'd when
+     * the row had never been pre-seeded, leaving a multiAdmin realm with no M0 Policy).
+     *
+     * @param existing the already-looked-up row (may be {@code null} → INSERT a new one)
+     * @return the managed (inserted or updated) entity, or {@code null} when the
+     *         realm-management tide-realm-admin role cannot be resolved to key the row.
+     */
+    IgaRolePolicyEntity upsertAdminPolicyRow(KeycloakSession session, RealmModel realm,
+                                                     IgaRolePolicyEntity existing,
+                                                     String policyBody, String policySig, int threshold) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        long now = System.currentTimeMillis();
+        if (existing != null) {
+            existing.setPolicy(policyBody);
+            existing.setPolicySig(policySig);
+            existing.setThreshold(threshold);
+            existing.setApprovalType(POLICY_APPROVAL_TYPE);
+            existing.setExecutionType(POLICY_EXECUTION_TYPE);
+            existing.setUpdatedAt(now);
+            return existing;
+        }
+        String tideRoleId = tideRealmAdminRoleId(realm);
+        if (tideRoleId == null) {
+            return null;
+        }
+        IgaRolePolicyEntity row = new IgaRolePolicyEntity();
+        row.setId(java.util.UUID.randomUUID().toString());
+        row.setRealmId(realm.getId());
+        row.setRoleId(tideRoleId);
+        row.setPolicy(policyBody);
+        row.setPolicySig(policySig);
+        row.setThreshold(threshold);
+        row.setApprovalType(POLICY_APPROVAL_TYPE);
+        row.setExecutionType(POLICY_EXECUTION_TYPE);
+        row.setCreatedAt(now);
+        em.persist(row);
+        log.infof("IGA admin Policy (M0) row created for realm %s (tide-realm-admin, threshold %d).",
+                realm.getName(), threshold);
+        return row;
     }
 
     /**
@@ -718,15 +788,6 @@ public class TideAttestor implements IgaAttestor {
         }
 
         IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
-        if (policy == null) {
-            // No admin policy artifact to keep in sync (it is upserted via the
-            // separate POST /iga/role-policies path). Nothing to regenerate;
-            // the live getThreshold gate is unaffected (it never reads this row).
-            log.infof("IGA policy regen skipped: realm %s has no tide-realm-admin role-policy row "
-                    + "to regenerate (membership delta %+d); live threshold gate is unaffected.",
-                    realm.getName(), delta);
-            return;
-        }
 
         // combineFinal runs PRE-replay, so the live count excludes this CR's effect;
         // add the pending net delta to obtain the post-commit count.
@@ -734,9 +795,12 @@ public class TideAttestor implements IgaAttestor {
         int postCommitCount = Math.max(0, countActiveTideRealmAdmins(realm, session) + delta);
         int newThreshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
 
-        // IsEqualTo short-circuit: regenerate only when the encoded threshold actually moves.
-        Integer currentThreshold = currentEncodedThreshold(policy);
-        if (currentThreshold != null && currentThreshold == newThreshold) {
+        // IsEqualTo short-circuit: regenerate only when the encoded threshold actually
+        // moves AND a row already exists. If the row is MISSING (e.g. a realm that flipped
+        // before the M0-FIX, or never had one seeded), we must INSERT it now regardless of
+        // the threshold delta so the multiAdmin approval-model has an M0 Policy to embed.
+        Integer priorThreshold = (policy == null) ? null : currentEncodedThreshold(policy);
+        if (priorThreshold != null && priorThreshold == newThreshold) {
             log.infof("IGA policy regen skipped (threshold unchanged): realm %s tide-realm-admin policy "
                     + "already encodes threshold %d (membership delta %+d, post-commit admins %d).",
                     realm.getName(), newThreshold, delta, postCommitCount);
@@ -751,22 +815,22 @@ public class TideAttestor implements IgaAttestor {
         // the previous behaviour. This regen fires ONLY from combineFinal's multiAdmin
         // branch, so when not capable the sig is the multiAdmin DUMMY_SIG_PREFIX as before.
         AdminPolicyArtifact artifact = buildSignedAdminPolicyArtifact(session, realm, newThreshold, vvkId);
-        String newPolicyBody = artifact.policyBody;
-        String newPolicySig = artifact.policySig;
 
-        policy.setPolicy(newPolicyBody);
-        policy.setPolicySig(newPolicySig);
-        policy.setThreshold(newThreshold);
-        policy.setApprovalType(POLICY_APPROVAL_TYPE);
-        policy.setExecutionType(POLICY_EXECUTION_TYPE);
-        policy.setUpdatedAt(System.currentTimeMillis());
-        // Managed entity — flush keeps the rewrite in the CR's commit transaction
+        IgaRolePolicyEntity result = upsertAdminPolicyRow(session, realm, policy,
+                artifact.policyBody, artifact.policySig, newThreshold);
+        if (result == null) {
+            log.infof("IGA policy regen skipped: realm %s has no tide-realm-admin role to key the "
+                    + "admin Policy row (membership delta %+d).", realm.getName(), delta);
+            return;
+        }
+        // Managed/persisted entity — flush keeps the rewrite in the CR's commit transaction
         // (atomic: if the commit rolls back, so does the regen).
         session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
 
-        log.infof("IGA admin policy regenerated: realm %s tide-realm-admin threshold %s -> %d "
+        log.infof("IGA admin policy %s: realm %s tide-realm-admin threshold %s -> %d "
                 + "(membership delta %+d, post-commit admins %d); policy re-signed (%s).",
-                realm.getName(), String.valueOf(currentThreshold), newThreshold, delta, postCommitCount,
+                priorThreshold == null ? "created" : "regenerated",
+                realm.getName(), String.valueOf(priorThreshold), newThreshold, delta, postCommitCount,
                 artifact.real ? "real VVK ceremony" : (DUMMY_SIG_PREFIX + " stub"));
     }
 
