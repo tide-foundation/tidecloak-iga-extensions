@@ -954,13 +954,47 @@ public final class RealmAttestationExporter {
         return out;
     }
 
-    /** Multi-valued user attribute map -> [NameValues] (ork unit 7). */
+    /**
+     * Multi-valued user attribute map -> [NameValues] (ork unit 7).
+     *
+     * <p>The ork {@code user_identity} validator ({@code AttestationUnit.cs}
+     * {@code GetNameValuesList}) requires every element of each {@code values[]}
+     * to be a CBOR text string — a {@code null} element fails the unit with
+     * {@code 'attributes'.values must contain only strings}, which aborts ORK
+     * signing of the whole bundle ({@code Midgard.SignModel} → "Not enough orks").
+     *
+     * <p>Keycloak's {@code UserAdapter.getAttributes()} merges the standard
+     * profile fields into this map via {@code MultivaluedHashMap.add}, which
+     * stores the raw getter result even when it is {@code null}: an absent
+     * {@code firstName}/{@code lastName}/{@code email} yields a single-element
+     * list {@code [null]}. We coerce to all-string by dropping {@code null}
+     * elements (an absent standard field → empty {@code values[]}); the ork reads
+     * those standard fields from the dedicated nullable payload keys
+     * ({@code first_name}/{@code last_name}/{@code email}), not from
+     * {@code attributes}, so dropping the {@code null} placeholder loses no
+     * verified state. Any genuine {@code null} inside a custom multi-valued
+     * attribute is likewise dropped (the ork has no representation for a null
+     * member of a string set).
+     *
+     * <p>This is the ONLY place the {@code attributes} {@code values[]} is built,
+     * and it serves BOTH the toggle-on backfill/commit signer and the login/export
+     * read ({@link #userIdentity}). A single coercion therefore keeps the two
+     * byte-identical: the same {@code null}-stripped list is emitted at sign time
+     * and at verify time.
+     */
     private static List<NameValues> userAttributeNameValues(Map<String, List<String>> attrs) {
         List<NameValues> out = new ArrayList<>();
         if (attrs != null) {
             for (Map.Entry<String, List<String>> e : attrs.entrySet()) {
-                out.add(new NameValues(e.getKey(),
-                        e.getValue() == null ? new ArrayList<>() : new ArrayList<>(e.getValue())));
+                List<String> values = new ArrayList<>();
+                if (e.getValue() != null) {
+                    for (String v : e.getValue()) {
+                        if (v != null) {
+                            values.add(v);
+                        }
+                    }
+                }
+                out.add(new NameValues(e.getKey(), values));
             }
         }
         return out;
