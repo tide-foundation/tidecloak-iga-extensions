@@ -898,7 +898,7 @@ public class TideAttestor implements IgaAttestor {
      * Carrying both together lets every write site stamp {@code POLICY} and
      * {@code POLICY_SIG} consistently from ONE capability decision.
      */
-    static final class AdminPolicyArtifact {
+    private static final class AdminPolicyArtifact {
         final String policyBody;
         final String policySig;
         final boolean real;
@@ -926,7 +926,7 @@ public class TideAttestor implements IgaAttestor {
      * realm is provisioned, its admin policy must never be stamped with a fake digest.
      * The stub path never throws.
      */
-    AdminPolicyArtifact buildSignedAdminPolicyArtifact(KeycloakSession session, RealmModel realm,
+    private AdminPolicyArtifact buildSignedAdminPolicyArtifact(KeycloakSession session, RealmModel realm,
                                                                int threshold, String vvkId) {
         if (isRealSigningCapable(realm)) {
             SignedPolicy signed = signAdminPolicyWithVvk(session, realm, threshold, vvkId);
@@ -1374,23 +1374,10 @@ public class TideAttestor implements IgaAttestor {
      * still carries SOMETHING as the policy — the enclave/ORK only consumes it for real on
      * a provisioned realm. Returns {@code null} only when there is no admin policy row at all.
      */
-    byte[] readM0AdminPolicyBytes(KeycloakSession session, RealmModel realm) {
+    private static byte[] readM0AdminPolicyBytes(KeycloakSession session, RealmModel realm) {
         IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
         if (policy == null || policy.getPolicy() == null || policy.getPolicy().isBlank()) {
-            // BACKFILL AUTO-HEAL: a realm that already flipped firstAdmin -> multiAdmin
-            // without ever installing a signed M0 Policy (e.g. flipped before the 96f498e
-            // fix, or pre-seeded with no body) lands here and would otherwise throw
-            // APPROVAL_MODEL_BUILD_FAILED on every approval. On a REAL-SIGNING-CAPABLE
-            // realm we create + VVK-sign the admin Policy on the spot — the SAME machinery
-            // the firstAdmin flip / threshold-regen use (buildSignedAdminPolicyArtifact ->
-            // signAdminPolicyWithVvk -> upsertAdminPolicyRow) — then return the fresh bytes
-            // so the build proceeds. Idempotent: only fires when the row is missing/blank.
-            // Non-capable realms keep returning null (the existing stub/throw path) — we do
-            // NOT fabricate a "real" policy on a realm that cannot really sign one.
-            policy = backfillM0AdminPolicyIfCapable(session, realm);
-            if (policy == null || policy.getPolicy() == null || policy.getPolicy().isBlank()) {
-                return null;
-            }
+            return null;
         }
         String body = policy.getPolicy();
         try {
@@ -1400,98 +1387,6 @@ public class TideAttestor implements IgaAttestor {
             // Dev/test stub realm: M0 wrote hand-rolled JSON. Carry it verbatim.
             return body.getBytes(StandardCharsets.UTF_8);
         }
-    }
-
-    /**
-     * BACKFILL AUTO-HEAL — create + VVK-sign the M0 admin Policy for an already-flipped
-     * multiAdmin realm that never installed one, then persist it. Invoked from
-     * {@link #readM0AdminPolicyBytes} when the tide-realm-admin {@link IgaRolePolicyEntity}
-     * has no (or a blank) {@code POLICY} body, so the heal happens lazily on the next
-     * approval-model build — no migration, no admin re-flip required.
-     *
-     * <h3>Capability gate</h3>
-     * <ul>
-     *   <li>{@link #isRealSigningCapable} realm → build the SAME genuine VVK-signed Policy
-     *       the firstAdmin flip ({@link #writeBackPolicySig}) and threshold-regen install:
-     *       {@link #buildSignedAdminPolicyArtifact} (→ {@link #signAdminPolicyWithVvk}, an
-     *       ORK SignModel round-trip) at the LIVE admin threshold, then
-     *       {@link #upsertAdminPolicyRow} to persist. Returns the managed row so the caller
-     *       reads the just-signed bytes.</li>
-     *   <li>NON-capable realm → return {@code null} unchanged, so the caller keeps the
-     *       existing stub/throw behaviour. We never fabricate a "real" policy on a realm
-     *       that cannot really sign one.</li>
-     * </ul>
-     *
-     * <h3>Threshold</h3>
-     * Unlike the firstAdmin flip / threshold-regen — which run PRE-replay and add the
-     * committing CR's pending delta — this heal runs on an ALREADY-committed, ALREADY-flipped
-     * realm, so the live admin count is authoritative as-is (no CR delta). The threshold is
-     * {@code max(1, floor(0.7 x countActiveTideRealmAdmins))} — byte-identical to the live
-     * multiAdmin gate in {@link #getThreshold}, so the installed Policy and the commit gate agree.
-     *
-     * <h3>Idempotency / concurrency</h3>
-     * Re-checks {@link #findTideRealmAdminPolicy} INSIDE this method first: if a valid signed
-     * row already exists (e.g. a concurrent approval healed it between the caller's read and
-     * here), it returns that row UNCHANGED — no re-sign, no double-insert.
-     * {@link #upsertAdminPolicyRow} updates the row in place when one is present, so a row
-     * that appears concurrently is updated rather than duplicated; it never throws on a
-     * pre-existing row.
-     *
-     * @return the managed (created or already-present) policy row, or {@code null} when the
-     *         realm is non-capable or the tide-realm-admin role cannot key a row.
-     */
-    private IgaRolePolicyEntity backfillM0AdminPolicyIfCapable(KeycloakSession session, RealmModel realm) {
-        // Idempotency / concurrency: re-check inside the heal. If a valid signed row already
-        // exists, reuse it unchanged (don't re-sign).
-        IgaRolePolicyEntity existing = findTideRealmAdminPolicy(session, realm);
-        if (existing != null && existing.getPolicy() != null && !existing.getPolicy().isBlank()) {
-            return existing;
-        }
-        // Only heal on a real-signing-capable realm; non-capable keeps the existing path.
-        if (!isBackfillSigningCapable(realm)) {
-            return null;
-        }
-        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        // LIVE admin count (no CR delta — the realm already flipped and the grant is committed).
-        // Same floor as getThreshold's multiAdmin branch, so the Policy matches the live gate.
-        int threshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * liveTideRealmAdminCount(realm, session)));
-        String vvkId = realmVvkId(realm);
-        // Build + REAL-VVK-sign (ORK SignModel round-trip) — the SAME capable-branch machinery
-        // writeBackPolicySig / maybeRegenerateAdminPolicyOnMembershipChange use. Fail-closed (throws on ORK failure).
-        AdminPolicyArtifact artifact = buildSignedAdminPolicyArtifact(session, realm, threshold, vvkId);
-        IgaRolePolicyEntity row = upsertAdminPolicyRow(session, realm, existing,
-                artifact.policyBody, artifact.policySig, threshold);
-        if (row == null) {
-            // tide-realm-admin role unresolvable — cannot key a row. Caller falls back to null.
-            log.warnf("IGA M0 backfill: realm %s has no tide-realm-admin role to key the admin "
-                    + "Policy row; cannot auto-heal.", realm.getName());
-            return null;
-        }
-        em.flush();
-        log.infof("IGA M0 backfill: realm %s had no signed admin Policy — created + REAL VVK-signed "
-                + "admin threshold Policy on approval-model read (threshold %d).", realm.getName(), threshold);
-        return row;
-    }
-
-    /**
-     * Backfill capability gate — delegates to the static {@link #isRealSigningCapable}.
-     * A thin instance seam ONLY so the auto-heal create-path can be unit-tested without
-     * provisioning real ORK material / THRESHOLD_* env (the test spies this); production
-     * behaviour is unchanged (pure delegation).
-     */
-    boolean isBackfillSigningCapable(RealmModel realm) {
-        return isRealSigningCapable(realm);
-    }
-
-    /**
-     * Live committed tide-realm-admin count for the backfill threshold — delegates to the
-     * static {@link #countActiveTideRealmAdmins}. A thin instance seam ONLY so the auto-heal
-     * threshold can be unit-tested deterministically (the test spies this); production
-     * behaviour is unchanged (pure delegation). No CR delta is applied: the realm has
-     * already flipped and the admin grant is committed, so the live count is authoritative.
-     */
-    int liveTideRealmAdminCount(RealmModel realm, KeycloakSession session) {
-        return countActiveTideRealmAdmins(realm, session);
     }
 
     // -------------------------------------------------------------------------
