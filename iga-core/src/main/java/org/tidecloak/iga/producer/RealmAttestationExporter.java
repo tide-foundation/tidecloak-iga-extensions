@@ -233,7 +233,7 @@ public final class RealmAttestationExporter {
         Set<String> ownerClientUuids = new LinkedHashSet<>();
         for (RoleModel role : roleClosure) {
             out.add(roleDefinition(role, realmId));
-            out.add(roleCompositeChildrenSet(role, realmId));
+            emitRoleCompositeChildrenSet(role, realmId, out);
             // The engine's client-role mapper walks role_definition.container_id ->
             // client_config to name resource_access.<clientId>. Collect every owning
             // client of a client-role so we can emit its client_config below.
@@ -425,7 +425,35 @@ public final class RealmAttestationExporter {
     /** {@code role_definition} (unit 4) + {@code role_composite_children_set} (unit 10) for a role. */
     private void emitRoleMetadata(RoleModel role, String realmId, List<AttestationUnit> out) {
         out.add(roleDefinition(role, realmId));
-        out.add(roleCompositeChildrenSet(role, realmId));
+        emitRoleCompositeChildrenSet(role, realmId, out);
+    }
+
+    /**
+     * Gated emission of {@code role_composite_children_set} (unit 10): emit ONLY for roles
+     * that are REAL composites with at least one composite child (i.e. they own
+     * {@code composite_role} rows). A LEAF role (e.g. {@code offline_access},
+     * {@code view-profile}, {@code manage-account-links}) has NO {@code composite_role} row,
+     * so {@code CompositeRoleEntity.attestation WHERE parentRole.id=:id} is structurally
+     * NULL — there is no column for the convergence stamper to write a signature into, and
+     * {@code IgaAttestationExporterProvider.replayOrFailClosed} would fail-close on the NULL
+     * at EVERY login (all users hold these default leaf roles via {@code default-roles}).
+     *
+     * <p>The convergence only signs existing {@code composite_role} rows, so emitting fewer
+     * units here keeps the login-emitted set and the convergence-signed set byte-identical
+     * and in lockstep. {@code role_definition} (unit 4) is STILL emitted for leaf roles by
+     * the callers (keyed on {@code keycloak_role.attestation}, which always exists) — only
+     * unit 10 is gated. Used by BOTH the login {@link #export} closure and the
+     * {@code exportRealmMetadata} convergence path (via {@link #emitRoleMetadata}).
+     */
+    private void emitRoleCompositeChildrenSet(RoleModel role, String realmId,
+                                              List<AttestationUnit> out) {
+        RoleCompositeChildrenSetUnit unit = roleCompositeChildrenSet(role, realmId);
+        if (unit.childRoleIds().isEmpty()) {
+            // Leaf role (no composite children) — no composite_role row to sign. Do NOT
+            // emit; emitting it would orphan a unit with no signable column → fail-close.
+            return;
+        }
+        out.add(unit);
     }
 
     /**

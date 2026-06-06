@@ -46,8 +46,14 @@ import static org.mockito.Mockito.when;
  * client's) membership-independently. These tests pin that:
  * <ol>
  *   <li>EVERY realm role and EVERY client role — including a composite
- *       {@code tide-realm-admin → realm-admin} that NO user holds — gets BOTH its
- *       {@code role_definition} and {@code role_composite_children_set} emitted.</li>
+ *       {@code tide-realm-admin → realm-admin} that NO user holds — gets its
+ *       {@code role_definition} emitted.</li>
+ *   <li>ONLY roles that ARE real composites (have composite children) get a
+ *       {@code role_composite_children_set} (unit 10): the composite
+ *       {@code tide-realm-admin} does; the LEAF roles ({@code realm-admin},
+ *       {@code plain-realm-role}, {@code client-role}) do NOT — a leaf has no
+ *       {@code composite_role} row to sign, so emitting the unit would fail-close the
+ *       login read on the structurally-NULL column.</li>
  *   <li>The composite's {@code role_composite_children_set} actually carries its child id
  *       (so the ORK can expand it), proving the composite metadata is real, not a stub.</li>
  *   <li>It is membership-INDEPENDENT: no {@code UserModel} is consulted — the closure comes
@@ -165,13 +171,23 @@ class RealmAttestationExporterMetadataClosureTest {
         }
 
         // (1) EVERY realm role AND the client role get a role_definition — incl. the roles
-        //     NO user holds (tide-realm-admin, realm-admin).
+        //     NO user holds (tide-realm-admin, realm-admin). role_definition is keyed on
+        //     keycloak_role.attestation which ALWAYS exists, so it is emitted for leaves too.
         for (String id : List.of(TIDE_REALM_ADMIN, REALM_ADMIN, PLAIN_REALM_ROLE, CLIENT_ROLE)) {
             assertTrue(defTargets.contains(id),
                     "role_definition must be emitted for " + id + " (membership-independent)");
-            assertTrue(compositeTargets.contains(id),
-                    "role_composite_children_set must be emitted for " + id
-                            + " (even when the role holds no composites / no user holds it)");
+        }
+
+        // (1b) GATE: role_composite_children_set (unit 10) is emitted ONLY for the REAL
+        //      composite (tide-realm-admin). The LEAF roles (realm-admin, plain-realm-role,
+        //      client-role) have ZERO composite_role rows — emitting the unit for them would
+        //      leave the convergence with no column to sign and fail-close every login.
+        assertTrue(compositeTargets.contains(TIDE_REALM_ADMIN),
+                "role_composite_children_set must be emitted for the composite tide-realm-admin");
+        for (String leaf : List.of(REALM_ADMIN, PLAIN_REALM_ROLE, CLIENT_ROLE)) {
+            assertTrue(!compositeTargets.contains(leaf),
+                    "role_composite_children_set must NOT be emitted for leaf role " + leaf
+                            + " (no composite_role row to sign → fail-close)");
         }
 
         // (2) the tide-realm-admin composite's children-set carries realm-admin — proving the
@@ -220,5 +236,78 @@ class RealmAttestationExporterMetadataClosureTest {
         assertEquals(1, composite,
                 "the un-held tide-realm-admin composite is signed by the metadata closure "
                         + "without any user being consulted");
+    }
+
+    /**
+     * ★ THE ROOT-CAUSE GATE — default-roles leaf-role scenario.
+     *
+     * <p>A {@code default-roles-<realm>} composite expands to leaf roles every user holds
+     * ({@code offline_access}, {@code view-profile}, {@code manage-account-links}). Those
+     * leaf roles have ZERO {@code composite_role} rows, so a
+     * {@code role_composite_children_set} (unit 10) emitted for them is structurally
+     * un-signable → the uniform login read fail-closed on the NULL column for EVERY login.
+     *
+     * <p>This pins the fix: the metadata closure emits unit 10 ONLY for the real composite
+     * ({@code default-roles}), never for the leaf roles — while STILL emitting
+     * {@code role_definition} (unit 4) for every leaf. A {@code default-roles} user login
+     * therefore emits ZERO orphan leaf-role composite units → no fail-close.
+     */
+    @Test
+    void defaultRolesLeafRoles_getNoCompositeChildrenSet_onlyDefinition_compositeStillEmitsUnit10() {
+        final String DEFAULT_ROLES = "default-roles-meta-realm-uuid";
+        final String OFFLINE_ACCESS = "offline_access-uuid";
+        final String VIEW_PROFILE = "view-profile-uuid";
+        final String MANAGE_ACCOUNT_LINKS = "manage-account-links-uuid";
+
+        // default-roles is a REAL composite -> the three leaf roles. The leaves are NOT
+        // composites (compositeChildIds == null -> isComposite()==false, no composite_role row).
+        RoleModel defaultRoles = role(DEFAULT_ROLES, false, REALM_ID,
+                List.of(OFFLINE_ACCESS, VIEW_PROFILE, MANAGE_ACCOUNT_LINKS));
+        RoleModel offlineAccess = role(OFFLINE_ACCESS, false, REALM_ID, null);
+        RoleModel viewProfile = role(VIEW_PROFILE, false, REALM_ID, null);
+        RoleModel manageAccountLinks = role(MANAGE_ACCOUNT_LINKS, false, REALM_ID, null);
+
+        RealmModel realm = mock(RealmModel.class);
+        when(realm.getId()).thenReturn(REALM_ID);
+        when(realm.getName()).thenReturn("default-roles-realm");
+        when(realm.getClientsStream()).thenAnswer(inv -> Stream.empty());
+        when(realm.getClientScopesStream()).thenAnswer(inv -> Stream.empty());
+        when(realm.getGroupsStream()).thenAnswer(inv -> Stream.empty());
+        when(realm.getDefaultGroupsStream()).thenAnswer(inv -> Stream.empty());
+        when(realm.getAttribute(org.mockito.ArgumentMatchers.anyString())).thenReturn(null);
+
+        KeycloakSession session = sessionWith(realm,
+                defaultRoles, offlineAccess, viewProfile, manageAccountLinks);
+
+        List<AttestationUnit> units = new RealmAttestationExporter().exportRealmMetadata(session, realm);
+
+        Set<String> defTargets = new LinkedHashSet<>();
+        Set<String> compositeTargets = new LinkedHashSet<>();
+        for (AttestationUnit u : units) {
+            if (u.type() == AttestationUnitType.ROLE_DEFINITION) {
+                defTargets.add(u.targetId());
+            } else if (u.type() == AttestationUnitType.ROLE_COMPOSITE_CHILDREN_SET) {
+                compositeTargets.add(u.targetId());
+            }
+        }
+
+        // role_definition (unit 4) for ALL roles incl. the leaves (keyed on the always-present
+        // keycloak_role.attestation column).
+        for (String id : List.of(DEFAULT_ROLES, OFFLINE_ACCESS, VIEW_PROFILE, MANAGE_ACCOUNT_LINKS)) {
+            assertTrue(defTargets.contains(id),
+                    "role_definition must STILL be emitted for " + id + " (only unit 10 is gated)");
+        }
+
+        // role_composite_children_set (unit 10): ONLY the real composite default-roles.
+        assertTrue(compositeTargets.contains(DEFAULT_ROLES),
+                "role_composite_children_set must be emitted for the real composite default-roles");
+        for (String leaf : List.of(OFFLINE_ACCESS, VIEW_PROFILE, MANAGE_ACCOUNT_LINKS)) {
+            assertTrue(!compositeTargets.contains(leaf),
+                    "NO role_composite_children_set for leaf role " + leaf
+                            + " — it has no composite_role row to sign (fail-close cause)");
+        }
+        // Exactly one unit-10 emitted in the whole closure (the composite), zero orphans.
+        assertEquals(1, compositeTargets.size(),
+                "exactly ONE role_composite_children_set (the composite) — zero orphan leaf units");
     }
 }
