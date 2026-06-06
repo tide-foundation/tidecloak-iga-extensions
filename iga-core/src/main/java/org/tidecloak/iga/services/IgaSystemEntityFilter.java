@@ -139,6 +139,38 @@ public final class IgaSystemEntityFilter {
             "uma_authorization"
     );
 
+    /**
+     * The Tide-identity client scope ({@code tide-claims}). It carries the
+     * {@code tideuserkey} / {@code vuid} / {@code t.uho} protocol mappers that
+     * every Tide-signed login token MUST contain — the ORK {@code Validate}
+     * step rejects a token with no {@code tideuserkey} ("Tide user key missing
+     * from token").
+     *
+     * <p>Like KC's built-in default scopes (profile/email/...), this scope must
+     * NEVER be quarantined: if the toggle-on ADOPT scan wrote an
+     * {@code IGA_UNSIGNED_ENTITY} sidecar row for it, then — until its
+     * {@code ADOPT_CLIENT_SCOPE} CR committed —
+     * {@link org.tidecloak.iga.providers.IgaClientScopeAdapter#getProtocolMappersStream()}
+     * would return {@code Stream.empty()} for it, STRIPPING the
+     * {@code tideuserkey} mapper from the issued token and breaking Tide login.
+     * The same strip would also empty the producer's
+     * {@code client_scope_mapper_set} unit (the producer reads the live
+     * {@code getProtocolMappersStream()}), so the signed unit would mismatch
+     * the (un-quarantined) login emission and replay would fail-close.</p>
+     *
+     * <p>Treating it as a hard-pinned system entity here makes the scan emit an
+     * <em>attestation-only</em> ADOPT CR for it (its producer column is still
+     * signed/governed) WITHOUT a quarantine sidecar — so its mappers are always
+     * present at token-mint and at producer sign time. Unlike the soft skips,
+     * this is NOT lifted by {@code iga.adopt.includeSystem=true}: quarantining
+     * the Tide-identity scope would brick every Tide login.</p>
+     *
+     * <p>Matched by the well-known canonical scope name (kept in sync with
+     * {@code IgaSystemProvisioner.TIDE_CLAIMS_SCOPE_NAME}). Only this scope is
+     * exempted — all other operator-authored custom scopes still quarantine.</p>
+     */
+    public static final String TIDE_CLAIMS_SCOPE_NAME = "tide-claims";
+
     private IgaSystemEntityFilter() {
     }
 
@@ -190,6 +222,17 @@ public final class IgaSystemEntityFilter {
             // The bookkeeping client default-roles-<realm> exists alongside
             // the role and is similarly pinned.
             if (defaultRolesName.equals(entityName)) {
+                return true;
+            }
+        }
+        if (IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE.equals(entityType)) {
+            // The Tide-identity scope tide-claims. Its tideuserkey/vuid/t.uho
+            // mappers must NEVER be stripped from a login token (and the
+            // producer must read them when signing the client_scope_mapper_set
+            // unit), so it must never be quarantined. Hard-pinned: not lifted
+            // by includeSystem=true. It STILL gets an attestation-only ADOPT CR
+            // (signed, no quarantine sidecar). See TIDE_CLAIMS_SCOPE_NAME.
+            if (TIDE_CLAIMS_SCOPE_NAME.equals(entityName)) {
                 return true;
             }
         }

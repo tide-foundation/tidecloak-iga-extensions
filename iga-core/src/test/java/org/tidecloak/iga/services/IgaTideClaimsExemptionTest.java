@@ -1,0 +1,73 @@
+package org.tidecloak.iga.services;
+
+import org.junit.jupiter.api.Test;
+import org.keycloak.models.RealmModel;
+import org.tidecloak.iga.replay.IgaReplayExtension;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+/**
+ * The tide-claims (Tide-identity) client scope must be treated by the ADOPT
+ * scan as a hard-pinned system entity → attestation-only ADOPT CR, NEVER a
+ * quarantine sidecar. If it were quarantined, IgaClientScopeAdapter
+ * .getProtocolMappersStream() would return Stream.empty() until the ADOPT CR
+ * committed, STRIPPING the tideuserkey/vuid/t.uho mappers from the login token
+ * (ORK Validate → "Tide user key missing from token") AND emptying the
+ * producer's client_scope_mapper_set unit (login bytes != signed bytes →
+ * replay fail-close).
+ *
+ * <p>Other operator-authored custom scopes are NOT exempt — they still
+ * quarantine under governance.</p>
+ */
+class IgaTideClaimsExemptionTest {
+
+    private RealmModel realm() {
+        RealmModel realm = mock(RealmModel.class);
+        lenient().when(realm.getName()).thenReturn("bvnvbncvb");
+        return realm;
+    }
+
+    @Test
+    void tideClaimsScope_isAttestationOnly_neverQuarantined() {
+        RealmModel realm = realm();
+        // includeSystem=false (default) AND includeSystem=true (hard-pin): both
+        // must classify tide-claims as system (attestation-only, no sidecar).
+        assertTrue(IgaSystemEntityFilter.shouldSkip(realm,
+                        IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE,
+                        "any-uuid", IgaSystemEntityFilter.TIDE_CLAIMS_SCOPE_NAME,
+                        null, false),
+                "tide-claims must be attestation-only (never quarantined) by default");
+        assertTrue(IgaSystemEntityFilter.shouldSkip(realm,
+                        IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE,
+                        "any-uuid", IgaSystemEntityFilter.TIDE_CLAIMS_SCOPE_NAME,
+                        null, true),
+                "tide-claims exemption is HARD-pinned — not lifted by includeSystem=true");
+    }
+
+    @Test
+    void tideClaimsOwnedEdges_areAttestationOnly() {
+        RealmModel realm = realm();
+        // Scope-owned edges (mapper edge, scope->client, scope->role,
+        // default-scope) resolve ownerNodeType=CLIENT_SCOPE, ownerNodeName=
+        // "tide-claims" → must skip (attestation-only) exactly as the node does.
+        assertTrue(IgaSystemEntityFilter.shouldSkipEdge(realm,
+                        IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE,
+                        IgaSystemEntityFilter.TIDE_CLAIMS_SCOPE_NAME, null, false),
+                "edges owned by tide-claims must be attestation-only too");
+    }
+
+    @Test
+    void otherCustomScope_stillQuarantines() {
+        RealmModel realm = realm();
+        // An operator-authored custom scope (not a KC default, not tide-claims)
+        // is NOT exempt — it falls through and IS quarantined.
+        assertFalse(IgaSystemEntityFilter.shouldSkip(realm,
+                        IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE,
+                        "any-uuid", "p6b-scope", null, false),
+                "other custom scopes must still be governed (quarantined)");
+    }
+}
