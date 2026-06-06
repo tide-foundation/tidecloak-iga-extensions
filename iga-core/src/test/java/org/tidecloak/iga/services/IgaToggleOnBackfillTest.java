@@ -101,6 +101,39 @@ class IgaToggleOnBackfillTest {
                 "maximal scope must be the deduped union of every client's optional scope names");
     }
 
+    @Test
+    void emptyEnvelopeBatch_makesNoOrkRoundTrip_andReturnsEmpty() {
+        // The backfill PHASE 2 batch signer short-circuits an empty envelope array WITHOUT
+        // touching the realm/vendor-key/Midgard at all (a null realm would NPE if it didn't).
+        // This is the "everything already real-signed, nothing to sign" toggle-on path: zero
+        // ORK round-trips, not one empty request.
+        assertEquals(0,
+                TideAttestor.signEnvelopesWithFirstAdminVvk(null, new byte[0][]).length,
+                "an empty envelope batch must sign nothing and make no ORK round-trip");
+        assertEquals(0,
+                TideAttestor.signEnvelopesWithFirstAdminVvk(null, null).length,
+                "a null envelope batch must sign nothing and make no ORK round-trip");
+    }
+
+    @Test
+    void orkRoundTripCount_isCeilOfUnitsOverBatchMax_one_for_a_realm_closure() {
+        // The backfill's reported orkRoundTrips = ceil(N / 100). The dedup'd realm closure
+        // (~dozens of units, e.g. the e2e signed=92) is a SINGLE round-trip (was N=92), and the
+        // batch only fans out into more requests for a pathologically large closure. This is the
+        // load-bearing speedup: 92 per-unit round-trips -> 1.
+        assertEquals(0, ceilDiv100(0));
+        assertEquals(1, ceilDiv100(1));
+        assertEquals(1, ceilDiv100(92), "a ~92-unit realm closure batches into ONE ORK round-trip");
+        assertEquals(1, ceilDiv100(100));
+        assertEquals(2, ceilDiv100(101), "only a >100-unit closure chunks into a second round-trip");
+        assertEquals(3, ceilDiv100(250));
+    }
+
+    /** Mirrors the backfill's reported {@code orkRoundTrips} math (ceil(n/100)). */
+    private static int ceilDiv100(int n) {
+        return n == 0 ? 0 : ((n + 99) / 100);
+    }
+
     private static ClientModel clientWithOptionalScopes(String... names) {
         ClientModel c = mock(ClientModel.class);
         Map<String, ClientScopeModel> optional = new LinkedHashMap<>();

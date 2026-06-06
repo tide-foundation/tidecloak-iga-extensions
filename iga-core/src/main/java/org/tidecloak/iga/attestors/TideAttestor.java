@@ -211,6 +211,16 @@ public class TideAttestor implements IgaAttestor {
      */
     private static final long FIRSTADMIN_SIGN_EXPIRY_SECONDS = 180L;
 
+    /**
+     * Defensive upper bound on the number of producer unit-envelopes packed into a SINGLE
+     * {@link #signUnitsWithFirstAdminVvk} / {@code AttestationUnit:1} ORK request. The ork
+     * imposes NO hard cap (only a {@code >= 1} minimum — {@code AttestationUnitSignRequest.cs}
+     * Validate), so the realm's whole ~dozens-of-units toggle-on closure normally fits in one
+     * round-trip; this only chunks a pathologically large closure to keep any single request's
+     * wire size sane.
+     */
+    private static final int FIRSTADMIN_SIGN_BATCH_MAX = 100;
+
     /** The action type whose firstAdmin sign is upgraded to the real VRK ceremony. */
     private static final String ACTION_GRANT_ROLES = "GRANT_ROLES";
 
@@ -2619,6 +2629,40 @@ public class TideAttestor implements IgaAttestor {
      * commit would write are interchangeable.
      */
     public static String signEnvelopeWithFirstAdminVvk(RealmModel realm, byte[] envelope) {
+        return signEnvelopesWithFirstAdminVvk(realm, new byte[][]{ envelope })[0];
+    }
+
+    /**
+     * BATCH firstAdmin VVK ceremony over MANY producer envelopes in ONE (or a few chunked)
+     * {@link Midgard#SignModel} ORK round-trip(s) — the multi-unit form of
+     * {@link #signEnvelopeWithFirstAdminVvk}. The ork's {@code AttestationUnit:1} request
+     * already signs one VVK sig PER unit in a single multi-unit request (its
+     * {@code Deserialize} sets {@code AmountOfSignaturesRequested = unitCount} and
+     * {@code PrepareDatasToSign} emits one {@code PlainSignatureFormat} per Draft segment),
+     * and {@link #signUnitsWithFirstAdminVvk} already accepts a {@code byte[][]} and returns
+     * one sig per envelope in order — so a caller with N envelopes to sign should call THIS
+     * once, not the single-envelope method N times (N ORK round-trips).
+     *
+     * <p>The vendor-key / settings / authorizer-triplet lookup is done ONCE (shared across
+     * the whole batch). The envelopes are signed VERBATIM (same byte-for-byte contract as the
+     * single method): {@code out[i]} is the {@link #FIRSTADMIN_SIG_PREFIX}+b64(64B) sig over
+     * {@code envelopes[i]}, byte-identical to what {@link #signEnvelopeWithFirstAdminVvk}
+     * would produce for that same envelope. Fail-closed: a real ceremony failure propagates.
+     *
+     * <p><b>Chunking.</b> The ork places no upper cap on the unit count of an
+     * {@code AttestationUnitSignRequest} (only a {@code >= 1} minimum — see
+     * {@code AttestationUnitSignRequest.cs} Validate). We still chunk at
+     * {@link #FIRSTADMIN_SIGN_BATCH_MAX} as a defensive bound on a single request's size; with
+     * the realm's ~dozens-of-units closure this is typically a single round-trip.
+     *
+     * @param envelopes one verbatim CBOR producer unit-envelope per requested sig (may be empty)
+     * @return {@code String[]} of {@link #FIRSTADMIN_SIG_PREFIX}+b64(64B) sigs, {@code out[i]}
+     *         over {@code envelopes[i]} (same length / order as {@code envelopes})
+     */
+    public static String[] signEnvelopesWithFirstAdminVvk(RealmModel realm, byte[][] envelopes) {
+        if (envelopes == null || envelopes.length == 0) {
+            return new String[0];
+        }
         ComponentModel vendorKey = realm.getComponentsStream()
                 .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
                 .findFirst()
@@ -2629,9 +2673,20 @@ public class TideAttestor implements IgaAttestor {
             SignRequestSettingsMidgard settings = constructSignSettings(config);
             String authorizer = config.getFirst(CFG_FIRST_ADMIN_AUTHORIZER);
             String authorizerCert = config.getFirst(CFG_FIRST_ADMIN_AUTHORIZER_CERTIFICATE);
-            byte[][] sigs = signUnitsWithFirstAdminVvk(new byte[][]{ envelope }, settings,
-                    authorizer, authorizerCert, realm.getName());
-            return FIRSTADMIN_SIG_PREFIX + java.util.Base64.getEncoder().encodeToString(sigs[0]);
+
+            String[] out = new String[envelopes.length];
+            // Chunk to stay under a defensive per-request bound; usually one round-trip.
+            for (int start = 0; start < envelopes.length; start += FIRSTADMIN_SIGN_BATCH_MAX) {
+                int end = Math.min(start + FIRSTADMIN_SIGN_BATCH_MAX, envelopes.length);
+                byte[][] chunk = java.util.Arrays.copyOfRange(envelopes, start, end);
+                byte[][] sigs = signUnitsWithFirstAdminVvk(chunk, settings,
+                        authorizer, authorizerCert, realm.getName());
+                for (int i = 0; i < chunk.length; i++) {
+                    out[start + i] = FIRSTADMIN_SIG_PREFIX
+                            + java.util.Base64.getEncoder().encodeToString(sigs[i]);
+                }
+            }
+            return out;
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {

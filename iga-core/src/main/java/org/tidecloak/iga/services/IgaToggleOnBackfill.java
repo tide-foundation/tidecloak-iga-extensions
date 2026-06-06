@@ -139,8 +139,11 @@ public final class IgaToggleOnBackfill {
                 .filter(UserModel::isEnabled)
                 .collect(Collectors.toList());
 
-        int signed = 0;
         int skipped = 0;
+        List<AttestationUnit> toSign = new ArrayList<>();
+        // PHASE 1 - ENUMERATE + DEDUP. Walk every (user, client) export, COLLECTING the unique
+        // units that still need a real sig (instead of signing each inline = one ORK round-trip
+        // per unit). toSign[] order is the order sigs come back in (sig[i] maps to toSign.get(i)).
         // Dedup envelopes already processed this pass (same unit can appear in many
         // exports — realm/role/client units repeat across every user). Key = unit
         // type + target id; a real sign happens at most once per logical unit.
@@ -171,27 +174,43 @@ public final class IgaToggleOnBackfill {
                         skipped++;
                         continue; // a real 64-byte sig is already present — never clobber
                     }
-                    // Sign the EXACT producer envelope with the firstAdmin pack and stamp
-                    // every owner row. Fail-closed inside signEnvelopeWithFirstAdminVvk.
-                    byte[] envelope = unit.serialize();
-                    String sig = TideAttestor.signEnvelopeWithFirstAdminVvk(realm, envelope);
-                    int rows = UnitColumnMapping.stamp(em, unit, sig);
-                    if (rows > 0) {
-                        signed++;
-                    } else {
-                        // No owner row to stamp (entity/edge vanished mid-pass). The login
-                        // won't emit this unit either (it builds from the same live model),
-                        // so this is a benign no-op, not a coverage hole.
-                        log.debugf("IGA toggle-on backfill: unit %s target %s had no row to stamp "
-                                + "(skipped)", unit.type(), unit.targetId());
-                    }
+                    toSign.add(unit); // dedup'd, NULL-or-stub column - needs a real sig
                 }
             }
         }
 
+        // PHASE 2 - BATCH SIGN. Sign ALL unique envelopes in ONE (or, for a pathologically
+        // large closure, a few chunked) Midgard.SignModel ORK round-trip(s): the ork returns
+        // one VVK sig per unit in a single multi-unit AttestationUnit:1 request, instead of N
+        // round-trips. Envelopes are the EXACT bytes each unit serializes (same wire shape the
+        // login read replays); sig[i] is the firstAdmin sig over envelopes[i]. Fail-closed: a
+        // real ceremony failure propagates (a capable firstAdmin realm must not half-sign then
+        // flip its uniform read).
+        byte[][] envelopes = new byte[toSign.size()][];
+        for (int i = 0; i < toSign.size(); i++) {
+            envelopes[i] = toSign.get(i).serialize();
+        }
+        String[] sigs = TideAttestor.signEnvelopesWithFirstAdminVvk(realm, envelopes);
+
+        // PHASE 3 - DISTRIBUTE. Stamp sig[i] onto unit toSign.get(i)'s dedicated column(s).
+        // The unit->sig mapping is preserved by index, so each unit gets the sig over its OWN
+        // envelope. A unit with no owner row to stamp (entity/edge vanished mid-pass) is a
+        // benign no-op - the login won't emit it either (same live model) - not a coverage hole.
+        int signed = 0;
+        for (int i = 0; i < toSign.size(); i++) {
+            AttestationUnit unit = toSign.get(i);
+            int rows = UnitColumnMapping.stamp(em, unit, sigs[i]);
+            if (rows > 0) {
+                signed++;
+            } else {
+                log.debugf("IGA toggle-on backfill: unit %s target %s had no row to stamp "
+                        + "(skipped)", unit.type(), unit.targetId());
+            }
+        }
+
         log.infof("IGA toggle-on backfill complete for realm %s: signed=%d, alreadyReal=%d, "
-                        + "users=%d, clients=%d", realm.getName(), signed, skipped, users.size(),
-                clients.size());
+                        + "users=%d, clients=%d, orkRoundTrips=%d", realm.getName(), signed, skipped,
+                users.size(), clients.size(), (toSign.isEmpty() ? 0 : ((toSign.size() + 99) / 100)));
         return new Result(true, null, signed, skipped, users.size(), clients.size());
     }
 
