@@ -114,7 +114,21 @@ public final class IgaReplayExtension {
      */
     public static final String ACTION_ADOPT_SCOPE_MAPPING = "ADOPT_SCOPE_MAPPING";
 
+    /**
+     * Manual-signing redesign (2026-06-06) — retroactive ADOPT for the REALM NODE
+     * itself. The login closure emits two realm-scoped producer units (realm_config #0,
+     * realm_default_groups_set #15) keyed on the realmId; neither had any ADOPT path
+     * before, so their dedicated columns (RealmEntity.realmConfigAttestation /
+     * realmDefaultGroupsAttestation) stayed NULL after toggle-on and the uniform login
+     * read fail-closed. This is an ATTESTATION-ONLY node (no sidecar, no quarantine —
+     * the realm is never a quarantineable entity): commit stamps the two realm columns
+     * via TideAttestor.stampProducerUnitColumns and flips the CR APPROVED. No model write
+     * and no legacy single-attestation column (the realm has none).
+     */
+    public static final String ACTION_ADOPT_REALM = "ADOPT_REALM";
+
     public static final String ENTITY_TYPE_USER = "USER";
+    public static final String ENTITY_TYPE_REALM = "REALM";
     public static final String ENTITY_TYPE_ROLE = "ROLE";
     public static final String ENTITY_TYPE_GROUP = "GROUP";
     public static final String ENTITY_TYPE_CLIENT = "CLIENT";
@@ -167,7 +181,10 @@ public final class IgaReplayExtension {
                 || ACTION_ADOPT_CLIENT_SCOPE_ROLE.equals(actionType)
                 || ACTION_ADOPT_PROTOCOL_MAPPER.equals(actionType)
                 || ACTION_ADOPT_DEFAULT_CLIENT_SCOPE.equals(actionType)
-                || ACTION_ADOPT_SCOPE_MAPPING.equals(actionType);
+                || ACTION_ADOPT_SCOPE_MAPPING.equals(actionType)
+                // Manual-signing redesign — the realm-node ADOPT shares the same
+                // bootstrap-onramp bypass (threshold=1, no approver-role gate).
+                || ACTION_ADOPT_REALM.equals(actionType);
     }
 
     /**
@@ -214,6 +231,20 @@ public final class IgaReplayExtension {
                 session.setAttribute("IGA_REPLAY_ACTIVE", "true");
                 try {
                     replayAdoptEdge(session, cr, finalAttestation, setSigned);
+                } finally {
+                    session.removeAttribute("IGA_REPLAY_ACTIVE");
+                }
+                return true;
+            case ACTION_ADOPT_REALM:
+                // The realm node has NO legacy single-attestation column and NO model
+                // write — the two realm producer columns (realm_config /
+                // realm_default_groups_set) are stamped by
+                // TideAttestor.stampProducerUnitColumns (the ADOPT_REALM case) which
+                // IgaAdminResource.commit invokes right after tryReplay. Here we only
+                // flip the CR APPROVED (attestation-only: no sidecar to clear).
+                session.setAttribute("IGA_REPLAY_ACTIVE", "true");
+                try {
+                    replayAdoptRealm(session, cr);
                 } finally {
                     session.removeAttribute("IGA_REPLAY_ACTIVE");
                 }
@@ -296,6 +327,22 @@ public final class IgaReplayExtension {
 
         // 6. Mark APPROVED + resolvedAt on the managed CR — same tail as
         // IgaReplayDispatcher.doReplay.
+        IgaChangeRequestEntity managed = em.find(IgaChangeRequestEntity.class, cr.getId());
+        if (managed != null) {
+            managed.setStatus("APPROVED");
+            managed.setResolvedAt(System.currentTimeMillis());
+        }
+    }
+
+    /**
+     * Replay an ADOPT_REALM CR (manual-signing redesign). Attestation-only: no model
+     * write, no legacy attestation column (the realm has none), no sidecar. The two
+     * realm producer columns are stamped by the POST-replay
+     * {@code TideAttestor.stampProducerUnitColumns} (ADOPT_REALM case) in the same JPA
+     * transaction. Here we just flip the CR APPROVED + resolvedAt.
+     */
+    private static void replayAdoptRealm(KeycloakSession session, IgaChangeRequestEntity cr) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         IgaChangeRequestEntity managed = em.find(IgaChangeRequestEntity.class, cr.getId());
         if (managed != null) {
             managed.setStatus("APPROVED");

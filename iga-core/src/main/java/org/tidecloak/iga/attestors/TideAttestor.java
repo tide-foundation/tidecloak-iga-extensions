@@ -25,7 +25,11 @@ import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
 import org.tidecloak.iga.crypto.SecretKeys;
 import org.tidecloak.iga.producer.RealmAttestationExporter;
+import org.tidecloak.iga.producer.spi.UnitColumnMapping;
+import org.tidecloak.iga.producer.units.AttestationUnit;
 import org.tidecloak.iga.producer.units.GroupRoleMappingSetUnit;
+import org.tidecloak.iga.producer.units.ParentType;
+import org.tidecloak.iga.producer.units.ProtocolMapperUnit;
 import org.tidecloak.iga.producer.units.RoleCompositeChildrenSetUnit;
 import org.tidecloak.iga.producer.units.UserGroupMembershipSetUnit;
 import org.tidecloak.iga.producer.units.UserRoleMappingSetUnit;
@@ -2577,6 +2581,38 @@ public class TideAttestor implements IgaAttestor {
                         stampRealmDefaultGroupsSet(session, realm, mode, em, cr);
                 case "ORG_INVITE_MEMBER", "ORG_RESEND_INVITE" ->
                         stampOrgDomainSet(session, realm, mode, em, cr);
+
+                // ---- ADOPT node CRs: stamp the producer column(s) the adopted entity OWNS ----
+                // The manual-signing redesign (2026-06-06) makes the toggle-on ADOPT CRs the
+                // ONLY path that signs the login closure (no toggle-time backfill). Committing an
+                // ADOPT_<node> CR must therefore stamp the SAME producer per-unit columns the
+                // uniform login read replays — for the entity that CR targets. Each node owns a
+                // small, fixed family of producer units (its own columns); we build them from the
+                // live (now-attested) entity via the shared RealmAttestationExporter helpers, sign
+                // each envelope, and stamp via UnitColumnMapping (which fans the set columns across
+                // every owner row, matching the dispatcher). Other entities' own units are stamped
+                // by THEIR ADOPT CRs — a node ADOPT only stamps what the node owns.
+                case "ADOPT_USER" -> stampAdoptUser(session, realm, mode, em, cr);
+                case "ADOPT_ROLE" -> stampAdoptRole(session, realm, mode, em, cr);
+                case "ADOPT_GROUP" -> stampAdoptGroup(session, realm, mode, em, cr);
+                case "ADOPT_CLIENT" -> stampAdoptClient(session, realm, mode, em, cr);
+                case "ADOPT_CLIENT_SCOPE" -> stampAdoptClientScope(session, realm, mode, em, cr);
+                case "ADOPT_ORGANIZATION" -> stampAdoptOrganization(session, realm, mode, em, cr);
+                // ADOPT_REALM stamps the two realm-scoped producer columns (realm_config #0,
+                // realm_default_groups_set #15) — neither had any ADOPT path before, so they
+                // fail-closed the uniform login read after toggle-on. Reuses the same realm
+                // stampers the SET_REALM_CONFIG / ADD_REALM_DEFAULT_GROUP commits use.
+                case "ADOPT_REALM" -> {
+                    stampRealmConfig(session, realm, mode, em, cr);
+                    stampRealmDefaultGroupsSet(session, realm, mode, em, cr);
+                }
+                // ADOPT_PROTOCOL_MAPPER: the only edge ADOPT that owns a dedicated producer column
+                // (protocol_mapper, id=mapperId). The other edge ADOPTs (composite-role,
+                // scope↔client, scope→role, default-scope, scope-mapping) feed into SET units
+                // (role_composite_children_set / client_scope_assignment_set / scope_role_allowlist_set)
+                // that are stamped by the OWNING node's ADOPT CR, so they need no separate stamp here.
+                case "ADOPT_PROTOCOL_MAPPER" -> stampAdoptProtocolMapper(session, realm, mode, em, cr);
+
                 default -> { /* edge sets already covered by combineFinal fan-out; no-op */ }
             }
         } catch (RuntimeException fatal) {
@@ -2901,6 +2937,147 @@ public class TideAttestor implements IgaAttestor {
             String sig = signProducerEnvelope(session, realm, mode, env);
             em.createQuery("UPDATE OrganizationEntity e SET e.orgDomainAttestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig).setParameter("id", orgId).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    // ---- ADOPT node/edge stampers (manual-signing redesign, 2026-06-06) ----
+    //
+    // Each ADOPT_<node> CR carries the adopted entity's id under rowsJson key "ID".
+    // On commit (post-replay, IGA_REPLAY_ACTIVE set) we build the producer units the
+    // node OWNS from the live entity, sign each envelope, and stamp via UnitColumnMapping
+    // (which fans the set columns across every owner row, matching the dispatcher /
+    // login read). The whole point of routing BOTH the stamp here and the login read
+    // through the producer + UnitColumnMapping is that they cannot drift.
+
+    /** Sign one producer unit envelope and stamp it into its dedicated column(s). */
+    private void signAndStampUnit(KeycloakSession session, RealmModel realm, String mode,
+                                  EntityManager em, AttestationUnit unit) {
+        if (unit == null) return;
+        String sig = signProducerEnvelope(session, realm, mode, unit.serialize());
+        UnitColumnMapping.stamp(em, unit, sig);
+    }
+
+    private void stampAdoptUser(KeycloakSession session, RealmModel realm, String mode,
+                                EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String userId = firstRowKey(cr, "ID");
+            if (userId == null) return;
+            UserModel user = session.users().getUserById(realm, userId);
+            if (user == null) return;
+            // user_identity (6), user_role_mapping_set (7), user_group_membership_set (8).
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.userIdentity(user, realm.getId()));
+            @SuppressWarnings("unchecked")
+            List<String> roleIds = new ArrayList<>(em.createQuery(
+                            "SELECT urm.roleId FROM UserRoleMappingEntity urm WHERE urm.user.id = :owner"
+                                    + " ORDER BY urm.roleId")
+                    .setParameter("owner", userId).getResultList());
+            signAndStampUnit(session, realm, mode, em,
+                    new UserRoleMappingSetUnit(realm.getId(), userId, roleIds));
+            List<String> groupIds = RealmAttestationExporter.userGroupMembershipSet(em, userId, false);
+            signAndStampUnit(session, realm, mode, em,
+                    new UserGroupMembershipSetUnit(realm.getId(), userId, groupIds));
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampAdoptRole(KeycloakSession session, RealmModel realm, String mode,
+                                EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String roleId = firstRowKey(cr, "ID");
+            if (roleId == null) return;
+            RoleModel role = realm.getRoleById(roleId);
+            if (role == null) return;
+            // role_definition (4), role_composite_children_set (10).
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.roleDefinition(role, realm.getId()));
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.roleCompositeChildrenSet(role, realm.getId()));
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampAdoptGroup(KeycloakSession session, RealmModel realm, String mode,
+                                 EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String groupId = firstRowKey(cr, "ID");
+            if (groupId == null) return;
+            org.keycloak.models.GroupModel group = realm.getGroupById(groupId);
+            if (group == null) return;
+            // group_definition (5), group_role_mapping_set (9).
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.groupDefinition(group, realm.getId()));
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.groupRoleMappingSet(em, groupId, realm.getId()));
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampAdoptClient(KeycloakSession session, RealmModel realm, String mode,
+                                  EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String clientUuid = firstRowKey(cr, "ID");
+            if (clientUuid == null) return;
+            ClientModel client = realm.getClientById(clientUuid);
+            if (client == null) return;
+            // client_config (1), client_scope_assignment_set (11), client_mapper_set (12),
+            // scope_role_allowlist_set/client (14).
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.clientConfig(client, realm.getId()));
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.clientScopeAssignmentSet(client, realm.getId()));
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.clientMapperSet(client, realm.getId()));
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.scopeRoleAllowlistSet(
+                            ParentType.client, client.getId(), client, realm.getId()));
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampAdoptClientScope(KeycloakSession session, RealmModel realm, String mode,
+                                       EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String scopeId = firstRowKey(cr, "ID");
+            if (scopeId == null) return;
+            ClientScopeModel scope = realm.getClientScopeById(scopeId);
+            if (scope == null) return;
+            // client_scope_config (2), client_scope_mapper_set (13),
+            // scope_role_allowlist_set/client_scope (14).
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.clientScopeConfig(scope, realm.getId()));
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.clientScopeMapperSet(scope, realm.getId()));
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.scopeRoleAllowlistSet(
+                            ParentType.client_scope, scope.getId(), scope, realm.getId()));
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampAdoptOrganization(KeycloakSession session, RealmModel realm, String mode,
+                                        EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String orgId = firstRowKey(cr, "ID");
+            if (orgId == null) return;
+            org.keycloak.organization.OrganizationProvider orgs =
+                    session.getProvider(org.keycloak.organization.OrganizationProvider.class);
+            if (orgs == null) return;
+            OrganizationModel org = orgs.getById(orgId);
+            if (org == null) return;
+            // organization_definition (16), organization_domain_set (17).
+            String groupId = RealmAttestationExporter.organizationBackingGroupId(em, org.getId());
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.organizationDefinition(org, groupId, realm.getId()));
+            signAndStampUnit(session, realm, mode, em,
+                    RealmAttestationExporter.organizationDomainSet(org, realm.getId()));
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    private void stampAdoptProtocolMapper(KeycloakSession session, RealmModel realm, String mode,
+                                          EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            // Edge ADOPT rowsJson carries the mapper id under "ID" (see createAdoptEdgeCr).
+            String mapperId = firstRowKey(cr, "ID");
+            if (mapperId == null) return;
+            ProtocolMapperUnit unit =
+                    RealmAttestationExporter.protocolMapperUnitById(session, realm, mapperId);
+            signAndStampUnit(session, realm, mode, em, unit);
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
 

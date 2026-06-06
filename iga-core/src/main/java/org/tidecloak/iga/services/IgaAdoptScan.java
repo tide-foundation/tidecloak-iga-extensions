@@ -289,6 +289,7 @@ public final class IgaAdoptScan {
         // Tallies — per-type CR counts initialized to 0 so the response shape
         // is stable even when nothing was created.
         Map<String, Long> created = new LinkedHashMap<>();
+        created.put(IgaReplayExtension.ENTITY_TYPE_REALM, 0L);
         created.put(IgaReplayExtension.ENTITY_TYPE_USER, 0L);
         created.put(IgaReplayExtension.ENTITY_TYPE_ROLE, 0L);
         created.put(IgaReplayExtension.ENTITY_TYPE_GROUP, 0L);
@@ -378,6 +379,30 @@ public final class IgaAdoptScan {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_ORGANIZATION, row, null,
                     requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
                     created, counters, alreadyAttestedCounter);
+        }
+
+        // ---------------------------------------------------------------------
+        // Manual-signing redesign — REALM NODE attestation-only ADOPT CR. The realm
+        // contributes two login-emitted producer units (realm_config #0,
+        // realm_default_groups_set #15) keyed on the realmId. They have no per-entity
+        // scanner row (the realm is not an "info" entity), so emit exactly one
+        // attestation-only ADOPT_REALM CR per scan, idempotently: skip if an APPROVED or
+        // PENDING ADOPT_REALM CR already exists for this realm (re-toggle safety).
+        // ---------------------------------------------------------------------
+        try {
+            counters[0]++; // total scanned (the realm node)
+            boolean realmAlreadyHasAdopt =
+                    !queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_REALM, "APPROVED").isEmpty()
+                            || !queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_REALM, "PENDING").isEmpty();
+            if (realmAlreadyHasAdopt) {
+                log.debugf("IGA scan skip(realmAlreadyAdopt): realm=%s", realm.getName());
+            } else {
+                crService.createAdoptRealmCr(realm, requestedBy);
+                created.merge(IgaReplayExtension.ENTITY_TYPE_REALM, 1L, Long::sum);
+            }
+        } catch (RuntimeException ex) {
+            counters[4]++;
+            log.warnf(ex, "IGA scan ERROR on realm-node ADOPT realm=%s — continuing", realm.getName());
         }
 
         // ---------------------------------------------------------------------
@@ -490,13 +515,22 @@ public final class IgaAdoptScan {
                                     long[] alreadyAttestedCounter) {
         counters[0]++; // total scanned
         try {
-            // 1. System-entity filter.
-            if (IgaSystemEntityFilter.shouldSkip(realm, entityType, row.entityId(),
-                    row.entityName(), parentClientId, includeSystem)) {
+            // 1. System-entity classification. The manual-signing redesign (2026-06-06)
+            //    NO LONGER skips system entities outright: the uniform login read is
+            //    all-or-nothing, so every login-emitted unit (incl. the built-in admin
+            //    clients + their roles, KC default scopes, default/composite realm roles)
+            //    must carry a signed producer column or the login fail-closes. System
+            //    entities therefore still get an ADOPT CR — but an ATTESTATION-ONLY one:
+            //    committing it stamps the entity's producer column(s) WITHOUT writing the
+            //    IGA_UNSIGNED_ENTITY sidecar, so the entity is signed but NEVER quarantined
+            //    (quarantining a built-in admin client / default scope / system role would
+            //    brick KC internals + the surface used to commit CRs). counters[1]
+            //    (skipped.systemFilter) now counts attestation-only system CRs for
+            //    observability.
+            boolean attestationOnly = IgaSystemEntityFilter.shouldSkip(realm, entityType,
+                    row.entityId(), row.entityName(), parentClientId, includeSystem);
+            if (attestationOnly) {
                 counters[1]++;
-                log.debugf("IGA scan skip(systemFilter): realm=%s type=%s id=%s name=%s parent=%s",
-                        realm.getName(), entityType, row.entityId(), row.entityName(), parentClientId);
-                return;
             }
             // 2. Already-committed ADOPT skip.
             //    counters[2] (skippedAlreadyCommittedAdopt) is pre-tallied
@@ -523,8 +557,10 @@ public final class IgaAdoptScan {
             }
             // 4. Emit the ADOPT CR. createAdoptCr's already-attested guard
             //    won't fire here (the scan only sees attestation IS NULL
-            //    rows) but we defensively catch it for symmetry.
-            crService.createAdoptCr(realm, entityType, row.entityId(), requestedBy);
+            //    rows) but we defensively catch it for symmetry. System
+            //    entities (attestationOnly=true) get a CR that signs without
+            //    a quarantine sidecar.
+            crService.createAdoptCr(realm, entityType, row.entityId(), requestedBy, attestationOnly);
             created.merge(entityType, 1L, Long::sum);
         } catch (IgaChangeRequestService.AlreadyAttestedException aae) {
             alreadyAttestedCounter[0]++;
@@ -574,17 +610,19 @@ public final class IgaAdoptScan {
         // helper so this skip lookup matches what createAdoptEdgeCr wrote.
         String syntheticEntityId =
                 IgaChangeRequestService.edgeSyntheticId(entityType, edge.key1(), edge.key2());
-        // 1. Built-in skip — owning-node classification (NOT a parallel
-        //    filter). A composite whose parent is default-roles-<realm>, an
-        //    edge owned by a KC default scope, or a mapper on a built-in
-        //    admin client is skipped exactly as its node would be.
-        if (IgaSystemEntityFilter.shouldSkipEdge(realm, edge.ownerNodeType(),
-                edge.ownerNodeName(), edge.ownerParentClientId(), includeSystem)) {
+        // 1. Built-in classification — owning-node rules (NOT a parallel filter). A
+        //    composite whose parent is default-roles-<realm>, an edge owned by a KC
+        //    default scope, or a mapper on a built-in admin client is classified exactly
+        //    as its node would be. Per the manual-signing redesign these are NO LONGER
+        //    skipped: a built-in edge that contributes to the login closure (notably a
+        //    PROTOCOL_MAPPER on a built-in admin client / default scope — its
+        //    protocol_mapper unit IS emitted at login) gets an ATTESTATION-ONLY edge CR
+        //    (signs on commit, no quarantine sidecar). systemEdgesCounter still counts
+        //    them for observability.
+        boolean attestationOnly = IgaSystemEntityFilter.shouldSkipEdge(realm, edge.ownerNodeType(),
+                edge.ownerNodeName(), edge.ownerParentClientId(), includeSystem);
+        if (attestationOnly) {
             systemEdgesCounter[0]++;
-            log.debugf("IGA scan skip(systemEdge): realm=%s type=%s key1=%s key2=%s ownerType=%s ownerName=%s",
-                    realm.getName(), entityType, edge.key1(), edge.key2(),
-                    edge.ownerNodeType(), edge.ownerNodeName());
-            return;
         }
         // 2. Already-committed ADOPT skip (re-toggle idempotency). Pre-
         //    tallied into counters[2] at scan start (the skip-set size loop
@@ -622,7 +660,7 @@ public final class IgaAdoptScan {
                         IgaChangeRequestService edgeCrService =
                                 new IgaChangeRequestService(edgeEm, edgeSession);
                         edgeCrService.createAdoptEdgeCr(edgeRealm, entityType,
-                                edge.key1(), edge.key2(), actionType, requestedBy);
+                                edge.key1(), edge.key2(), actionType, requestedBy, attestationOnly);
                     });
             created.merge(entityType, 1L, Long::sum);
         } catch (RuntimeException ex) {

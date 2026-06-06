@@ -873,6 +873,16 @@ public final class RealmAttestationExporter {
 
     private ProtocolMapperUnit protocolMapper(ProtocolMapperModel pm, ParentType parentType,
                                               String parentId, String realmId) {
+        return protocolMapperUnit(pm, parentType, parentId, realmId);
+    }
+
+    /**
+     * Build a {@code protocol_mapper} (unit 3) for a mapper whose parent is already
+     * resolved. {@code public static} so the commit-time ADOPT_PROTOCOL_MAPPER stamper
+     * (TideAttestor) can build the SAME unit-envelope the login/export path emits.
+     */
+    public static ProtocolMapperUnit protocolMapperUnit(ProtocolMapperModel pm, ParentType parentType,
+                                                        String parentId, String realmId) {
         return new ProtocolMapperUnit(realmId,
                 pm.getId(),
                 parentType,
@@ -880,6 +890,49 @@ public final class RealmAttestationExporter {
                 nullToEmpty(pm.getProtocol()),
                 pm.getProtocolMapper(),
                 attributeNameValues(pm.getConfig()));
+    }
+
+    /**
+     * Resolve a {@code protocol_mapper} (unit 3) from just the mapper id (the key an
+     * ADOPT_PROTOCOL_MAPPER CR carries), or {@code null} if the mapper / its parent are
+     * not resolvable. Looks up the owning client or client-scope via the
+     * ProtocolMapperEntity FK columns, then rebuilds via the model API so the unit bytes
+     * match the login/export emission byte-for-byte.
+     */
+    public static ProtocolMapperUnit protocolMapperUnitById(KeycloakSession session,
+                                                            RealmModel realm, String mapperId) {
+        if (mapperId == null) {
+            return null;
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        // ProtocolMapperEntity has a client FK and a clientScope FK (one is set).
+        @SuppressWarnings("unchecked")
+        List<String> clientUuids = em.createQuery(
+                        "SELECT e.client.id FROM ProtocolMapperEntity e WHERE e.id = :id AND e.client IS NOT NULL")
+                .setParameter("id", mapperId).getResultList();
+        if (!clientUuids.isEmpty()) {
+            ClientModel client = realm.getClientById(clientUuids.get(0));
+            if (client == null) {
+                return null;
+            }
+            ProtocolMapperModel pm = client.getProtocolMapperById(mapperId);
+            return pm == null ? null
+                    : protocolMapperUnit(pm, ParentType.client, client.getId(), realm.getId());
+        }
+        @SuppressWarnings("unchecked")
+        List<String> scopeIds = em.createQuery(
+                        "SELECT e.clientScope.id FROM ProtocolMapperEntity e WHERE e.id = :id AND e.clientScope IS NOT NULL")
+                .setParameter("id", mapperId).getResultList();
+        if (!scopeIds.isEmpty()) {
+            ClientScopeModel scope = realm.getClientScopeById(scopeIds.get(0));
+            if (scope == null) {
+                return null;
+            }
+            ProtocolMapperModel pm = scope.getProtocolMapperById(mapperId);
+            return pm == null ? null
+                    : protocolMapperUnit(pm, ParentType.client_scope, scope.getId(), realm.getId());
+        }
+        return null;
     }
 
     // -------------------------------------------------------------------------

@@ -151,6 +151,22 @@ public class IgaChangeRequestService {
      */
     public String createAdoptCr(RealmModel realm, String entityType, String entityId,
                                  String requestedBy) {
+        return createAdoptCr(realm, entityType, entityId, requestedBy, false);
+    }
+
+    /**
+     * Overload with {@code attestationOnly}. When {@code true}, the ADOPT CR signs the
+     * entity's producer unit column(s) on commit (the manual-signing redesign,
+     * 2026-06-06) but does NOT write the {@code IGA_UNSIGNED_ENTITY} sidecar row — so the
+     * entity is NEVER subjected to read-time quarantine. This is the path for KC
+     * system/infrastructure entities (built-in admin clients + their roles, KC default
+     * client-scopes, default realm roles): they must appear in the signed login closure
+     * (the uniform read is all-or-nothing) but full IGA governance would quarantine them
+     * and brick KC internals. The {@code attestationOnly} marker is also recorded in the
+     * CR's rowsJson for audit.
+     */
+    public String createAdoptCr(RealmModel realm, String entityType, String entityId,
+                                 String requestedBy, boolean attestationOnly) {
         if (realm == null || entityType == null || entityId == null) {
             throw new IllegalArgumentException(
                     "createAdoptCr requires non-null realm + entityType + entityId");
@@ -254,6 +270,10 @@ public class IgaChangeRequestService {
                                 + "' (expected USER | ROLE | GROUP | CLIENT | CLIENT_SCOPE | ORGANIZATION)");
         }
 
+        if (attestationOnly) {
+            repRow.put("ATTESTATION_ONLY", Boolean.TRUE);
+        }
+
         IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
         cr.setId(UUID.randomUUID().toString());
         cr.setRealmId(realm.getId());
@@ -266,8 +286,13 @@ public class IgaChangeRequestService {
         cr.setCreatedAt(System.currentTimeMillis());
         em.persist(cr);
 
-        // Sidecar row linking the unattested entity to its ADOPT CR.
-        IgaUnsignedEntityService.markUnsigned(em, realm.getId(), entityType, entityId, cr.getId());
+        // Sidecar row linking the unattested entity to its ADOPT CR — drives read-time
+        // quarantine. SKIPPED for attestation-only system-entity CRs: they sign on commit
+        // but must never be quarantined (quarantining a built-in admin client / default
+        // scope / system role would brick KC internals + the very surface used to commit).
+        if (!attestationOnly) {
+            IgaUnsignedEntityService.markUnsigned(em, realm.getId(), entityType, entityId, cr.getId());
+        }
 
         em.flush();
         return cr.getId();
@@ -311,6 +336,17 @@ public class IgaChangeRequestService {
     public String createAdoptEdgeCr(RealmModel realm, String entityType,
                                     String key1, String key2,
                                     String actionType, String requestedBy) {
+        return createAdoptEdgeCr(realm, entityType, key1, key2, actionType, requestedBy, false);
+    }
+
+    /**
+     * Overload with {@code attestationOnly} (see the node {@link #createAdoptCr} overload).
+     * When {@code true}, no {@code IGA_UNSIGNED_ENTITY} sidecar is written for the edge,
+     * so it is never quarantined; the edge's producer column is still stamped on commit.
+     */
+    public String createAdoptEdgeCr(RealmModel realm, String entityType,
+                                    String key1, String key2,
+                                    String actionType, String requestedBy, boolean attestationOnly) {
         if (realm == null || entityType == null || key1 == null || actionType == null) {
             throw new IllegalArgumentException(
                     "createAdoptEdgeCr requires non-null realm + entityType + key1 + actionType");
@@ -354,6 +390,9 @@ public class IgaChangeRequestService {
                 throw new IllegalArgumentException(
                         "createAdoptEdgeCr: unsupported edge entityType '" + entityType + "'");
         }
+        if (attestationOnly) {
+            row.put("ATTESTATION_ONLY", Boolean.TRUE);
+        }
 
         IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
         cr.setId(UUID.randomUUID().toString());
@@ -367,8 +406,47 @@ public class IgaChangeRequestService {
         cr.setCreatedAt(System.currentTimeMillis());
         em.persist(cr);
 
-        IgaUnsignedEntityService.markUnsigned(em, realm.getId(), entityType, syntheticEntityId, cr.getId());
+        // No sidecar for attestation-only system-edge CRs (no quarantine). See node overload.
+        if (!attestationOnly) {
+            IgaUnsignedEntityService.markUnsigned(em, realm.getId(), entityType, syntheticEntityId, cr.getId());
+        }
 
+        em.flush();
+        return cr.getId();
+    }
+
+    /**
+     * Manual-signing redesign (2026-06-06) — create the ATTESTATION-ONLY ADOPT CR for the
+     * REALM NODE. The realm contributes two login-emitted producer units (realm_config #0,
+     * realm_default_groups_set #15) keyed on the realmId; neither had any ADOPT path
+     * before, so their dedicated columns stayed NULL and the uniform login read
+     * fail-closed. Committing this CR stamps those two columns (TideAttestor's ADOPT_REALM
+     * case). Always attestation-only — the realm is never a quarantineable entity, so no
+     * sidecar is written. Idempotent at the scan level via a per-realm pending/approved
+     * skip the caller computes; this method itself just emits one CR.
+     *
+     * @return the new CR's id
+     */
+    public String createAdoptRealmCr(RealmModel realm, String requestedBy) {
+        if (realm == null) {
+            throw new IllegalArgumentException("createAdoptRealmCr requires non-null realm");
+        }
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("ID", realm.getId());
+        row.put("ATTESTATION_ONLY", Boolean.TRUE);
+
+        IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
+        cr.setId(UUID.randomUUID().toString());
+        cr.setRealmId(realm.getId());
+        cr.setEntityType(IgaReplayExtension.ENTITY_TYPE_REALM);
+        cr.setEntityId(realm.getId());
+        cr.setActionType(IgaReplayExtension.ACTION_ADOPT_REALM);
+        cr.setRowsJson(serializeRows(List.of(row)));
+        cr.setStatus("PENDING");
+        cr.setRequestedBy(requestedBy);
+        cr.setCreatedAt(System.currentTimeMillis());
+        em.persist(cr);
+        // No sidecar — the realm node is never quarantined.
         em.flush();
         return cr.getId();
     }
