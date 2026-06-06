@@ -132,6 +132,86 @@ class ProducerBuilderDeterminismTest {
                 "realm_default_groups_set must sort the group ids");
     }
 
+    /**
+     * Byte-identity regression for the ORK "Attested unit signature validation failed" at
+     * token-mint: the convergence / commit-time signer ({@code stampProducerUnitColumns})
+     * and the login {@code export} read the same entity in DIFFERENT sessions, where the JPA
+     * {@code @ElementCollection} attribute / config maps (HashMap-backed) have NO stable
+     * iteration order. Emitting them in raw map order made the sign-time stamped CBOR diverge
+     * from the login-emitted CBOR for the attribute/config-bearing units (client_config #1,
+     * client_scope_config #2, protocol_mapper #3 config, user_identity #6) — and the ork
+     * Ed25519-verifies the sig over the LITERAL emitted envelope. The shared builders now
+     * ordinal-sort the {name,value} entries by name (matching ork
+     * {@code AttestationUnit.GetNameValueList}). Feeding a deliberately mis-ordered HashMap and
+     * asserting the bytes equal an ASCENDING-name unit proves both producer paths converge to
+     * the SAME canonical bytes regardless of map iteration order.
+     */
+    @Test
+    void clientConfig_sortsAttributesByName_andWebOrigins() {
+        ClientModel client = mock(ClientModel.class);
+        when(client.getId()).thenReturn(CLIENT_UUID);
+        when(client.getClientId()).thenReturn("acct");
+        when(client.getProtocol()).thenReturn("openid-connect");
+        when(client.isFullScopeAllowed()).thenReturn(false);
+        when(client.isServiceAccountsEnabled()).thenReturn(false);
+        // web_origins: a Set in reverse order; must emit ordinal-sorted.
+        java.util.Set<String> origins = new java.util.LinkedHashSet<>(Arrays.asList("zeta", "alpha"));
+        when(client.getWebOrigins()).thenReturn(origins);
+        // attributes: mis-ordered insertion order in a LinkedHashMap (simulates an unstable
+        // HashMap order at one session); must emit ordinal-sorted by name.
+        java.util.Map<String, String> attrs = new java.util.LinkedHashMap<>();
+        attrs.put("pkce.code.challenge.method", "S256");
+        attrs.put("post.logout.redirect.uris", "+");
+        when(client.getAttributes()).thenReturn(attrs);
+
+        byte[] built = RealmAttestationExporter.clientConfig(client, REALM_ID).serialize();
+
+        byte[] expected = new org.tidecloak.iga.producer.units.ClientConfigUnit(REALM_ID,
+                CLIENT_UUID, "acct", "openid-connect", false, false,
+                Arrays.asList("alpha", "zeta"),
+                Arrays.asList(
+                        new org.tidecloak.iga.producer.units.NameValue("pkce.code.challenge.method", "S256"),
+                        new org.tidecloak.iga.producer.units.NameValue("post.logout.redirect.uris", "+")))
+                .serialize();
+        assertArrayEquals(expected, built,
+                "client_config must ordinal-sort attributes by name and web_origins, so the "
+                        + "commit-time stamp is byte-identical to the login emit");
+    }
+
+    /**
+     * Same byte-identity guard for the protocol_mapper #3 config map (the t.uho /
+     * usermodel-attribute mappers were in the 44-re-signed set). Two different insertion
+     * orders of the SAME config must serialize to identical bytes.
+     */
+    @Test
+    void protocolMapper_configByteIdenticalAcrossMapOrder() {
+        ProtocolMapperModel a = mock(ProtocolMapperModel.class);
+        when(a.getId()).thenReturn("pm-1");
+        when(a.getProtocol()).thenReturn("openid-connect");
+        when(a.getProtocolMapper()).thenReturn("oidc-usermodel-attribute-mapper");
+        java.util.Map<String, String> cfgOrderX = new java.util.LinkedHashMap<>();
+        cfgOrderX.put("claim.name", "tideuserkey");
+        cfgOrderX.put("access.token.claim", "true");
+        cfgOrderX.put("user.attribute", "tideUserKey");
+        when(a.getConfig()).thenReturn(cfgOrderX);
+
+        ProtocolMapperModel b = mock(ProtocolMapperModel.class);
+        when(b.getId()).thenReturn("pm-1");
+        when(b.getProtocol()).thenReturn("openid-connect");
+        when(b.getProtocolMapper()).thenReturn("oidc-usermodel-attribute-mapper");
+        java.util.Map<String, String> cfgOrderY = new java.util.LinkedHashMap<>();
+        cfgOrderY.put("user.attribute", "tideUserKey");
+        cfgOrderY.put("claim.name", "tideuserkey");
+        cfgOrderY.put("access.token.claim", "true");
+        when(b.getConfig()).thenReturn(cfgOrderY);
+
+        byte[] x = RealmAttestationExporter.protocolMapperUnit(a, ParentType.client, CLIENT_UUID, REALM_ID).serialize();
+        byte[] y = RealmAttestationExporter.protocolMapperUnit(b, ParentType.client, CLIENT_UUID, REALM_ID).serialize();
+        assertArrayEquals(x, y,
+                "protocol_mapper config must serialize byte-identically regardless of the "
+                        + "JPA config map iteration order (sign-time vs login-emit byte-identity)");
+    }
+
     @Test
     void organizationDomainSet_sortsByName() {
         OrganizationModel org = mock(OrganizationModel.class);

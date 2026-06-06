@@ -836,24 +836,44 @@ public final class RealmAttestationExporter {
                 realmConfigAttributes(realm));
     }
 
-    /** The producer-filtered realm attributes ({name,value} list; null → ""). */
+    /**
+     * The producer-filtered realm attributes ({name,value} list; null → "").
+     *
+     * <p><b>Ordinal-sorted by name (load-bearing).</b> The ork verifies the
+     * attested-unit Ed25519 signature over the LITERAL emitted CBOR bytes
+     * ({@code TidecloakSessionStartTokenSignRequest.Validate} →
+     * {@code vvk.VerifyWithThrow(envelope, sig)}), and its own canonicalizer
+     * ({@code AttestationUnit.GetNameValueList}) sorts {name,value} entries by name
+     * with {@code CompareOrdinal} ascending. So the canonical wire order is
+     * ordinal-by-name. {@code REALM_CONFIG_ATTR_KEYS} is a hand-ordered list, not
+     * ordinal — sort it here so the realm_config bytes the convergence/commit signer
+     * stamps and the login {@link #realmConfig} emits are byte-identical (and match
+     * the ork canonical).
+     */
     private static List<NameValue> realmConfigAttributes(RealmModel realm) {
         List<NameValue> attrs = new ArrayList<>();
         for (String key : REALM_CONFIG_ATTR_KEYS) {
             String val = realm.getAttribute(key);
             attrs.add(new NameValue(key, val == null ? "" : val));
         }
+        attrs.sort(java.util.Comparator.comparing(NameValue::name));
         return attrs;
     }
 
     public static ClientConfigUnit clientConfig(ClientModel client, String realmId) {
+        // web_origins is a Set with no stable iteration order across sessions; the ork
+        // canonicalizes it with GetStringList -> StringComparer.Ordinal sort, and verifies
+        // the sig over the literal emitted bytes, so emit it ordinal-sorted to keep the
+        // sign-time stamp byte-identical to the login emit (and aligned with the ork canonical).
+        List<String> webOrigins = new ArrayList<>(orEmptySet(client.getWebOrigins()));
+        webOrigins.sort(java.util.Comparator.naturalOrder());
         return new ClientConfigUnit(realmId,
                 client.getId(),
                 client.getClientId(),
                 nullToEmpty(client.getProtocol()),
                 client.isFullScopeAllowed(),
                 client.isServiceAccountsEnabled(),
-                new ArrayList<>(orEmptySet(client.getWebOrigins())),
+                webOrigins,
                 attributeNameValues(client.getAttributes()));
     }
 
@@ -1198,7 +1218,25 @@ public final class RealmAttestationExporter {
 
     // ---- name/value list helpers (ork {name,value} / {name,values}) ----
 
-    /** Single-valued attribute map -> [NameValue] (null value -> ""). */
+    /**
+     * Single-valued attribute / config / mapper-config map -> [NameValue] (null value -> "").
+     *
+     * <p><b>Ordinal-sorted by name (load-bearing byte-identity).</b> The source map is a
+     * JPA {@code @ElementCollection} (Hibernate {@code PersistentMap} over a HashMap for
+     * {@code ProtocolMapperEntity.config}, {@code ClientEntity}/{@code ClientScopeEntity}
+     * attributes), whose iteration order is NOT stable across sessions — the convergence /
+     * commit-time signer ({@code TideAttestor.stampProducerUnitColumns}) and the login
+     * {@link #export} read the entity in DIFFERENT sessions, so an unsorted emission can
+     * stamp one key order and emit another, diverging the LITERAL CBOR bytes the ork
+     * Ed25519-verifies ({@code TidecloakSessionStartTokenSignRequest.Validate} verifies the
+     * signature over the verbatim envelope, no re-canonicalization). The ork's own
+     * canonicalizer ({@code AttestationUnit.GetNameValueList}) sorts {name,value} by name
+     * with {@code CompareOrdinal} — so ordinal-by-name IS the canonical wire order. Sorting
+     * here (the SOLE construction site for client_config #1, client_scope_config #2,
+     * protocol_mapper #3 config) makes sign-time == login-emit byte-identical, fixing the
+     * "Attested unit signature validation failed" on the attribute-bearing units (the
+     * protocol_mapper / *_config family were the bulk of the 44 re-signed types).
+     */
     private static List<NameValue> attributeNameValues(Map<String, String> attrs) {
         List<NameValue> out = new ArrayList<>();
         if (attrs != null) {
@@ -1206,6 +1244,9 @@ public final class RealmAttestationExporter {
                 out.add(new NameValue(e.getKey(), e.getValue() == null ? "" : e.getValue()));
             }
         }
+        // Deterministic ordinal-by-name order (matches the ork canonical + makes the
+        // sign-time stamp byte-identical to the login emit regardless of map iteration).
+        out.sort(java.util.Comparator.comparing(NameValue::name));
         return out;
     }
 
@@ -1252,6 +1293,15 @@ public final class RealmAttestationExporter {
                 out.add(new NameValues(e.getKey(), values));
             }
         }
+        // Sort the entries by NAME ordinal (load-bearing byte-identity): the user-attribute
+        // map (UserEntity attributes, a JPA element collection) has no stable iteration order
+        // across the sign-time (stampUserIdentity / ADOPT_USER) vs login (export) sessions, so
+        // an unsorted user_identity #6 emission diverges the LITERAL CBOR bytes the ork
+        // Ed25519-verifies. The ork canonicalizer (AttestationUnit.GetNameValuesList) sorts the
+        // {name,values} entries by name with CompareOrdinal but keeps each values[] in STORED
+        // order (KC getFirstAttribute reads values[0] = stored-first), so we mirror exactly:
+        // sort by name only, never reorder the per-attribute values[].
+        out.sort(java.util.Comparator.comparing(NameValues::name));
         return out;
     }
 
