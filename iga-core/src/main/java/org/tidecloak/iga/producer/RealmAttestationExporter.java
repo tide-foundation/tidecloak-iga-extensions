@@ -304,6 +304,180 @@ public final class RealmAttestationExporter {
         return out;
     }
 
+    /**
+     * Emit the FULL realm-METADATA unit closure — every membership-INDEPENDENT unit
+     * the realm owns, regardless of which (if any) current user holds the role / scope /
+     * group. This is the convergence / toggle-on counterpart of {@link #export}: where
+     * {@code export} emits only the metadata a SPECIFIC {@code (client, user, scope)} login
+     * would surface (seeded from that user's grants / groups / allowlists), this enumerates
+     * EVERY role, client-scope, client, group and organization in the realm so a role NO
+     * current user holds (e.g. {@code tide-realm-admin → realm-admin} and the
+     * {@code realm-management} system composites) still gets its
+     * {@code role_definition} + {@code role_composite_children_set} signed.
+     *
+     * <p><b>What is emitted (all membership-INDEPENDENT, all 18 metadata-class types):</b>
+     * <ul>
+     *   <li><b>Realm</b> — {@code realm_config} + {@code realm_default_groups_set}.</li>
+     *   <li><b>All roles</b> — realm roles ({@code session.roles().getRealmRolesStream})
+     *       AND every client's roles ({@code client.getRolesStream()}), INCLUDING the
+     *       built-in {@code realm-management} / {@code account} / system clients and
+     *       {@code tide-realm-admin}: {@code role_definition} (unit 4) +
+     *       {@code role_composite_children_set} (unit 10, for composites).</li>
+     *   <li><b>All client scopes</b> — every {@code realm.getClientScopesStream()} (incl.
+     *       built-ins): {@code client_scope_config} (unit 2) +
+     *       {@code client_scope_mapper_set} (unit 13) + {@code scope_role_allowlist_set}
+     *       (unit 14, {@code parent_type=client_scope}) + a {@code protocol_mapper}
+     *       (unit 3) per JWT-relevant mapper the scope owns.</li>
+     *   <li><b>All clients</b> — every {@code realm.getClientsStream()}:
+     *       {@code client_config} (unit 1) + {@code client_mapper_set} (unit 12) +
+     *       {@code client_scope_assignment_set} (unit 11) + {@code scope_role_allowlist_set}
+     *       (unit 14, {@code parent_type=client}) + a {@code protocol_mapper} (unit 3) per
+     *       JWT-relevant mapper the client owns.</li>
+     *   <li><b>All groups</b> — every {@code realm.getGroupsStream()} (flat, incl.
+     *       sub-groups): {@code group_definition} (unit 5) + {@code group_role_mapping_set}
+     *       (unit 9).</li>
+     *   <li><b>All organizations</b> — every org via {@code OrganizationProvider.getAllStream}:
+     *       {@code organization_definition} (unit 16) + {@code organization_domain_set}
+     *       (unit 17). (The org's backing group is already covered by the all-groups walk.)</li>
+     * </ul>
+     *
+     * <p><b>What is NOT emitted here — the per-USER membership units stay per-user:</b>
+     * {@code user_identity} (unit 6), {@code user_role_mapping_set} (unit 7) and
+     * {@code user_group_membership_set} (unit 8) are membership-DEPENDENT and are produced
+     * by {@link #export} from each ENABLED user's own state. The convergence caller stamps
+     * those from the per-user export loop; this method emits ONLY the metadata closure.
+     *
+     * <p><b>Byte-identity.</b> Every unit here is built with the SAME {@code public static}
+     * builders {@link #export} uses ({@link #roleDefinition}, {@link #roleCompositeChildrenSet},
+     * {@link #clientConfig}, {@link #clientScopeConfig}, {@link #clientMapperSet},
+     * {@link #clientScopeMapperSet}, {@link #clientScopeAssignmentSet},
+     * {@link #scopeRoleAllowlistSet}, {@link #realmConfig}, {@link #realmDefaultGroupsSetStatic},
+     * {@link #groupDefinition}, {@link #groupRoleMappingSet}, {@link #protocolMapperUnit},
+     * {@link #organizationDefinition}, {@link #organizationDomainSet}). A unit a login emits
+     * is byte-identical to the same unit emitted here (same target id, same payload), so the
+     * convergence-stamped column the uniform login read replays cannot drift from what the
+     * login would itself emit.
+     *
+     * <p>The list may contain DUPLICATE logical units (e.g. the same role enumerated under a
+     * client and surfaced by {@code export} for a user too) — the convergence caller dedups
+     * by {@code (type, targetId)} before signing, so duplicates are harmless.
+     *
+     * @return every membership-independent metadata {@link AttestationUnit} in the realm
+     */
+    public List<AttestationUnit> exportRealmMetadata(KeycloakSession session, RealmModel realm) {
+        session.getContext().setRealm(realm);
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        String realmId = realm.getId();
+
+        List<AttestationUnit> out = new ArrayList<>();
+
+        // 1) Realm-level units.
+        out.add(realmConfig(realm, realmId));
+        out.add(realmDefaultGroupsSetStatic(realm, realmId));
+
+        // 2) All roles — realm roles + every client's roles (built-ins INCLUDED). The
+        //    role_definition + role_composite_children_set for tide-realm-admin / realm-admin
+        //    / the realm-management system composites are signed here even though NO current
+        //    user holds them, so the moment a user is granted tide-realm-admin and logs in,
+        //    every composite the token emits already carries a real column sig.
+        session.roles().getRealmRolesStream(realm)
+                .forEach(role -> emitRoleMetadata(role, realmId, out));
+
+        // 3) All client scopes (built-ins INCLUDED) — config + mapper-set + scope→role
+        //    allowlist + a protocol_mapper per JWT-relevant mapper the scope owns.
+        realm.getClientScopesStream().forEach(scope -> {
+            out.add(clientScopeConfig(scope, realmId));
+            out.add(clientScopeMapperSet(scope, realmId));
+            out.add(scopeRoleAllowlistSet(ParentType.client_scope, scope.getId(), scope, realmId));
+            emitContainerProtocolMappers(scope.getProtocolMappersStream(),
+                    ParentType.client_scope, scope.getId(), realmId, out);
+        });
+
+        // 4) All clients — config + mapper-set + scope-assignment-set + scope→role allowlist
+        //    + a protocol_mapper per JWT-relevant mapper the client owns + the client's own
+        //    roles (client roles are owned by the client, not surfaced by getRealmRolesStream).
+        realm.getClientsStream().forEach(client -> {
+            out.add(clientConfig(client, realmId));
+            out.add(clientMapperSet(client, realmId));
+            out.add(clientScopeAssignmentSet(client, realmId));
+            out.add(scopeRoleAllowlistSet(ParentType.client, client.getId(), client, realmId));
+            emitContainerProtocolMappers(client.getProtocolMappersStream(),
+                    ParentType.client, client.getId(), realmId, out);
+            client.getRolesStream().forEach(role -> emitRoleMetadata(role, realmId, out));
+        });
+
+        // 5) All groups (flat stream, incl. sub-groups) — definition + role-mapping set.
+        realm.getGroupsStream().forEach(group -> {
+            out.add(groupDefinition(group, realmId));
+            out.add(groupRoleMappingSet(em, group.getId(), realmId));
+        });
+
+        // 6) All organizations — definition + domain set (the backing group is already
+        //    covered by the all-groups walk above; no separate group emission needed).
+        emitAllOrganizations(session, em, realm, realmId, out);
+
+        log.infof("producer: realm-METADATA export realm=%s -> %d unit(s) (membership-independent; "
+                + "all roles incl tide-realm-admin/realm-management, all scopes, all clients, "
+                + "all groups, all orgs)", realm.getName(), out.size());
+        return out;
+    }
+
+    /** {@code role_definition} (unit 4) + {@code role_composite_children_set} (unit 10) for a role. */
+    private void emitRoleMetadata(RoleModel role, String realmId, List<AttestationUnit> out) {
+        out.add(roleDefinition(role, realmId));
+        out.add(roleCompositeChildrenSet(role, realmId));
+    }
+
+    /**
+     * Emit a {@code protocol_mapper} (unit 3) for every JWT-relevant mapper a container
+     * (client OR client-scope) owns — the SAME {@link #JWT_BODY_IRRELEVANT_FACTORIES}
+     * filter the login path applies, so the realm-metadata set never emits a mapper unit
+     * the login would suppress (which would dangle an un-referenced column with no harm,
+     * but emitting only JWT-relevant mappers keeps the closure exactly the login's).
+     */
+    private void emitContainerProtocolMappers(Stream<ProtocolMapperModel> mappers,
+                                              ParentType parentType, String parentId,
+                                              String realmId, List<AttestationUnit> out) {
+        mappers.forEach(pm -> {
+            if (JWT_BODY_IRRELEVANT_FACTORIES.contains(pm.getProtocolMapper())) {
+                return;
+            }
+            out.add(protocolMapperUnit(pm, parentType, parentId, realmId));
+        });
+    }
+
+    /**
+     * Emit {@code organization_definition} (unit 16) + {@code organization_domain_set}
+     * (unit 17) for EVERY organization in the realm (membership-independent), reusing the
+     * shared {@link #organizationDefinition} / {@link #organizationDomainSet} builders so the
+     * bytes match the per-user org closure. No-op when the realm has no organizations or the
+     * provider is unavailable.
+     */
+    private void emitAllOrganizations(KeycloakSession session, EntityManager em,
+                                      RealmModel realm, String realmId, List<AttestationUnit> out) {
+        OrganizationProvider orgProvider;
+        try {
+            orgProvider = session.getProvider(OrganizationProvider.class);
+        } catch (RuntimeException re) {
+            log.debugf("producer: OrganizationProvider not available (%s); skipping realm-metadata "
+                    + "org closure", re.getMessage());
+            return;
+        }
+        if (orgProvider == null) {
+            return;
+        }
+        orgProvider.getAllStream().forEach(org -> {
+            String groupId = organizationBackingGroupId(em, org.getId());
+            if (groupId == null) {
+                log.warnf("producer: organization %s has no backing group id; emitting "
+                        + "organization_definition with null group_id (realm-metadata closure)",
+                        org.getId());
+            }
+            out.add(organizationDefinition(org, groupId, realmId));
+            out.add(organizationDomainSet(org, realmId));
+        });
+    }
+
     // -------------------------------------------------------------------------
     // Organization closure (units 6 group_definition, 9 user_group_membership_set,
     // 10 group_role_mapping_set, 17 organization_definition, 18 organization_domain_set)

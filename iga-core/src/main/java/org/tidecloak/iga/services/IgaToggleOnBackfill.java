@@ -42,10 +42,27 @@ import java.util.stream.Collectors;
  *
  * <h2>Enumeration — the EXACT login closure, reusing the producer</h2>
  * The login read is all-or-nothing, so the backfill must enumerate precisely the unit
- * set the login emits. It does so by invoking the SAME
- * {@link RealmAttestationExporter#export} the login uses, over the MAXIMAL request
- * surface:
+ * set the login emits. It does so in TWO membership-orthogonal phases, both through the
+ * SAME {@link RealmAttestationExporter} the login uses (so the bytes cannot drift):
  * <ul>
+ *   <li><b>FULL REALM METADATA (membership-INDEPENDENT) —
+ *       {@link RealmAttestationExporter#exportRealmMetadata}.</b> Enumerates EVERY
+ *       metadata unit the realm owns regardless of current membership: all roles
+ *       (realm + every client's, INCLUDING {@code tide-realm-admin}, {@code realm-admin}
+ *       and the {@code realm-management} system composites) -> {@code role_definition}
+ *       + {@code role_composite_children_set}; all client scopes -> config / mapper-set /
+ *       allowlist / protocol_mappers; all clients -> config / mapper-set /
+ *       scope-assignment / allowlist / protocol_mappers; the realm -> {@code realm_config}
+ *       + {@code realm_default_groups_set}; all groups -> definition / role-mapping; all
+ *       orgs -> definition / domain-set. This signs the units NO current user surfaces,
+ *       which is why a fresh realm's {@code tide-realm-admin -> realm-admin} composite (and
+ *       all {@code realm-management} composites) are now signed BEFORE any user holds the
+ *       role — so the multiAdmin-flip login finds its full closure already real.</li>
+ *   <li><b>PER-USER membership (membership-DEPENDENT) — {@link RealmAttestationExporter#export}
+ *       over the MAXIMAL request surface.</b> Emits the per-user units
+ *       ({@code user_identity}, {@code user_role_mapping_set},
+ *       {@code user_group_membership_set}) that are derived from each enabled user's own
+ *       state; the metadata it re-surfaces is dedup'd against the metadata phase:</li>
  *   <li><b>per enabled user × per client</b> — covers every (client, user) login the
  *       realm can issue. Realm-state / config / role / scope / group / derived-set
  *       units are user-independent and dedup across these exports (idempotent stamp);
@@ -149,6 +166,37 @@ public final class IgaToggleOnBackfill {
         // type + target id; a real sign happens at most once per logical unit.
         Set<String> processed = new LinkedHashSet<>();
 
+        // PHASE 1a - FULL REALM METADATA (membership-INDEPENDENT). Enumerate EVERY metadata
+        // unit the realm owns - all roles (incl tide-realm-admin, realm-admin, the
+        // realm-management system composites), all client scopes, all clients, all groups,
+        // all orgs - regardless of which (if any) current user holds them. This is the ROOT
+        // fix: the per-(user x client) export below only emits the metadata a CURRENT user's
+        // token surfaces, so any role NO enabled user holds (tide-realm-admin and its
+        // realm-management composite children) never got its role_composite_children_set /
+        // role_definition signed -> the moment a user is granted tide-realm-admin and logs in,
+        // the uniform read fail-closed on that NULL composite. Signing the full metadata
+        // closure here, membership-independent, closes that gap. Built with the SAME producer
+        // builders the login uses (RealmAttestationExporter), so the bytes are identical.
+        List<AttestationUnit> metadataUnits =
+                new RealmAttestationExporter().exportRealmMetadata(session, realm);
+        for (AttestationUnit unit : metadataUnits) {
+            String key = unit.type().name() + ' ' + unit.targetId();
+            if (!processed.add(key)) {
+                continue; // already handled this logical unit in this pass
+            }
+            String stored = UnitColumnMapping.readStored(em, unit);
+            if (isRealReplayableSig(stored)) {
+                skipped++;
+                continue; // a real 64-byte sig is already present - never clobber
+            }
+            toSign.add(unit); // dedup'd, NULL-or-stub metadata column - needs a real sig
+        }
+
+        // PHASE 1b - PER-USER membership units (membership-DEPENDENT): user_identity,
+        // user_role_mapping_set, user_group_membership_set (+ any metadata a user surfaces,
+        // already covered + deduped by PHASE 1a). The per-(user x client) export is retained
+        // because the per-user membership units are user-state-derived and only emitted by an
+        // export for that user; the metadata units it re-emits are dedup'd against PHASE 1a.
         for (UserModel user : users) {
             for (ClientModel client : clients) {
                 List<AttestationUnit> units;
