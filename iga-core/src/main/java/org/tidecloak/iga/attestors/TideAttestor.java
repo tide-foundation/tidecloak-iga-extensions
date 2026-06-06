@@ -2644,7 +2644,7 @@ public class TideAttestor implements IgaAttestor {
      * will produce, signed per-unit at commit) — the remaining M3/P4-followup work item.
      * The firstAdmin (pre-flip) real path here is unchanged.
      */
-    private String signProducerEnvelope(KeycloakSession session, RealmModel realm, String mode,
+    String signProducerEnvelope(KeycloakSession session, RealmModel realm, String mode,
                                         byte[] envelope) {
         if (MODE_FIRST_ADMIN.equals(mode) && isRealSigningCapable(realm)) {
             return signEnvelopeWithFirstAdminVvk(realm, envelope);

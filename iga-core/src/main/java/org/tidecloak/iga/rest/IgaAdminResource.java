@@ -919,6 +919,20 @@ public class IgaAdminResource {
                         crId, ev.getEntityType(), ev.getEntityId());
                 return outcome;
             }
+
+            // POST-replay per-unit-type column stamp (uniform Design B) — IDENTICAL to the
+            // single-CR commit path (commit():417-419). Without this, a bulk-approved CR
+            // (e.g. the toggle-on ADOPT closure) replays but never stamps the node/derived/
+            // realm producer attestation-units into their DEDICATED per-unit columns. On a
+            // firstAdmin real-signing-capable realm those stampers route through
+            // signProducerEnvelope -> the REAL 64B VVK ceremony; skipping them left
+            // realm_config / realm_default_groups / the derived-set columns / user_role_mapping
+            // NULL and the node columns carrying only combineFinal's stub. Runs in the SAME
+            // JPA transaction as the replay above. Set-signing (tide) only; no-op on simple.
+            if (attestor instanceof org.tidecloak.iga.attestors.TideAttestor tideAttestor) {
+                tideAttestor.stampProducerUnitColumns(session, realm, cr);
+            }
+
             outcome.put("status", "COMMITTED");
             return outcome;
         } catch (ForbiddenException fe) {
