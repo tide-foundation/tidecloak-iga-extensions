@@ -164,6 +164,28 @@ public final class IgaReplayExtension {
      * {@code IgaAdminResource.authorize}/{@code commit}) can authorize + commit
      * an ADOPT_* in one signature.
      */
+    /**
+     * The complete set of ADOPT_* action types (node, edge, and realm), in one
+     * place so callers that need to query the pending-ADOPT closure (e.g. the
+     * post-commit full-closure convergence in
+     * {@link org.tidecloak.iga.services.IgaToggleOnBackfill}) stay in lock-step
+     * with {@link #isAdoptAction}.
+     */
+    public static final java.util.List<String> ALL_ADOPT_ACTION_TYPES = java.util.List.of(
+            ACTION_ADOPT_USER,
+            ACTION_ADOPT_ROLE,
+            ACTION_ADOPT_GROUP,
+            ACTION_ADOPT_CLIENT,
+            ACTION_ADOPT_CLIENT_SCOPE,
+            ACTION_ADOPT_ORGANIZATION,
+            ACTION_ADOPT_COMPOSITE_ROLE,
+            ACTION_ADOPT_CLIENT_SCOPE_CLIENT,
+            ACTION_ADOPT_CLIENT_SCOPE_ROLE,
+            ACTION_ADOPT_PROTOCOL_MAPPER,
+            ACTION_ADOPT_DEFAULT_CLIENT_SCOPE,
+            ACTION_ADOPT_SCOPE_MAPPING,
+            ACTION_ADOPT_REALM);
+
     public static boolean isAdoptAction(String actionType) {
         if (actionType == null) return false;
         return ACTION_ADOPT_USER.equals(actionType)

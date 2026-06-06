@@ -215,6 +215,88 @@ public final class IgaToggleOnBackfill {
     }
 
     /**
+     * Post-commit full-closure convergence — the ROOT-cause fix for the incomplete
+     * hand-coded ADOPT stampers.
+     *
+     * <p>The per-CR {@code stampProducerUnitColumns} ADOPT cases hand-list each
+     * adopted node's OWN small unit family, but that hand-listing is incomplete: a
+     * login emits the ENTIRE producer closure (all 18 unit types), and units owned by
+     * SYSTEM entities (e.g. {@code role_composite_children_set} on
+     * {@code default-roles-<realm>} and the built-in admin clients' composite roles,
+     * plus the protocol_mappers on KC default scopes / built-in clients) arrive via
+     * the EDGE / attestation-only ADOPT CRs whose hand-coded path deliberately does
+     * NOT stamp the owner's derived-set column (it assumes "the owning node's ADOPT CR
+     * covers it" — which only holds for the subset of nodes whose own ADOPT CR was
+     * emitted and whose stamper enumerates that set). The net effect was
+     * {@code role_composite_children_set} (ALL still 32B {@code TIDE-DUMMY} stub) and
+     * 23/39 {@code protocol_mapper} columns staying NULL/stub after a bulk-approve, so
+     * the uniform login read fail-closed on {@code role_composite_children_set}.
+     *
+     * <p>Rather than patch each hand-listed case, this re-uses the PROVEN-COMPLETE
+     * {@link #backfill} enumeration — the SAME producer-driven
+     * {@link RealmAttestationExporter#export} -> {@code signEnvelopesWithFirstAdminVvk}
+     * -> {@link UnitColumnMapping#stamp} closure the login read consumes — and runs it
+     * ONCE after the admin's approval (single or bulk commit) leaves the realm
+     * fully-adopted. Because the backfill enumerates the EXACT login surface (every
+     * enabled user x client x maximal scope) and emits every unit those exports
+     * produce — INCLUDING system units, since {@link RealmAttestationExporter#export}
+     * does NOT apply {@code IgaSystemEntityFilter} — every login-emitted unit (all 18
+     * types) is stamped REAL by construction, not by a hand-listed subset.
+     *
+     * <p><b>Fully-adopted gate.</b> We only run the (closure-wide) stamp once NO
+     * pending ADOPT_* CR remains for the realm — i.e. the admin has approved the whole
+     * ADOPT set. This keeps the convergence admin-triggered (it fires from the
+     * approve/commit endpoint, never at toggle), avoids re-enumerating the closure on
+     * every intermediate single-CR approval, and guarantees the entities the producer
+     * enumerates already exist + are attested. On a bulk-approve that drains the whole
+     * ADOPT set in one call, it fires once at the end; on serial single-CR approvals it
+     * fires on the LAST one. The pass is idempotent (only NULL/stub columns are
+     * (re)signed), firstAdmin+capable gated, and fail-closed (a real VVK ceremony
+     * failure propagates) — all inherited from {@link #backfill}.
+     *
+     * <p>Runs in the caller's commit JPA transaction (same {@code em}), so the stamps
+     * land atomically with the final ADOPT commit. A no-op (returns
+     * {@link Result#skipped}) when ADOPT CRs are still pending, or when the realm is
+     * not firstAdmin / not real-signing-capable (dev/test realms keep their stub
+     * behaviour).
+     *
+     * @param session the commit session (realm context will be set on it)
+     * @param realm   the realm whose ADOPT set was just (partly) committed
+     * @return the {@link Result} of the full-closure pass, or
+     *         {@link Result#skipped}{@code ("adopt_pending")} if ADOPT CRs remain
+     */
+    public static Result convergeAfterCommit(KeycloakSession session, RealmModel realm) {
+        // Cheap gate FIRST: if the realm is not a firstAdmin real-signing realm the whole
+        // pass is a no-op anyway — skip the pending-ADOPT count query entirely. Capability
+        // (a pure in-memory tide-vendor-key check) is evaluated before the firstAdmin-mode
+        // check (which reads realm state) so a non-provisioned dev/test realm short-circuits
+        // without touching the DB.
+        if (!TideAttestor.isRealSigningCapableRealm(realm)
+                || !TideAttestor.isFirstAdminMode(session, realm)) {
+            return Result.skipped("not_first_admin_or_not_capable");
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        long pendingAdopt = em.createQuery(
+                        "SELECT COUNT(cr) FROM IgaChangeRequestEntity cr "
+                                + "WHERE cr.realmId = :realmId AND cr.status = 'PENDING' "
+                                + "AND cr.actionType IN :adoptTypes", Long.class)
+                .setParameter("realmId", realm.getId())
+                .setParameter("adoptTypes",
+                        org.tidecloak.iga.replay.IgaReplayExtension.ALL_ADOPT_ACTION_TYPES)
+                .getSingleResult();
+        if (pendingAdopt > 0) {
+            log.debugf("IGA post-commit convergence: realm %s still has %d pending ADOPT CR(s) "
+                    + "— deferring full-closure stamp until the ADOPT set is fully approved.",
+                    realm.getName(), pendingAdopt);
+            return Result.skipped("adopt_pending");
+        }
+        log.infof("IGA post-commit convergence: realm %s ADOPT set fully approved — running the "
+                + "producer-driven full-closure stamp so EVERY login-emitted unit carries a real "
+                + "64B sig (covers composite_role + protocol_mapper + all 18 types).", realm.getName());
+        return backfill(session, realm);
+    }
+
+    /**
      * Is {@code stored} a real replayable firstAdmin envelope sig? Mirrors
      * {@code IgaAttestationExporterProvider.decodeReplayableSig}: a
      * {@code TIDE-FIRSTADMIN-v1:}+b64 string whose decoded body is EXACTLY 64 bytes.

@@ -418,6 +418,18 @@ public class IgaAdminResource {
             tideAttestor.stampProducerUnitColumns(session, realm, cr);
         }
 
+        // ROOT-cause complete-coverage stamp (uniform Design B). The hand-coded per-CR
+        // stampers above cover each adopted node's OWN unit family, but that hand-listing is
+        // incomplete (composite_role + 23/39 protocol_mappers, esp. on SYSTEM entities, stayed
+        // stub/NULL -> login fail-closed on role_composite_children_set). Once this approval
+        // leaves the realm fully-adopted (no pending ADOPT CR remains), run the PROVEN-COMPLETE
+        // producer-driven full-closure stamp (the SAME RealmAttestationExporter.export ->
+        // signEnvelopesWithFirstAdminVvk -> UnitColumnMapping.stamp the login read consumes), so
+        // EVERY login-emitted unit (all 18 types) carries a real 64B sig BY CONSTRUCTION.
+        // Idempotent (only NULL/stub columns), firstAdmin+capable gated, fail-closed, admin-
+        // triggered (fires here at approval, never at toggle). No-op while ADOPT CRs pend.
+        org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, realm);
+
         IgaChangeRequestService service = getService();
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
         return Response.ok(toRepresentation(updated, service)).build();
@@ -741,6 +753,20 @@ public class IgaAdminResource {
                         else if ("REJECTED".equals(status)) rejected++;
                         else skipped++;
                     }
+
+                    // ROOT-cause complete-coverage stamp (uniform Design B), once per bulk call
+                    // AFTER the whole batch drains the ADOPT set. The per-CR hand-coded stampers
+                    // (processOneCr -> stampProducerUnitColumns) cover each adopted node's OWN
+                    // unit family, but that hand-listing is incomplete (composite_role + 23/39
+                    // protocol_mappers, esp. on SYSTEM entities, stayed stub/NULL -> login fail-
+                    // closed). Once this bulk-approve leaves the realm fully-adopted (no pending
+                    // ADOPT CR remains), run the PROVEN-COMPLETE producer-driven full-closure stamp
+                    // (the SAME RealmAttestationExporter.export -> signEnvelopesWithFirstAdminVvk ->
+                    // UnitColumnMapping.stamp the login read consumes), so EVERY login-emitted unit
+                    // (all 18 types incl composite_role + protocol_mapper) carries a real 64B sig BY
+                    // CONSTRUCTION. Idempotent, firstAdmin+capable gated, fail-closed, admin-
+                    // triggered (fires here on approval, never at toggle). No-op while ADOPT pend.
+                    org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, realm);
 
                     Map<String, Object> summary = new LinkedHashMap<>();
                     summary.put("total", results.size());
