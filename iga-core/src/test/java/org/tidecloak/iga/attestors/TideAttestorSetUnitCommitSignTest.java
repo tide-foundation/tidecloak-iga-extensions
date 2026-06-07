@@ -115,11 +115,12 @@ class TideAttestorSetUnitCommitSignTest {
      * ★ P4 — the SAME {@link TideAttestor#isProducerEnvelopeSignedAction} gate is what
      * phase-1 ({@code buildMultiAdminApprovalModel}) uses to frame the producer unit-CBOR
      * onto the multiAdmin carrier (vs the regular-canonical dev carry-through). So the 7
-     * edge-set actions are EXACTLY the unit types real post-flip multiAdmin signing covers:
+     * edge-set actions are the index-0 unit types real post-flip multiAdmin signing covers:
      * phase-1 frames the identical producer envelope the login replays, and the commit's
-     * {@code signMultiAdminUnitViaPolicy} signs it. The node/derived/realm actions are
-     * stamped POST-replay with no carrier (NOT covered post-flip yet — documented TODO),
-     * which is exactly the {@code false} set above.
+     * {@code signMultiAdminUnitViaPolicy} signs it. (★ P4 also frames the CREATE_* NODE unit
+     * onto the carrier — from REP_JSON via IgaCreateUnitBuilder — even though CREATE_* is
+     * NOT in this edge-set gate; see {@code buildAllCrUnits}. The SET_* / derived / realm
+     * units remain stub post-flip — the documented coverage boundary.)
      */
     @Test
     void postFlipMultiAdminCoverage_isTheEdgeSetActionSet() {
@@ -146,7 +147,7 @@ class TideAttestorSetUnitCommitSignTest {
         when(cr.getRowsJson()).thenReturn(
                 "[{\"USER\":\"" + USER_ID + "\",\"GROUP\":\"g-new\"}]");
 
-        byte[] commitBytes = attestor.buildUserGroupMembershipSetUnitCbor(session, realm, cr);
+        byte[] commitBytes = attestor.buildUserGroupMembershipSetUnit(session, realm, cr).serialize();
 
         // Producer emission over the COMMITTED post-change set (sorted, as the producer's
         // ORDER BY m.groupId yields).
@@ -166,7 +167,7 @@ class TideAttestorSetUnitCommitSignTest {
         when(cr.getRowsJson()).thenReturn(
                 "[{\"USER\":\"" + USER_ID + "\",\"GROUP\":\"g-bbb\"}]");
 
-        byte[] commitBytes = attestor.buildUserGroupMembershipSetUnitCbor(session, realm, cr);
+        byte[] commitBytes = attestor.buildUserGroupMembershipSetUnit(session, realm, cr).serialize();
 
         List<String> committed = Arrays.asList("g-aaa", "g-ccc");
         byte[] producerBytes =
@@ -188,7 +189,7 @@ class TideAttestorSetUnitCommitSignTest {
         when(cr.getRowsJson()).thenReturn(
                 "[{\"GROUP\":\"" + GROUP_ID + "\",\"ROLE\":\"r-zzz\"}]");
 
-        byte[] commitBytes = attestor.buildGroupRoleMappingSetUnitCbor(session, realm, cr);
+        byte[] commitBytes = attestor.buildGroupRoleMappingSetUnit(session, realm, cr).serialize();
 
         List<String> committed = Arrays.asList("r-aaa", "r-zzz");
         byte[] producerBytes =
@@ -220,7 +221,7 @@ class TideAttestorSetUnitCommitSignTest {
         when(cr.getRowsJson()).thenReturn(
                 "[{\"COMPOSITE\":\"" + PARENT_ROLE_ID + "\",\"CHILD_ROLE\":\"c-bbb\"}]");
 
-        byte[] commitBytes = attestor.buildRoleCompositeChildrenSetUnitCbor(session, realm, cr);
+        byte[] commitBytes = attestor.buildRoleCompositeChildrenSetUnit(session, realm, cr).serialize();
 
         List<String> committed = Arrays.asList("c-aaa", "c-bbb", "c-ccc");
         byte[] producerBytes =

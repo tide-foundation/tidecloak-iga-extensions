@@ -24,6 +24,7 @@ import org.midgard.models.RequestExtensions.PolicySignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
 import org.tidecloak.iga.crypto.SecretKeys;
+import org.tidecloak.iga.producer.IgaCreateUnitBuilder;
 import org.tidecloak.iga.producer.RealmAttestationExporter;
 import org.tidecloak.iga.producer.spi.UnitColumnMapping;
 import org.tidecloak.iga.producer.units.AttestationUnit;
@@ -1364,13 +1365,20 @@ public class TideAttestor implements IgaAttestor {
                     + "Policy:1 approval request for CR " + cr.getId());
         }
 
-        // The action's draft: reuse the producer unit-CBOR for any producer-envelope-
-        // signed action (set units) so the ork TVE re-derives identical bytes; otherwise
-        // the regular canonical (a dev/non-real-signing carry-through — only the
-        // producer-envelope actions are exercised by the live Policy:1 round-trip).
-        byte[] unitCbor = isProducerEnvelopeSignedAction(cr.getActionType())
-                ? buildUnitCbor(session, realm, cr)
-                : canonicalForRegularCr(session, cr);
+        // ★ P4: the action's draft frames EVERY producer unit the CR touches, in the
+        // deterministic order buildAllCrUnitCbor enumerates (edge-set unit at index 0,
+        // then the CREATE_* node unit from REP_JSON). One GetDataToAuthorize hash thus
+        // covers ALL framed units — the admins approve them in one round, and the ORK
+        // returns one VVK sig per Draft segment (AmountOfSignaturesRequested = unitCount).
+        // The same buildAllCrUnitCbor is re-run at commit so the i-th sig lines up with
+        // the i-th unit's column (commit can't drift from phase-1). For a non-producer
+        // action (dev/non-real-signing carry-through — never exercised by the live
+        // Policy:1 round-trip) frame the single regular canonical so the carrier wiring
+        // still round-trips.
+        byte[][] unitCbors = buildAllCrUnitCbor(session, realm, cr);
+        if (unitCbors.length == 0) {
+            unitCbors = new byte[][]{ canonicalForRegularCr(session, cr) };
+        }
 
         // M2: frame the draft via the proper Midgard AttestationUnitSignRequest (NOT a raw
         // ModelRequest.New). SetUnits(byte[][]) stores the unit CBOR VERBATIM; SerializeDraft
@@ -1384,7 +1392,7 @@ public class TideAttestor implements IgaAttestor {
         AttestationUnitSignRequest req = new AttestationUnitSignRequest(POLICY_AUTH_FLOW);
         // VERBATIM CBOR via the byte[][] overload (NOT List<?>/Object — those re-CBOR-wrap
         // each element through Jackson, corrupting the envelope).
-        req.SetUnits(new byte[][]{ unitCbor });
+        req.SetUnits(unitCbors);
         // Longer expiry than the 30s default — admin approval is a human round-trip. Set
         // BEFORE materializing the draft / creation-auth (Expiry folds into both the
         // data-to-authorize hash and InitializeTideRequestWithVrk's expireAtTime).
@@ -2267,7 +2275,7 @@ public class TideAttestor implements IgaAttestor {
      * serialize the one unit. The realm binding is the unit's {@code target_id ==
      * userId}; the realm id is {@code realm.getId()}.
      */
-    private byte[] buildUserRoleMappingSetUnitCbor(KeycloakSession session, RealmModel realm,
+    private UserRoleMappingSetUnit buildUserRoleMappingSetUnit(KeycloakSession session, RealmModel realm,
                                                    IgaChangeRequestEntity cr) {
         List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
 
@@ -2317,7 +2325,7 @@ public class TideAttestor implements IgaAttestor {
         // signer = sorted(pre-set ∪ granted) == producer = sorted(committed set).
         roleIds.sort(Comparator.naturalOrder());
 
-        return new UserRoleMappingSetUnit(realm.getId(), userId, roleIds).serialize();
+        return new UserRoleMappingSetUnit(realm.getId(), userId, roleIds);
     }
 
     // -------------------------------------------------------------------------
@@ -2360,23 +2368,126 @@ public class TideAttestor implements IgaAttestor {
      */
     byte[] buildUnitCbor(KeycloakSession session, RealmModel realm,
                                  IgaChangeRequestEntity cr) {
+        return buildEdgeSetUnit(session, realm, cr).serialize();
+    }
+
+    /**
+     * The edge-set producer {@link AttestationUnit} a producer-envelope-signed
+     * (7-action) CR perturbs, built over the POST-change owner set. Returned as the
+     * typed unit (not just bytes) so {@link #buildAllCrUnitCbor} can carry it as its
+     * OWN column descriptor (index 0); {@link #buildUnitCbor} keeps the {@code byte[]}
+     * contract for the existing edge-set carrier path.
+     */
+    private AttestationUnit buildEdgeSetUnit(KeycloakSession session, RealmModel realm,
+                                             IgaChangeRequestEntity cr) {
         String actionType = cr.getActionType();
         switch (actionType) {
             case ACTION_GRANT_ROLES:
-                return buildUserRoleMappingSetUnitCbor(session, realm, cr);
+                return buildUserRoleMappingSetUnit(session, realm, cr);
             case ACTION_JOIN_GROUPS:
             case ACTION_LEAVE_GROUPS:
-                return buildUserGroupMembershipSetUnitCbor(session, realm, cr);
+                return buildUserGroupMembershipSetUnit(session, realm, cr);
             case ACTION_GROUP_GRANT_ROLES:
             case ACTION_GROUP_REVOKE_ROLES:
-                return buildGroupRoleMappingSetUnitCbor(session, realm, cr);
+                return buildGroupRoleMappingSetUnit(session, realm, cr);
             case ACTION_ADD_COMPOSITE:
             case ACTION_REMOVE_COMPOSITE:
-                return buildRoleCompositeChildrenSetUnitCbor(session, realm, cr);
+                return buildRoleCompositeChildrenSetUnit(session, realm, cr);
             default:
                 throw new RuntimeException("IGA firstAdmin sign: actionType " + actionType
                         + " has no producer-envelope unit builder (CR " + cr.getId() + ")");
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // ★ P4: the full-CR unit enumerator (deterministic unit→column descriptor)
+    // -------------------------------------------------------------------------
+
+    /**
+     * <b>★ P4.</b> The ORDERED list of EVERY producer {@link AttestationUnit} a CR
+     * touches, built over its POST-change state — the single shared enumerator used by
+     * BOTH phase-1 multi-unit carrier framing ({@code buildMultiAdminApprovalModel} →
+     * {@code SetUnits}) and commit-time per-unit sig distribution
+     * ({@code stampProducerUnitColumns}'s multiAdmin branch). The two paths call THIS
+     * one method so their unit set / order CANNOT diverge — the i-th carrier sig the
+     * ORK returns lines up with the i-th unit here, and each unit IS its own column
+     * descriptor ({@link UnitColumnMapping#stamp(EntityManager, AttestationUnit, String)}
+     * resolves the column from {@code unit.type()}+{@code unit.targetId()}), so no
+     * separate parallel descriptor list is needed.
+     *
+     * <h2>Order (deterministic, re-derivable identically at commit)</h2>
+     * <ol>
+     *   <li><b>index 0</b> — the edge-set unit for the 7 edge actions
+     *       ({@link #isProducerEnvelopeSignedAction}), via {@link #buildEdgeSetUnit}.
+     *       Preserves the {@code signMultiAdminUnitsViaPolicy().get(0)} edge contract:
+     *       the edge unit stays at index 0 so the dispatcher's edge fan-out still reads
+     *       sig[0].</li>
+     *   <li><b>node unit</b> — for a {@code CREATE_*} node (entity absent pre-replay)
+     *       built byte-identically from REP_JSON via {@link IgaCreateUnitBuilder}
+     *       (scratch rebuild + rollback). (SET_* / UPDATE_* live-entity node units, the
+     *       derived owner-sets, and the realm-scoped units are NOT framed here yet —
+     *       see the coverage boundary note below.)</li>
+     * </ol>
+     *
+     * <h2>★ Byte-identity (the critical invariant)</h2>
+     * Every unit here is produced by the SAME builder the post-replay stamper /
+     * login-read uses ({@link #buildEdgeSetUnit} over {@code pre±delta};
+     * {@link IgaCreateUnitBuilder} which itself runs the dispatcher's create-rebuild
+     * helper + the {@link RealmAttestationExporter} node builder). So the carrier-framed
+     * bytes equal the committed-login bytes by construction; the ORK signs the literal
+     * framed CBOR and the login replay batch-verifies the same bytes against the realm
+     * VVK.
+     *
+     * <h2>★ P4 coverage boundary (still TODO post-flip)</h2>
+     * SET_* / UPDATE_* node units, the derived owner-sets (mapper-set / allowlist-set /
+     * assignment-set), and the realm-scoped units (realm_config /
+     * realm_default_groups_set / org_domain_set) read the live model, which at phase-1
+     * is still PRE-change (the CR's delta is pending in ROWS_JSON, not yet applied).
+     * Framing their PRE-change bytes would NOT match the post-replay stamper's
+     * POST-change bytes → ork verify failure. Wiring them needs a per-action POST-change
+     * live-model derivation at phase-1 (the {@code pre±delta} discipline the edge sets
+     * already use, generalized to attribute/config/assignment deltas). Until then those
+     * unit types keep the {@link #DUMMY_SIG_PREFIX} stub post-flip (NOT login-replayable)
+     * — see {@link #signProducerEnvelope}. The edge-set (index 0) and the CREATE_* node
+     * unit ARE login-replayable post-flip.
+     */
+    List<AttestationUnit> buildAllCrUnits(KeycloakSession session, RealmModel realm,
+                                          IgaChangeRequestEntity cr) {
+        List<AttestationUnit> units = new ArrayList<>();
+        String action = cr.getActionType();
+
+        // index 0: edge-set unit (the 7 edge actions). Keep it FIRST so the existing
+        // signMultiAdminUnitsViaPolicy().get(0) edge contract is preserved.
+        if (isProducerEnvelopeSignedAction(action)) {
+            units.add(buildEdgeSetUnit(session, realm, cr));
+        }
+
+        // CREATE_* node unit — built byte-identically from REP_JSON (entity absent
+        // pre-replay) via the shared dispatcher-rebuild scratch+rollback.
+        if (IgaCreateUnitBuilder.isFromRepCreateAction(action)) {
+            AttestationUnit node = IgaCreateUnitBuilder.nodeUnitFromRep(session, realm, cr);
+            if (node != null) {
+                units.add(node);
+            }
+        }
+
+        // (SET_*/derived/realm units intentionally NOT framed — see coverage boundary.)
+        return units;
+    }
+
+    /**
+     * Serialized form of {@link #buildAllCrUnits} — the ORDERED verbatim unit CBOR the
+     * phase-1 carrier frames via {@code SetUnits(byte[][])}. Same order/length as the
+     * unit list, so {@code sigs[i]} (carrier order) stamps {@code units.get(i)}'s column.
+     */
+    byte[][] buildAllCrUnitCbor(KeycloakSession session, RealmModel realm,
+                                IgaChangeRequestEntity cr) {
+        List<AttestationUnit> units = buildAllCrUnits(session, realm, cr);
+        byte[][] out = new byte[units.size()][];
+        for (int i = 0; i < units.size(); i++) {
+            out[i] = units.get(i).serialize();
+        }
+        return out;
     }
 
     /**
@@ -2408,7 +2519,7 @@ public class TideAttestor implements IgaAttestor {
      * Pre-set read via {@link RealmAttestationExporter#userGroupMembershipSet} (unfiltered,
      * onlyAttested=false) ± the CR's JOIN/LEAVE delta, then re-serialized.
      */
-    byte[] buildUserGroupMembershipSetUnitCbor(KeycloakSession session, RealmModel realm,
+    UserGroupMembershipSetUnit buildUserGroupMembershipSetUnit(KeycloakSession session, RealmModel realm,
                                                        IgaChangeRequestEntity cr) {
         List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
         boolean addAction = ACTION_JOIN_GROUPS.equals(cr.getActionType());
@@ -2435,7 +2546,7 @@ public class TideAttestor implements IgaAttestor {
         List<String> groupIds = applyMemberDelta(
                 RealmAttestationExporter.userGroupMembershipSet(em, userId, false),
                 deltaGroups, addAction);
-        return new UserGroupMembershipSetUnit(realm.getId(), userId, groupIds).serialize();
+        return new UserGroupMembershipSetUnit(realm.getId(), userId, groupIds);
     }
 
     /**
@@ -2443,7 +2554,7 @@ public class TideAttestor implements IgaAttestor {
      * Pre-set via {@link RealmAttestationExporter#groupRoleMappingSet} ± the CR's
      * GROUP_GRANT/REVOKE_ROLES delta, re-serialized.
      */
-    byte[] buildGroupRoleMappingSetUnitCbor(KeycloakSession session, RealmModel realm,
+    GroupRoleMappingSetUnit buildGroupRoleMappingSetUnit(KeycloakSession session, RealmModel realm,
                                                     IgaChangeRequestEntity cr) {
         List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
         boolean addAction = ACTION_GROUP_GRANT_ROLES.equals(cr.getActionType());
@@ -2470,7 +2581,7 @@ public class TideAttestor implements IgaAttestor {
         GroupRoleMappingSetUnit preUnit = RealmAttestationExporter.groupRoleMappingSet(
                 em, groupId, realm.getId());
         List<String> roleIds = applyMemberDelta(preUnit.roleIds(), deltaRoles, addAction);
-        return new GroupRoleMappingSetUnit(realm.getId(), groupId, roleIds).serialize();
+        return new GroupRoleMappingSetUnit(realm.getId(), groupId, roleIds);
     }
 
     /**
@@ -2480,7 +2591,7 @@ public class TideAttestor implements IgaAttestor {
      * ADD/REMOVE_COMPOSITE delta, re-serialized. The parent role already exists at commit
      * time; only the composite edge is being added/removed, so the model read is valid.
      */
-    byte[] buildRoleCompositeChildrenSetUnitCbor(KeycloakSession session, RealmModel realm,
+    RoleCompositeChildrenSetUnit buildRoleCompositeChildrenSetUnit(KeycloakSession session, RealmModel realm,
                                                          IgaChangeRequestEntity cr) {
         List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
         boolean addAction = ACTION_ADD_COMPOSITE.equals(cr.getActionType());
@@ -2512,7 +2623,7 @@ public class TideAttestor implements IgaAttestor {
         RoleCompositeChildrenSetUnit preUnit =
                 RealmAttestationExporter.roleCompositeChildrenSet(parent, realm.getId());
         List<String> childIds = applyMemberDelta(preUnit.childRoleIds(), deltaChildren, addAction);
-        return new RoleCompositeChildrenSetUnit(realm.getId(), parentRoleId, childIds).serialize();
+        return new RoleCompositeChildrenSetUnit(realm.getId(), parentRoleId, childIds);
     }
 
     // -------------------------------------------------------------------------
@@ -2547,6 +2658,21 @@ public class TideAttestor implements IgaAttestor {
         String mode = resolveMode(session, realm);
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         String action = cr.getActionType();
+
+        // ★ P4 multiAdmin distribution. Post-flip the firstAdmin pack is burned, so the
+        // node/derived/realm stampers below would only stub (signProducerEnvelope's
+        // multiAdmin branch → DUMMY_SIG_PREFIX). Instead, on a real-signing-capable
+        // multiAdmin realm we sign the phase-1 collected-doken carrier ONCE via the
+        // Policy:1 quorum and distribute the per-unit sigs to each framed unit's column.
+        // The unit set + order is RE-DERIVED from the SAME buildAllCrUnits the phase-1
+        // carrier framed, so sigs[i] (carrier order) lands on units.get(i)'s column
+        // (each unit IS its own column descriptor via UnitColumnMapping). Returns after
+        // distributing so the per-action stub stampers never overwrite a real sig.
+        if (MODE_MULTI_ADMIN.equals(mode) && isRealSigningCapable(realm)) {
+            distributeMultiAdminUnitSigs(session, realm, em, cr);
+            return;
+        }
+
         try {
             switch (action) {
                 // ---- NODE units: re-stamp the owner's node column with the real envelope ----
@@ -2623,6 +2749,56 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
+     * <b>★ P4 commit-time distribution (multiAdmin, real-signing-capable).</b> Sign the
+     * phase-1 collected-doken carrier ONCE via {@link #signMultiAdminUnitsViaPolicy}
+     * (one Policy:1 {@code Midgard.SignModel} round-trip → N real 64B VVK sigs, in the
+     * carrier's unit order), then distribute {@code sigs[i]} onto the column of the
+     * i-th unit {@link #buildAllCrUnits} enumerates — the SAME enumerator (same order)
+     * the phase-1 carrier framed, so the i-th sig matches the i-th unit by construction.
+     *
+     * <p>Each unit is its OWN column descriptor: {@link UnitColumnMapping#stamp} resolves
+     * the column from {@code unit.type()}+{@code unit.targetId()} and (for set units) fans
+     * the sig across every owner row, exactly mirroring the dispatcher / login read. The
+     * stamped value is {@code FIRSTADMIN_SIG_PREFIX + b64(64B)} (returned by
+     * {@code signMultiAdminUnitsViaPolicy}) — the signer-agnostic replayable marker, so a
+     * post-flip multiAdmin column is byte-shape-identical to a pre-flip firstAdmin column.
+     *
+     * <p>Index 0 (the edge-set unit, when present) was already stamped by the dispatcher
+     * fan-out from {@code combineFinal}'s sig; re-stamping it here is byte-identical
+     * (same carrier, same unit, same VVK), so it is a harmless idempotent overwrite.
+     * No-op (returns) when the CR frames no producer unit. Fail-closed: a carrier/sign
+     * failure propagates out of {@code signMultiAdminUnitsViaPolicy}.
+     */
+    private void distributeMultiAdminUnitSigs(KeycloakSession session, RealmModel realm,
+                                              EntityManager em, IgaChangeRequestEntity cr) {
+        List<AttestationUnit> units = buildAllCrUnits(session, realm, cr);
+        if (units.isEmpty()) {
+            // No producer unit framed at phase-1 for this action — nothing to distribute.
+            // (The carrier carried only the regular-canonical carry-through; no per-unit
+            // column applies.)
+            return;
+        }
+        List<String> sigs = signMultiAdminUnitsViaPolicy(session, realm, cr);
+        if (sigs.size() < units.size()) {
+            throw new RuntimeException("IGA multiAdmin distribute: Policy:1 ceremony returned "
+                    + sigs.size() + " sig(s) for CR " + cr.getId() + " but the carrier framed "
+                    + units.size() + " unit(s) — cannot stamp all per-unit columns (fail-closed)");
+        }
+        for (int i = 0; i < units.size(); i++) {
+            int rows = UnitColumnMapping.stamp(em, units.get(i), sigs.get(i));
+            if (rows == 0) {
+                // Owner row absent (e.g. the unit's target entity does not exist) — the
+                // login won't emit that unit either, so a 0-row stamp is a coverage no-op,
+                // not an error (matches UnitColumnMapping.stamp's contract).
+                log.debugf("IGA multiAdmin distribute: unit %s (target=%s) for CR %s stamped 0 rows",
+                        units.get(i).type(), units.get(i).targetId(), cr.getId());
+            }
+        }
+        log.infof("IGA multiAdmin commit: distributed %d per-unit VVK sig(s) across producer "
+                + "columns for CR %s (realm %s).", units.size(), cr.getId(), realm.getName());
+    }
+
+    /**
      * Sign a producer unit-envelope for the POST-replay column stampers (the NODE /
      * DERIVED / REALM units). firstAdmin + real-signing-capable → the REAL single-unit
      * VVK ceremony (fail-closed); every other case → the deterministic stub under the
@@ -2631,18 +2807,21 @@ public class TideAttestor implements IgaAttestor {
      * envelope-driven (no CR canonical), so the same byte-shape is produced for the
      * per-unit columns.
      *
-     * <p><b>★ P4 coverage boundary (multiAdmin node/derived/realm).</b> Post-flip
-     * multiAdmin REAL signing is wired today for the EDGE-SET actions (the 7 in
-     * {@link #isProducerEnvelopeSignedAction}) via the phase-1 carrier + {@link #sign}'s
-     * {@code signMultiAdminUnitViaPolicy}, replayable into the edge columns. The
-     * node/derived/realm units stamped HERE run POST-replay and have NO collected-doken
-     * carrier authorizing their specific unit request (the phase-1 carrier frames the
-     * edge-set unit, and a CREATE_* node entity does not exist pre-replay to frame at
-     * phase-1 at all), so on a multiAdmin realm they keep the {@link #DUMMY_SIG_PREFIX}
-     * stub — i.e. they are NOT yet login-replayable post-flip. Closing this needs the
-     * interactive multi-unit carrier (phase-1 frames every node/derived/realm unit the CR
-     * will produce, signed per-unit at commit) — the remaining M3/P4-followup work item.
-     * The firstAdmin (pre-flip) real path here is unchanged.
+     * <p><b>★ P4 coverage boundary (multiAdmin).</b> Post-flip multiAdmin REAL signing is
+     * now wired (via the phase-1 multi-unit carrier + {@code distributeMultiAdminUnitSigs})
+     * for: the EDGE-SET actions (the 7 in {@link #isProducerEnvelopeSignedAction}) AND the
+     * CREATE_* NODE units (framed byte-identically from REP_JSON by
+     * {@link IgaCreateUnitBuilder}). For those actions {@code stampProducerUnitColumns}
+     * takes the multiAdmin distribution branch and NEVER reaches this method on a
+     * real-signing-capable realm. STILL TODO post-flip: the SET_* / UPDATE_* live-entity node
+     * units, the derived owner-sets, and the realm-scoped units — their phase-1 live model
+     * is PRE-change (delta pending in ROWS_JSON) so they are not framed at phase-1 yet, and
+     * on a multiAdmin realm they keep the {@link #DUMMY_SIG_PREFIX} stub HERE (NOT yet
+     * login-replayable). Closing them needs a per-action POST-change live-model derivation
+     * at phase-1 (the {@code pre±delta} discipline generalized) — see
+     * {@link #buildAllCrUnits}'s coverage-boundary note. The firstAdmin (pre-flip) real path
+     * here is unchanged; this multiAdmin-stub branch stays ONLY as the not-capable dev/test
+     * fallback + the not-yet-framed unit types.
      */
     String signProducerEnvelope(KeycloakSession session, RealmModel realm, String mode,
                                         byte[] envelope) {

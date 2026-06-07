@@ -282,48 +282,246 @@ public class IgaReplayDispatcher {
     // CREATE replays
     // -------------------------------------------------------------------------
 
+    // -------------------------------------------------------------------------
+    // Reusable entity-rebuild helpers (CREATE_* from REP_JSON).
+    //
+    // ★ BYTE-IDENTITY CONTRACT. Each helper rebuilds the live entity from the
+    // CR row EXACTLY as the per-action replay used to inline — pinning the
+    // captured id/name and applying the captured REP_JSON via the SAME
+    // RepresentationToModel.* builder Keycloak's REST resource uses. The
+    // replayCreate* methods above now call THESE helpers, and so does the
+    // phase-1 multiAdmin from-REP_JSON node-unit builder
+    // ({@code IgaCreateUnitBuilder}): it runs the helper into a SCRATCH entity
+    // (nested runJobInTransaction, IGA_REPLAY_ACTIVE=true), reads the live
+    // producer unit envelope, then ROLLS BACK. Because both the real replay and
+    // the phase-1 framing go through the identical helper + the identical
+    // producer builder, the node-unit CBOR the carrier frames at phase-1 is
+    // byte-identical to the post-replay stamper's bytes BY CONSTRUCTION — they
+    // CANNOT drift. (All helpers run under IGA_REPLAY_ACTIVE so the nested
+    // create/setter calls pass straight through the IGA wrappers.)
+    // -------------------------------------------------------------------------
+
+    /** Rebuild a user from a CREATE_USER row (REP_JSON full path, bare-create net otherwise). */
+    public static void rebuildCreateUserFromRow(KeycloakSession session, RealmModel realm,
+                                         Map<String, Object> row) {
+        String userId = str(row, "ID");
+        String username = str(row, "USERNAME");
+        String repJson = str(row, "REP_JSON");
+        if (repJson != null && !repJson.isEmpty()) {
+            // Full-config path: rebuild the complete user from the captured
+            // UserRepresentation via the SAME builder Keycloak's import path
+            // uses. RepresentationToModel.createUser honours rep.getId() (5-arg
+            // local-storage addUser) then applies enabled/email/names/attributes/
+            // required-actions/credentials/federated-identities/role-mappings/
+            // consents/notBefore/service-account/group-memberships.
+            try {
+                org.keycloak.representations.idm.UserRepresentation rep =
+                        MAPPER.readValue(repJson,
+                                org.keycloak.representations.idm.UserRepresentation.class);
+                rep.setId(userId);
+                if (username != null) rep.setUsername(username);
+                org.keycloak.models.utils.RepresentationToModel.createUser(session, realm, rep);
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new RuntimeException(
+                        "Failed to deserialize REP_JSON for CREATE_USER replay (CR row id=" + userId + ")", e);
+            }
+        } else {
+            // Bare-create safety net (non-REST programmatic callers only).
+            session.users().addUser(realm, userId, username, false, false);
+        }
+    }
+
+    /** Rebuild a role from a CREATE_ROLE row; returns the created role (or null if not buildable). */
+    public static RoleModel rebuildCreateRoleFromRow(KeycloakSession session, RealmModel realm,
+                                              Map<String, Object> row) {
+        String id = str(row, "ID");
+        String name = str(row, "NAME");
+        boolean clientRole = Boolean.TRUE.equals(row.get("CLIENT_ROLE"));
+        String repJson = str(row, "REP_JSON");
+
+        // Create the role with the captured UUID + name. For client roles
+        // resolve the owning client via CLIENT_UUID (contract). The id-bearing
+        // add* lands in IgaRealmProvider.addRealmRole/addClientRole which, under
+        // IGA_REPLAY_ACTIVE, delegates to super and does NOT re-intercept.
+        RoleModel role;
+        if (clientRole) {
+            ClientModel client = resolveClient(session, realm, row);
+            if (client == null) {
+                log.warnf("CREATE_ROLE replay: owning client not resolvable for client role id=%s; skipping", id);
+                return null;
+            }
+            role = session.roles().addClientRole(client, id, name);
+        } else {
+            role = session.roles().addRealmRole(realm, id, name);
+        }
+        if (role == null) return null;
+
+        if (repJson != null && !repJson.isEmpty()) {
+            // Full-config path: apply description, attributes and composites
+            // exactly as Keycloak's RoleContainerResource.createRole does (it
+            // cannot pin an id, so we do the id-bearing add above and then
+            // replicate the rest of its logic faithfully — no invented behaviour).
+            try {
+                org.keycloak.representations.idm.RoleRepresentation rep =
+                        MAPPER.readValue(repJson,
+                                org.keycloak.representations.idm.RoleRepresentation.class);
+                if (rep.getDescription() != null) role.setDescription(rep.getDescription());
+                if (rep.getAttributes() != null) {
+                    for (Map.Entry<String, java.util.List<String>> attr : rep.getAttributes().entrySet()) {
+                        role.setAttribute(attr.getKey(), attr.getValue());
+                    }
+                }
+                if (Boolean.TRUE.equals(rep.isComposite()) && rep.getComposites() != null) {
+                    org.keycloak.representations.idm.RoleRepresentation.Composites composites =
+                            rep.getComposites();
+                    java.util.Set<String> compositeRealmRoles = composites.getRealm();
+                    if (compositeRealmRoles != null) {
+                        for (String roleName : compositeRealmRoles) {
+                            RoleModel realmRole = realm.getRole(roleName);
+                            if (realmRole == null) {
+                                log.warnf("CREATE_ROLE replay: composite realm role '%s' not found for role id=%s; skipping that composite link", roleName, id);
+                                continue;
+                            }
+                            role.addCompositeRole(realmRole);
+                        }
+                    }
+                    Map<String, java.util.List<String>> compositeClientRoles = composites.getClient();
+                    if (compositeClientRoles != null) {
+                        for (Map.Entry<String, java.util.List<String>> e : compositeClientRoles.entrySet()) {
+                            ClientModel cClient = realm.getClientByClientId(e.getKey());
+                            if (cClient == null) continue; // Keycloak: continue
+                            for (String roleName : e.getValue()) {
+                                RoleModel clientRoleModel = cClient.getRole(roleName);
+                                if (clientRoleModel == null) {
+                                    log.warnf("CREATE_ROLE replay: composite client role '%s' (client %s) not found for role id=%s; skipping that composite link", roleName, e.getKey(), id);
+                                    continue;
+                                }
+                                role.addCompositeRole(clientRoleModel);
+                            }
+                        }
+                    }
+                }
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new RuntimeException(
+                        "Failed to deserialize REP_JSON for CREATE_ROLE replay (CR row id=" + id + ")", e);
+            }
+        }
+        // else: bare-create safety net (non-REST callers) — id+name only.
+        return role;
+    }
+
+    /** Rebuild a group from a CREATE_GROUP row; returns the created group (or null). */
+    public static GroupModel rebuildCreateGroupFromRow(KeycloakSession session, RealmModel realm,
+                                                Map<String, Object> row) {
+        String id = str(row, "ID");
+        String name = str(row, "NAME");
+        String parentId = str(row, "PARENT_GROUP");
+        String repJson = str(row, "REP_JSON");
+        GroupModel parent = (parentId != null) ? session.groups().getGroupById(realm, parentId) : null;
+        // Create with captured UUID + name + (resolved) parent. Lands in
+        // IgaRealmProvider.createGroup which, under IGA_REPLAY_ACTIVE, delegates
+        // to super and does NOT re-intercept. Top-level vs child is decided by
+        // whether PARENT_GROUP was captured.
+        GroupModel group = session.groups().createGroup(realm, id, name, parent);
+
+        if (group != null && repJson != null && !repJson.isEmpty()) {
+            // Full-config path: apply description + attributes exactly as
+            // Keycloak's GroupResource.updateGroup does after create.
+            try {
+                org.keycloak.representations.idm.GroupRepresentation rep =
+                        MAPPER.readValue(repJson,
+                                org.keycloak.representations.idm.GroupRepresentation.class);
+                if (rep.getAttributes() != null) {
+                    for (Map.Entry<String, java.util.List<String>> attr : rep.getAttributes().entrySet()) {
+                        group.setAttribute(attr.getKey(), attr.getValue());
+                    }
+                }
+                // updateGroup always calls setDescription(rep.getDescription())
+                // (including null) — mirror exactly.
+                group.setDescription(rep.getDescription());
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new RuntimeException(
+                        "Failed to deserialize REP_JSON for CREATE_GROUP replay (CR row id=" + id + ")", e);
+            }
+        }
+        // else: bare-create safety net (non-REST callers).
+        return group;
+    }
+
+    /** Rebuild a client from a CREATE_CLIENT row (REP_JSON full path, bare-create net otherwise). */
+    public static void rebuildCreateClientFromRow(KeycloakSession session, RealmModel realm,
+                                           Map<String, Object> row) {
+        String id = str(row, "ID");
+        // CLIENT_ID is the HUMAN client identifier (contract). The own PK UUID is ID.
+        String clientId = str(row, "CLIENT_ID");
+        String repJson = str(row, "REP_JSON");
+
+        if (repJson != null && !repJson.isEmpty()) {
+            // Full-config path: rebuild the complete client from the captured
+            // ClientRepresentation via the same builder Keycloak uses on POST
+            // {realm}/clients. Under IGA_REPLAY_ACTIVE the internal
+            // realm.addClient(...) + setters + addProtocolMapper(...) pass
+            // straight through the IGA wrappers without re-triggering interception.
+            try {
+                org.keycloak.representations.idm.ClientRepresentation rep =
+                        MAPPER.readValue(repJson,
+                                org.keycloak.representations.idm.ClientRepresentation.class);
+                rep.setId(id);
+                if (clientId != null) rep.setClientId(clientId);
+                org.keycloak.models.utils.RepresentationToModel.createClient(session, realm, rep);
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new RuntimeException(
+                        "Failed to deserialize REP_JSON for CREATE_CLIENT replay (CR row id=" + id + ")", e);
+            }
+        } else {
+            // Safety net for non-rep programmatic callers only (no REP_JSON).
+            log.warnf("IGA replay CREATE_CLIENT: REP_JSON MISSING for clientId=%s "
+                    + "— bare client create only (webOrigins/redirectUris/attributes/flows WILL BE LOST).",
+                    clientId);
+            session.clients().addClient(realm, id, clientId != null ? clientId : id);
+        }
+    }
+
+    /** Rebuild a client scope from a CREATE_CLIENT_SCOPE row; returns the scope (or null). */
+    public static ClientScopeModel rebuildCreateClientScopeFromRow(RealmModel realm, Map<String, Object> row) {
+        String id = str(row, "ID");
+        String name = str(row, "NAME");
+        String protocol = str(row, "PROTOCOL");
+        String description = str(row, "DESCRIPTION");
+        String repJson = str(row, "REP_JSON");
+        if (id == null || name == null) return null;
+
+        if (repJson != null && !repJson.isEmpty()) {
+            // Full-config path: rebuild via the SAME builder Keycloak's
+            // ClientScopesResource.create uses (RepresentationToModel
+            // .createClientScope) — honours rep.getId() and applies name/
+            // description/protocol/mappers/attributes. Nested calls pass through
+            // the IGA wrappers because IGA_REPLAY_ACTIVE is set.
+            try {
+                org.keycloak.representations.idm.ClientScopeRepresentation rep =
+                        MAPPER.readValue(repJson,
+                                org.keycloak.representations.idm.ClientScopeRepresentation.class);
+                rep.setId(id);
+                rep.setName(name);
+                return org.keycloak.models.utils.RepresentationToModel.createClientScope(realm, rep);
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new RuntimeException(
+                        "Failed to deserialize REP_JSON for CREATE_CLIENT_SCOPE replay (CR row id=" + id + ")", e);
+            }
+        }
+        // Bare-create safety net for non-REST programmatic callers.
+        ClientScopeModel scope = realm.addClientScope(id, name);
+        if (scope == null) return null;
+        if (protocol != null) scope.setProtocol(protocol);
+        if (description != null) scope.setDescription(description);
+        return scope;
+    }
+
     private static void replayCreateUser(KeycloakSession session, RealmModel realm,
                                           List<Map<String, Object>> rows, String sig, EntityManager em) {
         for (Map<String, Object> row : rows) {
             String userId = str(row, "ID");
-            String username = str(row, "USERNAME");
-            String repJson = str(row, "REP_JSON");
-
-            if (repJson != null && !repJson.isEmpty()) {
-                // Full-config path: rebuild the complete user from the captured
-                // UserRepresentation via the SAME builder Keycloak's import
-                // path uses. RepresentationToModel.createUser delegates to
-                // DefaultExportImportManager.createUser, which honours
-                // rep.getId() (via the 5-arg local-storage addUser, NOT the
-                // IGA-wrapped 1-arg addUser) and then applies enabled, email,
-                // names, attributes, required actions, credentials (plaintext
-                // value AND hashed secret/credential data), federated
-                // identities, role mappings, client consents, notBefore,
-                // service-account client link, and group memberships.
-                // IGA_REPLAY_ACTIVE (set by replay()) makes every nested
-                // IgaUserAdapter call (setEnabled/setAttribute/grantRole/
-                // joinGroup/...) pass straight through the wrappers without
-                // re-triggering interception.
-                try {
-                    org.keycloak.representations.idm.UserRepresentation rep =
-                            MAPPER.readValue(repJson,
-                                    org.keycloak.representations.idm.UserRepresentation.class);
-                    // Pin identity to the captured values so the replayed user
-                    // keeps the original UUID and username.
-                    rep.setId(userId);
-                    if (username != null) rep.setUsername(username);
-                    org.keycloak.models.utils.RepresentationToModel.createUser(session, realm, rep);
-                } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-                    throw new RuntimeException(
-                            "Failed to deserialize REP_JSON for CREATE_USER replay (CR row id=" + userId + ")", e);
-                }
-            } else {
-                // Bare-create safety net for non-REST programmatic callers
-                // only (no REP_JSON). NOT a legacy-CR compat shim — an
-                // admin-created user always carries REP_JSON. 5-arg addUser to
-                // supply our own id.
-                session.users().addUser(realm, userId, username, false, false);
-            }
+            rebuildCreateUserFromRow(session, realm, row);
             em.createQuery("UPDATE UserEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig)
                     .setParameter("id", userId)
@@ -336,86 +534,9 @@ public class IgaReplayDispatcher {
                                           boolean setSigned) {
         for (Map<String, Object> row : rows) {
             String id = str(row, "ID");
-            String name = str(row, "NAME");
-            boolean clientRole = Boolean.TRUE.equals(row.get("CLIENT_ROLE"));
-            String repJson = str(row, "REP_JSON");
 
-            // Create the role with the captured UUID + name. For client roles
-            // resolve the owning client via CLIENT_UUID (contract). The
-            // id-bearing add* lands in IgaRealmProvider.addRealmRole /
-            // addClientRole which, under IGA_REPLAY_ACTIVE (set by replay()),
-            // delegates to super and does NOT re-intercept.
-            RoleModel role;
-            if (clientRole) {
-                ClientModel client = resolveClient(session, realm, row);
-                if (client == null) {
-                    log.warnf("CREATE_ROLE replay: owning client not resolvable for client role id=%s; skipping", id);
-                    continue;
-                }
-                role = session.roles().addClientRole(client, id, name);
-            } else {
-                role = session.roles().addRealmRole(realm, id, name);
-            }
+            RoleModel role = rebuildCreateRoleFromRow(session, realm, row);
             if (role == null) continue;
-
-            if (repJson != null && !repJson.isEmpty()) {
-                // Full-config path: apply description, attributes and
-                // composites exactly as Keycloak's RoleContainerResource
-                // .createRole does (it cannot pin an id, so we do the
-                // id-bearing add above and then replicate the rest of its
-                // logic faithfully — no invented behaviour).
-                try {
-                    org.keycloak.representations.idm.RoleRepresentation rep =
-                            MAPPER.readValue(repJson,
-                                    org.keycloak.representations.idm.RoleRepresentation.class);
-                    if (rep.getDescription() != null) role.setDescription(rep.getDescription());
-                    if (rep.getAttributes() != null) {
-                        for (Map.Entry<String, java.util.List<String>> attr : rep.getAttributes().entrySet()) {
-                            role.setAttribute(attr.getKey(), attr.getValue());
-                        }
-                    }
-                    if (Boolean.TRUE.equals(rep.isComposite()) && rep.getComposites() != null) {
-                        org.keycloak.representations.idm.RoleRepresentation.Composites composites =
-                                rep.getComposites();
-                        java.util.Set<String> compositeRealmRoles = composites.getRealm();
-                        if (compositeRealmRoles != null) {
-                            for (String roleName : compositeRealmRoles) {
-                                RoleModel realmRole = realm.getRole(roleName);
-                                if (realmRole == null) {
-                                    // Composite target not yet created (it may
-                                    // be a separate pending CR). Keycloak's REST
-                                    // path 404s here; we log and skip the single
-                                    // composite link rather than abort the whole
-                                    // role create.
-                                    log.warnf("CREATE_ROLE replay: composite realm role '%s' not found for role id=%s; skipping that composite link", roleName, id);
-                                    continue;
-                                }
-                                role.addCompositeRole(realmRole);
-                            }
-                        }
-                        Map<String, java.util.List<String>> compositeClientRoles = composites.getClient();
-                        if (compositeClientRoles != null) {
-                            for (Map.Entry<String, java.util.List<String>> e : compositeClientRoles.entrySet()) {
-                                ClientModel cClient = realm.getClientByClientId(e.getKey());
-                                if (cClient == null) continue; // Keycloak: continue
-                                for (String roleName : e.getValue()) {
-                                    RoleModel clientRoleModel = cClient.getRole(roleName);
-                                    if (clientRoleModel == null) {
-                                        log.warnf("CREATE_ROLE replay: composite client role '%s' (client %s) not found for role id=%s; skipping that composite link", roleName, e.getKey(), id);
-                                        continue;
-                                    }
-                                    role.addCompositeRole(clientRoleModel);
-                                }
-                            }
-                        }
-                    }
-                } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-                    throw new RuntimeException(
-                            "Failed to deserialize REP_JSON for CREATE_ROLE replay (CR row id=" + id + ")", e);
-                }
-            }
-            // else: bare-create safety net (non-REST callers) — role already
-            // created above with id+name; no extra config.
 
             em.createQuery("UPDATE RoleEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig)
@@ -451,43 +572,8 @@ public class IgaReplayDispatcher {
                                            List<Map<String, Object>> rows, String sig, EntityManager em) {
         for (Map<String, Object> row : rows) {
             String id = str(row, "ID");
-            String name = str(row, "NAME");
-            String parentId = str(row, "PARENT_GROUP");
-            String repJson = str(row, "REP_JSON");
-            GroupModel parent = (parentId != null) ? session.groups().getGroupById(realm, parentId) : null;
-            // Create with the captured UUID + name + (resolved) parent. This
-            // lands in IgaRealmProvider.createGroup, which under
-            // IGA_REPLAY_ACTIVE (set by replay()) delegates to super and does
-            // NOT re-intercept. Top-level vs child is decided purely by whether
-            // PARENT_GROUP was captured — matching Keycloak's
-            // GroupsResource.addTopLevelGroup vs GroupResource.addChild.
-            GroupModel group = session.groups().createGroup(realm, id, name, parent);
-
-            if (group != null && repJson != null && !repJson.isEmpty()) {
-                // Full-config path: apply description + attributes exactly as
-                // Keycloak's GroupResource.updateGroup does after create. We do
-                // NOT recurse into subGroups — Keycloak creates each sub-group
-                // via its own POST .../children request (its own CREATE_GROUP
-                // CR), so inventing recursion here would double-create.
-                try {
-                    org.keycloak.representations.idm.GroupRepresentation rep =
-                            MAPPER.readValue(repJson,
-                                    org.keycloak.representations.idm.GroupRepresentation.class);
-                    if (rep.getAttributes() != null) {
-                        for (Map.Entry<String, java.util.List<String>> attr : rep.getAttributes().entrySet()) {
-                            group.setAttribute(attr.getKey(), attr.getValue());
-                        }
-                    }
-                    // Keycloak's updateGroup always calls setDescription(rep
-                    // .getDescription()) (including null) — mirror exactly.
-                    group.setDescription(rep.getDescription());
-                } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-                    throw new RuntimeException(
-                            "Failed to deserialize REP_JSON for CREATE_GROUP replay (CR row id=" + id + ")", e);
-                }
-            }
-            // else: bare-create safety net (non-REST callers).
-
+            GroupModel group = rebuildCreateGroupFromRow(session, realm, row);
+            if (group == null) continue;
             em.createQuery("UPDATE GroupEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig)
                     .setParameter("id", id)
@@ -500,53 +586,7 @@ public class IgaReplayDispatcher {
                                             boolean setSigned) {
         for (Map<String, Object> row : rows) {
             String id = str(row, "ID");
-            // CLIENT_ID is the HUMAN client identifier (contract). The own PK
-            // UUID is ID.
-            String clientId = str(row, "CLIENT_ID");
-            String repJson = str(row, "REP_JSON");
-
-            if (repJson != null && !repJson.isEmpty()) {
-                // Full-config path: rebuild the complete client from the
-                // captured ClientRepresentation via the same builder Keycloak
-                // uses on POST {realm}/clients. IGA_REPLAY_ACTIVE is set by the
-                // surrounding replay() call, so RepresentationToModel.createClient's
-                // internal realm.addClient(...) + setters + addProtocolMapper(...)
-                // pass straight through the IGA wrappers without re-triggering
-                // interception.
-                try {
-                    org.keycloak.representations.idm.ClientRepresentation rep =
-                            MAPPER.readValue(repJson,
-                                    org.keycloak.representations.idm.ClientRepresentation.class);
-                    // Pin identity to the captured values so the replayed
-                    // client keeps the original UUID (ID) and human clientId.
-                    rep.setId(id);
-                    if (clientId != null) rep.setClientId(clientId);
-                    int wo = rep.getWebOrigins() == null ? 0 : rep.getWebOrigins().size();
-                    int ru = rep.getRedirectUris() == null ? 0 : rep.getRedirectUris().size();
-                    log.infof("IGA replay CREATE_CLIENT: full-rep path for clientId=%s "
-                            + "(webOrigins=%d, redirectUris=%d) via RepresentationToModel.createClient",
-                            clientId, wo, ru);
-                    org.keycloak.models.utils.RepresentationToModel.createClient(session, realm, rep);
-                } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-                    throw new RuntimeException(
-                            "Failed to deserialize REP_JSON for CREATE_CLIENT replay (CR row id=" + id + ")", e);
-                }
-            } else {
-                // Safety net for non-rep callers only (e.g. a programmatic
-                // session.clients().addClient(...) that did NOT go through
-                // RepresentationToModel.createClient — so the model-layer
-                // capture seam never produced a REP_JSON). This is NOT a
-                // legacy-CR compatibility shim: old pending CRs lacking
-                // REP_JSON are intentionally discarded, and an admin-created
-                // client always has REP_JSON (captured at the model-layer
-                // terminal seam IgaClientAdapter#updateClient).
-                log.warnf("IGA replay CREATE_CLIENT: REP_JSON MISSING for clientId=%s "
-                        + "— bare client create only (webOrigins/redirectUris/attributes/flows "
-                        + "WILL BE LOST). The model-layer capture seam did not record a full "
-                        + "representation for this client create (non-REST programmatic caller).",
-                        clientId);
-                session.clients().addClient(realm, id, clientId != null ? clientId : id);
-            }
+            rebuildCreateClientFromRow(session, realm, row);
             em.createQuery("UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig)
                     .setParameter("id", id)
@@ -1823,38 +1863,9 @@ public class IgaReplayDispatcher {
         for (Map<String, Object> row : rows) {
             String id = str(row, "ID");
             String name = str(row, "NAME");
-            String protocol = str(row, "PROTOCOL");
-            String description = str(row, "DESCRIPTION");
-            String repJson = str(row, "REP_JSON");
             if (id == null || name == null) continue;
 
-            if (repJson != null && !repJson.isEmpty()) {
-                // Full-config path: rebuild via the SAME builder Keycloak's
-                // ClientScopesResource.create uses
-                // (RepresentationToModel.createClientScope), which honours
-                // rep.getId() (id-bearing realm.addClientScope) and applies
-                // name, description, protocol, protocol mappers (incl. their
-                // full config) and attributes. The nested realm.addClientScope
-                // + scope.addProtocolMapper(...) calls pass straight through
-                // the IGA wrappers because IGA_REPLAY_ACTIVE is set by replay().
-                try {
-                    org.keycloak.representations.idm.ClientScopeRepresentation rep =
-                            MAPPER.readValue(repJson,
-                                    org.keycloak.representations.idm.ClientScopeRepresentation.class);
-                    rep.setId(id);
-                    if (name != null) rep.setName(name);
-                    org.keycloak.models.utils.RepresentationToModel.createClientScope(realm, rep);
-                } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-                    throw new RuntimeException(
-                            "Failed to deserialize REP_JSON for CREATE_CLIENT_SCOPE replay (CR row id=" + id + ")", e);
-                }
-            } else {
-                // Bare-create safety net for non-REST programmatic callers.
-                ClientScopeModel scope = realm.addClientScope(id, name);
-                if (scope == null) continue;
-                if (protocol != null) scope.setProtocol(protocol);
-                if (description != null) scope.setDescription(description);
-            }
+            if (rebuildCreateClientScopeFromRow(realm, row) == null) continue;
 
             if (sig != null && !sig.isEmpty()) {
                 em.createQuery("UPDATE ClientScopeEntity e SET e.attestation = :sig WHERE e.id = :id")

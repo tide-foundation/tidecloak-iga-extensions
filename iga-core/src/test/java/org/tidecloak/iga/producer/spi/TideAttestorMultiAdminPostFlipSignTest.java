@@ -80,4 +80,29 @@ class TideAttestorMultiAdminPostFlipSignTest {
         assertNull(IgaAttestationExporterProvider.decodeReplayableSig(dummyStub),
                 "the DUMMY_SIG_PREFIX stub must NOT be login-replayable");
     }
+
+    /**
+     * ★ P4 — the CREATE_* NODE unit (now framed onto the phase-1 carrier from REP_JSON and
+     * distributed at commit via {@code distributeMultiAdminUnitSigs}) is stamped with the
+     * SAME {@code FIRSTADMIN_SIG_PREFIX}+b64(64B) shape — so a post-flip CREATE node column
+     * is login-replayable, NOT a dead stub. (Distinct from the edge-set unit at index 0,
+     * this is the node unit at index ≥1 in the carrier; both share the signer-agnostic
+     * replayable wire shape.) The SET_* / derived / realm units that are NOT yet framed keep
+     * the non-replayable DUMMY stub — that remaining boundary is asserted above.
+     */
+    @Test
+    void createNodeUnitColumn_isLoginReplayable_postFlip() {
+        byte[] nodeVvkSig = bytes(64, 23); // the ORK's 64B VVK sig over the CREATE node unit
+        String orkSigB64 = Base64.getEncoder().encodeToString(nodeVvkSig);
+
+        // distributeMultiAdminUnitSigs stamps signMultiAdminUnitsViaPolicy's value verbatim:
+        // FIRSTADMIN_SIG_PREFIX + b64(64B) — the same shape for EVERY framed unit (edge or
+        // node), so the CREATE node column replays just like the edge column.
+        String nodeColumn = multiAdminColumnValue(orkSigB64);
+
+        byte[] replayed = IgaAttestationExporterProvider.decodeReplayableSig(nodeColumn);
+        assertNotNull(replayed, "the post-flip CREATE node column must be login-replayable");
+        assertArrayEquals(nodeVvkSig, replayed,
+                "the CREATE node column must replay the exact 64-byte VVK sig the ORK produced");
+    }
 }
