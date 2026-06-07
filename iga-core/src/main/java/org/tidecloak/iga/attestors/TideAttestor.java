@@ -1405,6 +1405,17 @@ public class TideAttestor implements IgaAttestor {
         // Policy:1 round-trip) frame the single regular canonical so the carrier wiring
         // still round-trips.
         byte[][] unitCbors = buildAllCrUnitCbor(session, realm, cr);
+        // P4: a producer CR (CREATE_USER / GRANT_ROLES / etc.) MUST frame ≥1 typed
+        // AttestationUnit. unitCbors.length==0 means the scratch-replay enumeration found no
+        // unit — the carrier would then fall back to canonicalForRegularCr (a NON-CBOR
+        // canonical digest, NOT an AttestationUnit envelope), which the enclave cannot treat
+        // as a unit → it self-closes on an "uninitialized request". Log at INFO so a future
+        // 0-unit regression on any producer actionType is immediately visible in the server
+        // log next to the "built Policy:1 ModelRequest" line, instead of only surfacing as an
+        // opaque enclave self-close on the client.
+        log.infof("IGA multiAdmin approval (phase 1): CR %s action=%s framed %d producer unit(s)%s",
+                cr.getId(), cr.getActionType(), unitCbors.length,
+                unitCbors.length == 0 ? " — FALLING BACK to canonicalForRegularCr (non-unit carrier)" : "");
         if (unitCbors.length == 0) {
             unitCbors = new byte[][]{ canonicalForRegularCr(session, cr) };
         }

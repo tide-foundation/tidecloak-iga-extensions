@@ -181,6 +181,45 @@ class TideAttestorBuildAllCrUnitsTest {
     }
 
     @Test
+    void createUserCr_enumeratesExactlyTheUserIdentityNodeUnit_notZero() {
+        // ★ Regression guard for the CREATE_USER multiAdmin carrier bug: the scratch-replay
+        // creates the user from REP_JSON with rep.id = the ROWS_JSON "ID", then enumerateLiveCrUnits
+        // resolves THAT user via session.users().getUserById(realm, firstRowKeyOr("USER_ID","ID"))
+        // and builds the user_identity node unit. The historical failure was 0 units (the lookup
+        // missed → canonicalForRegularCr fallback → a non-AttestationUnit carrier → enclave
+        // self-close). This asserts the CREATE_USER branch resolves the post-change user and frames
+        // EXACTLY one user_identity unit targeting that user.
+        org.keycloak.models.UserModel user = mock(org.keycloak.models.UserModel.class);
+        when(user.getId()).thenReturn(USER_ID);
+        when(user.getUsername()).thenReturn("dfgewwer");
+        when(user.getEmail()).thenReturn("test@tide.org");
+        when(user.isEmailVerified()).thenReturn(false);
+        when(user.getFirstName()).thenReturn("werrewr");
+        when(user.getLastName()).thenReturn("dsfsd");
+        when(user.getAttributes()).thenReturn(java.util.Collections.emptyMap());
+        org.keycloak.models.UserProvider users = mock(org.keycloak.models.UserProvider.class);
+        when(session.users()).thenReturn(users);
+        when(users.getUserById(realm, USER_ID)).thenReturn(user);
+
+        when(cr.getActionType()).thenReturn("CREATE_USER");
+        // The CREATE_USER ROWS_JSON carries "ID" (own UUID), not "USER_ID" — firstRowKeyOr
+        // must fall through "USER_ID" → "ID". (Matches IgaReplayDispatcher.replayCreateUser,
+        // which reads str(row,"ID") and rep.setId(that).)
+        when(cr.getRowsJson()).thenReturn(
+                "[{\"ID\":\"" + USER_ID + "\",\"USERNAME\":\"dfgewwer\"}]");
+
+        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
+
+        assertEquals(1, units.size(),
+                "CREATE_USER must frame exactly the user_identity node unit (NOT 0 → no "
+                        + "canonicalForRegularCr fallback)");
+        assertEquals(AttestationUnitType.USER_IDENTITY, units.get(0).type(),
+                "the single framed unit must be the user_identity node");
+        assertEquals(USER_ID, units.get(0).targetId(),
+                "the user_identity unit targets the newly-created user's id (the ROWS_JSON ID)");
+    }
+
+    @Test
     void setRealmAttributeCr_enumeratesTheRealmConfigUnit() {
         when(cr.getActionType()).thenReturn("SET_REALM_ATTRIBUTE");
         when(cr.getRowsJson()).thenReturn("[{\"NAME\":\"some.attr\",\"VALUE\":\"v\"}]");
