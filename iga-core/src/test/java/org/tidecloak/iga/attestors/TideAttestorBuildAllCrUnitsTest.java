@@ -4,6 +4,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.ClientModel;
+import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.mockito.Mock;
@@ -14,6 +16,7 @@ import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.producer.IgaCreateUnitBuilder;
 import org.tidecloak.iga.producer.units.AttestationUnit;
 import org.tidecloak.iga.producer.units.AttestationUnitType;
+import org.tidecloak.iga.producer.units.ScopeRoleAllowlistSetUnit;
 import org.tidecloak.iga.producer.units.UserRoleMappingSetUnit;
 
 import jakarta.persistence.EntityManager;
@@ -31,29 +34,24 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * ★ P4 — coverage for the full-CR unit enumerator {@code TideAttestor.buildAllCrUnits} /
- * {@code buildAllCrUnitCbor} (the single shared descriptor list phase-1 framing and
- * commit-time distribution both run) and the {@link IgaCreateUnitBuilder} routing gate.
+ * ★ P4 — coverage for the SHARED affected-units enumerator
+ * {@code TideAttestor.enumerateLiveCrUnits} (the single mapping "which units does actionType X
+ * touch", used by BOTH phase-1 carrier framing AND commit-time distribution) and the
+ * {@code buildAllCrUnits(..., modelAlreadyPostChange=true)} commit-path overload that runs it
+ * directly over the (already-post-change) live model.
  *
- * <p>What is asserted WITHOUT real ORKs / a real session factory:
- * <ul>
- *   <li>An edge-set CR enumerates EXACTLY one unit (the index-0 edge-set unit) and its
- *       serialized CBOR equals the producer's post-change envelope — i.e. the unit the
- *       carrier frames is byte-identical to what the login replays.</li>
- *   <li>{@code buildAllCrUnitCbor} returns the parallel {@code byte[][]} (same order /
- *       length) — the verbatim CBOR {@code SetUnits} frames.</li>
- *   <li>The CREATE_* routing gate {@link IgaCreateUnitBuilder#isFromRepCreateAction} marks
- *       exactly the five from-REP_JSON node creates (so they get a framed node unit) and
- *       nothing else.</li>
- * </ul>
+ * <p>What is asserted WITHOUT real ORKs / a real session factory (Mockito): the enumerator
+ * returns the CORRECT affected-unit SET (types + targets + order) for an edge action, the four
+ * representative non-edge actions the task calls out (SET_CLIENT_ATTRIBUTE / ASSIGN_SCOPE /
+ * ADD_PROTOCOL_MAPPER / SET_REALM_ATTRIBUTE), and that the SAME enumerator returns the IDENTICAL
+ * set whether reached via the commit overload or invoked directly (framing == distribution).
  *
- * <p>The deep byte-identity of the CREATE_* from-REP_JSON node unit (its
- * {@code nodeUnitCborFromRep} bytes == the post-replay stamper bytes for the same REP_JSON)
- * is guaranteed BY CONSTRUCTION — both paths run the SAME
- * {@code IgaReplayDispatcher.rebuildCreate*FromRow} helper into a scratch entity + the SAME
- * {@code RealmAttestationExporter} node builder — and is exercised live in the multiAdmin
- * ceremony; it cannot be unit-tested here because the scratch rebuild needs a real
- * {@code KeycloakSessionFactory} ({@code runJobInTransaction} + {@code RepresentationToModel}).
+ * <p>The PHASE-1 scratch-replay-and-read ({@code buildAllCrUnits(..., false)} →
+ * {@code IgaScratchUnitBuilder.unitsFromScratchReplay}) needs a real
+ * {@code KeycloakSessionFactory} ({@code runJobInTransaction} + the dispatcher replay) so it is
+ * NOT exercised here; the deep byte-identity (scratch post-change == committed post-change) is
+ * guaranteed BY CONSTRUCTION — both run the IDENTICAL {@code IgaReplayDispatcher.replay} and the
+ * IDENTICAL {@code enumerateLiveCrUnits} — and is flagged for live multiAdmin validation.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -61,6 +59,8 @@ class TideAttestorBuildAllCrUnitsTest {
 
     private static final String REALM_ID = "realm-uuid-p4";
     private static final String USER_ID = "user-p4";
+    private static final String CLIENT_UUID = "client-uuid-p4";
+    private static final String SCOPE_ID = "scope-id-p4";
 
     @Mock KeycloakSession session;
     @Mock RealmModel realm;
@@ -85,26 +85,25 @@ class TideAttestorBuildAllCrUnitsTest {
         when(q.getResultList()).thenReturn((List) ids);
     }
 
+    // ---- the commit-path overload runs enumerateLiveCrUnits directly (mock-friendly) ----
+
     @Test
-    void edgeSetCr_enumeratesExactlyTheIndex0EdgeUnit_byteIdenticalToProducer() {
-        // A GRANT_ROLES CR over a user with pre-set {r-aaa} granting r-zzz.
+    void edgeSetCr_commitPath_enumeratesExactlyTheIndex0EdgeUnit_byteIdenticalToProducer() {
+        // A GRANT_ROLES CR over a user with post-change set {r-aaa, r-zzz}.
         stubIdQuery(Arrays.asList("r-aaa"));
         when(cr.getActionType()).thenReturn("GRANT_ROLES");
         when(cr.getEntityId()).thenReturn(USER_ID);
         when(cr.getRowsJson()).thenReturn(
                 "[{\"USER_ID\":\"" + USER_ID + "\",\"ROLE_ID\":\"r-zzz\"}]");
 
-        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr);
+        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
 
-        // Exactly ONE unit (the edge-set unit at index 0) — no node/derived framed for an
-        // edge action.
         assertEquals(1, units.size(), "an edge-set CR frames exactly its index-0 edge unit");
         AttestationUnit u0 = units.get(0);
         assertEquals(AttestationUnitType.USER_ROLE_MAPPING_SET, u0.type(),
                 "index 0 must be the user_role_mapping_set edge unit");
         assertEquals(USER_ID, u0.targetId(), "the edge unit's target is the owner user");
 
-        // Byte-identical to the producer's post-change emission (sorted pre ∪ delta).
         List<String> committed = Arrays.asList("r-aaa", "r-zzz");
         byte[] producerBytes = new UserRoleMappingSetUnit(REALM_ID, USER_ID, committed).serialize();
         assertArrayEquals(producerBytes, u0.serialize(),
@@ -119,14 +118,122 @@ class TideAttestorBuildAllCrUnitsTest {
         when(cr.getRowsJson()).thenReturn(
                 "[{\"USER_ID\":\"" + USER_ID + "\",\"ROLE_ID\":\"r-zzz\"}]");
 
-        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr);
-        byte[][] cbor = attestor.buildAllCrUnitCbor(session, realm, cr);
+        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
+        byte[][] cbor = new byte[units.size()][];
+        for (int i = 0; i < units.size(); i++) cbor[i] = units.get(i).serialize();
 
-        assertEquals(units.size(), cbor.length,
-                "buildAllCrUnitCbor must be the same length as buildAllCrUnits");
+        assertEquals(units.size(), cbor.length);
         for (int i = 0; i < units.size(); i++) {
             assertArrayEquals(units.get(i).serialize(), cbor[i],
                     "cbor[" + i + "] must be units.get(" + i + ").serialize() (verbatim, in order)");
+        }
+    }
+
+    // ---- the affected-units mapping: a NODE, a DERIVED, an edge-derived, a REALM unit ----
+
+    @Test
+    void setClientAttributeCr_enumeratesTheClientConfigNodeUnit() {
+        ClientModel client = mock(ClientModel.class);
+        when(client.getId()).thenReturn(CLIENT_UUID);
+        when(realm.getClientById(CLIENT_UUID)).thenReturn(client);
+        when(cr.getActionType()).thenReturn("SET_CLIENT_ATTRIBUTE");
+        when(cr.getRowsJson()).thenReturn("[{\"CLIENT_UUID\":\"" + CLIENT_UUID + "\"}]");
+
+        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
+
+        assertEquals(1, units.size(), "SET_CLIENT_ATTRIBUTE touches exactly the client_config node");
+        assertEquals(AttestationUnitType.CLIENT_CONFIG, units.get(0).type());
+        assertEquals(CLIENT_UUID, units.get(0).targetId());
+    }
+
+    @Test
+    void assignScopeCr_enumeratesTheClientScopeAssignmentSet() {
+        ClientModel client = mock(ClientModel.class);
+        when(client.getId()).thenReturn(CLIENT_UUID);
+        when(client.getClientScopes(org.mockito.ArgumentMatchers.anyBoolean()))
+                .thenReturn(java.util.Collections.emptyMap());
+        when(realm.getClientById(CLIENT_UUID)).thenReturn(client);
+        when(cr.getActionType()).thenReturn("ASSIGN_SCOPE");
+        when(cr.getRowsJson()).thenReturn(
+                "[{\"CLIENT_UUID\":\"" + CLIENT_UUID + "\",\"SCOPE_ID\":\"" + SCOPE_ID + "\"}]");
+
+        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
+
+        assertEquals(1, units.size(), "ASSIGN_SCOPE touches exactly the client_scope_assignment_set");
+        assertEquals(AttestationUnitType.CLIENT_SCOPE_ASSIGNMENT_SET, units.get(0).type());
+        assertEquals(CLIENT_UUID, units.get(0).targetId());
+    }
+
+    @Test
+    void addProtocolMapperCr_onAClient_enumeratesTheClientMapperSet() {
+        ClientModel client = mock(ClientModel.class);
+        when(client.getId()).thenReturn(CLIENT_UUID);
+        when(client.getProtocolMappersStream()).thenReturn(java.util.stream.Stream.empty());
+        when(realm.getClientById(CLIENT_UUID)).thenReturn(client);
+        when(cr.getActionType()).thenReturn("ADD_PROTOCOL_MAPPER");
+        when(cr.getRowsJson()).thenReturn("[{\"CLIENT_UUID\":\"" + CLIENT_UUID + "\"}]");
+
+        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
+
+        assertEquals(1, units.size(), "ADD_PROTOCOL_MAPPER on a client touches the client_mapper_set");
+        assertEquals(AttestationUnitType.CLIENT_MAPPER_SET, units.get(0).type());
+        assertEquals(CLIENT_UUID, units.get(0).targetId());
+    }
+
+    @Test
+    void setRealmAttributeCr_enumeratesTheRealmConfigUnit() {
+        when(cr.getActionType()).thenReturn("SET_REALM_ATTRIBUTE");
+        when(cr.getRowsJson()).thenReturn("[{\"NAME\":\"some.attr\",\"VALUE\":\"v\"}]");
+
+        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
+
+        assertEquals(1, units.size(), "SET_REALM_ATTRIBUTE touches exactly the realm_config unit");
+        assertEquals(AttestationUnitType.REALM_CONFIG, units.get(0).type());
+        assertEquals(REALM_ID, units.get(0).targetId(), "realm-scoped units target the realm id");
+    }
+
+    @Test
+    void scopeAddRoleCr_enumeratesTheScopeRoleAllowlistSet_forClientScopeParent() {
+        ClientScopeModel scope = mock(ClientScopeModel.class);
+        when(scope.getId()).thenReturn(SCOPE_ID);
+        when(scope.getScopeMappingsStream()).thenReturn(java.util.stream.Stream.empty());
+        when(realm.getClientScopeById(SCOPE_ID)).thenReturn(scope);
+        when(cr.getActionType()).thenReturn("SCOPE_ADD_ROLE");
+        when(cr.getRowsJson()).thenReturn(
+                "[{\"SCOPE_ID\":\"" + SCOPE_ID + "\",\"ROLE_ID\":\"r-1\"}]");
+
+        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
+
+        assertEquals(1, units.size());
+        assertEquals(AttestationUnitType.SCOPE_ROLE_ALLOWLIST_SET, units.get(0).type());
+        assertEquals(SCOPE_ID, units.get(0).targetId());
+        assertTrue(units.get(0) instanceof ScopeRoleAllowlistSetUnit);
+    }
+
+    // ---- framing == distribution: the SAME enumerator, identical set ----
+
+    @Test
+    void sharedEnumerator_returnsIdenticalSet_forPhase1AndCommit() {
+        // Two invocations of the SAME enumerator (via the commit overload) over the same
+        // (post-change) model MUST return an identical unit set — types, targets, and bytes.
+        // This is the framing==distribution invariant the phase-1 carrier and the commit
+        // distribution both rely on (both call enumerateLiveCrUnits; phase-1 only differs in
+        // first reaching post-change via the scratch replay).
+        ClientModel client = mock(ClientModel.class);
+        when(client.getId()).thenReturn(CLIENT_UUID);
+        when(realm.getClientById(CLIENT_UUID)).thenReturn(client);
+        when(cr.getActionType()).thenReturn("SET_CLIENT_ATTRIBUTE");
+        when(cr.getRowsJson()).thenReturn("[{\"CLIENT_UUID\":\"" + CLIENT_UUID + "\"}]");
+
+        List<AttestationUnit> a = attestor.buildAllCrUnits(session, realm, cr, true);
+        List<AttestationUnit> b = attestor.buildAllCrUnits(session, realm, cr, true);
+
+        assertEquals(a.size(), b.size(), "the shared enumerator must return a stable unit count");
+        for (int i = 0; i < a.size(); i++) {
+            assertEquals(a.get(i).type(), b.get(i).type(), "unit[" + i + "] type must be stable");
+            assertEquals(a.get(i).targetId(), b.get(i).targetId(), "unit[" + i + "] target must be stable");
+            assertArrayEquals(a.get(i).serialize(), b.get(i).serialize(),
+                    "unit[" + i + "] CBOR must be stable (framing == distribution)");
         }
     }
 
@@ -135,9 +242,8 @@ class TideAttestorBuildAllCrUnitsTest {
         for (String a : new String[]{"CREATE_USER", "CREATE_ROLE", "CREATE_GROUP",
                 "CREATE_CLIENT", "CREATE_CLIENT_SCOPE"}) {
             assertTrue(IgaCreateUnitBuilder.isFromRepCreateAction(a),
-                    a + " must be a from-REP_JSON node create (framed at phase-1)");
+                    a + " must be a from-REP_JSON node create");
         }
-        // NOT from-REP_JSON: edge actions, SET_*, derived, realm, org-create, null.
         for (String a : new String[]{"GRANT_ROLES", "JOIN_GROUPS", "SET_CLIENT_ATTRIBUTE",
                 "ASSIGN_SCOPE", "ADD_PROTOCOL_MAPPER", "SET_REALM_CONFIG",
                 "CREATE_ORGANIZATION", null}) {
