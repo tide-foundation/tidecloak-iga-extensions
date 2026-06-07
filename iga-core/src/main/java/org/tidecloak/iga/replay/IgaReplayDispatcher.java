@@ -307,6 +307,30 @@ public class IgaReplayDispatcher {
         String userId = str(row, "ID");
         String username = str(row, "USERNAME");
         String repJson = str(row, "REP_JSON");
+
+        // ★ ENROLL-BEFORE-COMMIT: if a LIVE persisted user with this id already exists
+        // (i.e. the pending CREATE_USER user was persisted pre-commit and ENROLLED via
+        // LinkTideAccount while the CR was PENDING — adding vuid/tideUserKey under
+        // IGA_REPLAY_ACTIVE with no re-sign), the REP_JSON snapshot captured at create
+        // time is STALE (attributes=null, pre-enrollment). Rebuilding from REP_JSON would
+        // drop the enrolled attrs and the phase-1 carrier's user_identity would sign the
+        // PRE-enrollment bytes — but the login emits user_identity over the user's CURRENT
+        // (post-enrollment) attributes. That divergence is the batch-Ed25519 verify failure
+        // this method must avoid. When the live user already exists, the scratch model is
+        // ALREADY at the post-change + post-enrollment state we want to sign over: skip the
+        // recreate entirely (createUser with a pinned, already-used id would throw anyway)
+        // and let the caller enumerate user_identity over the LIVE attrs. This keeps the
+        // phase-1 carrier bytes == commit live bytes == login emit bytes (the invariant).
+        org.keycloak.models.UserModel existing =
+                (userId == null) ? null : session.users().getUserById(realm, userId);
+        if (existing != null) {
+            // Live user present (enroll-before-commit). Do NOT recreate from the stale
+            // REP_JSON; the user_identity unit is built over this live user's CURRENT
+            // attributes (incl. vuid/tideUserKey) by the enumerator — exactly what the
+            // login replays. Nothing to do here.
+            return;
+        }
+
         if (repJson != null && !repJson.isEmpty()) {
             // Full-config path: rebuild the complete user from the captured
             // UserRepresentation via the SAME builder Keycloak's import path
