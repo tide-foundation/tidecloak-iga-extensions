@@ -181,14 +181,19 @@ class TideAttestorBuildAllCrUnitsTest {
     }
 
     @Test
-    void createUserCr_enumeratesExactlyTheUserIdentityNodeUnit_notZero() {
-        // ★ Regression guard for the CREATE_USER multiAdmin carrier bug: the scratch-replay
-        // creates the user from REP_JSON with rep.id = the ROWS_JSON "ID", then enumerateLiveCrUnits
-        // resolves THAT user via session.users().getUserById(realm, firstRowKeyOr("USER_ID","ID"))
-        // and builds the user_identity node unit. The historical failure was 0 units (the lookup
-        // missed → canonicalForRegularCr fallback → a non-AttestationUnit carrier → enclave
-        // self-close). This asserts the CREATE_USER branch resolves the post-change user and frames
-        // EXACTLY one user_identity unit targeting that user.
+    void createUserCr_enumeratesTheNewUsersFullPerUserLoginClosure_notJustUserIdentity() {
+        // ★ Regression guard for the CREATE_USER multiAdmin carrier coverage bug: the carrier
+        // historically framed ONLY the user_identity node unit, so the quorum signed only that.
+        // But a freshly-created user is assigned the realm's default-roles, and its LOGIN
+        // (RealmAttestationExporter.export) ALSO emits a user_role_mapping_set edge unit. Framing
+        // only user_identity left that edge's ATTESTATION column NULL → the new user's login
+        // fail-closed ("user_role_mapping_set ... has a NULL column").
+        //
+        // The fix: the CREATE_USER branch of enumerateLiveCrUnits now enumerates the user's FULL
+        // per-user login closure — user_identity AND user_role_mapping_set (from the post-change
+        // live role set, ORDER BY urm.roleId) AND user_group_membership_set when non-empty — so the
+        // quorum signs every unit the login replays. This asserts N>1 and that user_role_mapping_set
+        // is present targeting the new user.
         org.keycloak.models.UserModel user = mock(org.keycloak.models.UserModel.class);
         when(user.getId()).thenReturn(USER_ID);
         when(user.getUsername()).thenReturn("dfgewwer");
@@ -201,6 +206,12 @@ class TideAttestorBuildAllCrUnitsTest {
         when(session.users()).thenReturn(users);
         when(users.getUserById(realm, USER_ID)).thenReturn(user);
 
+        // Stub the two post-change set queries (role set, then group set). The shared
+        // em.createQuery(anyString()) stub returns the SAME result list for both; a non-empty
+        // list means BOTH user_role_mapping_set and user_group_membership_set get framed —
+        // exercising the full-closure enumeration (N == 3: identity + role-set + group-set).
+        stubIdQuery(List.of("default-roles-bewreakn-role-id"));
+
         when(cr.getActionType()).thenReturn("CREATE_USER");
         // The CREATE_USER ROWS_JSON carries "ID" (own UUID), not "USER_ID" — firstRowKeyOr
         // must fall through "USER_ID" → "ID". (Matches IgaReplayDispatcher.replayCreateUser,
@@ -210,13 +221,18 @@ class TideAttestorBuildAllCrUnitsTest {
 
         List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
 
-        assertEquals(1, units.size(),
-                "CREATE_USER must frame exactly the user_identity node unit (NOT 0 → no "
-                        + "canonicalForRegularCr fallback)");
+        assertTrue(units.size() > 1,
+                "CREATE_USER must frame the new user's FULL per-user login closure (N>1), not just "
+                        + "the user_identity node — got " + units.size());
         assertEquals(AttestationUnitType.USER_IDENTITY, units.get(0).type(),
-                "the single framed unit must be the user_identity node");
+                "the user_identity node must stay first in the closure");
         assertEquals(USER_ID, units.get(0).targetId(),
                 "the user_identity unit targets the newly-created user's id (the ROWS_JSON ID)");
+        assertTrue(units.stream().anyMatch(u ->
+                        u.type() == AttestationUnitType.USER_ROLE_MAPPING_SET
+                                && USER_ID.equals(u.targetId())),
+                "the CREATE_USER closure MUST include the new user's user_role_mapping_set edge unit "
+                        + "(the default-roles assignment the login replays) targeting that user");
     }
 
     @Test

@@ -2602,7 +2602,41 @@ public class TideAttestor implements IgaAttestor {
             case "CREATE_USER", "SET_USER_ATTRIBUTE" -> {
                 String userId = firstRowKeyOr(cr, "USER_ID", "ID");
                 UserModel u = userId == null ? null : session.users().getUserById(realm, userId);
-                if (u != null) units.add(RealmAttestationExporter.userIdentity(u, realmId));
+                if (u != null) {
+                    units.add(RealmAttestationExporter.userIdentity(u, realmId));
+                    // ★ CREATE_USER must cover the new user's FULL per-user LOGIN closure,
+                    // not just the user_identity node. A freshly-created user is assigned
+                    // the realm's default-roles, so its LOGIN (RealmAttestationExporter.export)
+                    // ALSO emits a `user_role_mapping_set` edge unit (the RAW stored
+                    // USER_ROLE_MAPPING child set). If the multiAdmin carrier framed only
+                    // user_identity, that edge column stays NULL and the new user's login
+                    // fail-closes ("user_role_mapping_set ... has a NULL column"). Mirror the
+                    // firstAdmin convergeAfterCommit / stampAdoptUser per-user closure, scoped
+                    // to THIS user, so the quorum signs every unit the login replays.
+                    //
+                    // Built from the POST-change live model (enumerateLiveCrUnits runs on the
+                    // already-committed model), in the SAME producer JPA order
+                    // (RealmAttestationExporter#userRoleMappingSet: ORDER BY urm.roleId) so the
+                    // CBOR is byte-identical to the login-emitted unit and the VVK sig verifies.
+                    if ("CREATE_USER".equals(action)) {
+                        @SuppressWarnings("unchecked")
+                        List<String> roleIds = new ArrayList<>(em.createQuery(
+                                        "SELECT urm.roleId FROM UserRoleMappingEntity urm"
+                                                + " WHERE urm.user.id = :owner ORDER BY urm.roleId")
+                                .setParameter("owner", u.getId()).getResultList());
+                        units.add(new UserRoleMappingSetUnit(realmId, u.getId(), roleIds));
+                        // user_group_membership_set: a freshly-created user gets the realm's
+                        // default GROUPS too (REALM_DEFAULT_GROUPS). The login closure emits a
+                        // `user_group_membership_set` edge unit for that user iff it has group
+                        // memberships, so frame it only when non-empty (an empty set is not
+                        // emitted by the login and would dangle a column-less unit).
+                        List<String> groupIds =
+                                RealmAttestationExporter.userGroupMembershipSet(em, u.getId(), false);
+                        if (!groupIds.isEmpty()) {
+                            units.add(new UserGroupMembershipSetUnit(realmId, u.getId(), groupIds));
+                        }
+                    }
+                }
             }
             case "CREATE_ORGANIZATION", "UPDATE_ORGANIZATION" ->
                     addIfPresent(units, buildOrganizationNodeUnit(session, realm, em, cr));
