@@ -164,7 +164,9 @@ class ProducerBuilderDeterminismTest {
         attrs.put("post.logout.redirect.uris", "+");
         when(client.getAttributes()).thenReturn(attrs);
 
-        byte[] built = RealmAttestationExporter.clientConfig(client, REALM_ID).serialize();
+        // No `+` wildcard present, so web_origins resolution is an identity transform —
+        // pass a null session (the null-session branch emits the raw set, ordinal-sorted).
+        byte[] built = RealmAttestationExporter.clientConfig(null, client, REALM_ID).serialize();
 
         byte[] expected = new org.tidecloak.iga.producer.units.ClientConfigUnit(REALM_ID,
                 CLIENT_UUID, "acct", "openid-connect", false, false,

@@ -2582,7 +2582,7 @@ public class TideAttestor implements IgaAttestor {
             case "CREATE_CLIENT", "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
                  "UPDATE_CLIENT_REDIRECT_URIS" -> {
                 ClientModel c = resolveClientForStamp(realm, cr);
-                if (c != null) units.add(RealmAttestationExporter.clientConfig(c, realmId));
+                if (c != null) units.add(RealmAttestationExporter.clientConfig(session, c, realmId));
             }
             case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE" -> {
                 String scopeId = firstRowKeyOr(cr, "SCOPE_ID", "ID");
@@ -3138,7 +3138,7 @@ public class TideAttestor implements IgaAttestor {
         try {
             ClientModel client = resolveClientForStamp(realm, cr);
             if (client == null) return;
-            byte[] env = RealmAttestationExporter.clientConfig(client, realm.getId()).serialize();
+            byte[] env = RealmAttestationExporter.clientConfig(session, client, realm.getId()).serialize();
             String sig = signProducerEnvelope(session, realm, mode, env);
             em.createQuery("UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig).setParameter("id", client.getId()).executeUpdate();
@@ -3420,7 +3420,7 @@ public class TideAttestor implements IgaAttestor {
             // client_config (1), client_scope_assignment_set (11), client_mapper_set (12),
             // scope_role_allowlist_set/client (14).
             signAndStampUnit(session, realm, mode, em,
-                    RealmAttestationExporter.clientConfig(client, realm.getId()));
+                    RealmAttestationExporter.clientConfig(session, client, realm.getId()));
             signAndStampUnit(session, realm, mode, em,
                     RealmAttestationExporter.clientScopeAssignmentSet(client, realm.getId()));
             signAndStampUnit(session, realm, mode, em,

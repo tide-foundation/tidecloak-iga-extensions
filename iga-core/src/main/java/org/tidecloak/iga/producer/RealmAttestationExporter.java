@@ -114,10 +114,24 @@ public final class RealmAttestationExporter {
      * AND (2) remove the same id from the corresponding mapper-set membership list,
      * so the set stays consistent with what's emitted.</p>
      *
-     * <p>The six filtered factories and why each is JWT-body-irrelevant:
+     * <p><b>NOTE on {@code oidc-allowed-origins-mapper}.</b> This factory is NOT in
+     * the filter set. The ork TVE registers a dedicated value-verifying handler for it
+     * ({@code Mappers/AllowedWebOriginsClaimMapper.cs}, factory
+     * {@code oidc-allowed-origins-mapper}) that DERIVES the {@code allowed-origins}
+     * claim from the requesting client's attested {@code web_origins}
+     * ({@code client_config.web_origins}, unit 1). On a NON-lightweight access token
+     * (KC default {@code access.token.claim} ⇒ included) the token carries
+     * {@code allowed-origins}, so the engine MUST collect this mapper (via the
+     * per-scope {@code client_scope_mapper_set}, unit 13) and run the handler, else
+     * Stage 8 rejects {@code allowed-origins} as "no attested source". So the producer
+     * emits the {@code protocol_mapper} envelope for it AND keeps its id in the
+     * web-origins scope's mapper-set membership. (The {@code web_origins} value the
+     * handler reads is RESOLVED in {@link #clientConfig} — KC's {@code +} wildcard is
+     * expanded to the client's redirect-URI origins so the attested-derived value
+     * MATCHES the token's resolved {@code allowed-origins}.)
+     *
+     * <p>The five filtered factories and why each is JWT-body-irrelevant:
      * <ul>
-     *   <li>{@code oidc-allowed-origins-mapper} — emits a SESSION NOTE
-     *       ({@code allowed-origins}), not a JWT claim;</li>
      *   <li>{@code oidc-acr-mapper} — the {@code acr} claim is set by KC's
      *       {@code initToken}, not by this mapper;</li>
      *   <li>{@code oidc-sub-mapper} — {@code sub} is base-bound from
@@ -131,7 +145,6 @@ public final class RealmAttestationExporter {
      * </ul>
      */
     private static final Set<String> JWT_BODY_IRRELEVANT_FACTORIES = Set.of(
-            "oidc-allowed-origins-mapper",
             "oidc-acr-mapper",
             "oidc-sub-mapper",
             "oidc-session-state-mapper",
@@ -207,7 +220,7 @@ public final class RealmAttestationExporter {
         out.add(realmConfig(realm, realmId));
 
         // 2) client_config (the request client).
-        out.add(clientConfig(client, realmId));
+        out.add(clientConfig(session, client, realmId));
 
         // 3) client_scope_assignment_set + 4) a client_scope_config per assigned scope.
         Map<String, ClientScopeModel> assigned = collectAssignedScopes(client);
@@ -277,7 +290,7 @@ public final class RealmAttestationExporter {
                         + "resource_access for it will be dropped (closure incomplete)", ownerUuid);
                 continue;
             }
-            out.add(clientConfig(owner, realmId));
+            out.add(clientConfig(session, owner, realmId));
         }
 
         // 10) scope_role_allowlist_set — the client's scope→role allowlist
@@ -418,7 +431,7 @@ public final class RealmAttestationExporter {
         //    + a protocol_mapper per JWT-relevant mapper the client owns + the client's own
         //    roles (client roles are owned by the client, not surfaced by getRealmRolesStream).
         realm.getClientsStream().forEach(client -> {
-            out.add(clientConfig(client, realmId));
+            out.add(clientConfig(session, client, realmId));
             out.add(clientMapperSet(client, realmId));
             out.add(clientScopeAssignmentSet(client, realmId));
             out.add(scopeRoleAllowlistSet(ParentType.client, client.getId(), client, realmId));
@@ -881,12 +894,31 @@ public final class RealmAttestationExporter {
         return attrs;
     }
 
-    public static ClientConfigUnit clientConfig(ClientModel client, String realmId) {
+    public static ClientConfigUnit clientConfig(KeycloakSession session, ClientModel client,
+                                                String realmId) {
         // web_origins is a Set with no stable iteration order across sessions; the ork
         // canonicalizes it with GetStringList -> StringComparer.Ordinal sort, and verifies
         // the sig over the literal emitted bytes, so emit it ordinal-sorted to keep the
         // sign-time stamp byte-identical to the login emit (and aligned with the ork canonical).
-        List<String> webOrigins = new ArrayList<>(orEmptySet(client.getWebOrigins()));
+        //
+        // ★ WILDCARD RESOLUTION (allowed-origins value-verification). The ork TVE's
+        // AllowedWebOriginsClaimMapper writes this client_config.web_origins set VERBATIM
+        // into the `allowed-origins` claim (Mappers/AllowedWebOriginsClaimMapper.cs:43-49:
+        // `var origins = ctx.Client.WebOrigins; ... PlaceClaim("allowed-origins", arr)`) and
+        // does NOT itself resolve KC's `+`/`*` wildcards (its ClientConfigAttestationUnit has
+        // no redirect_uris field). The REAL token's allowed-origins is
+        // WebOriginsUtils.resolveValidWebOrigins(session, client) — KC's
+        // AllowedWebOriginsProtocolMapper.setWebOrigin(:138-145) resolves `+` to the origins
+        // of the client's redirect URIs. So for the attested-derived value to MATCH the
+        // token, the producer must attest the RESOLVED origins here, not the raw `+`. We
+        // call the exact KC util the mapper uses, keyed off the same session, so the
+        // attested web_origins == the token's allowed-origins (e.g. `["+"]` on
+        // security-admin-console -> `["http://localhost:8080"]`). For a client with no `+`
+        // this is an identity transform over the raw set (modulo the ordinal sort).
+        Set<String> resolved = (session == null || client.getWebOrigins() == null)
+                ? orEmptySet(client.getWebOrigins())
+                : org.keycloak.protocol.oidc.utils.WebOriginsUtils.resolveValidWebOrigins(session, client);
+        List<String> webOrigins = new ArrayList<>(resolved);
         webOrigins.sort(java.util.Comparator.naturalOrder());
         return new ClientConfigUnit(realmId,
                 client.getId(),

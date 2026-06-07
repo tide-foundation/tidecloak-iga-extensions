@@ -168,7 +168,7 @@ public final class IgaCreateUnitBuilder {
                 IgaReplayDispatcher.rebuildCreateClientFromRow(scratch, realm, row);
                 String id = str(row, "ID");
                 ClientModel c = realm.getClientById(id);
-                return c == null ? null : RealmAttestationExporter.clientConfig(c, realmId);
+                return c == null ? null : RealmAttestationExporter.clientConfig(scratch, c, realmId);
             }
             case "CREATE_CLIENT_SCOPE" -> {
                 ClientScopeModel s = IgaReplayDispatcher.rebuildCreateClientScopeFromRow(realm, row);
