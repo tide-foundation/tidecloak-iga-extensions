@@ -366,8 +366,12 @@ public final class RealmAttestationExporter {
      * <p><b>Emission shape (mirrors {@code export} exactly):</b>
      * <ul>
      *   <li>{@code user_identity} — always.</li>
-     *   <li>{@code user_role_mapping_set} — always (even empty; the ork distinguishes
-     *       "no entries" from "missing"), matching {@code export} line ~239.</li>
+     *   <li>{@code user_role_mapping_set} — ONLY when the user holds at least one direct
+     *       role row. The set's sig lives ON the user_role_mapping rows (any row), so a
+     *       roleless user has no row to carry it; emitting it empty would dangle a
+     *       column-less unit that fail-closes the login (commit stamps 0 rows, login read
+     *       sees a NULL column). Same rule as {@code user_group_membership_set} below and
+     *       the {@code role_composite_children_set} leaf-role precedent.</li>
      *   <li>{@code user_group_membership_set} — ONLY when non-empty, matching
      *       {@code emitOrganizationClosure} (an empty set is not emitted by the login
      *       and would dangle a column-less unit).</li>
@@ -379,8 +383,23 @@ public final class RealmAttestationExporter {
     public List<AttestationUnit> perUserUnits(EntityManager em, UserModel user, String realmId) {
         List<AttestationUnit> out = new ArrayList<>();
         out.add(userIdentity(user, realmId));
-        out.add(new UserRoleMappingSetUnit(realmId, user.getId(),
-                userRoleMappingSet(em, user.getId())));
+        // user_role_mapping_set: emitted ONLY when the user actually holds at least one
+        // direct role row. The set unit's sig lives ON the user_role_mapping rows (see
+        // UnitColumnMapping: "user.id = :id; any row"), so a roleless user has NO row to
+        // carry it — the commit-time stamp would write 0 rows and the login read would
+        // find a NULL column → replayOrFailClosed fail-closes the login (the bug this
+        // fixes; user 98bc3758 had 0 role rows yet the phase-1 carrier framed an empty
+        // unit the quorum signed but had nowhere to stamp). This mirrors the existing
+        // user_group_membership_set rule directly below ("an empty set is not emitted by
+        // the login and would dangle a column-less unit") and the role_composite_children_set
+        // precedent (commit bd1cf4e: a leaf role with no composite_role row must not emit the
+        // set unit). Because perUserUnits is the SINGLE source for BOTH the login export and
+        // the commit-time CREATE_USER carrier, gating here keeps them byte-identical: the
+        // carrier frames (and the quorum signs) exactly the set the login replays.
+        List<String> roleIds = userRoleMappingSet(em, user.getId());
+        if (!roleIds.isEmpty()) {
+            out.add(new UserRoleMappingSetUnit(realmId, user.getId(), roleIds));
+        }
         List<String> groupIds = userGroupMembershipSet(em, user.getId());
         if (!groupIds.isEmpty()) {
             out.add(new UserGroupMembershipSetUnit(realmId, user.getId(), groupIds));

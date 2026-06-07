@@ -258,6 +258,57 @@ class TideAttestorBuildAllCrUnitsTest {
     }
 
     @Test
+    void createUserCr_rolelessUser_doesNotFrameAnEmptyUserRoleMappingSet() {
+        // ★ Regression guard for the empty-set fail-closed bug (user 98bc3758, realm bewreakn,
+        // CR 836228ce): a CREATE_USER for a user with ZERO direct role rows must NOT frame a
+        // user_role_mapping_set unit. That unit's sig lives ON the user_role_mapping rows (any
+        // row); a roleless user has none, so the commit-time stamp writes 0 rows and the login
+        // read finds a NULL column → replayOrFailClosed fail-closes the login. perUserUnits now
+        // gates the role-set on a non-empty role list (mirroring user_group_membership_set), so
+        // the carrier frames ONLY user_identity and the login emits ONLY user_identity — they
+        // stay byte-identical and there is nothing column-less to dangle.
+        org.keycloak.models.UserModel user = mock(org.keycloak.models.UserModel.class);
+        when(user.getId()).thenReturn(USER_ID);
+        when(user.getUsername()).thenReturn("aperson1@company.com");
+        when(user.getEmail()).thenReturn("aperson1@company.com");
+        when(user.isEmailVerified()).thenReturn(false);
+        when(user.getFirstName()).thenReturn("A");
+        when(user.getLastName()).thenReturn("Person");
+        when(user.getAttributes()).thenReturn(java.util.Collections.emptyMap());
+        org.keycloak.models.UserProvider users = mock(org.keycloak.models.UserProvider.class);
+        when(session.users()).thenReturn(users);
+        when(users.getUserById(realm, USER_ID)).thenReturn(user);
+
+        // Both the role-set and the group-set JPQL return EMPTY → no edge set unit may be framed.
+        stubIdQuery(java.util.Collections.emptyList());
+
+        when(cr.getActionType()).thenReturn("CREATE_USER");
+        when(cr.getRowsJson()).thenReturn(
+                "[{\"ID\":\"" + USER_ID + "\",\"USERNAME\":\"aperson1@company.com\"}]");
+
+        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
+
+        assertEquals(1, units.size(),
+                "a roleless CREATE_USER must frame ONLY the user_identity node — an empty "
+                        + "user_role_mapping_set has no user_role_mapping row to carry its sig and "
+                        + "would fail-close the login");
+        assertEquals(AttestationUnitType.USER_IDENTITY, units.get(0).type());
+        assertEquals(USER_ID, units.get(0).targetId());
+        assertFalse(units.stream().anyMatch(u -> u.type() == AttestationUnitType.USER_ROLE_MAPPING_SET),
+                "no empty user_role_mapping_set unit may be framed for a roleless user");
+
+        // Lockstep with the producer's own per-user closure (export emits the same set).
+        List<AttestationUnit> producerPerUser =
+                new org.tidecloak.iga.producer.RealmAttestationExporter()
+                        .perUserUnits(em, user, REALM_ID);
+        assertEquals(producerPerUser.size(), units.size(),
+                "carrier must equal the producer per-user closure (both omit the empty role-set)");
+        assertFalse(producerPerUser.stream()
+                        .anyMatch(u -> u.type() == AttestationUnitType.USER_ROLE_MAPPING_SET),
+                "perUserUnits must omit the empty user_role_mapping_set for a roleless user");
+    }
+
+    @Test
     void setRealmAttributeCr_enumeratesTheRealmConfigUnit() {
         when(cr.getActionType()).thenReturn("SET_REALM_ATTRIBUTE");
         when(cr.getRowsJson()).thenReturn("[{\"NAME\":\"some.attr\",\"VALUE\":\"v\"}]");
