@@ -497,29 +497,39 @@ public class TideAttestor implements IgaAttestor {
         RealmModel realm = session.realms().getRealm(cr.getRealmId());
         String mode = resolveMode(session, realm);   // "firstAdmin" (row or no-row tide) | "multiAdmin" | null
 
-        // The tide-realm-admin POLICY bootstrap is the only case whose payload
-        // differs: in firstAdmin mode a GRANT_ROLES of tide-realm-admin signs the
-        // realm's stored policy bytes verbatim; every other CR —
-        // in both modes — signs the regular set/node canonical.
+        // The tide-realm-admin POLICY bootstrap is the flip-triggering CR: a firstAdmin
+        // GRANT_ROLES of tide-realm-admin. It has TWO distinct signing obligations that
+        // were previously conflated:
+        //   (1) the granted user's producer `user_role_mapping_set` unit — the edge this
+        //       CR actually mutates (it adds the direct tide-realm-admin role-mapping row);
+        //       this is the attestation the dispatcher fans onto the role-mapping rows and
+        //       that the login emits/replays, so it MUST be a REAL 64B firstAdmin VVK sig.
+        //   (2) the realm's M0 admin Policy bytes — keyed into the IGA_ROLE_POLICY row by
+        //       writeBackPolicySig (on a real-signing-capable realm writeBackPolicySig
+        //       builds its OWN VVK policy sig and ignores the arg; only the non-capable
+        //       dev/test path stamps the passed value as a stub POLICY_SIG).
+        // ★ BUG (pre-fix): the bootstrap path forced realCeremonyEligible=false and
+        // returned the POLICY-bytes stub as `sig`, so the granted user's
+        // user_role_mapping_set was stamped with a 32-byte stub. Then writeBackPolicySig
+        // signs the M0 policy and the flip BURNS the firstAdmin pack — leaving that stub
+        // un-re-signable forever, so the new admin's login fail-closes (replayOrFailClosed:
+        // "user_role_mapping_set ... has a stub / wrong-length sig (not 64 bytes)").
+        // ★ FIX: the bootstrap CR's producer unit is signed REAL with the still-alive
+        // firstAdmin pack BEFORE the M0 policy sign / pack-burn / flip. A GRANT_ROLES of
+        // tide-realm-admin is a producer-envelope-signed action exactly like any other
+        // firstAdmin GRANT_ROLES, so it is real-ceremony-eligible — the policy-bytes stub
+        // is computed SEPARATELY (policyStubSig) and passed to writeBackPolicySig.
         boolean isPolicyBootstrap = MODE_FIRST_ADMIN.equals(mode)
                 && isTideRealmAdminAssignment(realm, cr);
-        byte[] canonical = isPolicyBootstrap
-                ? readTideRealmAdminPolicyBytes(session, realm, cr)
-                : canonicalForRegularCr(session, cr);
 
-        // A firstAdmin NON-policy GRANT_ROLES CR is signed by the
-        // REAL VVK → Midgard → ORK ceremony over the producer's `user_role_mapping_set`
-        // unit-envelope CBOR (built fresh from the CR's POST-change role set, NOT the
-        // entity-state canonical) — so the signed bytes are exactly what the ork
-        // TVE re-derives. Everything else — incl. the firstAdmin tide-realm-admin
-        // POLICY bootstrap (which signs policy bytes, not a role-mapping-set) and every
-        // multiAdmin CR — keeps the stub. The policy-bootstrap exclusion is essential:
-        // that path's `canonical` is the admin-policy bytes, NOT a user_role_mapping_set,
-        // so it must not enter the GRANT_ROLES unit ceremony even though its actionType
-        // is GRANT_ROLES. The ceremony rebuilds its OWN unit CBOR from `cr`; `canonical`
-        // is only the stub fallback's input (and every non-eligible path's bytes).
-        boolean realCeremonyEligible = !isPolicyBootstrap
-                && isProducerEnvelopeSignedAction(cr.getActionType());
+        // (1) The producer-unit attestation. For BOTH the bootstrap GRANT_ROLES and every
+        // other firstAdmin GRANT_ROLES this is the REAL VVK → Midgard → ORK ceremony over
+        // the producer's `user_role_mapping_set` unit-envelope CBOR (built fresh from the
+        // CR's POST-change role set, NOT the entity-state canonical) — so the signed bytes
+        // are exactly what the ork TVE re-derives. The ceremony rebuilds its OWN unit CBOR
+        // from `cr`; `canonical` is only the stub fallback's input (non-capable dev/test).
+        byte[] canonical = canonicalForRegularCr(session, cr);
+        boolean realCeremonyEligible = isProducerEnvelopeSignedAction(cr.getActionType());
         String sig = sign(session, realm, mode, realCeremonyEligible, cr, canonical);
 
         // Transition trigger: on a successful firstAdmin-mode sign of the
@@ -546,7 +556,26 @@ public class TideAttestor implements IgaAttestor {
         // the error surfaces. Idempotent: already-multiAdmin never reaches here
         // (gated on firstAdmin).
         if (isPolicyBootstrap) {
-            boolean policyCommitted = writeBackPolicySig(session, realm, cr, sig);
+            // ★ Pack-burn ordering (the heart of the fix). `sig` above is the granted
+            // user's REAL user_role_mapping_set VVK sig, produced by the firstAdmin pack
+            // while it is STILL ALIVE — combineFinal returns it and IgaReplayDispatcher
+            // fans it across every UserRoleMappingEntity row for the user (incl. the new
+            // tide-realm-admin row it inserts), so the login emits a 64B sig, not a stub.
+            // The user_role_mapping_set is the ONLY producer unit a GRANT_ROLES touches
+            // (enumerateLiveCrUnits returns just the edge-set unit at index 0 for
+            // GRANT_ROLES; the 27 realm-management roles the admin gains are reached by
+            // composite expansion at token time, NOT stored as direct mappings, and their
+            // role metadata is convergence-signed membership-independently). So `sig`
+            // fully covers the grant's producer-unit closure.
+            //
+            // ONLY AFTER the producer unit is signed do we sign the M0 admin Policy and
+            // flip. writeBackPolicySig builds its OWN real VVK policy sig on a capable
+            // realm (the policyStubSig arg is used only by the non-capable dev/test path
+            // as a stub POLICY_SIG); we sign the policy bytes here for that fallback so the
+            // M0 row's stub still reflects the policy payload (not the role-mapping-set).
+            String policyStubSig = stubSign(FIRSTADMIN_SIG_PREFIX,
+                    readTideRealmAdminPolicyBytes(session, realm, cr));
+            boolean policyCommitted = writeBackPolicySig(session, realm, cr, policyStubSig);
             if (policyCommitted) {
                 flipModeToMultiAdmin(session, realm);
             } else {
@@ -1794,8 +1823,11 @@ public class TideAttestor implements IgaAttestor {
      * Mode-aware signing swap-point.
      *
      * <p>The {@code firstAdmin} branch produces the REAL VVK → Midgard → ORK
-     * ceremony — but ONLY for a non-policy {@code GRANT_ROLES} CR
-     * ({@code realCeremonyEligible}) AND ONLY once the realm is established as
+     * ceremony for ANY producer-envelope-signed {@code GRANT_ROLES} CR
+     * ({@code realCeremonyEligible}) — INCLUDING the flip-triggering tide-realm-admin
+     * grant, whose {@code user_role_mapping_set} unit is signed REAL here (with the
+     * still-alive firstAdmin pack) BEFORE {@code combineFinal} signs the M0 policy and
+     * burns the pack — AND ONLY once the realm is established as
      * REAL-SIGNING-CAPABLE ({@link #isRealSigningCapable}). The ceremony signs the
      * producer's {@code user_role_mapping_set} unit-envelope CBOR (built from the
      * CR's POST-change role set), NOT the entity-state canonical, so the signed
@@ -1816,8 +1848,11 @@ public class TideAttestor implements IgaAttestor {
      *
      * <p>Every other path keeps the stub:
      * <ul>
-     *   <li>{@code firstAdmin} non-eligible (the tide-realm-admin POLICY bootstrap,
-     *       and any non-{@code GRANT_ROLES} CR) → {@link #FIRSTADMIN_SIG_PREFIX} stub.</li>
+     *   <li>{@code firstAdmin} non-eligible (any non-producer-envelope-signed CR — e.g.
+     *       a node CREATE or a realm-config change) → {@link #FIRSTADMIN_SIG_PREFIX}
+     *       stub. The tide-realm-admin POLICY bootstrap is NO LONGER non-eligible: its
+     *       {@code user_role_mapping_set} now takes the real ceremony (the M0 policy bytes
+     *       are signed separately in {@code combineFinal}).</li>
      *   <li>{@code multiAdmin} — when the realm is REAL-SIGNING-CAPABLE the collected-doken
      *       carrier ({@code cr.requestModel}) is reloaded and signed via the real
      *       {@code Midgard.SignModel(Policy:1)} ceremony ({@link #signMultiAdminUnitViaPolicy}),
@@ -1830,11 +1865,11 @@ public class TideAttestor implements IgaAttestor {
      * Midgard → ORK in production; it is (a) admin quorum and (b) key /
      * signing ceremony.
      *
-     * @param realCeremonyEligible {@code true} iff this is a firstAdmin non-policy
-     *        {@code GRANT_ROLES} CR (computed by {@link #combineFinal}, which knows
-     *        the policy-bootstrap discriminator); gates the real ceremony so the
-     *        policy-bootstrap path — whose {@code canonical} is policy bytes, not a
-     *        role-mapping-set — never enters it.
+     * @param realCeremonyEligible {@code true} iff this CR is a producer-envelope-signed
+     *        action ({@link #isProducerEnvelopeSignedAction}, computed by
+     *        {@link #combineFinal}) — INCLUDING the flip-triggering tide-realm-admin
+     *        GRANT_ROLES, whose {@code user_role_mapping_set} must be signed real with the
+     *        still-alive firstAdmin pack before the M0 policy sign / pack-burn / flip.
      * @param cr       the committing CR — the eligible firstAdmin ceremony rebuilds
      *        its OWN {@code user_role_mapping_set} unit CBOR from this; every other
      *        path ignores it and signs {@code canonical}.
@@ -1847,7 +1882,7 @@ public class TideAttestor implements IgaAttestor {
             if (realCeremonyEligible && isRealSigningCapable(realm)) {
                 return signFirstAdminUnitWithVvk(session, realm, cr);      // REAL VVK unit-CBOR ceremony (fail-closed)
             }
-            return stubSign(FIRSTADMIN_SIG_PREFIX, canonical);             // firstAdmin stub (not capable / policy bootstrap / other CRs)
+            return stubSign(FIRSTADMIN_SIG_PREFIX, canonical);             // firstAdmin stub (not capable / non-producer-envelope CRs)
         }
         if (MODE_MULTI_ADMIN.equals(mode) && isRealSigningCapable(realm)) {
             return signMultiAdminUnitViaPolicy(session, realm, cr);        // REAL Midgard.SignModel(Policy:1) over the collected-doken carrier (fail-closed)
