@@ -233,6 +233,28 @@ class TideAttestorBuildAllCrUnitsTest {
                                 && USER_ID.equals(u.targetId())),
                 "the CREATE_USER closure MUST include the new user's user_role_mapping_set edge unit "
                         + "(the default-roles assignment the login replays) targeting that user");
+
+        // ★ COMPLETE BY CONSTRUCTION: the carrier set must be DERIVED from the producer's OWN
+        // per-user closure (RealmAttestationExporter.perUserUnits) — the exact same method
+        // export() calls to emit a user's units — NOT a hand-listed subset. Assert the carrier
+        // equals perUserUnits byte-for-byte (types, targets, AND CBOR). If the producer ever adds
+        // a per-user unit type to perUserUnits, this equality keeps the carrier in lockstep
+        // automatically (and this assertion would catch any drift).
+        List<AttestationUnit> producerPerUser =
+                new org.tidecloak.iga.producer.RealmAttestationExporter()
+                        .perUserUnits(em, user, REALM_ID);
+        assertEquals(producerPerUser.size(), units.size(),
+                "the CREATE_USER carrier must enumerate EXACTLY the producer's per-user closure "
+                        + "(complete by construction), not a hand-coded subset");
+        for (int i = 0; i < units.size(); i++) {
+            assertEquals(producerPerUser.get(i).type(), units.get(i).type(),
+                    "carrier unit[" + i + "] type must match the producer per-user closure");
+            assertEquals(producerPerUser.get(i).targetId(), units.get(i).targetId(),
+                    "carrier unit[" + i + "] target must match the producer per-user closure");
+            assertArrayEquals(producerPerUser.get(i).serialize(), units.get(i).serialize(),
+                    "carrier unit[" + i + "] CBOR must be byte-identical to the producer's "
+                            + "per-user closure (== the login-replay bytes the VVK sig verifies)");
+        }
     }
 
     @Test

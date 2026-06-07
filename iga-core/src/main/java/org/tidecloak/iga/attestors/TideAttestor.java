@@ -2603,38 +2603,34 @@ public class TideAttestor implements IgaAttestor {
                 String userId = firstRowKeyOr(cr, "USER_ID", "ID");
                 UserModel u = userId == null ? null : session.users().getUserById(realm, userId);
                 if (u != null) {
-                    units.add(RealmAttestationExporter.userIdentity(u, realmId));
-                    // ★ CREATE_USER must cover the new user's FULL per-user LOGIN closure,
-                    // not just the user_identity node. A freshly-created user is assigned
-                    // the realm's default-roles, so its LOGIN (RealmAttestationExporter.export)
-                    // ALSO emits a `user_role_mapping_set` edge unit (the RAW stored
-                    // USER_ROLE_MAPPING child set). If the multiAdmin carrier framed only
-                    // user_identity, that edge column stays NULL and the new user's login
-                    // fail-closes ("user_role_mapping_set ... has a NULL column"). Mirror the
-                    // firstAdmin convergeAfterCommit / stampAdoptUser per-user closure, scoped
-                    // to THIS user, so the quorum signs every unit the login replays.
-                    //
-                    // Built from the POST-change live model (enumerateLiveCrUnits runs on the
-                    // already-committed model), in the SAME producer JPA order
-                    // (RealmAttestationExporter#userRoleMappingSet: ORDER BY urm.roleId) so the
-                    // CBOR is byte-identical to the login-emitted unit and the VVK sig verifies.
                     if ("CREATE_USER".equals(action)) {
-                        @SuppressWarnings("unchecked")
-                        List<String> roleIds = new ArrayList<>(em.createQuery(
-                                        "SELECT urm.roleId FROM UserRoleMappingEntity urm"
-                                                + " WHERE urm.user.id = :owner ORDER BY urm.roleId")
-                                .setParameter("owner", u.getId()).getResultList());
-                        units.add(new UserRoleMappingSetUnit(realmId, u.getId(), roleIds));
-                        // user_group_membership_set: a freshly-created user gets the realm's
-                        // default GROUPS too (REALM_DEFAULT_GROUPS). The login closure emits a
-                        // `user_group_membership_set` edge unit for that user iff it has group
-                        // memberships, so frame it only when non-empty (an empty set is not
-                        // emitted by the login and would dangle a column-less unit).
-                        List<String> groupIds =
-                                RealmAttestationExporter.userGroupMembershipSet(em, u.getId(), false);
-                        if (!groupIds.isEmpty()) {
-                            units.add(new UserGroupMembershipSetUnit(realmId, u.getId(), groupIds));
-                        }
+                        // ★ COMPLETE BY CONSTRUCTION: a freshly-created user's LOGIN replay
+                        // reads its WHOLE per-user closure (user_identity + the RAW stored
+                        // user_role_mapping_set + user_group_membership_set when the realm's
+                        // default groups give it any). Rather than hand-listing those unit
+                        // types (a maintained subset that silently misses any per-user unit
+                        // the producer adds later → a new user's login fail-closes on a NULL
+                        // column), DERIVE the carrier's units from the producer's OWN per-user
+                        // closure — RealmAttestationExporter#perUserUnits, the SINGLE method
+                        // export() itself calls to emit a user's units. So if the producer adds
+                        // a per-user unit type, the carrier covers it automatically.
+                        //
+                        // Scope: perUserUnits returns ONLY the units whose target == THIS user
+                        // (the ones that would be NULL for a fresh user); realm-metadata units
+                        // are already signed and are NOT re-framed here. Built from the
+                        // POST-change live model (enumerateLiveCrUnits runs post-commit) with
+                        // the SAME builders + JPQL/order the login uses (default onlyAttested=
+                        // false, matching the login + firstAdmin signer), so the quorum-signed
+                        // CBOR is byte-identical to the login-emitted units and the VVK sig
+                        // verifies over the literal envelope bytes.
+                        units.addAll(new RealmAttestationExporter()
+                                .perUserUnits(em, u, realmId));
+                    } else {
+                        // SET_USER_ATTRIBUTE: only the user_identity node changed. The
+                        // user_role_mapping_set / user_group_membership_set are already real
+                        // (signed at create/grant); re-framing them would needlessly re-sign
+                        // already-attested units. Frame only the node that mutated.
+                        units.add(RealmAttestationExporter.userIdentity(u, realmId));
                     }
                 }
             }
@@ -3399,18 +3395,14 @@ public class TideAttestor implements IgaAttestor {
             UserModel user = session.users().getUserById(realm, userId);
             if (user == null) return;
             // user_identity (6), user_role_mapping_set (7), user_group_membership_set (8).
-            signAndStampUnit(session, realm, mode, em,
-                    RealmAttestationExporter.userIdentity(user, realm.getId()));
-            @SuppressWarnings("unchecked")
-            List<String> roleIds = new ArrayList<>(em.createQuery(
-                            "SELECT urm.roleId FROM UserRoleMappingEntity urm WHERE urm.user.id = :owner"
-                                    + " ORDER BY urm.roleId")
-                    .setParameter("owner", userId).getResultList());
-            signAndStampUnit(session, realm, mode, em,
-                    new UserRoleMappingSetUnit(realm.getId(), userId, roleIds));
-            List<String> groupIds = RealmAttestationExporter.userGroupMembershipSet(em, userId, false);
-            signAndStampUnit(session, realm, mode, em,
-                    new UserGroupMembershipSetUnit(realm.getId(), userId, groupIds));
+            // Single-sourced from the producer's per-user closure (perUserUnits) so the
+            // firstAdmin ADOPT_USER stamp and the multiAdmin CREATE_USER carrier sign the
+            // SAME set the login replay reads — complete by construction (a new per-user
+            // unit type added to the producer is picked up here automatically).
+            for (org.tidecloak.iga.producer.units.AttestationUnit unit :
+                    new RealmAttestationExporter().perUserUnits(em, user, realm.getId())) {
+                signAndStampUnit(session, realm, mode, em, unit);
+            }
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
 

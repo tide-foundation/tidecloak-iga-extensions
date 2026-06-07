@@ -229,14 +229,18 @@ public final class RealmAttestationExporter {
             out.add(clientScopeConfig(scope, realmId));
         }
 
-        // 5) user_identity (the 4-unit floor) — carries every property/attribute the
-        //    profile/email mappers read.
-        out.add(userIdentity(user, realmId));
+        // 5) user_identity (the 4-unit floor) + 6) user_role_mapping_set + (when
+        //    non-empty) user_group_membership_set — the user's OWN per-user closure,
+        //    single-sourced from perUserUnits so the commit-time CREATE_USER carrier
+        //    (TideAttestor.enumerateLiveCrUnits) derives the SAME set this login emits.
+        //    user_group_membership_set is emitted HERE (not only in
+        //    emitOrganizationClosure) so the per-user closure is complete in one place.
+        out.addAll(perUserUnits(em, user, realmId));
 
-        // 6) user_role_mapping_set — the RAW stored USER_ROLE_MAPPING child set
-        //    (JPQL, not the effective set) so the hash matches the stored rows.
+        // The metadata seed needs the RAW stored USER_ROLE_MAPPING child set (JPQL,
+        // not the effective set). Recompute it here for the role-closure seed; this is
+        // the SAME query perUserUnits used for the emitted unit (byte-identical).
         List<String> seedRoleIds = userRoleMappingSet(em, req.userId());
-        out.add(new UserRoleMappingSetUnit(realmId, req.userId(), seedRoleIds));
 
         // 7) role_definition + 8) role_composite_children_set for the FULL TRANSITIVE
         //    role-METADATA closure (mirrors the engine's GrantedRoles composite
@@ -335,6 +339,52 @@ public final class RealmAttestationExporter {
                         + "%d unit(s); roles=%d ownerClients=%d orgUnits=%d",
                 realm.getName(), req.clientId(), req.userId(), req.scope(),
                 out.size(), roleClosure.size(), ownerClientUuids.size(), orgUnitsEmitted);
+        return out;
+    }
+
+    /**
+     * The producer's per-user closure: EXACTLY the units the {@link #export} login
+     * emits whose {@code target_id == user.getId()} — i.e. the units that would be
+     * NULL for a freshly-created user and that the user's LOGIN replay demands.
+     *
+     * <p><b>Single source of truth.</b> This is the ONLY place that enumerates a
+     * user's own units. {@link #export} calls it (so the login closure and this
+     * method can never drift), {@code emitOrganizationClosure} reuses its
+     * {@code user_group_membership_set} emission, and the commit-time signer
+     * ({@code TideAttestor.enumerateLiveCrUnits} CREATE_USER carrier /
+     * {@code stampAdoptUser}) calls it to frame the quorum-signed set. Because the
+     * carrier is DERIVED from this method rather than a hand-listed subset, adding a
+     * new per-user unit type here is COMPLETE BY CONSTRUCTION: every consumer — the
+     * login replay AND the commit-time carrier — picks it up automatically.
+     *
+     * <p><b>Byte-identity.</b> Built with the SAME builders + JPQL/order the login
+     * uses ({@link #userIdentity}, {@link #userRoleMappingSet} ORDER BY urm.roleId,
+     * {@link #userGroupMembershipSet}), so the quorum-signed CBOR is byte-identical
+     * to the login-emitted unit and the VVK signature verifies over the literal
+     * envelope bytes.
+     *
+     * <p><b>Emission shape (mirrors {@code export} exactly):</b>
+     * <ul>
+     *   <li>{@code user_identity} — always.</li>
+     *   <li>{@code user_role_mapping_set} — always (even empty; the ork distinguishes
+     *       "no entries" from "missing"), matching {@code export} line ~239.</li>
+     *   <li>{@code user_group_membership_set} — ONLY when non-empty, matching
+     *       {@code emitOrganizationClosure} (an empty set is not emitted by the login
+     *       and would dangle a column-less unit).</li>
+     * </ul>
+     *
+     * <p>Honors {@link #onlyAttested} on the membership JPQL (off by default) exactly
+     * as {@code export} does, so this method and the login agree under either setting.
+     */
+    public List<AttestationUnit> perUserUnits(EntityManager em, UserModel user, String realmId) {
+        List<AttestationUnit> out = new ArrayList<>();
+        out.add(userIdentity(user, realmId));
+        out.add(new UserRoleMappingSetUnit(realmId, user.getId(),
+                userRoleMappingSet(em, user.getId())));
+        List<String> groupIds = userGroupMembershipSet(em, user.getId());
+        if (!groupIds.isEmpty()) {
+            out.add(new UserGroupMembershipSetUnit(realmId, user.getId(), groupIds));
+        }
         return out;
     }
 
@@ -587,14 +637,12 @@ public final class RealmAttestationExporter {
             return 0;
         }
 
-        // 1) user's full group-membership set (the RAW stored child set). One unit
-        //    per user. Mirrors the user_role_mapping_set JPQL shape.
-        List<String> groupIds = userGroupMembershipSet(em, user.getId());
+        // 1) user's full group-membership set (the RAW stored child set) is now
+        //    emitted by perUserUnits (the single per-user closure source), called from
+        //    export() above — NOT here — so the login closure carries exactly one
+        //    user_group_membership_set unit and the commit-time CREATE_USER carrier can
+        //    derive the same per-user set. This method emits ONLY the org/group units.
         int added = 0;
-        if (!groupIds.isEmpty()) {
-            out.add(new UserGroupMembershipSetUnit(realmId, user.getId(), groupIds));
-            added++;
-        }
 
         // 2) per-org closure: organization_definition + organization_domain_set + the
         //    ORGANIZATION-type backing group_definition + its group_role_mapping_set.
