@@ -173,7 +173,7 @@ public class IgaReplayDispatcher {
         List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
 
         switch (cr.getActionType()) {
-            case "CREATE_USER" -> replayCreateUser(session, realm, rows, finalAttestation, em);
+            case "CREATE_USER" -> replayCreateUser(session, realm, cr, rows, finalAttestation, em);
             case "CREATE_ROLE" -> replayCreateRole(session, realm, rows, finalAttestation, em, setSigned);
             case "CREATE_GROUP" -> replayCreateGroup(session, realm, rows, finalAttestation, em);
             case "CREATE_CLIENT" -> replayCreateClient(session, realm, rows, finalAttestation, em, setSigned);
@@ -542,6 +542,7 @@ public class IgaReplayDispatcher {
     }
 
     private static void replayCreateUser(KeycloakSession session, RealmModel realm,
+                                          org.tidecloak.iga.entities.IgaChangeRequestEntity cr,
                                           List<Map<String, Object>> rows, String sig, EntityManager em) {
         for (Map<String, Object> row : rows) {
             String userId = str(row, "ID");
@@ -550,6 +551,18 @@ public class IgaReplayDispatcher {
                     .setParameter("sig", sig)
                     .setParameter("id", userId)
                     .executeUpdate();
+        }
+        // ★ FINALIZE the persisted-pending user (enroll-before-commit / Tideless
+        // quarantine): clear any IGA_UNSIGNED_ENTITY sidecar row this CREATE_USER
+        // CR registered when the pending user was PERSISTED quarantined (the
+        // Tideless path in IgaUserAdapter.getId). Keyed on the CR id, so it is a
+        // no-op for the Tide path (no sidecar was written there — replayOrFailClosed
+        // is the guard) and for any historical rollback-style CREATE_USER CR. The
+        // user_identity producer column is stamped over the LIVE (post-enrollment)
+        // attributes by the TideAttestor commit path (CREATE_USER → stampUserIdentity
+        // / the multiAdmin carrier), un-quarantining the now-finalized user.
+        if (cr != null) {
+            org.tidecloak.iga.services.IgaUnsignedEntityService.clearByAdoptCr(em, cr.getId());
         }
     }
 

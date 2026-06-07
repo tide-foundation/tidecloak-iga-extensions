@@ -10,7 +10,10 @@ import org.keycloak.models.jpa.UserAdapter;
 import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.representations.idm.UserRepresentation;
+import org.tidecloak.iga.attestors.TideAttestor;
+import org.tidecloak.iga.replay.IgaReplayExtension;
 import org.tidecloak.iga.services.IgaQuarantineCache;
+import org.tidecloak.iga.services.IgaUnsignedEntityService;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -564,6 +567,50 @@ public class IgaUserAdapter extends UserAdapter {
         Map<String, Object> row = buildCapturedUserRow();
 
         String requestedBy = getCurrentUserId();
+
+        // ─────────────────────────────────────────────────────────────────────
+        // ★ PERSIST-PENDING (enroll-before-commit).
+        //
+        // HISTORY: this seam used to setRollbackOnly() so the fully-built scratch
+        // user died with the request tx and ONLY the CR survived. That made a
+        // post-flip Tide user UN-ENROLLABLE while PENDING (no live row for
+        // LinkTideAccount to write vuid/tideUserKey onto), so user_identity was
+        // signed pre-enrollment and the login batch-verify failed.
+        //
+        // NEW: we PERSIST the pending user. DefaultKeycloakSession#close() COMMITS
+        // the request tx unless getRollbackOnly() is set (it inspects ONLY the
+        // rollback flag — a propagating exception does NOT auto-rollback), so by
+        // NOT setting rollback-only the live user (already fully built by KC at
+        // UsersResource.createUser:175 — profile.create + updateUserFromRep +
+        // createGroups already ran) survives. Its UserEntity.attestation column is
+        // NULL (KC never stamps it) — that NULL is the "pending/quarantined" marker.
+        //
+        // QUARANTINE / FAIL-CLOSED until commit (two modes, mode-aware):
+        //   • Tide realm (iga.attestor=="tide"): the login signed-token path
+        //     (DefaultTokenManager.encodeTideSignedTokens →
+        //     IgaAttestationExporterProvider.exportSignedAccessTokenUnits →
+        //     replayOrFailClosed) FAIL-CLOSES on the NULL user_identity column, so
+        //     the pending user CANNOT mint a real login token. We must NOT write the
+        //     IGA_UNSIGNED_ENTITY sidecar here: it would flip IgaUserAdapter.isEnabled()
+        //     to false, and the enrollment browser flow (AuthenticationProcessor.
+        //     validateUser → USER_DISABLED) would reject the user BEFORE LinkTideAccount
+        //     can run. Enabled-but-attestation-NULL is the required state.
+        //   • Tideless realm (iga.attestor!="tide"): tokens are NOT signed, so there
+        //     is no replayOrFailClosed guard. We quarantine via the IGA_UNSIGNED_ENTITY
+        //     sidecar (isEnabled()→false hard-refuses every login/token checkpoint)
+        //     until the CREATE_USER CR commits. Tideless realms have no Tide enrollment,
+        //     so the sidecar does NOT block any enroll flow.
+        //
+        // The non-governed live state KC applied to the scratch user before :175
+        // (credentials/password + federated identities — the OLD rollback discarded
+        // these; CREATE_USER governs ONLY the 8 token fields, REP_JSON nulls them) is
+        // STRIPPED so the persisted live user matches the governed representation. The
+        // user sets their own password / links Tide post-approval, exactly as before.
+        // ─────────────────────────────────────────────────────────────────────
+        stripNonGovernedLiveState();
+
+        boolean tideRealm = TideAttestor.ID.equals(realm.getAttribute("iga.attestor"));
+
         String[] crIdHolder = new String[1];
         KeycloakModelUtils.runJobInTransaction(igaSession.getKeycloakSessionFactory(), newSession -> {
             RealmModel newRealm = newSession.realms().getRealm(realm.getId());
@@ -571,16 +618,84 @@ public class IgaUserAdapter extends UserAdapter {
             IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
             crIdHolder[0] = newService.create(newRealm, "USER", userId,
                     "CREATE_USER", List.of(row), requestedBy).getId();
+            // Tideless quarantine: register the persisted-but-pending user in the
+            // unsigned-entity sidecar, keyed to its CREATE_USER CR id so the commit
+            // can clear it (IgaReplayDispatcher.replayCreateUser → clearByAdoptCr).
+            // Tide realms intentionally skip this (replayOrFailClosed is the guard,
+            // and the sidecar would block enrollment — see the block comment above).
+            if (!tideRealm) {
+                IgaUnsignedEntityService.markUnsigned(newEm, newRealm.getId(),
+                        IgaReplayExtension.ENTITY_TYPE_USER, userId, crIdHolder[0]);
+                newEm.flush();
+            }
         });
 
-        // Mark the REQUEST tx rollback-only so DefaultKeycloakSession#close()
-        // rolls back and the scratch user + everything attached dies. The CR
-        // survives because runJobInTransaction wrote it on a separate session.
-        // Same idiom + lifecycle proof as IgaClientScopeAdapter#getId /
-        // IgaRoleAdapter#getName.
-        igaSession.getTransactionManager().setRollbackOnly();
+        // NOTE: NO setRollbackOnly() — the request tx COMMITS so the pending user
+        // persists. The CR was written on a separate session above (so it is durable
+        // independently), and the 202 below is still returned via the exception mapper.
+        log.infof("IGA user-capture PERSIST-PENDING: user=%s uuid=%s realm=%s "
+                + "mode=%s — live user persisted, UserEntity.attestation NULL "
+                + "(pending), %s; CREATE_USER CR=%s. Enrollable while PENDING; "
+                + "real login fail-closed until commit finalizes (stamps user_identity).",
+                username, userId, realm.getName(),
+                tideRealm ? "tide" : "tideless",
+                tideRealm ? "no quarantine sidecar (replayOrFailClosed guards login)"
+                          : "IGA_UNSIGNED_ENTITY sidecar set (isEnabled()=false guards login)",
+                crIdHolder[0]);
 
         throw new IgaPendingApprovalException(crIdHolder[0], "USER", "CREATE_USER");
+    }
+
+    /**
+     * Strip the live state KC applied to the scratch user that CREATE_USER does
+     * NOT govern (credentials + federated identities), so the PERSISTED pending
+     * user matches the governed {@link #buildCapturedUserRow()} REP_JSON exactly
+     * (which explicitly nulls credentials/federatedIdentities). Before this change
+     * the request-tx rollback discarded them; now that the user persists we must
+     * remove them here or an un-governed create-time password / IdP link would
+     * silently survive onto the live (committed) user.
+     *
+     * <p>Governed token fields (username/enabled/email/emailVerified/first/last/
+     * attributes/groups) are LEFT intact — they are the CREATE_USER closure. Roles
+     * are not applied by KC's createUser at all (governed separately), so there is
+     * nothing to strip there.</p>
+     */
+    private void stripNonGovernedLiveState() {
+        try {
+            // Credentials (any create-time password). credentialManager() is the
+            // real super manager (the capture override was removed).
+            credentialManager().getStoredCredentialsStream()
+                    .map(org.keycloak.credential.CredentialModel::getId)
+                    .filter(java.util.Objects::nonNull)
+                    .collect(java.util.stream.Collectors.toList())
+                    .forEach(id -> {
+                        try {
+                            credentialManager().removeStoredCredentialById(id);
+                        } catch (RuntimeException re) {
+                            log.debugf(re, "PERSIST-PENDING: failed removing credential %s for user %s",
+                                    id, super.getId());
+                        }
+                    });
+        } catch (RuntimeException re) {
+            log.debugf(re, "PERSIST-PENDING: credential strip skipped for user %s", super.getId());
+        }
+        try {
+            // Federated identities applied by createFederatedIdentities (:171).
+            igaSession.users().getFederatedIdentitiesStream(realm, this)
+                    .map(org.keycloak.models.FederatedIdentityModel::getIdentityProvider)
+                    .filter(java.util.Objects::nonNull)
+                    .collect(java.util.stream.Collectors.toList())
+                    .forEach(idp -> {
+                        try {
+                            igaSession.users().removeFederatedIdentity(realm, this, idp);
+                        } catch (RuntimeException re) {
+                            log.debugf(re, "PERSIST-PENDING: failed removing fed-identity %s for user %s",
+                                    idp, super.getId());
+                        }
+                    });
+        } catch (RuntimeException re) {
+            log.debugf(re, "PERSIST-PENDING: fed-identity strip skipped for user %s", super.getId());
+        }
     }
 
     /**
