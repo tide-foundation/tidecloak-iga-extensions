@@ -166,6 +166,27 @@ public final class RealmAttestationExporter {
     public List<AttestationUnit> export(KeycloakSession session, RealmModel realm,
                                         ExportRequest req) {
         session.getContext().setRealm(realm);
+
+        // Fail closed with a clear, named error instead of letting a null userId fall
+        // through to session.users().getUserById(realm, null), which NPEs deep in the
+        // Infinispan key codec ("Null keys are not supported!") with no actionable
+        // context. The DTM caller now sources userId from the userSession; this guard
+        // catches any future caller that supplies a null id (e.g. a lightweight access
+        // token whose `sub` claim was skipped) before it reaches the cache.
+        if (req.userId() == null) {
+            throw new IllegalStateException(
+                    "IGA producer export: null userId for realm '" + realm.getName()
+                            + "' client '" + req.clientId() + "' (scope '" + req.scope()
+                            + "'). The caller must supply the authenticated user id "
+                            + "(source it from the userSession, not the token `sub` "
+                            + "claim, which is absent on lightweight access tokens).");
+        }
+        if (req.clientId() == null) {
+            throw new IllegalStateException(
+                    "IGA producer export: null clientId for realm '" + realm.getName()
+                            + "' user '" + req.userId() + "'.");
+        }
+
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         String realmId = realm.getId();
 
