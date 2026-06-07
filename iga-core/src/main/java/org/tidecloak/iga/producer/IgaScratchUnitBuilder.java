@@ -98,6 +98,18 @@ public final class IgaScratchUnitBuilder {
             scratch.setAttribute("IGA_REPLAY_ACTIVE", "true");
             try {
                 RealmModel scratchRealm = scratch.realms().getRealm(realmId);
+                if (scratchRealm == null) {
+                    throw new IllegalStateException(
+                            "scratch-replay: realm " + realmId + " not loadable in scratch session");
+                }
+                // Bind the realm context on the nested scratch session BEFORE any user/entity
+                // enumeration. Without this, the scratch session's context realm is null, so
+                // user-storage reads (session.users().getUserById → validateUser →
+                // isReadOnlyOrganizationMember → OrganizationProvider.getRealm() reading
+                // scratch.getContext().getRealm()) throw "Session not bound to a realm".
+                // Same class of fix as the startup backfillTideClaimsScope NPE. The scratch tx
+                // is rolled back below, so restoring the prior (null) context is unnecessary.
+                scratch.getContext().setRealm(scratchRealm);
                 EntityManager em = scratch.getProvider(JpaConnectionProvider.class).getEntityManager();
 
                 // Re-load the CR in the scratch persistence context so the replay's
