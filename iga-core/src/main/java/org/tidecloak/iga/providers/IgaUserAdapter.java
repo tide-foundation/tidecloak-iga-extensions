@@ -11,6 +11,7 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.representations.idm.UserRepresentation;
 import org.tidecloak.iga.attestors.TideAttestor;
+import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.replay.IgaReplayExtension;
 import org.tidecloak.iga.services.IgaQuarantineCache;
 import org.tidecloak.iga.services.IgaUnsignedEntityService;
@@ -1237,7 +1238,14 @@ public class IgaUserAdapter extends UserAdapter {
         List<Map<String, Object>> rows = List.of(Map.of("USER_ID", userId, "ROLE_ID", role.getId()));
         guardOrAlreadyPending(service, userId, "GRANT_ROLES", rows);
         String requestedBy = getCurrentUserId();
-        service.create(realm, "USER", userId, "GRANT_ROLES", rows, requestedBy);
+        IgaChangeRequestEntity assignmentCr =
+                service.create(realm, "USER", userId, "GRANT_ROLES", rows, requestedBy);
+        // STEADY-STATE multiAdmin: if this grant is of tide-realm-admin and moves the dynamic
+        // 0.7×N threshold, create the REGEN_ADMIN_POLICY CR RIGHT NOW (sibling of the assignment
+        // CR, same enclave session), dependency-gated to commit after it. No-op in firstAdmin
+        // mode (bootstrap) or for any other role. See maybeEmitThresholdPolicyCrAtCapture.
+        new TideAttestor(igaSession)
+                .maybeEmitThresholdPolicyCrAtCapture(igaSession, realm, assignmentCr);
     }
 
     @Override
@@ -1255,7 +1263,13 @@ public class IgaUserAdapter extends UserAdapter {
         List<Map<String, Object>> rows = List.of(Map.of("USER_ID", userId, "ROLE_ID", role.getId()));
         guardOrAlreadyPending(service, userId, "REVOKE_ROLES", rows);
         String requestedBy = getCurrentUserId();
-        service.create(realm, "USER", userId, "REVOKE_ROLES", rows, requestedBy);
+        IgaChangeRequestEntity assignmentCr =
+                service.create(realm, "USER", userId, "REVOKE_ROLES", rows, requestedBy);
+        // STEADY-STATE multiAdmin: a tide-realm-admin REVOKE that moves the dynamic 0.7×N
+        // threshold creates/folds the REGEN_ADMIN_POLICY CR at capture (sibling of this
+        // assignment CR), dependency-gated to commit after it. No-op otherwise.
+        new TideAttestor(igaSession)
+                .maybeEmitThresholdPolicyCrAtCapture(igaSession, realm, assignmentCr);
     }
 
     // -------------------------------------------------------------------------

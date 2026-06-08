@@ -201,16 +201,6 @@ public class TideAttestor implements IgaAttestor {
     private static final String POLICY_AUTH_FLOW = "Policy:1";
 
     /**
-     * The {@code modelId} arg to {@code InitializeTideRequestWithVrk} for the phase-1
-     * approval request. The phase-1 request is a Midgard {@link AttestationUnitSignRequest}
-     * whose constructor stamps Name={@code AttestationUnit}, Version={@code 1}; this
-     * {@code AttestationUnit:1} id is one of the firstAdmin authorizer pack's allowed
-     * ModelIds, so the ORK's creation-auth flow accepts the {@code InitializeTideRequestWithVrk}
-     * seg-7 signature.
-     */
-    private static final String APPROVAL_MODEL_ID = "AttestationUnit:1";
-
-    /**
      * Seconds added to the signing request's default expiry before
      * {@code GetDataToAuthorize} (the 30s Midgard default is too short for the ORK
      * ceremony round-trip). 3 minutes.
@@ -608,24 +598,17 @@ public class TideAttestor implements IgaAttestor {
                         + "firstAdmin pack is preserved so the flip can be retried once the policy commits.",
                         realm.getName());
             }
-        } else if (MODE_MULTI_ADMIN.equals(mode)) {
-            // multiAdmin steady-state. If this committing CR changes the active
-            // tide-realm-admin set (grant/revoke of the role), the dynamic threshold
-            // floor(0.7 x N) may move, so the SIGNED admin policy artifact must be
-            // regenerated + re-signed to encode the new threshold.
-            //
-            // ★ This NO LONGER signs in-line. The previous behaviour
-            // (maybeRegenerateAdminPolicyOnMembershipChange → signAdminPolicyViaPolicyFlow)
-            // re-signed the M0 policy with a doken-less Midgard.SignModel(Policy:1) — which a
-            // real signing-capable ORK REJECTS (no collected admin dokens), fail-closing every
-            // tide-realm-admin grant/revoke. Instead we EMIT an explicit, enclave-signed
-            // REGEN_ADMIN_POLICY CR (one per batch, folded) that carries the NEW unsigned
-            // Policy bytes and is committed — after the assignment CR(s) it dependsOn — via a
-            // REAL Policy:1 quorum sign with the collected dokens. Sequenced LAST so the CR's
-            // own attestation `sig` is already built. No-op (and IsEqualTo-skipped) when the CR
-            // is not a membership change or the threshold did not actually move.
-            maybeEmitThresholdPolicyCr(session, realm, cr);
         }
+        // ★ STEADY-STATE multiAdmin threshold re-sign is NO LONGER emitted here. The
+        // REGEN_ADMIN_POLICY CR is now created at CAPTURE time — the moment a steady-state
+        // tide-realm-admin grant/revoke is turned into its assignment CR (see
+        // maybeEmitThresholdPolicyCrAtCapture, called from IgaUserAdapter.grantRole /
+        // deleteRoleMapping) — so the policy CR is a SIBLING of the assignment CR in the SAME
+        // approval enclave session, not a CR that only materialises after commit (which left
+        // it out of the assignment's enclave session). At commit the policy CR follows the
+        // unchanged Policy:1 quorum sign path (replayRegenAdminPolicy) once its dependsOn
+        // assignment CR(s) have committed. combineFinal therefore does NOTHING extra for the
+        // steady-state membership change beyond signing the assignment CR itself.
         return sig;
     }
 
@@ -875,9 +858,13 @@ public class TideAttestor implements IgaAttestor {
     /**
      * Steady-state (multiAdmin) admin-policy threshold re-sign, emitted as an
      * EXPLICIT, enclave-signed {@link #ACTION_REGEN_ADMIN_POLICY} change request — one
-     * per batch, folded. Fired from {@link #combineFinal} ONLY in multiAdmin mode, AFTER
-     * the committing CR's own attestation signature is built (so the emit is sequenced
-     * last and never disturbs the CR sign).
+     * per batch, folded. Fired AT CAPTURE — the moment a steady-state tide-realm-admin
+     * grant/revoke is turned into its assignment CR (called from
+     * {@code IgaUserAdapter.grantRole}/{@code deleteRoleMapping}, AFTER the assignment CR
+     * has been persisted) — so the policy CR is a SIBLING of the assignment CR in the SAME
+     * approval enclave session, both PENDING together. (Previously this fired lazily at
+     * COMMIT in {@code combineFinal}, which left the policy CR out of the assignment's
+     * enclave session.)
      *
      * <h3>Why a CR, not an in-line re-sign</h3>
      * The previous behaviour ({@code maybeRegenerateAdminPolicyOnMembershipChange})
@@ -889,18 +876,25 @@ public class TideAttestor implements IgaAttestor {
      *
      * <h3>What it does</h3>
      * <ol>
-     *   <li>Detect a membership-changing CR: a committed GRANT/REVOKE of the
-     *       realm-management {@code tide-realm-admin} role ({@link #tideRealmAdminMembershipDelta}).
-     *       Delta 0 → no-op.</li>
-     *   <li>Compute the FINAL post-commit count. {@code combineFinal} runs BEFORE the
-     *       dispatcher replays this CR, so {@link #countActiveTideRealmAdmins} still
-     *       returns the PRE-commit count; add the pending net delta (+1 grant / -1
-     *       revoke), clamp at 0, and apply the SAME {@code max(1, floor(0.7 × N))}
-     *       formula {@link #getThreshold} uses (cannot drift).</li>
+     *   <li><b>firstAdmin-bootstrap exclusion.</b> Only acts in {@code multiAdmin} mode. The
+     *       FIRST tide-realm-admin grant runs while the realm is still {@code firstAdmin}
+     *       (the flip happens at that CR's commit); it bootstraps the M0 inline VRK-signed and
+     *       must NOT spawn a REGEN CR. STEADY-STATE multiAdmin changes only.</li>
+     *   <li>Detect a membership-changing CR: a GRANT/REVOKE of the realm-management
+     *       {@code tide-realm-admin} role ({@link #tideRealmAdminMembershipDelta}). Delta 0 →
+     *       no-op.</li>
+     *   <li>Compute the PROJECTED post-commit count at CAPTURE: the committed count
+     *       ({@link #countActiveTideRealmAdmins}) plus the NET delta of EVERY pending
+     *       tide-realm-admin GRANT/REVOKE assignment CR in this batch
+     *       ({@link #pendingTideRealmAdminDelta} — which already INCLUDES the assignment CR
+     *       this method was triggered for, since the adapter persisted it before calling).
+     *       Clamp at 0, apply the SAME {@code max(1, floor(0.7 × N))} formula
+     *       {@link #getThreshold} uses (cannot drift). Summing the pending set (not just this
+     *       one CR) makes bulk fold to the FINAL threshold and nets-to-zero collapse.</li>
      *   <li>IsEqualTo no-op: if {@code newThreshold} already equals the current encoded
      *       threshold of the existing M0 policy, emit NO CR — and if a pending
-     *       {@code REGEN_ADMIN_POLICY} exists for this realm+role, DENY/cancel it (handles
-     *       a batch that nets back to the current threshold).</li>
+     *       {@code REGEN_ADMIN_POLICY} exists for this realm+role, CANCEL it (handles a batch
+     *       that nets back to the current threshold).</li>
      *   <li>Fold to exactly ONE: if a pending {@code REGEN_ADMIN_POLICY} CR exists for this
      *       realm+role, UPDATE its ROWS_JSON in place (rebuilt OLD/NEW threshold + fresh
      *       unsigned policy bytes) and CLEAR its authorizations (a new threshold needs a new
@@ -909,12 +903,21 @@ public class TideAttestor implements IgaAttestor {
      * </ol>
      *
      * <p>This method NEVER signs. The Policy:1 sign happens at the policy CR's own commit
-     * ({@link #replayRegenAdminPolicy}) with the collected dokens. OLD quorum (the threshold
-     * in force when the membership CR committed) authorizes the policy CR; it installs the
-     * NEW threshold for SUBSEQUENT CRs — no circular dependency.
+     * ({@link #replayRegenAdminPolicy}) with the collected dokens. The policy CR is CREATED
+     * up-front (so it is visible/approvable alongside the assignment in one enclave session)
+     * but its {@code dependsOn} the assignment CR(s) gates its COMMIT to AFTER them, so the
+     * OLD quorum (the threshold in force when the membership CRs commit) authorizes the
+     * re-sign and the NEW threshold takes effect for SUBSEQUENT CRs — no circular dependency.
      */
-    void maybeEmitThresholdPolicyCr(KeycloakSession session, RealmModel realm,
-                                    IgaChangeRequestEntity cr) {
+    public void maybeEmitThresholdPolicyCrAtCapture(KeycloakSession session, RealmModel realm,
+                                                    IgaChangeRequestEntity cr) {
+        // firstAdmin-bootstrap exclusion: only STEADY-STATE multiAdmin membership changes get a
+        // REGEN CR. The bootstrap grant runs in firstAdmin mode (flip is at its own commit) and
+        // bootstraps the M0 inline — it must NOT create a REGEN CR.
+        if (!MODE_MULTI_ADMIN.equals(resolveMode(session, realm))) {
+            return;
+        }
+
         int delta = tideRealmAdminMembershipDelta(realm, cr);
         if (delta == 0) {
             return; // not a tide-realm-admin grant/revoke — the set is unchanged.
@@ -929,10 +932,12 @@ public class TideAttestor implements IgaAttestor {
 
         IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
 
-        // combineFinal runs PRE-replay, so the live count excludes this CR's effect; add the
-        // pending net delta to obtain the FINAL post-commit count. Clamp at 0 (a revoke can
-        // never make the count negative). SAME formula getThreshold uses.
-        int postCommitCount = Math.max(0, countActiveTideRealmAdmins(realm, session) + delta);
+        // Projected post-commit count at CAPTURE = committed count + the NET delta of all
+        // pending tide-realm-admin assignment CRs in the batch (this CR's assignment is already
+        // persisted, so it is INCLUDED in the pending sum — do NOT also add `delta`). Clamp at 0
+        // (a revoke can never drive the count negative). SAME formula getThreshold uses.
+        int netPending = pendingTideRealmAdminDelta(session, realm, tideRoleId);
+        int postCommitCount = Math.max(0, countActiveTideRealmAdmins(realm, session) + netPending);
         int newThreshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
 
         Integer priorThreshold = (policy == null) ? null : currentEncodedThreshold(policy);
@@ -951,12 +956,12 @@ public class TideAttestor implements IgaAttestor {
                 pending.setResolvedAt(System.currentTimeMillis());
                 em.flush();
                 log.infof("IGA threshold-policy CR cancelled (nets to zero): realm %s tide-realm-admin "
-                        + "threshold stays %d after membership delta %+d — pending CR %s CANCELLED.",
-                        realm.getName(), newThreshold, delta, pending.getId());
+                        + "threshold stays %d after net pending delta %+d — pending CR %s CANCELLED.",
+                        realm.getName(), newThreshold, netPending, pending.getId());
             } else {
                 log.infof("IGA threshold-policy CR skipped (threshold unchanged): realm %s tide-realm-admin "
-                        + "policy already encodes threshold %d (membership delta %+d, post-commit admins %d).",
-                        realm.getName(), newThreshold, delta, postCommitCount);
+                        + "policy already encodes threshold %d (net pending delta %+d, projected admins %d).",
+                        realm.getName(), newThreshold, netPending, postCommitCount);
             }
             return;
         }
@@ -992,19 +997,52 @@ public class TideAttestor implements IgaAttestor {
             pending.setDependsOnList(new ArrayList<>(deps));
             em.flush();
             log.infof("IGA threshold-policy CR folded: realm %s tide-realm-admin threshold %d -> %d "
-                    + "(membership delta %+d, post-commit admins %d); pending CR %s rewritten, "
+                    + "(net pending delta %+d, projected admins %d); pending CR %s rewritten, "
                     + "authorizations cleared, dependsOn += %s.",
-                    realm.getName(), oldThreshold, newThreshold, delta, postCommitCount,
+                    realm.getName(), oldThreshold, newThreshold, netPending, postCommitCount,
                     pending.getId(), cr.getId());
             return;
         }
 
         IgaChangeRequestEntity created = service.create(realm, ENTITY_TYPE_ADMIN_POLICY, tideRoleId,
                 ACTION_REGEN_ADMIN_POLICY, rows, cr.getRequestedBy(), List.of(cr.getId()));
-        log.infof("IGA threshold-policy CR created: realm %s tide-realm-admin threshold %d -> %d "
-                + "(membership delta %+d, post-commit admins %d); CR %s dependsOn assignment CR %s.",
-                realm.getName(), oldThreshold, newThreshold, delta, postCommitCount,
+        log.infof("IGA threshold-policy CR created at capture: realm %s tide-realm-admin threshold %d -> %d "
+                + "(net pending delta %+d, projected admins %d); CR %s dependsOn assignment CR %s.",
+                realm.getName(), oldThreshold, newThreshold, netPending, postCommitCount,
                 created.getId(), cr.getId());
+    }
+
+    /**
+     * The NET membership delta of all PENDING tide-realm-admin assignment CRs in the realm:
+     * {@code +1} per pending {@code GRANT_ROLES} and {@code -1} per pending {@code REVOKE_ROLES}
+     * whose ROWS_JSON targets the {@code tide-realm-admin} role id. Used at CAPTURE to project
+     * the post-commit admin count: because the triggering assignment CR is persisted by the
+     * adapter BEFORE the policy hook runs, it is already in this pending set — so summing the
+     * set (rather than adding a single per-CR delta) makes a bulk batch fold to the FINAL
+     * threshold and a grant+revoke pair net to zero. Mirrors {@link #tideRealmAdminMembershipDelta}'s
+     * per-CR detection over the pending GRANT/REVOKE CRs.
+     */
+    private int pendingTideRealmAdminDelta(KeycloakSession session, RealmModel realm, String tideRoleId) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaChangeRequestService service = new IgaChangeRequestService(em, session);
+        int net = 0;
+        for (IgaChangeRequestEntity grant
+                : service.findPendingByAction(realm.getId(), "USER", "GRANT_ROLES")) {
+            if (crTargetsRole(grant, tideRoleId)) net += 1;
+        }
+        for (IgaChangeRequestEntity revoke
+                : service.findPendingByAction(realm.getId(), "USER", "REVOKE_ROLES")) {
+            if (crTargetsRole(revoke, tideRoleId)) net -= 1;
+        }
+        return net;
+    }
+
+    /** True iff any ROWS_JSON row of {@code cr} carries {@code ROLE_ID == roleId}. */
+    private static boolean crTargetsRole(IgaChangeRequestEntity cr, String roleId) {
+        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+            if (roleId.equals(str(row, "ROLE_ID"))) return true;
+        }
+        return false;
     }
 
     /**
@@ -1687,7 +1725,7 @@ public class TideAttestor implements IgaAttestor {
         // seg-7 creation-authorization via the realm's VRK — only on a real-signing-capable
         // realm (dev/test realms carry no real VRK; the un-initialized request still
         // round-trips for the carrier/threshold wiring). Fail-closed once capable.
-        if (isRealSigningCapable(realm)) {
+        if (approvalRequestNeedsVrkInit(realm)) {
             initializeApprovalRequestWithVrk(realm, req);
         }
 
@@ -1696,7 +1734,7 @@ public class TideAttestor implements IgaAttestor {
         session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
         log.infof("IGA multiAdmin approval (phase 1): built Policy:1 ModelRequest for CR %s "
                 + "(action=%s, realm=%s, creation-auth=%s).", cr.getId(), cr.getActionType(),
-                realm.getName(), isRealSigningCapable(realm) ? "VRK" : "none(dev)");
+                realm.getName(), approvalRequestNeedsVrkInit(realm) ? "VRK" : "none(dev)");
         return encoded;
     }
 
@@ -1710,7 +1748,19 @@ public class TideAttestor implements IgaAttestor {
      * {@code AttestationUnit:1} creation. Called only after {@link #isRealSigningCapable}
      * passed; fail-closed (throws) on any signing failure.
      */
-    private void initializeApprovalRequestWithVrk(RealmModel realm, ModelRequest req) {
+    /**
+     * Instance gate for "does this phase-1 approval carrier need the seg-7 VRK creation-auth?"
+     * — a spyable wrapper over the static {@link #isRealSigningCapable} so BOTH approval-build
+     * paths (producer-unit {@link #buildMultiAdminApprovalModel} and policy
+     * {@link #buildPolicyResignApprovalModel}) gate the vendor-init identically and a test can
+     * drive the capable branch deterministically (the static gate also reads {@code THRESHOLD_*}
+     * env, which a unit test cannot control).
+     */
+    boolean approvalRequestNeedsVrkInit(RealmModel realm) {
+        return isRealSigningCapable(realm);
+    }
+
+    void initializeApprovalRequestWithVrk(RealmModel realm, ModelRequest req) {
         ComponentModel vendorKey = realm.getComponentsStream()
                 .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
                 .findFirst()
@@ -1726,12 +1776,16 @@ public class TideAttestor implements IgaAttestor {
             SignRequestSettingsMidgard settings = constructSignSettings(config);
             // The ORK's VRKAuthorizationFlow.AuthorizeAsync authorizes the OUTER request id
             // that InitializeTideRequestWithVrk builds — "TideRequestInitialization:1" — NOT the
-            // inner APPROVAL_MODEL_ID ("AttestationUnit:1", which is only embedded as the seg-2
-            // draft modelId and merely existence-checked). The MAIN gVRK pack lists
-            // TideRequestInitialization:1 in its ModelIds; the firstAdmin pack does not. So the
-            // creation-auth wrapper must be authorized by the MAIN gVRK pack, not the firstAdmin
-            // pack. (signUnitsWithFirstAdminVvk stays on the firstAdmin pack — it signs a real
-            // AttestationUnit:1 OUTER request, which the firstAdmin pack does allow.)
+            // inner request's modelId (folded as the seg-2 draft label over SHA512(req.Draft) and
+            // merely existence-checked by the ORK's PolicyAuthorizedTideRequestInitializationSignRequest
+            // — CheckModelIdExistsInAnyRegistry). We pass the request's OWN id (req.Id()) so the
+            // label matches the carrier being created: "AttestationUnit:1" for the producer-unit
+            // path, "Policy:1" for the REGEN_ADMIN_POLICY re-sign carrier (both are registered, so
+            // both pass the existence check). The MAIN gVRK pack lists TideRequestInitialization:1
+            // in its ModelIds; the firstAdmin pack does not. So the creation-auth wrapper must be
+            // authorized by the MAIN gVRK pack, not the firstAdmin pack. (signUnitsWithFirstAdminVvk
+            // stays on the firstAdmin pack — it signs a real AttestationUnit:1 OUTER request, which
+            // the firstAdmin pack does allow.)
             String gVrk = config.getFirst(CFG_GVRK);
             String gVrkCert = config.getFirst(CFG_GVRK_CERTIFICATE);
             if (gVrk == null || gVrk.isBlank()
@@ -1740,7 +1794,7 @@ public class TideAttestor implements IgaAttestor {
                         + "MAIN gVRK authorizer material (gVRK/gVRKCertificate) for realm "
                         + realm.getName());
             }
-            ModelRequest.InitializeTideRequestWithVrk(req, settings, APPROVAL_MODEL_ID,
+            ModelRequest.InitializeTideRequestWithVrk(req, settings, req.Id(),
                     java.util.HexFormat.of().parseHex(gVrk),
                     java.util.Base64.getDecoder().decode(gVrkCert));
         } catch (RuntimeException e) {
@@ -1804,6 +1858,9 @@ public class TideAttestor implements IgaAttestor {
         // Materialize Draft (PolicySignRequest folds the policy payload into Draft lazily via
         // Serialize, invoked by GetDraft) BEFORE Encode() — else Encode() persists an EMPTY
         // seg-3 draft (the enclave would approve nothing). Mirrors the AttestationUnit path.
+        // The revoke flag (SetRevokeAuthorizingPolicyOnSign, above) is ALREADY set, so the
+        // materialized Draft contains policy@0 + flag@2 — both then covered by the seg-7
+        // creation-auth's SHA512(Draft) AND the collected admin dokens.
         try {
             req.GetDraft();
         } catch (Exception e) {
@@ -1811,11 +1868,26 @@ public class TideAttestor implements IgaAttestor {
                     + "re-sign draft for CR " + cr.getId() + ": " + e.getMessage(), e);
         }
 
+        // ★ FIX (enclave validation): seg-7 VRK creation-authorization — the SAME init step the
+        // producer-unit path takes (buildMultiAdminApprovalModel → initializeApprovalRequestWithVrk).
+        // Without it the carrier has an EMPTY AuthorizerSignatureOfThisRequest, so the enclave's
+        // "approved initially by the vendor" check reads a 0-length buffer and self-closes
+        // ("Insufficient data to read: buffer length is 0 ... Must initialize request to get
+        // creation time"). InitializeTideRequestWithVrk requires AuthFlow=="Policy:1" (satisfied)
+        // and gives the request a creation time + vendor auth. Gated on a real-signing-capable
+        // realm (dev/test realms carry no real VRK; the un-initialized carrier still round-trips
+        // for the threshold/carrier wiring). MUST run AFTER GetDraft() so the seg-7 signature
+        // covers the materialized Draft (policy@0 + revoke-flag@2) — never an empty Draft.
+        if (approvalRequestNeedsVrkInit(realm)) {
+            initializeApprovalRequestWithVrk(realm, req);
+        }
+
         String encoded = java.util.Base64.getEncoder().encodeToString(req.Encode());
         cr.setRequestModel(encoded);
         session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
         log.infof("IGA threshold-policy approval (phase 1): built Policy:1 re-sign ModelRequest for "
-                + "CR %s (realm %s).", cr.getId(), realm.getName());
+                + "CR %s (realm %s, creation-auth=%s).", cr.getId(), realm.getName(),
+                approvalRequestNeedsVrkInit(realm) ? "VRK" : "none(dev)");
         return encoded;
     }
 
