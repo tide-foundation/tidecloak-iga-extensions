@@ -258,8 +258,8 @@ class TideAttestorThresholdPolicyCrTest {
         assertEquals("REGEN_ADMIN_POLICY", emitted.getActionType());
         assertEquals("ADMIN_POLICY", emitted.getEntityType());
         assertEquals(TIDE_ROLE_ID, emitted.getEntityId(), "CR keyed to the tide-realm-admin role id");
-        assertEquals(expectedDeps(1, 0), emitted.getDependsOnList(),
-                "policy CR dependsOn ALL pending tide-realm-admin assignment CRs");
+        assertTrue(emitted.getDependsOnList() == null || emitted.getDependsOnList().isEmpty(),
+                "policy CR carries NO dependsOn — signable in the same enclave session as the assignments");
         // ROWS_JSON carries old/new threshold + role + unsigned policy bytes.
         assertTrue(emitted.getRowsJson().contains("\"OLD_THRESHOLD\":1"));
         assertTrue(emitted.getRowsJson().contains("\"NEW_THRESHOLD\":2"));
@@ -353,6 +353,7 @@ class TideAttestorThresholdPolicyCrTest {
         policyCr.setEntityId(TIDE_ROLE_ID);
         policyCr.setActionType("REGEN_ADMIN_POLICY");
         policyCr.setStatus("PENDING");
+        // A stale dependsOn from an OLD CR: the fold must CLEAR it (so the carrier is unblocked).
         policyCr.setDependsOnList(expectedDeps(1, 0));
         stubFindPending(policyCr);
         // no authorizations to clear
@@ -368,7 +369,8 @@ class TideAttestorThresholdPolicyCrTest {
         attestor.ensureThresholdPolicyCrForEnclave(session, realm);
 
         verify(em, never()).persist(any());                   // folded, NOT a second create
-        assertEquals(expectedDeps(1, 0), policyCr.getDependsOnList(), "dependsOn unchanged (same set)");
+        assertTrue(policyCr.getDependsOnList() == null || policyCr.getDependsOnList().isEmpty(),
+                "fold CLEARS dependsOn (policy CR signable alongside the assignments)");
         assertTrue(policyCr.getRowsJson().contains("\"NEW_THRESHOLD\":2"));
     }
 
@@ -423,8 +425,8 @@ class TideAttestorThresholdPolicyCrTest {
         // A pending REGEN_ADMIN_POLICY already exists; the pending set now has TWO tide-realm-admin
         // grants (e.g. a second grant that COALESCED — never reached the capture path). Both grants
         // net +2 over 2 committed -> projected 4 -> floor(0.7*4)=2. The ensure UPDATEs the pending
-        // CR in place (no persist), re-points dependsOn to the CURRENT pending set, and CLEARs its
-        // authorizations.
+        // CR in place (no persist), CLEARS any stale dependsOn (signable alongside the assignments),
+        // and CLEARs its authorizations.
         stubMultiAdminMode();
         stubPolicyLookup(policyAtThreshold(1));
         IgaChangeRequestEntity pending = new IgaChangeRequestEntity();
@@ -454,8 +456,8 @@ class TideAttestorThresholdPolicyCrTest {
         verify(em, times(1)).remove(a1);
         verify(em, times(1)).remove(a2);                    // authorizations cleared
         assertNull(pending.getRequestModel(), "stale carrier cleared (re-sign required)");
-        assertEquals(expectedDeps(2, 0), pending.getDependsOnList(),
-                "dependsOn re-pointed to the CURRENT pending assignment set (both grants)");
+        assertTrue(pending.getDependsOnList() == null || pending.getDependsOnList().isEmpty(),
+                "fold CLEARS the stale dependsOn (policy CR signable alongside the assignments)");
         assertTrue(pending.getRowsJson().contains("\"NEW_THRESHOLD\":2"));
     }
 
@@ -478,7 +480,8 @@ class TideAttestorThresholdPolicyCrTest {
         IgaChangeRequestEntity emitted = captor.getValue();
         assertTrue(emitted.getRowsJson().contains("\"OLD_THRESHOLD\":2"));
         assertTrue(emitted.getRowsJson().contains("\"NEW_THRESHOLD\":1"));
-        assertEquals(expectedDeps(0, 1), emitted.getDependsOnList());
+        assertTrue(emitted.getDependsOnList() == null || emitted.getDependsOnList().isEmpty(),
+                "policy CR carries NO dependsOn even for a revoke-driven lowering");
     }
 
     // --- unsigned policy bytes + ModelIds config check -----------------------

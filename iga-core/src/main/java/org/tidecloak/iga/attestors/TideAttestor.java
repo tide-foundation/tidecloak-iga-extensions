@@ -618,9 +618,11 @@ public class TideAttestor implements IgaAttestor {
         // so the policy CR surfaces alongside the assignment CRs in the SAME enclave, and is
         // robust to grants captured before the hook deployed OR coalesced into an existing
         // pending CR (both of which the old capture-time hook missed). At commit the policy CR
-        // follows the unchanged Policy:1 quorum sign path (replayRegenAdminPolicy) once its
-        // dependsOn assignment CR(s) have committed. combineFinal therefore does NOTHING extra
-        // for the steady-state membership change beyond signing the assignment CR itself.
+        // follows the unchanged Policy:1 quorum sign path (replayRegenAdminPolicy); it carries NO
+        // dependsOn on the assignments (its NEW threshold is pinned + the M0 quorum authorizes the
+        // re-sign now), so it can be signed in the SAME enclave session as the assignments.
+        // combineFinal therefore does NOTHING extra for the steady-state membership change beyond
+        // signing the assignment CR itself.
         return sig;
     }
 
@@ -908,12 +910,22 @@ public class TideAttestor implements IgaAttestor {
      *   <li>IsEqualTo no-op: if {@code newThreshold} equals the current encoded threshold, emit
      *       NO CR — and CANCEL any stale pending policy CR.</li>
      *   <li>Fold to exactly ONE: if a pending policy CR exists, UPDATE its ROWS_JSON in place
-     *       (rebuilt OLD/NEW threshold + fresh unsigned policy bytes), re-point its
-     *       {@code dependsOn} to the CURRENT pending assignment set, and CLEAR its authorizations
-     *       (a new threshold needs a fresh quorum). Otherwise CREATE one, {@code dependsOn} ALL
-     *       pending assignment CRs so the 412 DEPENDENCY_NOT_MET gate forces it to commit AFTER
-     *       them (count final).</li>
+     *       (rebuilt OLD/NEW threshold + fresh unsigned policy bytes) and CLEAR its authorizations
+     *       (a new threshold needs a fresh quorum). Otherwise CREATE one.</li>
      * </ol>
+     *
+     * <h3>No {@code dependsOn} on the policy CR</h3>
+     * The policy CR carries NO {@code dependsOn} coupling to the assignment CRs (and the fold path
+     * CLEARS any stale dependsOn). Its NEW threshold is PINNED at create/fold time (in ROWS_JSON +
+     * {@code POLICY_BODY_UNSIGNED}) and its {@code Policy:1} re-sign is authorized by the EXISTING M0
+     * quorum (available now) — so it does NOT need the assignments committed first. This lets the admin
+     * select the tide-realm-admin assignments AND sign the resulting policy CR together in ONE enclave
+     * session (no grey-out, no 412 DEPENDENCY_NOT_MET). If the policy happens to commit before the
+     * assignments in a batch, the new (higher) threshold is briefly in effect before the new admins
+     * land — that is FAIL-SAFE (more approvers required, not fewer) and self-resolves when the
+     * assignments commit. The enclave-open re-ensure also self-corrects: if the pending assignment set
+     * changes before signing, the next open folds the policy CR to the new pinned threshold (or cancels
+     * it if it nets back to the encoded value).
      *
      * <p>This method NEVER signs. The Policy:1 sign happens at the policy CR's own commit
      * ({@link #replayRegenAdminPolicy}). Because it runs as a side-effect of a read (the enclave
@@ -1004,24 +1016,34 @@ public class TideAttestor implements IgaAttestor {
             // FOLD: rewrite the pending CR's payload to the projected threshold and CLEAR its
             // authorizations — the new threshold demands a fresh quorum; the phase-1 carrier
             // (REQUEST_MODEL) is now stale. Idempotent: re-opening with the SAME pending set
-            // recomputes the SAME bytes and the SAME dependsOn, so nothing observably changes.
+            // recomputes the SAME bytes, so nothing observably changes.
+            //
+            // NO dependsOn: the policy CR's NEW threshold is PINNED in ROWS_JSON / POLICY_BODY_UNSIGNED
+            // at fold time and its Policy:1 re-sign is authorized by the EXISTING M0 quorum (available
+            // now), so it does NOT need the assignment CRs committed first. Removing the dependsOn lets
+            // it be approved/signed in the SAME enclave session as the assignments (no grey-out, no 412).
+            // We CLEAR any stale dependsOn left by an older CR so a folded carrier is unblocked too.
             pending.setRowsJson(serializeRows(rows));
             pending.setRequestModel(null);
             clearAuthorizations(em, pending);
-            pending.setDependsOnList(new ArrayList<>(assignmentCrIds));
+            pending.setDependsOnList(new ArrayList<>());
             em.flush();
             log.infof("IGA threshold-policy CR folded at enclave open: realm %s tide-realm-admin "
                     + "threshold %d -> %d (net pending delta %+d, projected admins %d); pending CR %s "
-                    + "rewritten, authorizations cleared, dependsOn = %s.",
+                    + "rewritten, authorizations cleared, dependsOn cleared (pinned threshold; "
+                    + "signable alongside assignments %s).",
                     realm.getName(), oldThreshold, newThreshold, netPending, postCommitCount,
                     pending.getId(), assignmentCrIds);
             return pending.getId();
         }
 
+        // NO dependsOn on create either (same rationale as the fold path): the new threshold is pinned
+        // and the Policy:1 re-sign uses the existing M0 quorum — independently signable/committable.
         IgaChangeRequestEntity created = service.create(realm, ENTITY_TYPE_ADMIN_POLICY, tideRoleId,
-                ACTION_REGEN_ADMIN_POLICY, rows, requestedBy, new ArrayList<>(assignmentCrIds));
+                ACTION_REGEN_ADMIN_POLICY, rows, requestedBy, new ArrayList<>());
         log.infof("IGA threshold-policy CR created at enclave open: realm %s tide-realm-admin "
-                + "threshold %d -> %d (net pending delta %+d, projected admins %d); CR %s dependsOn %s.",
+                + "threshold %d -> %d (net pending delta %+d, projected admins %d); CR %s (no dependsOn — "
+                + "pinned threshold, signable alongside assignments %s).",
                 realm.getName(), oldThreshold, newThreshold, netPending, postCommitCount,
                 created.getId(), assignmentCrIds);
         return created.getId();
@@ -1053,11 +1075,12 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * Every PENDING tide-realm-admin GRANT/REVOKE assignment CR id in the realm (the CRs the
-     * projected-threshold REGEN policy must {@code dependsOn} so it can only commit AFTER the
-     * membership set is final). Order is deterministic (grants then revokes, each in the JPQL's
-     * order) so the {@code dependsOn} list and the fold-comparison are stable across repeated
-     * enclave opens — the idempotency contract.
+     * Every PENDING tide-realm-admin GRANT/REVOKE assignment CR id in the realm — the membership
+     * set whose NET delta projects the policy threshold. (No longer used as the policy CR's
+     * {@code dependsOn}: the policy CR is intentionally uncoupled so it can be signed in the same
+     * enclave session as the assignments. Still used to attribute the policy CR's {@code requestedBy}
+     * and for diagnostic logging.) Order is deterministic (grants then revokes, each in the JPQL's
+     * order) so the projection and the fold-comparison are stable across repeated enclave opens.
      */
     private List<String> pendingTideRealmAdminAssignmentCrIds(KeycloakSession session,
                                                               RealmModel realm, String tideRoleId) {
