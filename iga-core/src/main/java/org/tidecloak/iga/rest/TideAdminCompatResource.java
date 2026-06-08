@@ -31,10 +31,14 @@ import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.keycloak.storage.UserStorageUtil;
 import org.tidecloak.iga.crypto.SecretKeys;
 import org.tidecloak.iga.replay.SidecarCapExceededException;
+import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.services.IgaAdoptCancel;
 import org.tidecloak.iga.services.IgaAdoptScan;
+import org.tidecloak.iga.services.IgaFirstAdminAutoCommit;
 
 import jakarta.persistence.EntityManager;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -290,6 +294,41 @@ public class TideAdminCompatResource {
                 // removed: the toggle must return promptly and no signing happens here.
                 // The login read fail-closes until the admin approves the ADOPT CRs;
                 // that is the intended manual-signing model.
+
+                // firstAdmin baseline-config AUTO-COMMIT (Option A). On a fresh realm
+                // while it is still in firstAdmin mode, the default/baseline settings &
+                // configuration CRs (the ALLOW-LIST in IgaFirstAdminAutoCommit:
+                // ADOPT_*, realm-attribute/config, default-scope/group, client-scope,
+                // client/role/group creation, protocol mappers, and a BENIGN
+                // default-role ADD_COMPOSITE) are auto-approved + auto-committed here
+                // — the firstAdmin never has to manually authorize+commit default config.
+                // The sweep is double-gated (firstAdmin mode AND the firstAdmin VRK pack
+                // active, the SAME isRealSigningCapableRealm probe the commit-time
+                // producer-column stamper uses) and a no-op once the realm flips to
+                // multiAdmin. Governed actions (CREATE_USER / GRANT_ROLES / privileged
+                // composites) are EXCLUDED and stay PENDING for the normal manual flow.
+                // If the VRK is not active the sweep is SKIPPED entirely (no stub stamps,
+                // no rollback) and the CRs stay PENDING. The sweep reuses the hardened,
+                // mutex-guarded bulk authorize+commit engine (IgaAdminResource.bulkAuthorize
+                // -> processOneCr -> stampProducerUnitColumns + convergeAfterCommit), so
+                // MF2 (DefaultRoleCompositeGuard) and the per-CR PENDING re-check (which
+                // re-asserts firstAdmin via isAutoCommittable filtering before the request)
+                // are inherited verbatim. Best-effort: a sweep failure must never abort
+                // the toggle (the attribute is committed and the response is about to send).
+                try {
+                    IgaFirstAdminAutoCommit.SweepResult sweep = runFirstAdminAutoCommitSweep();
+                    if (sweep != null) {
+                        body.put("autoCommit", sweep.toMap());
+                    }
+                } catch (RuntimeException sweepEx) {
+                    logger.errorf(sweepEx, "IGA toggle-on firstAdmin auto-commit sweep FAILED for realm %s "
+                            + "— toggle remains enabled; baseline-config CRs stay PENDING for manual handling.",
+                            realm.getName());
+                    Map<String, Object> sweepErr = new LinkedHashMap<>();
+                    sweepErr.put("error", sweepEx.getClass().getSimpleName());
+                    sweepErr.put("message", String.valueOf(sweepEx.getMessage()));
+                    body.put("autoCommit", sweepErr);
+                }
 
                 String warning = buildAdminCoverageWarning(session, realm);
                 if (warning != null) {
@@ -896,6 +935,78 @@ public class TideAdminCompatResource {
         try {
             if (auth != null && auth.adminAuth() != null && auth.adminAuth().getUser() != null) {
                 return auth.adminAuth().getUser().getId();
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /**
+     * Drive the firstAdmin baseline-config auto-commit sweep on the OFF→ON toggle
+     * tail (Option A). Delegates all gating + classification to
+     * {@link IgaFirstAdminAutoCommit#sweep}: the two gates (firstAdmin mode + the
+     * firstAdmin VRK pack active) and the allow-list / MF2 per-CR filter live there;
+     * this method only assembles the inputs and provides the engine.
+     *
+     * <p>Candidate CRs are fetched as the PENDING CRs whose action type is in the
+     * baseline-config allow-list (so governed CRs — CREATE_USER, GRANT_ROLES, etc. —
+     * are never even loaded); {@code IgaFirstAdminAutoCommit.isAutoCommittable} then
+     * applies the ADD_COMPOSITE default-role + MF2 fine filter. The injected
+     * {@link IgaFirstAdminAutoCommit.BulkEngine} delegates to the SAME hardened
+     * {@code IgaAdminResource.bulkAuthorize} engine the admin UI's bulk-approve uses
+     * (per-realm {@code IgaBulkLock}, per-CR PENDING re-check, producer-column
+     * stamping, full-closure backfill), constructed with the toggle's own
+     * {@code session}/{@code realm}/{@code auth} so {@code requireManageRealm} and the
+     * firstAdmin signer resolve identically.</p>
+     *
+     * <p>Returns {@code null} only if there is nothing to do at the gate level (the
+     * gates short-circuit inside {@code sweep}, which still returns a SweepResult);
+     * never throws for a normal skip — only a genuine engine failure propagates and
+     * is caught by the caller as best-effort.</p>
+     */
+    private IgaFirstAdminAutoCommit.SweepResult runFirstAdminAutoCommitSweep() {
+        IgaChangeRequestService service = new IgaChangeRequestService(
+                session.getProvider(JpaConnectionProvider.class).getEntityManager(), session);
+        // Pull only the baseline-config allow-list action types as candidates (governed
+        // CRs are never loaded). High limit — a fresh-realm provisioning closure is well
+        // under this; the per-CR MF2/default-role filter happens in isAutoCommittable.
+        List<String> allowList = new ArrayList<>(IgaFirstAdminAutoCommit.BASELINE_CONFIG_ACTION_TYPES);
+        List<IgaChangeRequestEntity> candidates =
+                service.listPendingByActionTypeIn(realm.getId(), allowList, null, 100_000);
+
+        UserModel admin = currentUserModel();
+
+        IgaFirstAdminAutoCommit.BulkEngine engine = actionTypeIn -> {
+            Map<String, Object> bulkBody = new LinkedHashMap<>();
+            bulkBody.put("actionTypeIn", actionTypeIn);
+            bulkBody.put("limit", 1000); // bulk endpoint hard cap
+            Response resp = new IgaAdminResource(session, realm, auth).bulkAuthorize(bulkBody);
+            Object entity = resp.getEntity();
+            if (entity instanceof Map<?, ?> respMap) {
+                Object results = respMap.get("results");
+                if (results instanceof List<?> list) {
+                    List<Map<String, Object>> out = new ArrayList<>();
+                    for (Object o : list) {
+                        if (o instanceof Map<?, ?> m) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> cast = (Map<String, Object>) m;
+                            out.add(cast);
+                        }
+                    }
+                    return out;
+                }
+            }
+            return List.of();
+        };
+
+        return IgaFirstAdminAutoCommit.sweep(session, realm, admin, candidates, engine);
+    }
+
+    /** Best-effort current admin {@link UserModel} for the auto-commit sweep signer. */
+    private UserModel currentUserModel() {
+        try {
+            if (auth != null && auth.adminAuth() != null) {
+                return auth.adminAuth().getUser();
             }
         } catch (Exception ignored) {
         }
