@@ -63,6 +63,58 @@ public class IgaChangeRequestService {
     }
 
     /**
+     * Find the first PENDING change request for ({@code realmId}, {@code entityType},
+     * {@code entityId}) that is an <em>exact duplicate</em> of the proposed change:
+     * same {@code actionType} AND a row payload equal (key-for-key, ignoring order)
+     * to one of {@code rows}. Returns {@code null} when no such duplicate exists.
+     *
+     * <p>This distinguishes a genuine re-request of an already-pending action (the
+     * admin clicked "grant role X" twice → idempotent, surface the existing CR as a
+     * 202 "already pending") from a <em>different</em> pending change on the same
+     * entity (e.g. a pending grant of role Y, or a pending group join) which the
+     * per-entity {@link #findPending} guard treats as a conflict. The entity-keyed
+     * {@code findPending} alone cannot tell these apart — it matches ANY pending CR
+     * on the user regardless of action or target.</p>
+     */
+    public IgaChangeRequestEntity findDuplicatePending(String realmId, String entityType,
+                                                       String entityId, String actionType,
+                                                       List<Map<String, Object>> rows) {
+        TypedQuery<IgaChangeRequestEntity> query = em.createNamedQuery(
+                "IgaChangeRequest.findPendingByEntity", IgaChangeRequestEntity.class);
+        query.setParameter("realmId", realmId);
+        query.setParameter("entityType", entityType);
+        query.setParameter("entityId", entityId);
+        for (IgaChangeRequestEntity cr : query.getResultList()) {
+            if (!actionType.equals(cr.getActionType())) {
+                continue;
+            }
+            List<Map<String, Object>> existingRows = parseRows(cr.getRowsJson());
+            if (rowsContainAll(existingRows, rows)) {
+                return cr;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * True iff every map in {@code needles} is present (by equals) in {@code haystack}.
+     * Map equality is order-independent, so {@code {USER_ID,ROLE_ID}} rows compare
+     * structurally regardless of JSON key order.
+     */
+    private static boolean rowsContainAll(List<Map<String, Object>> haystack,
+                                          List<Map<String, Object>> needles) {
+        if (needles == null || needles.isEmpty()) {
+            return false;
+        }
+        for (Map<String, Object> needle : needles) {
+            if (haystack == null || !haystack.contains(needle)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Create a new change request for the given realm/entity.
      */
     public IgaChangeRequestEntity create(RealmModel realm, String entityType, String entityId,

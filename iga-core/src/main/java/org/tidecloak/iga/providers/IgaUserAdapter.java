@@ -1234,11 +1234,10 @@ public class IgaUserAdapter extends UserAdapter {
         }
         IgaChangeRequestService service = getService();
         String userId = getId();
-        checkNoPendingCr(service, userId);
+        List<Map<String, Object>> rows = List.of(Map.of("USER_ID", userId, "ROLE_ID", role.getId()));
+        guardOrAlreadyPending(service, userId, "GRANT_ROLES", rows);
         String requestedBy = getCurrentUserId();
-        service.create(realm, "USER", userId, "GRANT_ROLES",
-                List.of(Map.of("USER_ID", userId, "ROLE_ID", role.getId())),
-                requestedBy);
+        service.create(realm, "USER", userId, "GRANT_ROLES", rows, requestedBy);
     }
 
     @Override
@@ -1253,11 +1252,10 @@ public class IgaUserAdapter extends UserAdapter {
         }
         IgaChangeRequestService service = getService();
         String userId = getId();
-        checkNoPendingCr(service, userId);
+        List<Map<String, Object>> rows = List.of(Map.of("USER_ID", userId, "ROLE_ID", role.getId()));
+        guardOrAlreadyPending(service, userId, "REVOKE_ROLES", rows);
         String requestedBy = getCurrentUserId();
-        service.create(realm, "USER", userId, "REVOKE_ROLES",
-                List.of(Map.of("USER_ID", userId, "ROLE_ID", role.getId())),
-                requestedBy);
+        service.create(realm, "USER", userId, "REVOKE_ROLES", rows, requestedBy);
     }
 
     // -------------------------------------------------------------------------
@@ -1285,11 +1283,10 @@ public class IgaUserAdapter extends UserAdapter {
         }
         IgaChangeRequestService service = getService();
         String userId = getId();
-        checkNoPendingCr(service, userId);
+        List<Map<String, Object>> rows = List.of(Map.of("USER", userId, "GROUP", group.getId()));
+        guardOrAlreadyPending(service, userId, "JOIN_GROUPS", rows);
         String requestedBy = getCurrentUserId();
-        service.create(realm, "USER", userId, "JOIN_GROUPS",
-                List.of(Map.of("USER", userId, "GROUP", group.getId())),
-                requestedBy);
+        service.create(realm, "USER", userId, "JOIN_GROUPS", rows, requestedBy);
     }
 
     @Override
@@ -1308,11 +1305,10 @@ public class IgaUserAdapter extends UserAdapter {
         }
         IgaChangeRequestService service = getService();
         String userId = getId();
-        checkNoPendingCr(service, userId);
+        List<Map<String, Object>> rows = List.of(Map.of("USER", userId, "GROUP", group.getId()));
+        guardOrAlreadyPending(service, userId, "JOIN_GROUPS", rows);
         String requestedBy = getCurrentUserId();
-        service.create(realm, "USER", userId, "JOIN_GROUPS",
-                List.of(Map.of("USER", userId, "GROUP", group.getId())),
-                requestedBy);
+        service.create(realm, "USER", userId, "JOIN_GROUPS", rows, requestedBy);
     }
 
     @Override
@@ -1331,11 +1327,10 @@ public class IgaUserAdapter extends UserAdapter {
         }
         IgaChangeRequestService service = getService();
         String userId = getId();
-        checkNoPendingCr(service, userId);
+        List<Map<String, Object>> rows = List.of(Map.of("USER", userId, "GROUP", group.getId()));
+        guardOrAlreadyPending(service, userId, "LEAVE_GROUPS", rows);
         String requestedBy = getCurrentUserId();
-        service.create(realm, "USER", userId, "LEAVE_GROUPS",
-                List.of(Map.of("USER", userId, "GROUP", group.getId())),
-                requestedBy);
+        service.create(realm, "USER", userId, "LEAVE_GROUPS", rows, requestedBy);
     }
 
     // -------------------------------------------------------------------------
@@ -1489,9 +1484,30 @@ public class IgaUserAdapter extends UserAdapter {
         }
     }
 
-    private void checkNoPendingCr(IgaChangeRequestService service, String userId) {
+    /**
+     * Pending-CR guard for the relationship seams (GRANT_ROLES / REVOKE_ROLES /
+     * JOIN_GROUPS / LEAVE_GROUPS).
+     *
+     * <p>The plain entity-keyed {@link IgaChangeRequestService#findPending} can only
+     * tell that <em>some</em> pending CR exists on the user — it cannot distinguish
+     * a re-request of the SAME action (idempotent) from a genuinely different pending
+     * change. So this method first checks for an exact duplicate (same actionType +
+     * same target row): if found, it throws the HANDLED
+     * {@link IgaPendingApprovalException} (→ 202, pointing at the existing CR) so an
+     * admin re-doing an already-pending grant simply sees "already pending", never an
+     * error. Only a DIFFERENT pending CR on the same user raises
+     * {@link IgaConflictException} (now mapped to a clean 409, never an uncaught 500).</p>
+     */
+    private void guardOrAlreadyPending(IgaChangeRequestService service, String userId,
+                                       String actionType, List<Map<String, Object>> rows) {
+        var duplicate = service.findDuplicatePending(realm.getId(), "USER", userId, actionType, rows);
+        if (duplicate != null) {
+            // Idempotent: the exact same change is already awaiting approval.
+            throw new IgaPendingApprovalException(duplicate.getId(), "USER", actionType);
+        }
         var existing = service.findPending(realm.getId(), "USER", userId);
         if (existing != null) {
+            // A different pending change on this user legitimately blocks → 409.
             throw new IgaConflictException(existing.getId());
         }
     }
