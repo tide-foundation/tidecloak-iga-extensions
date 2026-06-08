@@ -435,37 +435,6 @@ public class IgaUserProvider extends JpaUserProvider {
         return false;
     }
 
-    /**
-     * Pure, unit-testable registration-FORM classifier. Given the live stack-frame
-     * signatures as {@code "<FQN>#<method>"} (any order), return true iff a
-     * {@link #KC_REGISTRATION_USER_CREATION} frame is present.
-     *
-     * <p>NOTE: this is the NARROW (registration-form-only) signal. The live
-     * default-role grant gate is now the ★ F2 ALLOW-LIST classifier
-     * {@link #isSelfEnrollmentFrame(java.util.List, boolean, boolean)} (RegOn-gated; grants
-     * only for the registration form OR a positive Tide-broker enrollment). This predicate
-     * is retained as the documented registration-form subset (a true here implies the
-     * allow-list grants too, given RegOn) and is exercised by the registration-form unit
-     * tests. Frame-list-driven so the partition is pinnable without a live
-     * {@link StackWalker}.</p>
-     */
-    static boolean isSelfRegistrationFrame(java.util.List<String> frameSignatures) {
-        if (frameSignatures == null) {
-            return false;
-        }
-        for (String sig : frameSignatures) {
-            if (sig == null) {
-                continue;
-            }
-            int hash = sig.lastIndexOf('#');
-            String cn = hash >= 0 ? sig.substring(0, hash) : sig;
-            if (KC_REGISTRATION_USER_CREATION.equals(cn)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     // addFederatedIdentity is NOT overridden — federated identities are IdP
     // brokering, not token claims, and are NOT governed. KC's
     // UsersResource.createUser:171 → RepresentationToModel.createFederatedIdentities

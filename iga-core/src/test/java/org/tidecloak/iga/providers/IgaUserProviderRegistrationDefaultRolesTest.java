@@ -37,9 +37,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * its CR commits and {@code IgaReplayDispatcher.replayCreateUser} D3 grants
  * default-roles at replay; granting at creation too would double-grant.</p>
  *
- * <p>These tests pin the pure, frame-list-driven classifier
- * {@link IgaUserProvider#isSelfRegistrationFrame} (the live {@link StackWalker}
- * cannot be mocked).</p>
+ * <p>These tests pin the pure, frame-list-driven ★ F2 ALLOW-LIST classifier
+ * {@link IgaUserProvider#isSelfEnrollmentFrame(java.util.List, boolean, boolean)}
+ * (the live {@link StackWalker} cannot be mocked).</p>
  */
 class IgaUserProviderRegistrationDefaultRolesTest {
 
@@ -52,93 +52,8 @@ class IgaUserProviderRegistrationDefaultRolesTest {
     private static final String ADMIN_RESOURCE =
             "org.keycloak.services.resources.admin.UsersResource";
 
-    // ── REGISTRATION: grant default-roles ────────────────────────────────────
-
-    @Test
-    void selfRegistrationStack_grantsDefaultRoles() {
-        // Live registration addUser stack (innermost first):
-        //   addUser ← DeclarativeUserProfileProvider$1.apply ← DefaultUserProfile.create
-        //   ← RegistrationUserCreation.success (:155 profile.create()).
-        List<String> frames = List.of(
-                PROFILE_FACTORY + "#apply",
-                DEFAULT_PROFILE + "#create",
-                REGISTRATION + "#success",
-                "org.keycloak.authentication.DefaultAuthenticationFlow#processAction");
-
-        assertTrue(IgaUserProvider.isSelfRegistrationFrame(frames),
-                "a RegistrationUserCreation frame in the stack must scope the "
-                        + "default-role grant ON (self-reg user holds default-roles → "
-                        + "token carries the account aud)");
-    }
-
-    @Test
-    void registrationFrameAnywhere_grantsDefaultRoles() {
-        // Defensive: the match is presence-anywhere, not immediate-caller — the
-        // profile factory sits between addUser and RegistrationUserCreation.
-        List<String> frames = List.of(
-                "org.keycloak.models.jpa.JpaUserProvider#addUser",
-                PROFILE_FACTORY + "#apply",
-                DEFAULT_PROFILE + "#create",
-                REGISTRATION + "#success");
-        assertTrue(IgaUserProvider.isSelfRegistrationFrame(frames));
-    }
-
-    // ── ADMIN-create: must NOT grant at creation ─────────────────────────────
-
-    @Test
-    void adminCreateStack_doesNotGrantDefaultRoles() {
-        // Admin-create goes through the SAME 1-arg addUser via profile.create(),
-        // but its entry frame is UsersResource#createUser, NOT RegistrationUserCreation.
-        // Its CR commits and the D3 replay grant assigns default-roles; granting at
-        // creation here would double-grant.
-        List<String> frames = List.of(
-                PROFILE_FACTORY + "#apply",
-                DEFAULT_PROFILE + "#create",
-                ADMIN_RESOURCE + "#createUser");
-
-        assertFalse(IgaUserProvider.isSelfRegistrationFrame(frames),
-                "admin-create (UsersResource#createUser) must NOT grant default-roles "
-                        + "at creation — its CR commits and D3 replay grants them");
-    }
-
-    // ── OTHER internal callers: must NOT grant ───────────────────────────────
-
-    @Test
-    void serviceAccountCreate_doesNotGrantDefaultRoles() {
-        List<String> frames = List.of(
-                "org.keycloak.services.managers.ClientManager#enableServiceAccount");
-        assertFalse(IgaUserProvider.isSelfRegistrationFrame(frames),
-                "service-account user-create must NOT be classified as self-registration");
-    }
-
-    @Test
-    void idpBrokerCreate_doesNotGrantDefaultRoles() {
-        List<String> frames = List.of(
-                "org.keycloak.authentication.authenticators.broker."
-                        + "IdpCreateUserIfUniqueAuthenticator#authenticateImpl");
-        assertFalse(IgaUserProvider.isSelfRegistrationFrame(frames),
-                "IdP-broker first-login user-create must NOT be classified as self-registration");
-    }
-
-    @Test
-    void tokenExchangeCreate_doesNotGrantDefaultRoles() {
-        List<String> frames = List.of(
-                "org.keycloak.protocol.oidc.tokenexchange."
-                        + "AbstractTokenExchangeProvider#exchangeToIdentityToken");
-        assertFalse(IgaUserProvider.isSelfRegistrationFrame(frames),
-                "token-exchange user-create must NOT be classified as self-registration");
-    }
-
-    @Test
-    void emptyOrNullStack_doesNotGrant() {
-        assertFalse(IgaUserProvider.isSelfRegistrationFrame(List.of()),
-                "an empty stack must NOT scope the grant on");
-        assertFalse(IgaUserProvider.isSelfRegistrationFrame(null),
-                "a null stack must NOT scope the grant on");
-    }
-
     // ═════════════════════════════════════════════════════════════════════════
-    // Round 3 — ★ F2 ALLOW-LIST self-enrollment classifier (isSelfEnrollmentFrame).
+    // ★ F2 ALLOW-LIST self-enrollment classifier (isSelfEnrollmentFrame).
     //
     // The former gate was a DENY-list (grant under RegOn for everything except
     // admin-create + service-account). That ALSO granted to token-exchange user
