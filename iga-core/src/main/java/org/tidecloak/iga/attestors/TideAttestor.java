@@ -8,6 +8,7 @@ import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientScopeModel;
+import org.keycloak.models.KeycloakContext;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.OrganizationModel;
 import org.keycloak.models.RealmModel;
@@ -412,6 +413,17 @@ public class TideAttestor implements IgaAttestor {
         // tide-realm-admin role — the committed/stamped grants.
         Set<String> committedAdminUserIds = committedTideAdminUserIds(session, realm, tideAdmin.getId());
         if (committedAdminUserIds.isEmpty()) return 0;
+
+        // Defensive: ensure the realm is bound on the session context before the user-stream
+        // lookup. In KC 26.5.5, session.users().getRoleMembersStream hits the Infinispan
+        // organization-provider guard, which reads session.getContext().getRealm() and throws
+        // "Session not bound to a realm" if it is null. Callers running inside a fresh
+        // runJobInTransaction session may not have bound the realm; bind it here so any
+        // unbound caller is safe.
+        KeycloakContext ctx = session.getContext();
+        if (ctx != null && ctx.getRealm() == null) {
+            ctx.setRealm(realm);
+        }
 
         return (int) session.users().getRoleMembersStream(realm, tideAdmin)
                 .filter(UserModel::isEnabled)

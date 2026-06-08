@@ -217,6 +217,13 @@ public class IgaAdminResource {
                 if (newRealm == null) {
                     return;
                 }
+                // Bind the realm onto the fresh job session's KeycloakContext. Without this,
+                // downstream user-stream lookups (countActiveTideRealmAdmins →
+                // session.users().getRoleMembersStream) hit the Infinispan org-provider guard
+                // reading session.getContext().getRealm() and throw
+                // "Session not bound to a realm", which the wrapper's best-effort try/catch
+                // then swallows as a WARN — so the policy CR is never created. Mirror IgaAdoptScan.
+                newSession.getContext().setRealm(newRealm);
                 new TideAttestor(newSession).ensureThresholdPolicyCrForEnclave(newSession, newRealm);
             });
         } catch (RuntimeException ex) {

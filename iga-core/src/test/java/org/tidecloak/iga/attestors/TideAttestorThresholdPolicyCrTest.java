@@ -267,6 +267,50 @@ class TideAttestorThresholdPolicyCrTest {
     }
 
     @Test
+    void enclaveOpen_bindsRealmOnUnboundContext_andStillEmitsCr() {
+        // REGRESSION for the swallowed "Session not bound to a realm": the enclave-open ensure
+        // runs in a fresh runJobInTransaction session whose KeycloakContext has NO realm bound.
+        // countActiveTideRealmAdmins → session.users().getRoleMembersStream then hits the
+        // Infinispan org-provider guard reading session.getContext().getRealm() == null and
+        // throws, which the wrapper swallows as a WARN — so NO policy CR was created.
+        // With the defensive bind, the ensure must (a) bind the passed realm onto the unbound
+        // context and (b) still emit the REGEN_ADMIN_POLICY CR.
+        //
+        // Stateful context: getRealm() is null until setRealm(x) is called, then returns x —
+        // mirroring the real binding so the user-stream path observes the bound realm.
+        org.keycloak.models.KeycloakContext ctx = mock(org.keycloak.models.KeycloakContext.class);
+        java.util.concurrent.atomic.AtomicReference<RealmModel> bound =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        org.mockito.Mockito.doAnswer(inv -> { bound.set(inv.getArgument(0)); return null; })
+                .when(ctx).setRealm(any());
+        when(ctx.getRealm()).thenAnswer(inv -> bound.get());
+        when(session.getContext()).thenReturn(ctx);
+
+        // Same 2 committed admins + 1 pending grant → projected 3 → floor(0.7*3)=2; encoded 1 MOVES.
+        stubMultiAdminMode();
+        stubPolicyLookup(policyAtThreshold(1));
+        stubFindPending(null);
+        stubActiveAdminCount(2);
+        stubPendingAssignments(1, 0);
+
+        // Context starts unbound — the exact precondition that threw before the fix.
+        org.junit.jupiter.api.Assertions.assertNull(ctx.getRealm(),
+                "precondition: the fresh job session context is unbound");
+
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
+
+        // The defensive bind ran: the passed realm is now bound on the context.
+        verify(ctx).setRealm(realm);
+        org.junit.jupiter.api.Assertions.assertSame(realm, ctx.getRealm(),
+                "the realm must be bound on the context before the user-stream lookup");
+
+        // And the CR is still created (the swallowed-WARN path no longer blocks it).
+        ArgumentCaptor<IgaChangeRequestEntity> captor = ArgumentCaptor.forClass(IgaChangeRequestEntity.class);
+        verify(em, times(1)).persist(captor.capture());
+        assertEquals("REGEN_ADMIN_POLICY", captor.getValue().getActionType());
+    }
+
+    @Test
     void enclaveOpen_noCr_whenNoPendingAssignmentsAndNoPolicyCr() {
         // No pending tide-realm-admin membership change and no lingering policy CR → no-op.
         stubMultiAdminMode();
