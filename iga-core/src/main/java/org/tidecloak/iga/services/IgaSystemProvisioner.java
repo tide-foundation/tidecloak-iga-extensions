@@ -409,6 +409,17 @@ public final class IgaSystemProvisioner {
      * before the scope physically exists.
      */
     private static String deterministicScopeId(String realmId) {
+        return deterministicTideClaimsScopeId(realmId);
+    }
+
+    /**
+     * Public, side-effect-free accessor for the deterministic tide-claims scope id in
+     * {@code realmId} ({@code UUID.nameUUIDFromBytes("tide-claims|" + realmId)}). Used by the
+     * firstAdmin auto-commit sweep to recognise an ASSIGN_SCOPE CR that targets the tide-claims
+     * scope even BEFORE the scope physically exists (the create + assign are filed in one pass, so
+     * the assign's SCOPE_ID is this deterministic id and cannot yet be resolved to a live scope).
+     */
+    public static String deterministicTideClaimsScopeId(String realmId) {
         return UUID.nameUUIDFromBytes(
                 (TIDE_CLAIMS_ID_PREFIX + realmId).getBytes(StandardCharsets.UTF_8)).toString();
     }

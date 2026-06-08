@@ -145,16 +145,27 @@ public final class IgaFirstAdminAutoCommit {
 
             // Default-role composite — ONLY when the parent is default-roles-<realm>
             // AND it stays benign (MF2). See isAutoCommittable.
-            "ADD_COMPOSITE"
+            "ADD_COMPOSITE",
+
+            // tide-claims scope attach to a SYSTEM/stock client — ON THE ALLOW-LIST but
+            // additionally gated PER CR by isSystemTideClaimsAssignScope: only an ASSIGN_SCOPE
+            // CR that attaches the tide-claims scope to a built-in client (account, account-
+            // console, admin-cli, broker, realm-management, security-admin-console) auto-commits.
+            // These are SYSTEM/baseline config filed by IgaSystemProvisioner during provisioning,
+            // NOT admin-authored — and they wedge VRK keygen (confirmInitialVRK's "any pending
+            // ASSIGN_SCOPE-on-CLIENT" guard) if they linger PENDING. An ASSIGN_SCOPE CR for ANY
+            // other scope, or for a CUSTOM (non-built-in) client, stays MANUAL.
+            "ASSIGN_SCOPE"
 
             // DELIBERATELY EXCLUDED (narrowed scope, user correction 2026-06-08): the
             // action types that create ADMIN-AUTHORED custom entities —
             //   CREATE_CLIENT, CREATE_ROLE, CREATE_GROUP, CREATE_CLIENT_SCOPE,
-            //   ADD_PROTOCOL_MAPPER, ASSIGN_SCOPE, SCOPE_ADD_ROLE, SCOPE_MAPPING_ADD.
+            //   ADD_PROTOCOL_MAPPER, SCOPE_ADD_ROLE, SCOPE_MAPPING_ADD.
             // These stay MANUAL even during firstAdmin (only realm DEFAULTS auto-sign).
             // Stock default entities are normally created IGA-OFF and surface via ADOPT_*
             // (covered above, system-gated); we do NOT special-case a stock entity that an
-            // admin happens to create under IGA-on — default to manual.
+            // admin happens to create under IGA-on — default to manual. ASSIGN_SCOPE is on the
+            // list but TIGHTLY per-CR gated (system client + tide-claims scope only).
     );
 
     private IgaFirstAdminAutoCommit() {
@@ -268,12 +279,83 @@ public final class IgaFirstAdminAutoCommit {
     }
 
     /**
+     * Per-CR system gate for an {@code ASSIGN_SCOPE} CR. Auto-eligibility requires BOTH:
+     * <ul>
+     *   <li>the assigned scope is the Tide-identity {@code tide-claims} scope — matched either by
+     *       resolving the CR's {@code SCOPE_ID} to a live {@link org.keycloak.models.ClientScopeModel}
+     *       whose name is {@link IgaSystemEntityFilter#TIDE_CLAIMS_SCOPE_NAME}, OR (for the one-pass
+     *       provisioning case where the scope's CREATE_CLIENT_SCOPE has not committed yet) the
+     *       {@code SCOPE_ID} equals the deterministic tide-claims scope id
+     *       ({@link IgaSystemProvisioner#deterministicTideClaimsScopeId}); AND</li>
+     *   <li>the target client is a BUILT-IN / stock client
+     *       ({@link IgaSystemEntityFilter#BUILTIN_CLIENT_IDS} — account, account-console, admin-cli,
+     *       broker, realm-management, security-admin-console), matched on the CR's {@code CLIENT_ID}
+     *       (human client id).</li>
+     * </ul>
+     * Any ASSIGN_SCOPE of a different scope, or onto a custom (non-built-in) client, returns
+     * {@code false} → stays MANUAL. These tide-claims-on-system-client assignments are SYSTEM
+     * baseline config filed by {@link IgaSystemProvisioner}, not admin-authored; leaving them
+     * PENDING wedges VRK keygen ({@code confirmInitialVRK}).
+     */
+    static boolean isSystemTideClaimsAssignScope(KeycloakSession session, RealmModel realm,
+                                                 IgaChangeRequestEntity cr) {
+        if (cr == null || realm == null) {
+            return false;
+        }
+        String rowsJson = cr.getRowsJson();
+        if (rowsJson == null || rowsJson.isBlank()) {
+            return false;
+        }
+        try {
+            List<Map<String, Object>> rows = MAPPER.readValue(rowsJson, LIST_MAP_REF);
+            if (rows == null) {
+                return false;
+            }
+            String deterministicTideClaimsId =
+                    IgaSystemProvisioner.deterministicTideClaimsScopeId(realm.getId());
+            for (Map<String, Object> row : rows) {
+                if (row == null) continue;
+                Object scopeIdObj = row.get("SCOPE_ID");
+                Object clientIdObj = row.get("CLIENT_ID");
+                if (scopeIdObj == null || clientIdObj == null) {
+                    return false;
+                }
+                String scopeId = scopeIdObj.toString();
+                String clientId = clientIdObj.toString();
+                // Client must be a built-in/stock client.
+                if (!IgaSystemEntityFilter.BUILTIN_CLIENT_IDS.contains(clientId)) {
+                    return false;
+                }
+                // Scope must be tide-claims: live-resolve by id, else match the deterministic id.
+                boolean isTideClaims = deterministicTideClaimsId.equals(scopeId);
+                if (!isTideClaims) {
+                    var scope = realm.getClientScopeById(scopeId);
+                    isTideClaims = scope != null
+                            && IgaSystemEntityFilter.TIDE_CLAIMS_SCOPE_NAME.equals(scope.getName());
+                }
+                if (!isTideClaims) {
+                    return false;
+                }
+            }
+            // All rows passed (tide-claims scope onto a built-in client).
+            return !rows.isEmpty();
+        } catch (Exception parseFail) {
+            log.debugf(parseFail, "IGA firstAdmin auto-commit: failed to parse ASSIGN_SCOPE rows for CR %s",
+                    cr.getId());
+            return false;
+        }
+    }
+
+    /**
      * Full per-CR auto-commit eligibility decision. A CR is auto-committable iff:
      * <ul>
      *   <li>its action type is on the {@link #BASELINE_CONFIG_ACTION_TYPES} allow-list; AND</li>
      *   <li>if {@code ADOPT_*}: the target is a SYSTEM/stock-default entity (the
      *       scan marked it {@link #ROWS_KEY_ATTESTATION_ONLY}). An ADOPT CR for a
      *       manually-added (non-system) entity stays manual; AND</li>
+     *   <li>if {@code ASSIGN_SCOPE}: the assigned scope is {@code tide-claims} AND the target
+     *       client is a built-in/stock client ({@link #isSystemTideClaimsAssignScope}). Any other
+     *       scope assignment (custom client, or any non-tide-claims scope) stays manual; AND</li>
      *   <li>if {@code ADD_COMPOSITE}: its parent is the realm default-role AND the
      *       resulting default-role composite is still benign per
      *       {@link DefaultRoleCompositeGuard} (MF2 fail-closed — a privileged child
@@ -293,6 +375,13 @@ public final class IgaFirstAdminAutoCommit {
             // Only a system/stock-default ADOPT is baseline config; a manually-added
             // (non-system) entity's ADOPT stays manual.
             if (!isSystemDefaultAdopt(cr)) {
+                return false;
+            }
+        }
+        if ("ASSIGN_SCOPE".equals(actionType)) {
+            // Only the tide-claims scope onto a built-in/stock client is baseline config; any
+            // other scope assignment (custom client / non-tide-claims scope) stays manual.
+            if (!isSystemTideClaimsAssignScope(session, realm, cr)) {
                 return false;
             }
         }

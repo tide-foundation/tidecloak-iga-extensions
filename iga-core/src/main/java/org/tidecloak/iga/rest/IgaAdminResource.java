@@ -18,6 +18,7 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.services.resources.admin.AdminEventBuilder;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
@@ -164,6 +165,18 @@ public class IgaAdminResource {
         auth.realm().requireManageRealm();
 
         String effectiveStatus = (status != null && !status.isBlank()) ? status : "PENDING";
+
+        // Approval-enclave open: when the admin lists the PENDING change requests to approve
+        // them, ensure the steady-state multiAdmin threshold-policy CR exists (or is folded /
+        // cancelled) for the CURRENT pending tide-realm-admin membership set. This is the single
+        // source of truth for the REGEN_ADMIN_POLICY CR — robust to tide-realm-admin grants
+        // captured before the hook existed and grants that coalesce into an existing pending CR
+        // (neither reaches the capture path). Runs in its OWN transaction and swallows any error
+        // so it can never poison the read; it is idempotent across repeated enclave opens.
+        if ("PENDING".equals(effectiveStatus)) {
+            ensureThresholdPolicyCrForEnclave();
+        }
+
         EntityManager em = getEm();
 
         TypedQuery<IgaChangeRequestEntity> query = em.createNamedQuery(
@@ -187,6 +200,31 @@ public class IgaAdminResource {
         return results.stream()
                 .map(cr -> toRepresentation(cr, service))
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Approval-enclave-open ensure of the steady-state multiAdmin threshold-policy CR. Runs in an
+     * INDEPENDENT {@link KeycloakModelUtils#runJobInTransaction} session (so it commits its own
+     * create/fold/cancel without entangling the surrounding read tx) and SWALLOWS any error (so a
+     * failed ensure can never break the pending-CR listing the admin needs). The ensure itself is
+     * a no-op for non-multiAdmin realms and idempotent across repeated opens
+     * ({@link TideAttestor#ensureThresholdPolicyCrForEnclave}).
+     */
+    private void ensureThresholdPolicyCrForEnclave() {
+        try {
+            KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(), newSession -> {
+                RealmModel newRealm = newSession.realms().getRealm(realm.getId());
+                if (newRealm == null) {
+                    return;
+                }
+                new TideAttestor(newSession).ensureThresholdPolicyCrForEnclave(newSession, newRealm);
+            });
+        } catch (RuntimeException ex) {
+            // Best-effort: never let the policy-CR ensure break the enclave listing. The next
+            // enclave open re-attempts it (idempotent).
+            log.warnf(ex, "IGA threshold-policy CR ensure at enclave open failed for realm %s "
+                    + "(listing unaffected); will retry on next open.", realm.getName());
+        }
     }
 
     // -------------------------------------------------------------------------

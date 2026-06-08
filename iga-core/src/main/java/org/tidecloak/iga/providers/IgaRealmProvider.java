@@ -596,6 +596,25 @@ public class IgaRealmProvider extends JpaRealmProvider {
             return;
         }
 
+        // SYSTEM baseline-config suppression (firstAdmin only): the tide-claims identity scope
+        // being attached to a BUILT-IN/stock client (account, account-console, admin-cli, broker,
+        // realm-management, security-admin-console) is system/baseline config filed by the
+        // IgaSystemProvisioner backfill / re-applied idempotently by VendorResource keygen
+        // (confirmInitialVRK → provisionTideClaimsScope) — NOT an admin-authored governed change.
+        // Capturing-and-throwing it here (IgaPendingApprovalException) WEDGES VRK keygen. While the
+        // realm is in firstAdmin (the single-signer bootstrap window), apply it DIRECTLY instead —
+        // it lands in the un-governed baseline the firstAdmin signer / ADOPT scan already attests,
+        // exactly like the client-creation-path scope links above. Post-flip (multiAdmin) this is a
+        // no-op and the normal governed capture below applies. Gate is tight: ALL scopes must be
+        // tide-claims AND the client must be built-in; anything else falls through to capture.
+        if (isSystemTideClaimsAttachInFirstAdmin(realm, client, clientScopes)) {
+            log.infof("IGA ASSIGN_SCOPE auto-applied (firstAdmin system baseline): tide-claims scope "
+                    + "onto built-in client %s (uuid=%s) — not captured (would wedge keygen).",
+                    client.getClientId(), client.getId());
+            super.addClientScopes(realm, client, clientScopes, defaultScope);
+            return;
+        }
+
         // Governed admin-initiated attach: emit ONE ASSIGN_SCOPE CR carrying all
         // scopes as multiple rows, then defer persistence to commit/replay.
         String clientUuid = client.getId();
@@ -615,6 +634,36 @@ public class IgaRealmProvider extends JpaRealmProvider {
         log.debugf("IGA capture ASSIGN_SCOPE: client uuid=%s clientId=%s — %d scope(s) "
                 + "in one CR (defaultScope=%s)", clientUuid, clientId, rows.size(), defaultScope);
         recordAndThrow(realm, "CLIENT", clientUuid, "ASSIGN_SCOPE", rows);
+    }
+
+    /**
+     * True iff this is the SYSTEM tide-claims baseline attach that firstAdmin should apply
+     * directly rather than capture: the realm is in firstAdmin mode AND the target client is a
+     * built-in/stock client ({@link org.tidecloak.iga.services.IgaSystemEntityFilter#BUILTIN_CLIENT_IDS})
+     * AND every scope being attached is the {@code tide-claims} identity scope. Any other
+     * combination (a custom client, or any non-tide-claims scope in the set) returns {@code false}
+     * → normal governed capture. Mirrors the {@code IgaFirstAdminAutoCommit} ASSIGN_SCOPE gate so
+     * the inline-applied set and the auto-committable set are the same shape.
+     */
+    private boolean isSystemTideClaimsAttachInFirstAdmin(RealmModel realm, ClientModel client,
+                                                         Set<ClientScopeModel> clientScopes) {
+        if (client == null || clientScopes == null || clientScopes.isEmpty()) {
+            return false;
+        }
+        if (!org.tidecloak.iga.services.IgaSystemEntityFilter.BUILTIN_CLIENT_IDS
+                .contains(client.getClientId())) {
+            return false;
+        }
+        if (!org.tidecloak.iga.attestors.TideAttestor.isFirstAdminMode(igaSession, realm)) {
+            return false;
+        }
+        for (ClientScopeModel scope : clientScopes) {
+            if (scope == null || !org.tidecloak.iga.services.IgaSystemEntityFilter.TIDE_CLAIMS_SCOPE_NAME
+                    .equals(scope.getName())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override

@@ -32,7 +32,11 @@ import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 class IgaFirstAdminAutoCommitTest {
 
     private static final String REALM = "myrealm";
+    private static final String REALM_ID = "myrealm-uuid";
     private static final String DEFAULT_ROLE_ID = "default-role-uuid";
+    /** The deterministic tide-claims scope id for REALM_ID (matches the backfill SCOPE_ID). */
+    private static final String TIDE_CLAIMS_SCOPE_ID =
+            IgaSystemProvisioner.deterministicTideClaimsScopeId(REALM_ID);
 
     // ─────────────────────────────────────────────────────────────────────────
     // Pure allow-list classifier
@@ -85,12 +89,51 @@ class IgaFirstAdminAutoCommitTest {
                 "manually-added client-scope → manual");
         assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("ADD_PROTOCOL_MAPPER"),
                 "manually-added protocol mapper → manual");
-        assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("ASSIGN_SCOPE"),
-                "client scope assignment → manual");
         assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("SCOPE_ADD_ROLE"),
                 "scope→role → manual");
         assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("SCOPE_MAPPING_ADD"),
                 "scope-mapping → manual");
+        // NOTE: ASSIGN_SCOPE is on the allow-list but TIGHTLY per-CR gated to the tide-claims
+        // scope onto a built-in/stock client (system backfill) — see the dedicated tests below.
+        // It is NOT a blanket-allowed action type.
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ASSIGN_SCOPE — tide-claims-on-system-client gate (FIX 2)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Test
+    void assignScope_tideClaimsOnSystemClient_isAutoCommittable() {
+        // The tide-claims scope onto a built-in/stock client (the IgaSystemProvisioner backfill)
+        // is SYSTEM/baseline config → auto-committable in firstAdmin so it never wedges keygen.
+        KeycloakSession session = mock(KeycloakSession.class);
+        RealmModel realm = tideClaimsRealm();
+        IgaChangeRequestEntity cr = assignScopeCr(
+                "assign-sys", "account", TIDE_CLAIMS_SCOPE_ID); // built-in client + tide-claims scope
+        assertTrue(IgaFirstAdminAutoCommit.isAutoCommittable(session, realm, cr),
+                "tide-claims ASSIGN_SCOPE onto a built-in client is system baseline config → auto");
+    }
+
+    @Test
+    void assignScope_tideClaimsOnCustomClient_staysManual() {
+        // The same tide-claims scope onto a CUSTOM (non-built-in) client is NOT system config.
+        KeycloakSession session = mock(KeycloakSession.class);
+        RealmModel realm = tideClaimsRealm();
+        IgaChangeRequestEntity cr = assignScopeCr(
+                "assign-custom", "my-app", TIDE_CLAIMS_SCOPE_ID); // custom client → manual
+        assertFalse(IgaFirstAdminAutoCommit.isAutoCommittable(session, realm, cr),
+                "tide-claims ASSIGN_SCOPE onto a custom client must stay manual");
+    }
+
+    @Test
+    void assignScope_nonTideClaimsScopeOnSystemClient_staysManual() {
+        // A DIFFERENT scope onto a built-in client is also not the system tide-claims backfill.
+        KeycloakSession session = mock(KeycloakSession.class);
+        RealmModel realm = tideClaimsRealm();
+        IgaChangeRequestEntity cr = assignScopeCr(
+                "assign-other", "account", "some-other-scope-id"); // built-in client, wrong scope
+        assertFalse(IgaFirstAdminAutoCommit.isAutoCommittable(session, realm, cr),
+                "a non-tide-claims ASSIGN_SCOPE (even onto a built-in client) must stay manual");
     }
 
     @Test
@@ -399,6 +442,28 @@ class IgaFirstAdminAutoCommitTest {
         lenient().when(defaultRole.getId()).thenReturn(DEFAULT_ROLE_ID);
         lenient().when(realm.getDefaultRole()).thenReturn(defaultRole);
         return realm;
+    }
+
+    /** A realm whose id resolves the deterministic tide-claims scope id (the backfill case). */
+    private static RealmModel tideClaimsRealm() {
+        RealmModel realm = mock(RealmModel.class);
+        lenient().when(realm.getName()).thenReturn(REALM);
+        lenient().when(realm.getId()).thenReturn(REALM_ID);
+        // No live scope resolution needed: the assign CRs carry the DETERMINISTIC scope id, which
+        // the gate matches directly (the one-pass provisioning case, scope not yet committed).
+        lenient().when(realm.getClientScopeById(org.mockito.ArgumentMatchers.anyString())).thenReturn(null);
+        return realm;
+    }
+
+    /** An ASSIGN_SCOPE CR attaching {@code scopeId} to {@code clientId} (human client id). */
+    private static IgaChangeRequestEntity assignScopeCr(String id, String clientId, String scopeId) {
+        IgaChangeRequestEntity cr = mock(IgaChangeRequestEntity.class);
+        lenient().when(cr.getId()).thenReturn(id);
+        lenient().when(cr.getActionType()).thenReturn("ASSIGN_SCOPE");
+        lenient().when(cr.getRowsJson()).thenReturn(
+                "[{\"CLIENT_UUID\":\"" + clientId + "-uuid\",\"CLIENT_ID\":\"" + clientId
+                        + "\",\"SCOPE_ID\":\"" + scopeId + "\",\"DEFAULT_SCOPE\":true}]");
+        return cr;
     }
 
     private static IgaChangeRequestEntity simpleCr(String id, String actionType) {

@@ -188,16 +188,22 @@ class TideAttestorThresholdPolicyCrTest {
     }
 
     /**
-     * Drive pendingTideRealmAdminDelta: stub findPendingByAction (GRANT_ROLES / REVOKE_ROLES,
-     * FROM IgaChangeRequestEntity) to return {@code grants} pending grant CRs and {@code revokes}
-     * pending revoke CRs, ALL targeting the tide-realm-admin role. At capture the triggering
-     * assignment CR is already persisted, so the test models it as part of this pending set.
+     * Drive pendingTideRealmAdminDelta + pendingTideRealmAdminAssignmentCrIds: stub
+     * findPendingByAction (GRANT_ROLES / REVOKE_ROLES, FROM IgaChangeRequestEntity) to return
+     * {@code grants} pending grant CRs and {@code revokes} pending revoke CRs, ALL targeting the
+     * tide-realm-admin role. The enclave-open ensure scans this WHOLE pending set itself — there
+     * is no single triggering CR. The pending CRs get deterministic ids
+     * ({@code pend-GRANT_ROLES-0}, ...) so the {@code dependsOn} assertion is stable; {@code em.find}
+     * resolves them for the requestedBy lookup.
      */
     @SuppressWarnings("unchecked")
     private void stubPendingAssignments(int grants, int revokes) {
+        List<IgaChangeRequestEntity> grantCrs = new ArrayList<>();
+        for (int i = 0; i < grants; i++) grantCrs.add(grantCr("pend-GRANT_ROLES-" + i));
+        List<IgaChangeRequestEntity> revokeCrs = new ArrayList<>();
+        for (int i = 0; i < revokes; i++) revokeCrs.add(revokeCr("pend-REVOKE_ROLES-" + i));
         // findPendingByAction (createQuery(String, IgaChangeRequestEntity.class) ... :actionType)
         // — a fresh TypedQuery per call that returns grants/revokes keyed on the bound actionType.
-        // All returned CRs carry the tide-realm-admin ROLE_ID (crTargetsRole → true).
         when(em.createQuery(contains("IgaChangeRequestEntity"), eq(IgaChangeRequestEntity.class)))
                 .thenAnswer(inv -> {
                     TypedQuery<IgaChangeRequestEntity> qq = mock(TypedQuery.class);
@@ -206,30 +212,45 @@ class TideAttestorThresholdPolicyCrTest {
                         if ("actionType".equals(p.getArgument(0))) {
                             String action = p.getArgument(1);
                             result.clear();
-                            int n = "GRANT_ROLES".equals(action) ? grants
-                                    : "REVOKE_ROLES".equals(action) ? revokes : 0;
-                            for (int i = 0; i < n; i++) result.add(grantCr("pend-" + action + "-" + i));
+                            if ("GRANT_ROLES".equals(action)) result.addAll(grantCrs);
+                            else if ("REVOKE_ROLES".equals(action)) result.addAll(revokeCrs);
                         }
                         return qq;
                     });
                     when(qq.getResultList()).thenAnswer(r -> new ArrayList<>(result));
                     return qq;
                 });
+        // em.find resolves the requestedBy carrier (the new ensure attributes the policy CR to
+        // the first pending assignment CR's requester).
+        when(em.find(eq(IgaChangeRequestEntity.class), anyString())).thenAnswer(inv -> {
+            String id = inv.getArgument(1);
+            for (IgaChangeRequestEntity cr : grantCrs) if (cr.getId().equals(id)) return cr;
+            for (IgaChangeRequestEntity cr : revokeCrs) if (cr.getId().equals(id)) return cr;
+            return null;
+        });
+    }
+
+    /** The deterministic dependsOn the enclave-open ensure builds from the stubbed pending set. */
+    private List<String> expectedDeps(int grants, int revokes) {
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < grants; i++) ids.add("pend-GRANT_ROLES-" + i);
+        for (int i = 0; i < revokes; i++) ids.add("pend-REVOKE_ROLES-" + i);
+        return ids;
     }
 
     // --- create --------------------------------------------------------------
 
     @Test
-    void create_emitsOneRegenCr_whenThresholdMoves() {
-        // 2 committed admins; the (already-pending) tide-realm-admin grant nets +1 → projected
-        // 3 (floor(0.7*3)=2). Encoded threshold 1 MOVES to 2, so a CR is created.
+    void enclaveOpen_emitsOneRegenCr_whenThresholdMoves() {
+        // 2 committed admins; ONE pending tide-realm-admin grant nets +1 → projected 3
+        // (floor(0.7*3)=2). Encoded threshold 1 MOVES to 2, so a CR is ensured at enclave open.
         stubMultiAdminMode();
         stubPolicyLookup(policyAtThreshold(1));
         stubFindPending(null);
         stubActiveAdminCount(2);
         stubPendingAssignments(1, 0);
 
-        attestor.maybeEmitThresholdPolicyCrAtCapture(session, realm, grantCr("g1"));
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
 
         ArgumentCaptor<IgaChangeRequestEntity> captor = ArgumentCaptor.forClass(IgaChangeRequestEntity.class);
         verify(em, times(1)).persist(captor.capture());
@@ -237,7 +258,8 @@ class TideAttestorThresholdPolicyCrTest {
         assertEquals("REGEN_ADMIN_POLICY", emitted.getActionType());
         assertEquals("ADMIN_POLICY", emitted.getEntityType());
         assertEquals(TIDE_ROLE_ID, emitted.getEntityId(), "CR keyed to the tide-realm-admin role id");
-        assertEquals(List.of("g1"), emitted.getDependsOnList(), "policy CR dependsOn the assignment CR");
+        assertEquals(expectedDeps(1, 0), emitted.getDependsOnList(),
+                "policy CR dependsOn ALL pending tide-realm-admin assignment CRs");
         // ROWS_JSON carries old/new threshold + role + unsigned policy bytes.
         assertTrue(emitted.getRowsJson().contains("\"OLD_THRESHOLD\":1"));
         assertTrue(emitted.getRowsJson().contains("\"NEW_THRESHOLD\":2"));
@@ -245,22 +267,21 @@ class TideAttestorThresholdPolicyCrTest {
     }
 
     @Test
-    void create_noCr_whenNotAMembershipChange() {
-        // A grant of some OTHER role is delta 0 -> no CR, no policy lookup needed.
+    void enclaveOpen_noCr_whenNoPendingAssignmentsAndNoPolicyCr() {
+        // No pending tide-realm-admin membership change and no lingering policy CR → no-op.
         stubMultiAdminMode();
-        IgaChangeRequestEntity cr = grantCr("x");
-        cr.setRowsJson("[{\"USER_ID\":\"u\",\"ROLE_ID\":\"some-other-role\"}]");
+        stubFindPending(null);
+        stubPendingAssignments(0, 0);
 
-        attestor.maybeEmitThresholdPolicyCrAtCapture(session, realm, cr);
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
 
         verify(em, never()).persist(any());
     }
 
     @Test
-    void create_noCr_whenFirstAdminBootstrap() {
-        // firstAdmin mode (no IgaAuthorizer row, tide attestor) — the FIRST tide-realm-admin
-        // grant bootstraps the M0 inline and must NOT spawn a REGEN CR. The capture hook
-        // short-circuits before any projection.
+    void enclaveOpen_noCr_whenFirstAdminBootstrap() {
+        // firstAdmin mode (no IgaAuthorizer row, tide attestor) — a firstAdmin realm bootstraps
+        // the M0 inline and must NOT spawn a REGEN CR. The ensure short-circuits before projection.
         when(realm.getAttribute("iga.attestor")).thenReturn("tide");
         @SuppressWarnings("unchecked")
         TypedQuery<IgaAuthorizerEntity> q = mock(TypedQuery.class);
@@ -269,37 +290,68 @@ class TideAttestorThresholdPolicyCrTest {
         when(q.setParameter(anyString(), any())).thenReturn(q);
         when(q.getResultStream()).thenAnswer(inv -> Stream.empty()); // no row → firstAdmin
 
-        attestor.maybeEmitThresholdPolicyCrAtCapture(session, realm, grantCr("bootstrap"));
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
 
         verify(em, never()).persist(any());
+    }
+
+    @Test
+    void enclaveOpen_secondOpen_doesNotDuplicate() {
+        // IDEMPOTENCY: the FIRST open creates the policy CR; the SECOND open (same pending set)
+        // sees the now-pending policy CR and FOLDS it in place — never a second persist. We model
+        // the second open by stubbing findPending to return the policy CR the first open created.
+        stubMultiAdminMode();
+        stubPolicyLookup(policyAtThreshold(1));
+        IgaChangeRequestEntity policyCr = new IgaChangeRequestEntity();
+        policyCr.setId("pending-regen");
+        policyCr.setRealmId(REALM_ID);
+        policyCr.setEntityType("ADMIN_POLICY");
+        policyCr.setEntityId(TIDE_ROLE_ID);
+        policyCr.setActionType("REGEN_ADMIN_POLICY");
+        policyCr.setStatus("PENDING");
+        policyCr.setDependsOnList(expectedDeps(1, 0));
+        stubFindPending(policyCr);
+        // no authorizations to clear
+        @SuppressWarnings("unchecked")
+        TypedQuery<IgaAuthorizationEntity> authQ = mock(TypedQuery.class);
+        when(em.createNamedQuery(eq("IgaAuthorization.findByChangeRequest"), eq(IgaAuthorizationEntity.class)))
+                .thenReturn(authQ);
+        when(authQ.setParameter(anyString(), any())).thenReturn(authQ);
+        when(authQ.getResultList()).thenReturn(List.of());
+        stubActiveAdminCount(2);
+        stubPendingAssignments(1, 0); // SAME pending set → projected 2, encoded 1 → still MOVES
+
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
+
+        verify(em, never()).persist(any());                   // folded, NOT a second create
+        assertEquals(expectedDeps(1, 0), policyCr.getDependsOnList(), "dependsOn unchanged (same set)");
+        assertTrue(policyCr.getRowsJson().contains("\"NEW_THRESHOLD\":2"));
     }
 
     // --- IsEqualTo no-op -----------------------------------------------------
 
     @Test
     void isEqualTo_noCr_whenThresholdUnchanged() {
-        // 4 active admins (floor(0.7*4)=2); a grant -> 5 (floor(0.7*5)=3)... pick numbers that
-        // do NOT move: 1 active admin (floor=1... wait clamp), use 10 admins -> floor(0.7*10)=7,
-        // +1 -> 11 -> floor(0.7*11)=7. Threshold stays 7 -> NO CR.
+        // 10 active admins (floor(0.7*10)=7); one pending grant -> 11 -> floor(0.7*11)=7.
+        // Threshold stays 7 -> NO CR.
         stubMultiAdminMode();
         stubPolicyLookup(policyAtThreshold(7));
         stubFindPending(null);
         stubActiveAdminCount(10);
         stubPendingAssignments(1, 0);
 
-        attestor.maybeEmitThresholdPolicyCrAtCapture(session, realm, grantCr("g1"));
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
 
         verify(em, never()).persist(any());
     }
 
-    // --- nets-to-zero cancel -------------------------------------------------
+    // --- nets-to-zero / stale cancel -----------------------------------------
 
     @Test
-    void netsToZero_cancelsPendingRegenCr_whenThresholdReturnsToCurrent() {
-        // The policy already encodes the threshold the batch nets back to, AND a pending
-        // REGEN_ADMIN_POLICY exists (an earlier CR in the batch moved it). A grant+revoke pair
-        // nets the projected delta to 0 → projected count == committed → threshold unchanged →
-        // the IsEqualTo branch must CANCEL that pending CR.
+    void cancelsPendingRegenCr_whenThresholdReturnsToCurrent() {
+        // The policy already encodes the threshold the pending set nets back to, AND a pending
+        // REGEN_ADMIN_POLICY lingers. A grant+revoke pair nets the projected delta to 0 →
+        // projected count == committed → threshold unchanged → the IsEqualTo branch CANCELs it.
         stubMultiAdminMode();
         stubPolicyLookup(policyAtThreshold(7));
         IgaChangeRequestEntity pending = new IgaChangeRequestEntity();
@@ -313,21 +365,21 @@ class TideAttestorThresholdPolicyCrTest {
         stubActiveAdminCount(10);
         stubPendingAssignments(1, 1); // net 0 -> projected 10 -> floor 7 == current 7
 
-        attestor.maybeEmitThresholdPolicyCrAtCapture(session, realm, grantCr("g2"));
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
 
         assertEquals("CANCELLED", pending.getStatus(), "the stale pending policy CR is cancelled");
         assertNotNull(pending.getResolvedAt());
         verify(em, never()).persist(any());
     }
 
-    // --- fold-to-one ---------------------------------------------------------
+    // --- fold (coalesced grants surface a policy CR via enclave-open) --------
 
     @Test
     void fold_rewritesPendingCrInPlace_andClearsAuthorizations() {
-        // A pending REGEN_ADMIN_POLICY already exists; a SECOND tide-realm-admin grant in the
-        // batch is captured. Both pending grants net +2 over 2 committed -> projected 4 ->
-        // floor(0.7*4)=2 (the FINAL batch threshold). We must UPDATE the pending CR in place (no
-        // new persist), re-point dependsOn to include the new assignment, and CLEAR its
+        // A pending REGEN_ADMIN_POLICY already exists; the pending set now has TWO tide-realm-admin
+        // grants (e.g. a second grant that COALESCED — never reached the capture path). Both grants
+        // net +2 over 2 committed -> projected 4 -> floor(0.7*4)=2. The ensure UPDATEs the pending
+        // CR in place (no persist), re-points dependsOn to the CURRENT pending set, and CLEARs its
         // authorizations.
         stubMultiAdminMode();
         stubPolicyLookup(policyAtThreshold(1));
@@ -339,7 +391,7 @@ class TideAttestorThresholdPolicyCrTest {
         pending.setActionType("REGEN_ADMIN_POLICY");
         pending.setStatus("PENDING");
         pending.setRequestModel("STALE-CARRIER");
-        pending.setDependsOnList(List.of("g1"));
+        pending.setDependsOnList(List.of("pend-GRANT_ROLES-0"));
         stubFindPending(pending);
         // existing carrier had 2 authorizations to clear
         IgaAuthorizationEntity a1 = new IgaAuthorizationEntity();
@@ -352,14 +404,14 @@ class TideAttestorThresholdPolicyCrTest {
         stubActiveAdminCount(2);
         stubPendingAssignments(2, 0); // net +2 -> projected 4 -> floor 2; encoded 1 -> MOVES
 
-        attestor.maybeEmitThresholdPolicyCrAtCapture(session, realm, grantCr("g2"));
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
 
         verify(em, never()).persist(any());                 // folded, not created
         verify(em, times(1)).remove(a1);
         verify(em, times(1)).remove(a2);                    // authorizations cleared
         assertNull(pending.getRequestModel(), "stale carrier cleared (re-sign required)");
-        assertTrue(pending.getDependsOnList().contains("g1"), "keeps prior dependency");
-        assertTrue(pending.getDependsOnList().contains("g2"), "adds the new assignment dependency");
+        assertEquals(expectedDeps(2, 0), pending.getDependsOnList(),
+                "dependsOn re-pointed to the CURRENT pending assignment set (both grants)");
         assertTrue(pending.getRowsJson().contains("\"NEW_THRESHOLD\":2"));
     }
 
@@ -375,14 +427,14 @@ class TideAttestorThresholdPolicyCrTest {
         stubActiveAdminCount(3);
         stubPendingAssignments(0, 1);
 
-        attestor.maybeEmitThresholdPolicyCrAtCapture(session, realm, revokeCr("r1"));
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
 
         ArgumentCaptor<IgaChangeRequestEntity> captor = ArgumentCaptor.forClass(IgaChangeRequestEntity.class);
         verify(em, times(1)).persist(captor.capture());
         IgaChangeRequestEntity emitted = captor.getValue();
         assertTrue(emitted.getRowsJson().contains("\"OLD_THRESHOLD\":2"));
         assertTrue(emitted.getRowsJson().contains("\"NEW_THRESHOLD\":1"));
-        assertEquals(List.of("r1"), emitted.getDependsOnList());
+        assertEquals(expectedDeps(0, 1), emitted.getDependsOnList());
     }
 
     // --- unsigned policy bytes + ModelIds config check -----------------------

@@ -599,16 +599,16 @@ public class TideAttestor implements IgaAttestor {
                         realm.getName());
             }
         }
-        // ★ STEADY-STATE multiAdmin threshold re-sign is NO LONGER emitted here. The
-        // REGEN_ADMIN_POLICY CR is now created at CAPTURE time — the moment a steady-state
-        // tide-realm-admin grant/revoke is turned into its assignment CR (see
-        // maybeEmitThresholdPolicyCrAtCapture, called from IgaUserAdapter.grantRole /
-        // deleteRoleMapping) — so the policy CR is a SIBLING of the assignment CR in the SAME
-        // approval enclave session, not a CR that only materialises after commit (which left
-        // it out of the assignment's enclave session). At commit the policy CR follows the
-        // unchanged Policy:1 quorum sign path (replayRegenAdminPolicy) once its dependsOn
-        // assignment CR(s) have committed. combineFinal therefore does NOTHING extra for the
-        // steady-state membership change beyond signing the assignment CR itself.
+        // ★ STEADY-STATE multiAdmin threshold re-sign is NOT emitted here. The
+        // REGEN_ADMIN_POLICY CR is created when the admin OPENS THE APPROVAL ENCLAVE — the
+        // moment the PENDING change requests are listed/assembled for approval (see
+        // ensureThresholdPolicyCrForEnclave, called from IgaAdminResource.listChangeRequests) —
+        // so the policy CR surfaces alongside the assignment CRs in the SAME enclave, and is
+        // robust to grants captured before the hook deployed OR coalesced into an existing
+        // pending CR (both of which the old capture-time hook missed). At commit the policy CR
+        // follows the unchanged Policy:1 quorum sign path (replayRegenAdminPolicy) once its
+        // dependsOn assignment CR(s) have committed. combineFinal therefore does NOTHING extra
+        // for the steady-state membership change beyond signing the assignment CR itself.
         return sig;
     }
 
@@ -856,121 +856,116 @@ public class TideAttestor implements IgaAttestor {
     // -------------------------------------------------------------------------
 
     /**
-     * Steady-state (multiAdmin) admin-policy threshold re-sign, emitted as an
-     * EXPLICIT, enclave-signed {@link #ACTION_REGEN_ADMIN_POLICY} change request — one
-     * per batch, folded. Fired AT CAPTURE — the moment a steady-state tide-realm-admin
-     * grant/revoke is turned into its assignment CR (called from
-     * {@code IgaUserAdapter.grantRole}/{@code deleteRoleMapping}, AFTER the assignment CR
-     * has been persisted) — so the policy CR is a SIBLING of the assignment CR in the SAME
-     * approval enclave session, both PENDING together. (Previously this fired lazily at
-     * COMMIT in {@code combineFinal}, which left the policy CR out of the assignment's
-     * enclave session.)
+     * Steady-state (multiAdmin) admin-policy threshold re-sign, emitted as an EXPLICIT,
+     * enclave-signed {@link #ACTION_REGEN_ADMIN_POLICY} change request — exactly ONE per realm,
+     * folded. Fired when the admin OPENS THE APPROVAL ENCLAVE — i.e. when the PENDING change
+     * requests are listed/assembled for approval ({@code GET /iga/change-requests?status=PENDING}
+     * in {@link org.tidecloak.iga.rest.IgaAdminResource}). This is the single source of truth for
+     * the policy CR.
+     *
+     * <h3>Why enclave-open, not grant-capture</h3>
+     * The previous behaviour created the policy CR at grant CAPTURE
+     * ({@code maybeEmitThresholdPolicyCrAtCapture}, called from {@code IgaUserAdapter.grantRole}/
+     * {@code deleteRoleMapping}). That missed (a) tide-realm-admin assignment CRs captured BEFORE
+     * the hook was deployed (stale realms), and (b) grants that COALESCE into an existing pending
+     * CR (the de-dup path returns the existing CR and never runs the capture hook). Moving the
+     * ensure to the moment the enclave is OPENED scans the WHOLE pending set every time, so it is
+     * robust to both — and idempotent: a second enclave open recomputes the SAME projected
+     * threshold and folds the existing policy CR in place (never a duplicate).
      *
      * <h3>Why a CR, not an in-line re-sign</h3>
-     * The previous behaviour ({@code maybeRegenerateAdminPolicyOnMembershipChange})
-     * re-signed the M0 policy in-line with a doken-LESS {@code Midgard.SignModel(Policy:1)}.
-     * On a real signing-capable realm the ORK's {@code PolicyAuthorizationFlow} REJECTS that
-     * (no collected admin dokens authorize the re-sign) — so every tide-realm-admin
-     * grant/revoke fail-closed. We instead emit a governed CR whose Policy:1 re-sign runs at
-     * commit with the dokens the admins actually collected via the two-phase ceremony.
+     * The original behaviour re-signed the M0 policy in-line with a doken-LESS
+     * {@code Midgard.SignModel(Policy:1)}. On a real signing-capable realm the ORK's
+     * {@code PolicyAuthorizationFlow} REJECTS that (no collected admin dokens authorize the
+     * re-sign). We instead emit a governed CR whose Policy:1 re-sign runs at commit with the
+     * dokens the admins collected via the two-phase ceremony.
      *
-     * <h3>What it does</h3>
+     * <h3>What it does (idempotent ensure)</h3>
      * <ol>
-     *   <li><b>firstAdmin-bootstrap exclusion.</b> Only acts in {@code multiAdmin} mode. The
-     *       FIRST tide-realm-admin grant runs while the realm is still {@code firstAdmin}
-     *       (the flip happens at that CR's commit); it bootstraps the M0 inline VRK-signed and
-     *       must NOT spawn a REGEN CR. STEADY-STATE multiAdmin changes only.</li>
-     *   <li>Detect a membership-changing CR: a GRANT/REVOKE of the realm-management
-     *       {@code tide-realm-admin} role ({@link #tideRealmAdminMembershipDelta}). Delta 0 →
-     *       no-op.</li>
-     *   <li>Compute the PROJECTED post-commit count at CAPTURE: the committed count
-     *       ({@link #countActiveTideRealmAdmins}) plus the NET delta of EVERY pending
-     *       tide-realm-admin GRANT/REVOKE assignment CR in this batch
-     *       ({@link #pendingTideRealmAdminDelta} — which already INCLUDES the assignment CR
-     *       this method was triggered for, since the adapter persisted it before calling).
-     *       Clamp at 0, apply the SAME {@code max(1, floor(0.7 × N))} formula
-     *       {@link #getThreshold} uses (cannot drift). Summing the pending set (not just this
-     *       one CR) makes bulk fold to the FINAL threshold and nets-to-zero collapse.</li>
-     *   <li>IsEqualTo no-op: if {@code newThreshold} already equals the current encoded
-     *       threshold of the existing M0 policy, emit NO CR — and if a pending
-     *       {@code REGEN_ADMIN_POLICY} exists for this realm+role, CANCEL it (handles a batch
-     *       that nets back to the current threshold).</li>
-     *   <li>Fold to exactly ONE: if a pending {@code REGEN_ADMIN_POLICY} CR exists for this
-     *       realm+role, UPDATE its ROWS_JSON in place (rebuilt OLD/NEW threshold + fresh
-     *       unsigned policy bytes) and CLEAR its authorizations (a new threshold needs a new
-     *       quorum). Otherwise CREATE one, {@code dependsOn} this assignment CR so the 412
-     *       DEPENDENCY_NOT_MET gate forces it to commit AFTER the assignments (count final).</li>
+     *   <li><b>firstAdmin-bootstrap exclusion.</b> Only acts in {@code multiAdmin} mode. A
+     *       firstAdmin realm bootstraps the M0 inline at the first grant's commit and must NOT
+     *       spawn a REGEN CR.</li>
+     *   <li>Gather EVERY pending tide-realm-admin GRANT/REVOKE assignment CR
+     *       ({@link #pendingTideRealmAdminAssignmentCrIds}). If there are NONE and no pending
+     *       policy CR exists, no-op. If there are none but a STALE policy CR lingers (every
+     *       assignment already committed/cancelled), the IsEqualTo branch cancels it.</li>
+     *   <li>Compute the PROJECTED post-commit count: committed count
+     *       ({@link #countActiveTideRealmAdmins}) plus the NET delta of every pending assignment
+     *       CR ({@link #pendingTideRealmAdminDelta}). Clamp at 0, apply the SAME
+     *       {@code max(1, floor(0.7 × N))} formula {@link #getThreshold} uses.</li>
+     *   <li>IsEqualTo no-op: if {@code newThreshold} equals the current encoded threshold, emit
+     *       NO CR — and CANCEL any stale pending policy CR.</li>
+     *   <li>Fold to exactly ONE: if a pending policy CR exists, UPDATE its ROWS_JSON in place
+     *       (rebuilt OLD/NEW threshold + fresh unsigned policy bytes), re-point its
+     *       {@code dependsOn} to the CURRENT pending assignment set, and CLEAR its authorizations
+     *       (a new threshold needs a fresh quorum). Otherwise CREATE one, {@code dependsOn} ALL
+     *       pending assignment CRs so the 412 DEPENDENCY_NOT_MET gate forces it to commit AFTER
+     *       them (count final).</li>
      * </ol>
      *
      * <p>This method NEVER signs. The Policy:1 sign happens at the policy CR's own commit
-     * ({@link #replayRegenAdminPolicy}) with the collected dokens. The policy CR is CREATED
-     * up-front (so it is visible/approvable alongside the assignment in one enclave session)
-     * but its {@code dependsOn} the assignment CR(s) gates its COMMIT to AFTER them, so the
-     * OLD quorum (the threshold in force when the membership CRs commit) authorizes the
-     * re-sign and the NEW threshold takes effect for SUBSEQUENT CRs — no circular dependency.
+     * ({@link #replayRegenAdminPolicy}). Because it runs as a side-effect of a read (the enclave
+     * GET), the CALLER must invoke it in its OWN write transaction and swallow any error — it must
+     * never poison the list read.
+     *
+     * @return the id of the ensured/folded policy CR, or {@code null} if none is needed.
      */
-    public void maybeEmitThresholdPolicyCrAtCapture(KeycloakSession session, RealmModel realm,
-                                                    IgaChangeRequestEntity cr) {
-        // firstAdmin-bootstrap exclusion: only STEADY-STATE multiAdmin membership changes get a
-        // REGEN CR. The bootstrap grant runs in firstAdmin mode (flip is at its own commit) and
-        // bootstraps the M0 inline — it must NOT create a REGEN CR.
+    public String ensureThresholdPolicyCrForEnclave(KeycloakSession session, RealmModel realm) {
+        // firstAdmin-bootstrap exclusion: only STEADY-STATE multiAdmin realms get a REGEN CR.
         if (!MODE_MULTI_ADMIN.equals(resolveMode(session, realm))) {
-            return;
-        }
-
-        int delta = tideRealmAdminMembershipDelta(realm, cr);
-        if (delta == 0) {
-            return; // not a tide-realm-admin grant/revoke — the set is unchanged.
+            return null;
         }
 
         String tideRoleId = tideRealmAdminRoleId(realm);
         if (tideRoleId == null) {
-            log.infof("IGA threshold-policy CR skipped: realm %s has no tide-realm-admin role to key "
-                    + "the admin Policy (membership delta %+d).", realm.getName(), delta);
-            return;
+            // No tide-realm-admin role to key the admin Policy — nothing to ensure.
+            return null;
         }
-
-        IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
-
-        // Projected post-commit count at CAPTURE = committed count + the NET delta of all
-        // pending tide-realm-admin assignment CRs in the batch (this CR's assignment is already
-        // persisted, so it is INCLUDED in the pending sum — do NOT also add `delta`). Clamp at 0
-        // (a revoke can never drive the count negative). SAME formula getThreshold uses.
-        int netPending = pendingTideRealmAdminDelta(session, realm, tideRoleId);
-        int postCommitCount = Math.max(0, countActiveTideRealmAdmins(realm, session) + netPending);
-        int newThreshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
-
-        Integer priorThreshold = (policy == null) ? null : currentEncodedThreshold(policy);
 
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         IgaChangeRequestService service = new IgaChangeRequestService(em, session);
         IgaChangeRequestEntity pending =
                 service.findPending(realm.getId(), ENTITY_TYPE_ADMIN_POLICY, tideRoleId);
 
-        // IsEqualTo no-op: the threshold does not move. Emit no CR; and if a stale pending
-        // REGEN_ADMIN_POLICY exists (an earlier CR in this batch moved it, a later one moved
-        // it back), CANCEL it so the batch nets to zero with no orphaned policy CR.
+        List<String> assignmentCrIds = pendingTideRealmAdminAssignmentCrIds(session, realm, tideRoleId);
+        if (assignmentCrIds.isEmpty() && pending == null) {
+            // No pending tide-realm-admin membership change and no lingering policy CR — no-op.
+            return null;
+        }
+
+        IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
+
+        // Projected post-commit count = committed count + the NET delta of ALL pending
+        // tide-realm-admin assignment CRs. Clamp at 0. SAME formula getThreshold uses.
+        int netPending = pendingTideRealmAdminDelta(session, realm, tideRoleId);
+        int postCommitCount = Math.max(0, countActiveTideRealmAdmins(realm, session) + netPending);
+        int newThreshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
+
+        Integer priorThreshold = (policy == null) ? null : currentEncodedThreshold(policy);
+
+        // IsEqualTo no-op: the threshold does not move (or there are no pending assignments left
+        // so the projection equals the committed state). Emit no CR; CANCEL any stale pending one.
         if (priorThreshold != null && priorThreshold == newThreshold) {
             if (pending != null) {
                 pending.setStatus("CANCELLED");
                 pending.setResolvedAt(System.currentTimeMillis());
                 em.flush();
-                log.infof("IGA threshold-policy CR cancelled (nets to zero): realm %s tide-realm-admin "
-                        + "threshold stays %d after net pending delta %+d — pending CR %s CANCELLED.",
+                log.infof("IGA threshold-policy CR cancelled (threshold unchanged at enclave open): "
+                        + "realm %s tide-realm-admin threshold stays %d (net pending delta %+d) — "
+                        + "pending CR %s CANCELLED.",
                         realm.getName(), newThreshold, netPending, pending.getId());
             } else {
-                log.infof("IGA threshold-policy CR skipped (threshold unchanged): realm %s tide-realm-admin "
-                        + "policy already encodes threshold %d (net pending delta %+d, projected admins %d).",
+                log.infof("IGA threshold-policy CR skipped (threshold unchanged at enclave open): "
+                        + "realm %s tide-realm-admin policy already encodes threshold %d "
+                        + "(net pending delta %+d, projected admins %d).",
                         realm.getName(), newThreshold, netPending, postCommitCount);
             }
-            return;
+            return null;
         }
 
         int oldThreshold = (priorThreshold == null) ? 0 : priorThreshold;
         String vvkId = realmVvkId(realm);
-        // The NEW unsigned admin Policy bytes (Base64) the policy CR will Policy:1-sign at
-        // commit. Built from the SAME Policy shape the M0/regen ceremonies use; the commit-time
-        // sign attaches the VVK signature onto these exact bytes (the carrier signs them).
+        // The NEW unsigned admin Policy bytes (Base64) the policy CR will Policy:1-sign at commit.
         String policyBodyUnsigned = java.util.Base64.getEncoder()
                 .encodeToString(buildUnsignedAdminPolicyBytes(newThreshold, vvkId));
 
@@ -983,33 +978,41 @@ public class TideAttestor implements IgaAttestor {
         row.put(ROW_POLICY_BODY_UNSIGNED, policyBodyUnsigned);
         rows.add(row);
 
+        // requestedBy: prefer the requester of the first pending assignment CR so the policy CR
+        // attributes to an admin (not the read caller). Falls back to "system" when unresolvable.
+        String requestedBy = "system";
+        if (!assignmentCrIds.isEmpty()) {
+            IgaChangeRequestEntity first = em.find(IgaChangeRequestEntity.class, assignmentCrIds.get(0));
+            if (first != null && first.getRequestedBy() != null) {
+                requestedBy = first.getRequestedBy();
+            }
+        }
+
         if (pending != null) {
-            // FOLD: rewrite the pending CR's payload to the final threshold and CLEAR its
-            // authorizations — the new threshold demands a fresh quorum re-approval, and the
-            // phase-1 carrier (REQUEST_MODEL) is now stale (built over the old policy bytes).
+            // FOLD: rewrite the pending CR's payload to the projected threshold and CLEAR its
+            // authorizations — the new threshold demands a fresh quorum; the phase-1 carrier
+            // (REQUEST_MODEL) is now stale. Idempotent: re-opening with the SAME pending set
+            // recomputes the SAME bytes and the SAME dependsOn, so nothing observably changes.
             pending.setRowsJson(serializeRows(rows));
             pending.setRequestModel(null);
             clearAuthorizations(em, pending);
-            // Re-point dependsOn to ALSO include this latest assignment CR so the policy CR
-            // can only commit after EVERY assignment in the batch has committed (count final).
-            java.util.LinkedHashSet<String> deps = new java.util.LinkedHashSet<>(pending.getDependsOnList());
-            deps.add(cr.getId());
-            pending.setDependsOnList(new ArrayList<>(deps));
+            pending.setDependsOnList(new ArrayList<>(assignmentCrIds));
             em.flush();
-            log.infof("IGA threshold-policy CR folded: realm %s tide-realm-admin threshold %d -> %d "
-                    + "(net pending delta %+d, projected admins %d); pending CR %s rewritten, "
-                    + "authorizations cleared, dependsOn += %s.",
+            log.infof("IGA threshold-policy CR folded at enclave open: realm %s tide-realm-admin "
+                    + "threshold %d -> %d (net pending delta %+d, projected admins %d); pending CR %s "
+                    + "rewritten, authorizations cleared, dependsOn = %s.",
                     realm.getName(), oldThreshold, newThreshold, netPending, postCommitCount,
-                    pending.getId(), cr.getId());
-            return;
+                    pending.getId(), assignmentCrIds);
+            return pending.getId();
         }
 
         IgaChangeRequestEntity created = service.create(realm, ENTITY_TYPE_ADMIN_POLICY, tideRoleId,
-                ACTION_REGEN_ADMIN_POLICY, rows, cr.getRequestedBy(), List.of(cr.getId()));
-        log.infof("IGA threshold-policy CR created at capture: realm %s tide-realm-admin threshold %d -> %d "
-                + "(net pending delta %+d, projected admins %d); CR %s dependsOn assignment CR %s.",
+                ACTION_REGEN_ADMIN_POLICY, rows, requestedBy, new ArrayList<>(assignmentCrIds));
+        log.infof("IGA threshold-policy CR created at enclave open: realm %s tide-realm-admin "
+                + "threshold %d -> %d (net pending delta %+d, projected admins %d); CR %s dependsOn %s.",
                 realm.getName(), oldThreshold, newThreshold, netPending, postCommitCount,
-                created.getId(), cr.getId());
+                created.getId(), assignmentCrIds);
+        return created.getId();
     }
 
     /**
@@ -1035,6 +1038,29 @@ public class TideAttestor implements IgaAttestor {
             if (crTargetsRole(revoke, tideRoleId)) net -= 1;
         }
         return net;
+    }
+
+    /**
+     * Every PENDING tide-realm-admin GRANT/REVOKE assignment CR id in the realm (the CRs the
+     * projected-threshold REGEN policy must {@code dependsOn} so it can only commit AFTER the
+     * membership set is final). Order is deterministic (grants then revokes, each in the JPQL's
+     * order) so the {@code dependsOn} list and the fold-comparison are stable across repeated
+     * enclave opens — the idempotency contract.
+     */
+    private List<String> pendingTideRealmAdminAssignmentCrIds(KeycloakSession session,
+                                                              RealmModel realm, String tideRoleId) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaChangeRequestService service = new IgaChangeRequestService(em, session);
+        java.util.LinkedHashSet<String> ids = new java.util.LinkedHashSet<>();
+        for (IgaChangeRequestEntity grant
+                : service.findPendingByAction(realm.getId(), "USER", "GRANT_ROLES")) {
+            if (crTargetsRole(grant, tideRoleId)) ids.add(grant.getId());
+        }
+        for (IgaChangeRequestEntity revoke
+                : service.findPendingByAction(realm.getId(), "USER", "REVOKE_ROLES")) {
+            if (crTargetsRole(revoke, tideRoleId)) ids.add(revoke.getId());
+        }
+        return new ArrayList<>(ids);
     }
 
     /** True iff any ROWS_JSON row of {@code cr} carries {@code ROLE_ID == roleId}. */
