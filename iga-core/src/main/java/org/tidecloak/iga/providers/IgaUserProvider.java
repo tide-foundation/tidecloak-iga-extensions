@@ -97,15 +97,28 @@ public class IgaUserProvider extends JpaUserProvider {
             // full model on it and the terminal IgaUserAdapter#getId seam emits
             // the CREATE_USER CR + rollback-only + throws (→ 202 + Location).
             //
-            // ★ accept-unattested SELF-REGISTRATION default-role grant.
-            // For the self-registration flow ONLY (a RegistrationUserCreation
-            // frame in the live stack — see inSelfRegistrationFlow), pass
-            // addDefaultRoles=true to the 5-arg local-storage super.addUser. KC's
-            // JpaUserProvider.addUser then grants realm.getDefaultRole() + joins
-            // the default groups on the REAL JpaUser (a plain UserAdapter — line
-            // 124-131 of JpaUserProvider), BEFORE we wrap it in the capture
-            // adapter. That grant is therefore NOT routed through the IGA capture
-            // path → no nested GRANT_ROLES CR — and it PERSISTS on the live user.
+            // ★ accept-unattested SELF-ENROLLMENT default-role grant (PATH-ROBUST).
+            // For genuine self-enrollment under RegOn — BOTH the registration form
+            // (a RegistrationUserCreation frame) AND the Tide-enrolled IdP-broker /
+            // link-tide-account import (which arrives here as UserCacheSession#addUser,
+            // with NO RegistrationUserCreation frame) — pass addDefaultRoles=true to
+            // the 5-arg local-storage super.addUser. KC's JpaUserProvider.addUser then
+            // grants realm.getDefaultRole() + joins the default groups on the REAL
+            // JpaUser (a plain UserAdapter — line 124-131 of JpaUserProvider), BEFORE
+            // we wrap it in the capture adapter. That grant is therefore NOT routed
+            // through the IGA capture path → no nested GRANT_ROLES CR — and it
+            // PERSISTS on the live user.
+            //
+            // WHY PATH-ROBUST (the Round-1 gap): the earlier gate keyed SOLELY on a
+            // RegistrationUserCreation StackWalker frame (isSelfRegistrationFrame),
+            // which fires for the plain registration form but NOT for the
+            // Tide-enrolled broker/link-tide import — the ACTUAL user flow. That left
+            // Tide-enrolled self-registrants ROLELESS → no account aud → ORK TVE
+            // "attested claim 'aud' is suppressed". The gate is now keyed on RegOn
+            // (realm.isRegistrationAllowed()) with admin-create / service-account
+            // EXCLUDED (see shouldGrantDefaultRolesOnSelfCreate), so BOTH self-enroll
+            // paths land the local default-role while admin/internal paths are
+            // unchanged.
             //
             // WHY: an accept-unattested self-reg user is admitted UNSIGNED at
             // login and its CREATE_USER CR never commits, so the D3 commit-replay
@@ -125,22 +138,28 @@ public class IgaUserProvider extends JpaUserProvider {
             //
             // SCOPE: the 1-arg overload is NOT registration-only — admin-create
             // (UsersResource#createUser, via profile.create()), service-account
-            // (ClientManager), token-exchange and IdP-broker all reach this branch.
-            // Only the self-registration flow gets default-roles here; admin-create
-            // keeps the CR + D3 commit-replay grant (granting at creation too would
-            // double-grant), and the internal callers keep stock-suppressed creation.
-            boolean grantDefaultRoles = inSelfRegistrationFlow();
+            // (ClientManager), token-exchange and IdP-broker/link-tide all reach this
+            // branch. Under RegOn we grant default-roles for genuine self-enrollment
+            // (registration form AND Tide-enrolled broker/link-tide import) but EXCLUDE
+            // admin-create (its CR commits and the D3 commit-replay grant assigns
+            // default-roles; granting at creation too would double-grant) and
+            // service-account creates (ClientManager — internal, no account aud needed,
+            // keeps stock-suppressed creation). When RegOn is OFF nothing is granted
+            // here (stock-suppressed), so the open-registration posture is the gate.
+            boolean grantDefaultRoles = shouldGrantDefaultRolesOnSelfCreate(realm);
             String userId = KeycloakModelUtils.generateId();
             UserModel base = super.addUser(realm, userId,
                     username == null ? null : username.toLowerCase(),
                     grantDefaultRoles, false);
             if (grantDefaultRoles) {
-                log.infof("IGA capture CREATE_USER: self-registration flow detected "
-                        + "(RegistrationUserCreation frame) — granted realm default-role + "
-                        + "default groups on the live user (uuid=%s) at creation so the "
-                        + "accept-unattested self-reg token carries the account aud; the "
-                        + "default-role is D1b-excluded so no user_role_mapping_set unit is "
-                        + "produced (gate still admits the unsigned user_identity).",
+                log.infof("IGA capture CREATE_USER: self-enrollment under RegOn detected "
+                        + "(registration form OR Tide-enrolled broker/link-tide import; "
+                        + "registrationAllowed=true, not admin-create/service-account) — "
+                        + "granted realm default-role + default groups on the live user "
+                        + "(uuid=%s) at creation so the accept-unattested self-enroll token "
+                        + "carries the account aud; the default-role is D1b-excluded so no "
+                        + "user_role_mapping_set unit is produced (gate still admits the "
+                        + "unsigned user_identity).",
                         userId);
             }
             if (base == null) return null;
@@ -247,29 +266,114 @@ public class IgaUserProvider extends JpaUserProvider {
             "org.keycloak.authentication.forms.RegistrationUserCreation";
 
     /**
-     * Live-stack predicate: is the current {@code addUser} call running inside the
-     * self-registration flow (a {@link #KC_REGISTRATION_USER_CREATION} frame anywhere
-     * in the stack)? Drives the {@code addDefaultRoles=true} scoping in the 1-arg
-     * {@link #addUser(RealmModel, String)} capture branch. Walks the live stack once
-     * and delegates the decision to the pure, unit-testable
-     * {@link #isSelfRegistrationFrame(java.util.List)}.
+     * The KC admin user-create resource. Its presence anywhere in the live 1-arg
+     * {@code addUser} stack marks the call as ADMIN-create
+     * ({@code UsersResource.createUser} → {@code profile.create()} → the 1-arg seam).
+     * Admin-create is EXCLUDED from the creation-time default-role grant: its
+     * CREATE_USER CR commits and {@code IgaReplayDispatcher.replayCreateUser} D3-grants
+     * default-roles at replay; granting at creation too would double-grant.
      */
-    private boolean inSelfRegistrationFlow() {
+    private static final String KC_USERS_RESOURCE =
+            "org.keycloak.services.resources.admin.UsersResource";
+
+    /**
+     * The KC service-account manager. Its presence marks an internal
+     * service-account user-create ({@code ClientManager.enableServiceAccount} →
+     * {@code addUser}). Service-account users are EXCLUDED — they are internal, need
+     * no {@code account} audience, and granting the realm default-role to them would
+     * be a regression.
+     */
+    private static final String KC_CLIENT_MANAGER =
+            "org.keycloak.services.managers.ClientManager";
+
+    /**
+     * Live-stack + RegOn predicate driving the {@code addDefaultRoles=true} scoping in
+     * the 1-arg {@link #addUser(RealmModel, String)} capture branch. Walks the live
+     * stack once and delegates to the pure, unit-testable
+     * {@link #shouldGrantDefaultRolesOnSelfCreate(java.util.List, boolean)}.
+     */
+    private boolean shouldGrantDefaultRolesOnSelfCreate(RealmModel realm) {
         java.util.List<String> frames = StackWalker.getInstance()
                 .walk(s -> s.map(f -> f.getClassName() + "#" + f.getMethodName())
                         .collect(java.util.stream.Collectors.toList()));
-        return isSelfRegistrationFrame(frames);
+        return shouldGrantDefaultRolesOnSelfCreate(frames, realm.isRegistrationAllowed());
     }
 
     /**
-     * Pure, unit-testable self-registration classifier. Given the live stack-frame
+     * Pure, unit-testable PATH-ROBUST self-enrollment classifier. Given the live
+     * stack-frame signatures as {@code "<FQN>#<method>"} (any order) and the realm's
+     * RegOn flag, return true iff the just-created user should receive the LOCAL realm
+     * default-role at creation.
+     *
+     * <p>Decision (RegOn-gated, admin/service-account excluded):
+     * <ol>
+     *   <li>If {@code registrationAllowed} is false → {@code false}
+     *       (no open-registration posture; nothing is granted at creation, the
+     *       stock-suppressed behaviour).</li>
+     *   <li>Else if an admin-create frame ({@link #KC_USERS_RESOURCE}{@code #createUser})
+     *       is present → {@code false} (its CR commits and the D3 replay grant assigns
+     *       default-roles; granting here would double-grant).</li>
+     *   <li>Else if a service-account frame ({@link #KC_CLIENT_MANAGER}) is present →
+     *       {@code false} (internal create, no account aud needed).</li>
+     *   <li>Else → {@code true} — genuine self-enrollment. This covers BOTH the
+     *       registration form (a {@link #KC_REGISTRATION_USER_CREATION} frame, the
+     *       former {@link #isSelfRegistrationFrame} subset) AND the Tide-enrolled
+     *       IdP-broker / link-tide-account import (which arrives as
+     *       {@code UserCacheSession#addUser} with NO RegistrationUserCreation frame —
+     *       the path the Round-1 StackWalker gate missed).</li>
+     * </ol>
+     *
+     * <p>Why RegOn rather than a positive broker frame: the user has explicitly
+     * accepted the open-registration posture (RegOn on ⇒ any unsigned default-roles
+     * user is admitted at login), and keying on RegOn makes the grant path-robust
+     * across the registration form AND every Tide self-enrollment entry (broker,
+     * link-tide, cache-wrapped {@code addUser}) without enumerating fragile broker
+     * frame signatures. Admin-create and service-account are the only paths that must
+     * NOT grant, and both have a stable, distinctive frame to exclude.</p>
+     */
+    static boolean shouldGrantDefaultRolesOnSelfCreate(
+            java.util.List<String> frameSignatures, boolean registrationAllowed) {
+        if (!registrationAllowed) {
+            return false;
+        }
+        if (frameSignatures == null) {
+            // RegOn but no stack to inspect: default to granting (genuine
+            // self-enrollment is the dominant RegOn create path). Admin/service-account
+            // always have a live stack with their excluding frame, so this branch is
+            // only reached in tests / degenerate cases.
+            return true;
+        }
+        for (String sig : frameSignatures) {
+            if (sig == null) {
+                continue;
+            }
+            int hash = sig.lastIndexOf('#');
+            String cn = hash >= 0 ? sig.substring(0, hash) : sig;
+            String mn = hash >= 0 ? sig.substring(hash + 1) : "";
+            if (KC_USERS_RESOURCE.equals(cn) && "createUser".equals(mn)) {
+                return false;
+            }
+            if (KC_CLIENT_MANAGER.equals(cn)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Pure, unit-testable registration-FORM classifier. Given the live stack-frame
      * signatures as {@code "<FQN>#<method>"} (any order), return true iff a
-     * {@link #KC_REGISTRATION_USER_CREATION} frame is present — the
-     * registration-SPECIFIC marker that scopes the default-role grant ON for
-     * self-registration while leaving admin-create and the other internal 1-arg
-     * {@code addUser} callers stock-suppressed. Frame-list-driven so the
-     * registration-vs-admin/other partition is pinnable without a live
-     * {@link StackWalker}.
+     * {@link #KC_REGISTRATION_USER_CREATION} frame is present.
+     *
+     * <p>NOTE: this is the NARROW (registration-form-only) signal. The live
+     * default-role grant gate is now the broader, path-robust
+     * {@link #shouldGrantDefaultRolesOnSelfCreate(java.util.List, boolean)} (RegOn-gated,
+     * admin/service-account excluded), which ALSO covers the Tide-enrolled
+     * broker/link-tide import that has no RegistrationUserCreation frame. This
+     * predicate is retained as the documented registration-form subset (a true here
+     * implies the broader gate grants too, given RegOn) and is exercised by the
+     * registration-form unit tests. Frame-list-driven so the partition is pinnable
+     * without a live {@link StackWalker}.</p>
      */
     static boolean isSelfRegistrationFrame(java.util.List<String> frameSignatures) {
         if (frameSignatures == null) {

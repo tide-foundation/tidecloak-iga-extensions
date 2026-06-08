@@ -136,4 +136,115 @@ class IgaUserProviderRegistrationDefaultRolesTest {
         assertFalse(IgaUserProvider.isSelfRegistrationFrame(null),
                 "a null stack must NOT scope the grant on");
     }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // Round 2 — PATH-ROBUST self-enrollment classifier
+    // (shouldGrantDefaultRolesOnSelfCreate): RegOn-gated, admin/service-account
+    // excluded, covers the Tide-enrolled broker/link-tide import that has NO
+    // RegistrationUserCreation frame (the Round-1 gap).
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private static final String USER_CACHE_SESSION =
+            "org.keycloak.models.cache.infinispan.UserCacheSession";
+    private static final String BROKER_FIRST_LOGIN =
+            "org.keycloak.authentication.authenticators.broker."
+                    + "IdpCreateUserIfUniqueAuthenticator";
+    private static final String LINK_TIDE_ACTION =
+            "org.tidecloak.idp.LinkTideAccountAction";
+    private static final String CLIENT_MANAGER =
+            "org.keycloak.services.managers.ClientManager";
+
+    // ── RegOn OFF: never grant (open-registration posture is the gate) ───────
+
+    @Test
+    void regOnOff_registrationForm_doesNotGrant() {
+        List<String> frames = List.of(
+                PROFILE_FACTORY + "#apply",
+                DEFAULT_PROFILE + "#create",
+                REGISTRATION + "#success");
+        assertFalse(IgaUserProvider.shouldGrantDefaultRolesOnSelfCreate(frames, false),
+                "RegOn off → no default-role grant at creation even for the registration form");
+    }
+
+    @Test
+    void regOnOff_brokerImport_doesNotGrant() {
+        List<String> frames = List.of(
+                "org.keycloak.models.jpa.JpaUserProvider#addUser",
+                USER_CACHE_SESSION + "#addUser",
+                LINK_TIDE_ACTION + "#authenticate");
+        assertFalse(IgaUserProvider.shouldGrantDefaultRolesOnSelfCreate(frames, false),
+                "RegOn off → no grant for the Tide-enrolled broker/link-tide import either");
+    }
+
+    // ── RegOn ON: genuine self-enrollment grants (BOTH paths) ────────────────
+
+    @Test
+    void regOnOn_registrationForm_grants() {
+        List<String> frames = List.of(
+                PROFILE_FACTORY + "#apply",
+                DEFAULT_PROFILE + "#create",
+                REGISTRATION + "#success");
+        assertTrue(IgaUserProvider.shouldGrantDefaultRolesOnSelfCreate(frames, true),
+                "RegOn on + registration form → grant the realm default-role at creation");
+    }
+
+    @Test
+    void regOnOn_tideEnrolledBrokerImport_grants() {
+        // THE Round-1 GAP: the Tide-enrolled link-tide/broker import arrives as
+        // UserCacheSession#addUser with NO RegistrationUserCreation frame. The
+        // Round-1 StackWalker gate (isSelfRegistrationFrame) returned false here →
+        // roleless user → ORK "attested claim 'aud' is suppressed". The path-robust
+        // gate MUST grant.
+        List<String> frames = List.of(
+                "org.keycloak.models.jpa.JpaUserProvider#addUser",
+                USER_CACHE_SESSION + "#addUser",
+                LINK_TIDE_ACTION + "#authenticate",
+                "org.keycloak.authentication.DefaultAuthenticationFlow#processAction");
+        assertFalse(IgaUserProvider.isSelfRegistrationFrame(frames),
+                "sanity: the Tide-enrolled import has NO RegistrationUserCreation frame "
+                        + "(this is exactly why the Round-1 narrow gate missed it)");
+        assertTrue(IgaUserProvider.shouldGrantDefaultRolesOnSelfCreate(frames, true),
+                "RegOn on + Tide-enrolled broker/link-tide import → grant the realm "
+                        + "default-role at creation (path-robust fix)");
+    }
+
+    @Test
+    void regOnOn_genericBrokerFirstLogin_grants() {
+        List<String> frames = List.of(
+                USER_CACHE_SESSION + "#addUser",
+                BROKER_FIRST_LOGIN + "#authenticateImpl");
+        assertTrue(IgaUserProvider.shouldGrantDefaultRolesOnSelfCreate(frames, true),
+                "RegOn on + generic IdP-broker first-login self-enrollment → grant");
+    }
+
+    // ── RegOn ON: admin-create and service-account still EXCLUDED ────────────
+
+    @Test
+    void regOnOn_adminCreate_excluded() {
+        List<String> frames = List.of(
+                PROFILE_FACTORY + "#apply",
+                DEFAULT_PROFILE + "#create",
+                ADMIN_RESOURCE + "#createUser");
+        assertFalse(IgaUserProvider.shouldGrantDefaultRolesOnSelfCreate(frames, true),
+                "admin-create (UsersResource#createUser) must NOT grant at creation even "
+                        + "under RegOn — its CR commits and the D3 replay grant assigns roles");
+    }
+
+    @Test
+    void regOnOn_serviceAccount_excluded() {
+        List<String> frames = List.of(
+                CLIENT_MANAGER + "#enableServiceAccount");
+        assertFalse(IgaUserProvider.shouldGrantDefaultRolesOnSelfCreate(frames, true),
+                "service-account user-create (ClientManager) must NOT get the realm "
+                        + "default-role even under RegOn — internal, no account aud needed");
+    }
+
+    @Test
+    void regOnOn_nullStack_grantsByDefault() {
+        // RegOn but no stack to inspect (degenerate/test path) → grant; admin and
+        // service-account always carry their excluding frame on a live stack.
+        assertTrue(IgaUserProvider.shouldGrantDefaultRolesOnSelfCreate(null, true),
+                "RegOn on + null stack → default to granting (self-enrollment is the "
+                        + "dominant RegOn create path)");
+    }
 }
