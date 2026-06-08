@@ -430,6 +430,18 @@ public class IgaAdminResource {
         // triggered (fires here at approval, never at toggle). No-op while ADOPT CRs pend.
         org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, realm);
 
+        // Re-sign the Tide IdP settings when this commit changed a realm-config
+        // field that feeds the enclave-verified VendorSettings (RegOn =
+        // realm.isRegistrationAllowed()). The replay above already applied the
+        // new value to realm state, so signIdpSettings re-runs over the UPDATED
+        // realm and the stored settingsSig stays valid. Fail-closed: a signer
+        // failure (no active VRK / ORKs unreachable) throws out of here, rolling
+        // back this whole commit tx rather than leaving a stale settingsSig.
+        // No-op on Tideless realms (no IdpSettingsSigner provider registered) and
+        // on any non-(setRegistrationAllowed) CR. This is the COMMON single-CR /
+        // multiAdmin commit tail; bulk has the identical call in processOneCr.
+        org.tidecloak.iga.signing.IgaIdpSettingsResign.maybeReSign(session, realm, cr);
+
         IgaChangeRequestService service = getService();
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
         return Response.ok(toRepresentation(updated, service)).build();
@@ -958,6 +970,16 @@ public class IgaAdminResource {
             if (attestor instanceof org.tidecloak.iga.attestors.TideAttestor tideAttestor) {
                 tideAttestor.stampProducerUnitColumns(session, realm, cr);
             }
+
+            // Re-sign Tide IdP settings if this CR changed a signed VendorSettings
+            // field (RegOn) — IDENTICAL to the single-CR commit tail (commit():
+            // after convergeAfterCommit). Fires per committed setRegistrationAllowed
+            // CR so a bulk-approve that includes one keeps the enclave's signed
+            // settings valid. Fail-closed: a signer failure throws out of
+            // processOneCr and is caught below as a per-CR REJECTED/COMMIT_FAILED
+            // (the CR's replay rolls back with the tx), never silently committed
+            // with a stale settingsSig. No-op on Tideless / non-signed-field CRs.
+            org.tidecloak.iga.signing.IgaIdpSettingsResign.maybeReSign(session, realm, cr);
 
             outcome.put("status", "COMMITTED");
             return outcome;
