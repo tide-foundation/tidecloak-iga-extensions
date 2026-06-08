@@ -38,6 +38,7 @@ import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.services.IgaAdoptCancel;
 import org.tidecloak.iga.services.IgaAdoptScan;
+import org.tidecloak.iga.services.IgaApproverRoleRepointer;
 import org.tidecloak.iga.services.IgaFirstAdminAutoCommit;
 import org.tidecloak.iga.services.IgaToggleJobService;
 
@@ -140,6 +141,11 @@ public class TideAdminCompatResource {
             jobService.stageRunning(jobId, "setup-realm", null, null);
         }
 
+        // Response body, populated as the toggle progresses. Declared up-front
+        // so the switch-to-Tide approver-role repoint (pre-flip) can record its
+        // per-surface counts under "approverRoleRepoint".
+        Map<String, Object> body = new LinkedHashMap<>();
+
         // OFF→ON, non-master: auto-create the tide-realm-admin approver
         // role BEFORE the isIGAEnabled flip below. Creating it pre-flip means
         // IGA is still OFF, so the addRole/addCompositeRole/setSingleAttribute
@@ -209,6 +215,33 @@ public class TideAdminCompatResource {
                     logger.warnf("IGA toggle-on: VRK not yet active for realm %s, deferring EdDSA switch (iga.attestor=tide still set)",
                             realm.getName());
                 }
+
+                // (c) Repoint EVERY declared iga.approverRole to the canonical
+                // Tide approver role tide-realm-admin (created above in stage 1).
+                // In Tideless IGA an operator may pin approvals to a custom /
+                // attribute-derived role; in Tide mode the multiAdmin quorum
+                // consults tide-realm-admin, so a stale Tideless approver role on
+                // any surface (realm / role / client / group / idp / org) must be
+                // repointed or it would mis-gate (or silently bypass) a post-flip
+                // commit. Runs BEFORE the isIGAEnabled flip (plain model writes,
+                // not captured as SET_*_ATTRIBUTE CRs) and is idempotent — a
+                // re-toggle on an already-Tide realm only rewrites surfaces that
+                // are not already tide-realm-admin (typically zero). firstAdmin
+                // is unaffected (it bypasses requireApprover); the repointed value
+                // becomes load-bearing only once the realm flips to multiAdmin.
+                // Best-effort: a per-surface failure never aborts the toggle.
+                try {
+                    IgaApproverRoleRepointer.Result repoint =
+                            IgaApproverRoleRepointer.repointToTideRealmAdmin(session, realm);
+                    if (repoint.total() > 0) {
+                        body.put("approverRoleRepoint", repoint.toMap());
+                    }
+                } catch (RuntimeException repointEx) {
+                    logger.errorf(repointEx,
+                            "IGA toggle-on: approver-role repoint to tide-realm-admin FAILED for realm %s "
+                                    + "— toggle continues; some surfaces may still carry a stale iga.approverRole.",
+                            realm.getName());
+                }
             }
         }
 
@@ -233,7 +266,6 @@ public class TideAdminCompatResource {
             jobService.stageDone(jobId, "setup-realm", null, null);
         }
 
-        Map<String, Object> body = new LinkedHashMap<>();
         body.put("enabled", next);
 
         // OFF→ON: run the one-shot ADOPT scan inside its own
