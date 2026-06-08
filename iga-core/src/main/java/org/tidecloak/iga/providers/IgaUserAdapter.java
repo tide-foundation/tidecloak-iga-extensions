@@ -604,7 +604,7 @@ public class IgaUserAdapter extends UserAdapter {
         // UsersResource.createUser:177 (runtime getId#8) falls through.
         captureEmitted = true;
         trace("getId#EMIT(UsersResource#createUser)");
-        emitPersistPendingCreateUserCr("UsersResource#createUser");
+        emitPersistPendingCreateUserCr(ADMIN_TERMINAL_LABEL);
         // unreachable — emit always throws IgaPendingApprovalException
         return super.getId();
     }
@@ -695,6 +695,40 @@ public class IgaUserAdapter extends UserAdapter {
             }
         });
 
+        // ─────────────────────────────────────────────────────────────────────
+        // ★ REGISTRATION default-role grant (accept-unattested self-reg aud fix).
+        //
+        // For the SELF-REGISTRATION terminal ONLY, grant the realm default-role +
+        // join the realm default groups onto the just-persisted pending user, so a
+        // self-reg user who is admitted UNSIGNED at login (RegOn / accept-unattested:
+        // the CREATE_USER CR is filed PENDING and NEVER commits) still HOLDS the
+        // default-roles. Without this the self-reg user is ROLELESS → KC builds the
+        // token with empty resource_access → no `account` audience → the TVE
+        // bidirectional check (TokenValidationEngine:965) rejects with
+        // "attested claim 'aud' is suppressed in token" (the producer's metadata
+        // closure attests aud=[account] from the default-role composite, and the ORK
+        // universal-inherits the realm default-role, so the token MUST carry it).
+        //
+        // SUPPRESSION (no nested CR): we are still in captureMode here, so
+        // grantRole/joinGroup short-circuit to super.* (plain pass-through, NO
+        // GRANT_ROLES/JOIN_GROUPS CR is emitted). This mirrors exactly how
+        // IgaReplayDispatcher.replayCreateUser :559-566 grants default-roles at
+        // commit under IGA_REPLAY_ACTIVE.
+        //
+        // CLOSURE INVARIANT (gate still admits): the realm default-role id is the
+        // D1b exclusion in RealmAttestationExporter.perUserUnits :418 — a user
+        // holding ONLY default-roles → empty role_ids → NO user_role_mapping_set
+        // unit. So the user HOLDS default-roles (KC token carries the account aud)
+        // AND the producer closure has no role-mapping unit (the default-roles-only
+        // gate still admits the unsigned user_identity). Both invariants hold.
+        //
+        // SCOPE: admin-create (terminal=UsersResource#createUser) is UNCHANGED — its
+        // CREATE_USER CR commits and the D3 replay grant handles default-roles there;
+        // double-granting would be wrong. Strictly gated on the registration terminal.
+        if (isRegistrationTerminal(terminalLabel)) {
+            grantDefaultRolesForRegistration();
+        }
+
         // NOTE: NO setRollbackOnly() — the request tx COMMITS so the pending user
         // persists. The CR was written on a separate session above (so it is durable
         // independently), and the 202 below is still returned via the exception mapper.
@@ -709,6 +743,63 @@ public class IgaUserAdapter extends UserAdapter {
                 crIdHolder[0]);
 
         throw new IgaPendingApprovalException(crIdHolder[0], "USER", "CREATE_USER");
+    }
+
+    /**
+     * Pure decision: is this persist-pending emit firing from the SELF-REGISTRATION
+     * terminal (so the just-persisted user must be granted the realm default-role,
+     * because the accept-unattested self-reg login admits the user UNSIGNED and its
+     * CREATE_USER CR never commits → the D3 replay grant never runs)?
+     *
+     * <p>True iff {@code terminalLabel} is exactly the registration terminal frame
+     * {@code "RegistrationUserCreation#success"} (the value passed by the
+     * registration {@link #setEnabled} seam). The admin terminal
+     * ({@code "UsersResource#createUser"}) returns false — its CR commits and the
+     * {@code IgaReplayDispatcher.replayCreateUser} D3 grant assigns default-roles
+     * there, so granting here would double-grant. Factored out as a pure,
+     * frame-list-free predicate so the registration-vs-admin scoping is unit-pinnable
+     * without a live stack/session.</p>
+     */
+    /** The exact terminalLabel the registration {@link #setEnabled} seam passes. */
+    static final String REGISTRATION_TERMINAL_LABEL = "RegistrationUserCreation#success";
+
+    /** The exact terminalLabel the admin {@link #getId} seam passes. */
+    static final String ADMIN_TERMINAL_LABEL = "UsersResource#createUser";
+
+    static boolean isRegistrationTerminal(String terminalLabel) {
+        return REGISTRATION_TERMINAL_LABEL.equals(terminalLabel);
+    }
+
+    /**
+     * Grant the realm default-role + join the realm default groups onto {@code this}
+     * just-persisted pending user, mirroring stock KC
+     * {@code JpaUserProvider.addUser} and the commit-time D3 grant
+     * ({@code IgaReplayDispatcher.replayCreateUser:559-566}).
+     *
+     * <p>★ Suppression (no nested CR): we are in {@code captureMode} here, so the
+     * overridden {@link #grantRole}/{@link #joinGroup} short-circuit to {@code super.*}
+     * (plain pass-through) and do NOT spawn a GRANT_ROLES/JOIN_GROUPS change request —
+     * exactly as the replay grant runs under {@code IGA_REPLAY_ACTIVE}. The granted
+     * default-role edge is NOT per-user signed: the producer's D1b exclusion
+     * ({@code RealmAttestationExporter.perUserUnits} / {@code userRoleMappingSet}
+     * filters the realm default-role id) keeps the closure free of a
+     * {@code user_role_mapping_set} unit, so the default-roles-only gate still admits.</p>
+     */
+    private void grantDefaultRolesForRegistration() {
+        if (!captureMode) {
+            // Defensive: only ever invoked from the capture-mode persist-pending emit.
+            return;
+        }
+        org.keycloak.models.RoleModel defaultRole = realm.getDefaultRole();
+        if (defaultRole != null) {
+            grantRole(defaultRole);
+        }
+        realm.getDefaultGroupsStream().forEach(this::joinGroup);
+        log.infof("IGA self-reg PERSIST-PENDING: granted realm default-role%s + default groups "
+                + "to self-registered user uuid=%s (no nested CR — captureMode pass-through; "
+                + "default-role excluded from the producer user_role_mapping_set unit, "
+                + "so the token carries the account aud and the gate still admits).",
+                defaultRole != null ? " " + defaultRole.getName() : " (none)", super.getId());
     }
 
     /**
@@ -973,7 +1064,7 @@ public class IgaUserAdapter extends UserAdapter {
                         + "(setEnabled immediate caller=RegistrationUserCreation#success) "
                         + "— firing persist-pending CREATE_USER CR for self-registered "
                         + "user uuid=%s", super.getId());
-                emitPersistPendingCreateUserCr("RegistrationUserCreation#success");
+                emitPersistPendingCreateUserCr(REGISTRATION_TERMINAL_LABEL);
             }
         }
     }

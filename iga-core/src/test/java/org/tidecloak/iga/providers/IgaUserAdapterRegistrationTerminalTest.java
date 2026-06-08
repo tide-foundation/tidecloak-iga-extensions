@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * ★ GOVERN SELF-REGISTRATION — the registration user-create terminal predicate.
@@ -177,5 +179,43 @@ class IgaUserAdapterRegistrationTerminalTest {
                 ADAPTER + "#classifyImmediateCaller",
                 ADAPTER + "#getId");
         assertEquals("<none>", IgaUserAdapter.classifyImmediateCaller(frames));
+    }
+
+    // ── REGISTRATION default-role grant scoping ──────────────────────────────
+    //
+    // ★ accept-unattested self-reg aud fix. The persist-pending emit grants the
+    // realm default-role ONLY at the REGISTRATION terminal (the CR never commits
+    // for accept-unattested self-reg, so the D3 replay grant never runs → without
+    // this the user is ROLELESS → no `account` aud → TVE rejects "attested claim
+    // 'aud' is suppressed"). The ADMIN terminal must NOT grant here — its CR
+    // commits and IgaReplayDispatcher.replayCreateUser D3 grants default-roles,
+    // so granting at the admin boundary would double-grant. isRegistrationTerminal
+    // is the pure scoping predicate driving that decision.
+
+    @Test
+    void registrationTerminalLabel_triggersDefaultRoleGrant() {
+        assertTrue(
+                IgaUserAdapter.isRegistrationTerminal(
+                        IgaUserAdapter.REGISTRATION_TERMINAL_LABEL),
+                "the registration terminal label must trigger the default-role grant "
+                        + "(self-reg user holds default-roles → token carries the account aud)");
+    }
+
+    @Test
+    void adminTerminalLabel_doesNotTriggerDefaultRoleGrant() {
+        assertFalse(
+                IgaUserAdapter.isRegistrationTerminal(
+                        IgaUserAdapter.ADMIN_TERMINAL_LABEL),
+                "the admin terminal label must NOT grant here — admin-create's CR commits "
+                        + "and the D3 replay grant assigns default-roles; granting here would "
+                        + "double-grant and is out of scope");
+    }
+
+    @Test
+    void unknownTerminalLabel_doesNotTriggerDefaultRoleGrant() {
+        assertFalse(IgaUserAdapter.isRegistrationTerminal("SomethingElse#frame"),
+                "only the exact registration terminal label may trigger the grant");
+        assertFalse(IgaUserAdapter.isRegistrationTerminal(null),
+                "a null terminal label must not trigger the grant");
     }
 }
