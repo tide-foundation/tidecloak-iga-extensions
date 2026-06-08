@@ -230,6 +230,16 @@ public class IgaReplayDispatcher {
             case "REQUEST_SERVER_CERT" -> replayRequestServerCert(cr);
             case "INSTALL_LICENSE", "ROTATE_LICENSE" -> replayLicenseAction(cr);
 
+            // ----- Admin-policy threshold re-sign (steady-state multiAdmin) -----
+            // NOT a model mutation: it Policy:1-signs the NEW admin Policy (carried in
+            // ROWS_JSON, approved via the two-phase ceremony) with the collected dokens and
+            // installs it into IGA_ROLE_POLICY at the new threshold. Delegated to the
+            // TideAttestor (which owns the Midgard/Policy material + upsert). It sets
+            // STATUS=APPROVED itself; the dispatcher tail's re-set is harmless/idempotent.
+            case "REGEN_ADMIN_POLICY" ->
+                    new org.tidecloak.iga.attestors.TideAttestor(session)
+                            .replayRegenAdminPolicy(session, realm, cr);
+
             // ----- Attribute writes -----
             case "SET_USER_ATTRIBUTE" -> replaySetUserAttribute(session, realm, rows, finalAttestation, em);
             case "REMOVE_USER_ATTRIBUTE" -> replayRemoveUserAttribute(session, realm, rows, em);

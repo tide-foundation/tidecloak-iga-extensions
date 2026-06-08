@@ -39,6 +39,7 @@ import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
+import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.replay.IgaReplayExtension;
 
 import jakarta.persistence.EntityManager;
@@ -228,6 +229,29 @@ public class TideAttestor implements IgaAttestor {
 
     /** The action type whose firstAdmin sign is upgraded to the real VRK ceremony. */
     private static final String ACTION_GRANT_ROLES = "GRANT_ROLES";
+
+    // -------------------------------------------------------------------------
+    // Threshold-policy re-sign CR (steady-state multiAdmin admin-policy regen)
+    // -------------------------------------------------------------------------
+    /**
+     * Action type of the explicit, enclave-signed admin-policy threshold re-sign CR.
+     * Emitted in {@link #combineFinal}'s multiAdmin branch when a committing
+     * tide-realm-admin membership change moves the dynamic threshold; it carries the
+     * NEW unsigned {@link Policy} bytes and is committed (after the assignment CRs it
+     * {@code dependsOn}) through a REAL Policy:1 quorum {@code Midgard.SignModel} with
+     * the collected dokens — replacing the old SILENT, doken-less in-line re-sign that
+     * a signing-capable ORK would have rejected (fail-closed).
+     */
+    public static final String ACTION_REGEN_ADMIN_POLICY = "REGEN_ADMIN_POLICY";
+    /** Entity type stamped on a {@link #ACTION_REGEN_ADMIN_POLICY} CR. */
+    public static final String ENTITY_TYPE_ADMIN_POLICY = "ADMIN_POLICY";
+    /** ROWS_JSON keys carried by a {@link #ACTION_REGEN_ADMIN_POLICY} CR. */
+    public static final String ROW_OLD_THRESHOLD = "OLD_THRESHOLD";
+    public static final String ROW_NEW_THRESHOLD = "NEW_THRESHOLD";
+    public static final String ROW_POLICY_ROLE_ID = "ROLE_ID";
+    public static final String ROW_POLICY_VVK_ID = "VVK_ID";
+    /** Base64 of the NEW unsigned {@code Policy.ToBytes()} at NEW_THRESHOLD. */
+    public static final String ROW_POLICY_BODY_UNSIGNED = "POLICY_BODY_UNSIGNED";
 
     // -------------------------------------------------------------------------
     // Admin-policy artifact shape
@@ -585,15 +609,22 @@ public class TideAttestor implements IgaAttestor {
                         realm.getName());
             }
         } else if (MODE_MULTI_ADMIN.equals(mode)) {
-            // multiAdmin steady-state. If this committing CR
-            // changes the active tide-realm-admin set (grant/revoke of the role), the
-            // dynamic threshold floor(0.7 x N) may move, so the SIGNED admin policy
-            // artifact must be regenerated + re-signed to encode the new threshold.
-            // Sequenced LAST — after the CR's own attestation `sig` is already built
-            // above — so the regen never disturbs the CR sign. No-op (and IsEqualTo-
-            // skipped) when the CR is not a membership change or the threshold did not
-            // actually move.
-            maybeRegenerateAdminPolicyOnMembershipChange(session, realm, cr);
+            // multiAdmin steady-state. If this committing CR changes the active
+            // tide-realm-admin set (grant/revoke of the role), the dynamic threshold
+            // floor(0.7 x N) may move, so the SIGNED admin policy artifact must be
+            // regenerated + re-signed to encode the new threshold.
+            //
+            // ★ This NO LONGER signs in-line. The previous behaviour
+            // (maybeRegenerateAdminPolicyOnMembershipChange → signAdminPolicyViaPolicyFlow)
+            // re-signed the M0 policy with a doken-less Midgard.SignModel(Policy:1) — which a
+            // real signing-capable ORK REJECTS (no collected admin dokens), fail-closing every
+            // tide-realm-admin grant/revoke. Instead we EMIT an explicit, enclave-signed
+            // REGEN_ADMIN_POLICY CR (one per batch, folded) that carries the NEW unsigned
+            // Policy bytes and is committed — after the assignment CR(s) it dependsOn — via a
+            // REAL Policy:1 quorum sign with the collected dokens. Sequenced LAST so the CR's
+            // own attestation `sig` is already built. No-op (and IsEqualTo-skipped) when the CR
+            // is not a membership change or the threshold did not actually move.
+            maybeEmitThresholdPolicyCr(session, realm, cr);
         }
         return sig;
     }
@@ -842,108 +873,170 @@ public class TideAttestor implements IgaAttestor {
     // -------------------------------------------------------------------------
 
     /**
-     * Steady-state (multiAdmin) admin-policy regeneration on an active-admin-set
-     * change. Fired from {@link #combineFinal} ONLY in multiAdmin
-     * mode, AFTER the committing CR's own attestation signature is built (so the
-     * regen is sequenced last).
+     * Steady-state (multiAdmin) admin-policy threshold re-sign, emitted as an
+     * EXPLICIT, enclave-signed {@link #ACTION_REGEN_ADMIN_POLICY} change request — one
+     * per batch, folded. Fired from {@link #combineFinal} ONLY in multiAdmin mode, AFTER
+     * the committing CR's own attestation signature is built (so the emit is sequenced
+     * last and never disturbs the CR sign).
+     *
+     * <h3>Why a CR, not an in-line re-sign</h3>
+     * The previous behaviour ({@code maybeRegenerateAdminPolicyOnMembershipChange})
+     * re-signed the M0 policy in-line with a doken-LESS {@code Midgard.SignModel(Policy:1)}.
+     * On a real signing-capable realm the ORK's {@code PolicyAuthorizationFlow} REJECTS that
+     * (no collected admin dokens authorize the re-sign) — so every tide-realm-admin
+     * grant/revoke fail-closed. We instead emit a governed CR whose Policy:1 re-sign runs at
+     * commit with the dokens the admins actually collected via the two-phase ceremony.
      *
      * <h3>What it does</h3>
      * <ol>
      *   <li>Detect a membership-changing CR: a committed GRANT/REVOKE of the
-     *       realm-management {@code tide-realm-admin} role. Anything else → no-op.</li>
-     *   <li>Compute the POST-commit active-admin count. {@code combineFinal} runs
-     *       BEFORE the dispatcher replays this CR, so {@link #countActiveTideRealmAdmins}
-     *       still returns the PRE-commit count; we add the CR's pending net delta
-     *       (+1 grant / -1 revoke).</li>
-     *   <li>{@code newThreshold = max(1, floor(0.7 x postCommitCount))} — the SAME
-     *       formula + the SAME counting function {@link #getThreshold} uses, so the
-     *       policy the artifact encodes and the gate {@code getThreshold} enforces
-     *       cannot drift.</li>
-     *   <li>IsEqualTo short-circuit: if the
-     *       current policy already encodes {@code newThreshold}, skip — no rewrite,
-     *       no re-sign. The floor formula means most single adds DON'T move the
-     *       threshold, so this is the primary churn control. Exactly one
-     *       regen per committed membership-changing CR.</li>
-     *   <li>Rebuild the policy artifact at {@code newThreshold},
-     *       re-sign it with the realm's CURRENT authorizer mode (the invariant:
-     *       admin policy signed with the mode the realm is in). This regen fires
-     *       only while the realm is already multiAdmin: on a REAL-SIGNING-CAPABLE
-     *       realm the re-sign is the REAL Policy:1 quorum ceremony bootstrapped by the
-     *       existing M0 policy ({@link #signAdminPolicyViaPolicyFlow}); on a
-     *       non-capable dev/test realm it is the {@link #DUMMY_SIG_PREFIX} stub. Write
-     *       {@code policy}/{@code policySig} in the same JPA transaction as the CR
-     *       commit (fail-closed + atomic).</li>
+     *       realm-management {@code tide-realm-admin} role ({@link #tideRealmAdminMembershipDelta}).
+     *       Delta 0 → no-op.</li>
+     *   <li>Compute the FINAL post-commit count. {@code combineFinal} runs BEFORE the
+     *       dispatcher replays this CR, so {@link #countActiveTideRealmAdmins} still
+     *       returns the PRE-commit count; add the pending net delta (+1 grant / -1
+     *       revoke), clamp at 0, and apply the SAME {@code max(1, floor(0.7 × N))}
+     *       formula {@link #getThreshold} uses (cannot drift).</li>
+     *   <li>IsEqualTo no-op: if {@code newThreshold} already equals the current encoded
+     *       threshold of the existing M0 policy, emit NO CR — and if a pending
+     *       {@code REGEN_ADMIN_POLICY} exists for this realm+role, DENY/cancel it (handles
+     *       a batch that nets back to the current threshold).</li>
+     *   <li>Fold to exactly ONE: if a pending {@code REGEN_ADMIN_POLICY} CR exists for this
+     *       realm+role, UPDATE its ROWS_JSON in place (rebuilt OLD/NEW threshold + fresh
+     *       unsigned policy bytes) and CLEAR its authorizations (a new threshold needs a new
+     *       quorum). Otherwise CREATE one, {@code dependsOn} this assignment CR so the 412
+     *       DEPENDENCY_NOT_MET gate forces it to commit AFTER the assignments (count final).</li>
      * </ol>
      *
-     * <h3>Who signs</h3>
-     * The membership CR is authorized by the OLD quorum at the OLD threshold
-     * ({@code getThreshold} was evaluated at the commit gate BEFORE this CR was
-     * counted); the regenerated policy — multiAdmin-signed here — installs the NEW
-     * threshold for SUBSEQUENT CRs. OLD quorum installs NEW threshold; no
-     * circular "need the new quorum to authorize its own creation".
+     * <p>This method NEVER signs. The Policy:1 sign happens at the policy CR's own commit
+     * ({@link #replayRegenAdminPolicy}) with the collected dokens. OLD quorum (the threshold
+     * in force when the membership CR committed) authorizes the policy CR; it installs the
+     * NEW threshold for SUBSEQUENT CRs — no circular dependency.
      */
-    private void maybeRegenerateAdminPolicyOnMembershipChange(KeycloakSession session, RealmModel realm,
-                                                              IgaChangeRequestEntity cr) {
+    void maybeEmitThresholdPolicyCr(KeycloakSession session, RealmModel realm,
+                                    IgaChangeRequestEntity cr) {
         int delta = tideRealmAdminMembershipDelta(realm, cr);
         if (delta == 0) {
             return; // not a tide-realm-admin grant/revoke — the set is unchanged.
         }
 
+        String tideRoleId = tideRealmAdminRoleId(realm);
+        if (tideRoleId == null) {
+            log.infof("IGA threshold-policy CR skipped: realm %s has no tide-realm-admin role to key "
+                    + "the admin Policy (membership delta %+d).", realm.getName(), delta);
+            return;
+        }
+
         IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
 
-        // combineFinal runs PRE-replay, so the live count excludes this CR's effect;
-        // add the pending net delta to obtain the post-commit count.
-        // Clamp at 0 — a revoke can never make the count negative.
+        // combineFinal runs PRE-replay, so the live count excludes this CR's effect; add the
+        // pending net delta to obtain the FINAL post-commit count. Clamp at 0 (a revoke can
+        // never make the count negative). SAME formula getThreshold uses.
         int postCommitCount = Math.max(0, countActiveTideRealmAdmins(realm, session) + delta);
         int newThreshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
 
-        // IsEqualTo short-circuit: regenerate only when the encoded threshold actually
-        // moves AND a row already exists. If the row is MISSING (e.g. a realm that flipped
-        // before the M0-FIX, or never had one seeded), we must INSERT it now regardless of
-        // the threshold delta so the multiAdmin approval-model has an M0 Policy to embed.
         Integer priorThreshold = (policy == null) ? null : currentEncodedThreshold(policy);
+
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaChangeRequestService service = new IgaChangeRequestService(em, session);
+        IgaChangeRequestEntity pending =
+                service.findPending(realm.getId(), ENTITY_TYPE_ADMIN_POLICY, tideRoleId);
+
+        // IsEqualTo no-op: the threshold does not move. Emit no CR; and if a stale pending
+        // REGEN_ADMIN_POLICY exists (an earlier CR in this batch moved it, a later one moved
+        // it back), CANCEL it so the batch nets to zero with no orphaned policy CR.
         if (priorThreshold != null && priorThreshold == newThreshold) {
-            log.infof("IGA policy regen skipped (threshold unchanged): realm %s tide-realm-admin policy "
-                    + "already encodes threshold %d (membership delta %+d, post-commit admins %d).",
-                    realm.getName(), newThreshold, delta, postCommitCount);
+            if (pending != null) {
+                pending.setStatus("CANCELLED");
+                pending.setResolvedAt(System.currentTimeMillis());
+                em.flush();
+                log.infof("IGA threshold-policy CR cancelled (nets to zero): realm %s tide-realm-admin "
+                        + "threshold stays %d after membership delta %+d — pending CR %s CANCELLED.",
+                        realm.getName(), newThreshold, delta, pending.getId());
+            } else {
+                log.infof("IGA threshold-policy CR skipped (threshold unchanged): realm %s tide-realm-admin "
+                        + "policy already encodes threshold %d (membership delta %+d, post-commit admins %d).",
+                        realm.getName(), newThreshold, delta, postCommitCount);
+            }
             return;
         }
 
+        int oldThreshold = (priorThreshold == null) ? 0 : priorThreshold;
         String vvkId = realmVvkId(realm);
-        // M0: capability-aware artifact. On a REAL-SIGNING-CAPABLE realm this is a
-        // genuine VVK-signed Midgard Policy (POLICY = Base64(signed Policy.ToBytes()),
-        // POLICY_SIG = real VVK sig); on a non-capable dev/test realm it is the
-        // pre-M0 stub (hand-rolled JSON body + DUMMY_SIG_PREFIX digest) — byte-for-byte
-        // the previous behaviour. This regen fires ONLY from combineFinal's multiAdmin
-        // branch, so when not capable the sig is the multiAdmin DUMMY_SIG_PREFIX as before.
-        //
-        // ★★ M3 GAP — FIXED (P4) ★★
-        // On a REAL-SIGNING-CAPABLE realm, buildSignedAdminPolicyArtifact now branches the
-        // policy SIGNER on the realm's mode: this regen fires ONLY in multiAdmin (post-flip),
-        // so it routes through signAdminPolicyViaPolicyFlow — the Policy:1 quorum re-sign
-        // bootstrapped by the EXISTING M0 policy — NOT signAdminPolicyWithVvk (VRK:1 +
-        // firstAdmin pack), whose pack the flip BURNED (ork PolicySignRequest.cs:102). The
-        // existing admin Policy authorizes the tide-realm-admin quorum to sign the UPDATED
-        // Policy; OLD quorum installs the NEW threshold. (The live per-CR doken collection for
-        // the regen is the remaining interactive M3 step — see signAdminPolicyViaPolicyFlow.)
-        AdminPolicyArtifact artifact = buildSignedAdminPolicyArtifact(session, realm, newThreshold, vvkId);
+        // The NEW unsigned admin Policy bytes (Base64) the policy CR will Policy:1-sign at
+        // commit. Built from the SAME Policy shape the M0/regen ceremonies use; the commit-time
+        // sign attaches the VVK signature onto these exact bytes (the carrier signs them).
+        String policyBodyUnsigned = java.util.Base64.getEncoder()
+                .encodeToString(buildUnsignedAdminPolicyBytes(newThreshold, vvkId));
 
-        IgaRolePolicyEntity result = upsertAdminPolicyRow(session, realm, policy,
-                artifact.policyBody, artifact.policySig, newThreshold);
-        if (result == null) {
-            log.infof("IGA policy regen skipped: realm %s has no tide-realm-admin role to key the "
-                    + "admin Policy row (membership delta %+d).", realm.getName(), delta);
+        List<Map<String, Object>> rows = new ArrayList<>(1);
+        Map<String, Object> row = new java.util.LinkedHashMap<>();
+        row.put(ROW_OLD_THRESHOLD, oldThreshold);
+        row.put(ROW_NEW_THRESHOLD, newThreshold);
+        row.put(ROW_POLICY_ROLE_ID, tideRoleId);
+        row.put(ROW_POLICY_VVK_ID, vvkId);
+        row.put(ROW_POLICY_BODY_UNSIGNED, policyBodyUnsigned);
+        rows.add(row);
+
+        if (pending != null) {
+            // FOLD: rewrite the pending CR's payload to the final threshold and CLEAR its
+            // authorizations — the new threshold demands a fresh quorum re-approval, and the
+            // phase-1 carrier (REQUEST_MODEL) is now stale (built over the old policy bytes).
+            pending.setRowsJson(serializeRows(rows));
+            pending.setRequestModel(null);
+            clearAuthorizations(em, pending);
+            // Re-point dependsOn to ALSO include this latest assignment CR so the policy CR
+            // can only commit after EVERY assignment in the batch has committed (count final).
+            java.util.LinkedHashSet<String> deps = new java.util.LinkedHashSet<>(pending.getDependsOnList());
+            deps.add(cr.getId());
+            pending.setDependsOnList(new ArrayList<>(deps));
+            em.flush();
+            log.infof("IGA threshold-policy CR folded: realm %s tide-realm-admin threshold %d -> %d "
+                    + "(membership delta %+d, post-commit admins %d); pending CR %s rewritten, "
+                    + "authorizations cleared, dependsOn += %s.",
+                    realm.getName(), oldThreshold, newThreshold, delta, postCommitCount,
+                    pending.getId(), cr.getId());
             return;
         }
-        // Managed/persisted entity — flush keeps the rewrite in the CR's commit transaction
-        // (atomic: if the commit rolls back, so does the regen).
-        session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
 
-        log.infof("IGA admin policy %s: realm %s tide-realm-admin threshold %s -> %d "
-                + "(membership delta %+d, post-commit admins %d); policy re-signed (%s).",
-                priorThreshold == null ? "created" : "regenerated",
-                realm.getName(), String.valueOf(priorThreshold), newThreshold, delta, postCommitCount,
-                artifact.real ? "real VVK ceremony" : (DUMMY_SIG_PREFIX + " stub"));
+        IgaChangeRequestEntity created = service.create(realm, ENTITY_TYPE_ADMIN_POLICY, tideRoleId,
+                ACTION_REGEN_ADMIN_POLICY, rows, cr.getRequestedBy(), List.of(cr.getId()));
+        log.infof("IGA threshold-policy CR created: realm %s tide-realm-admin threshold %d -> %d "
+                + "(membership delta %+d, post-commit admins %d); CR %s dependsOn assignment CR %s.",
+                realm.getName(), oldThreshold, newThreshold, delta, postCommitCount,
+                created.getId(), cr.getId());
+    }
+
+    /**
+     * The NEW unsigned admin-threshold {@link Policy} bytes at {@code threshold} — the exact
+     * {@code Policy.ToBytes()} (NO signature attached) the {@link #ACTION_REGEN_ADMIN_POLICY}
+     * carrier wraps in a {@link PolicySignRequest} and the commit-time Policy:1 ceremony signs.
+     * Same shape (contractId / modelId={@code "any"} / EXPLICIT / PUBLIC / {threshold, role,
+     * resource}) the firstAdmin {@link #signAdminPolicyWithVvk} and the post-flip re-sign use,
+     * so the signed artifact is byte-compatible with the M0 the rest of the stack consumes.
+     */
+    static byte[] buildUnsignedAdminPolicyBytes(int threshold, String vvkId) {
+        PolicyParameters params = new PolicyParameters();
+        params.put("threshold", threshold);
+        params.put("role", TIDE_REALM_ADMIN_ROLE);
+        params.put("resource", POLICY_RESOURCE);
+        // Midgard's Policy keyId is NOT-NULL (it digests KeyId.getBytes()); a non-capable
+        // dev/test realm may have no vvkId yet, so coalesce to "" — the carrier still builds,
+        // and a real signing-capable realm always carries a real vvkId.
+        Policy policy = new Policy(POLICY_TYPE, "any", vvkId == null ? "" : vvkId,
+                ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params);
+        return policy.ToBytes();
+    }
+
+    /** Delete every {@link IgaAuthorizationEntity} for a CR (re-sign required after a fold). */
+    private static void clearAuthorizations(EntityManager em, IgaChangeRequestEntity cr) {
+        List<IgaAuthorizationEntity> auths = em.createNamedQuery(
+                        "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
+                .setParameter("changeRequestId", cr.getId())
+                .getResultList();
+        for (IgaAuthorizationEntity a : auths) {
+            em.remove(a);
+        }
     }
 
     /**
@@ -1292,6 +1385,135 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
+     * COMMIT/DISPATCH of a {@link #ACTION_REGEN_ADMIN_POLICY} CR — the REAL Policy:1 quorum
+     * re-sign with the NOW-COLLECTED admin dokens, then install the signed admin Policy (M0)
+     * into {@code IGA_ROLE_POLICY} at the NEW threshold. Invoked from
+     * {@code IgaReplayDispatcher.doReplay}'s {@code REGEN_ADMIN_POLICY} case.
+     *
+     * <h3>Steps</h3>
+     * <ol>
+     *   <li>Reload the doken-embedded carrier {@code cr.getRequestModel()} (the phase-1
+     *       PolicySignRequest, now carrying the collected admin dokens). Fail-closed if null
+     *       — a REGEN CR cannot commit without a phase-1 carrier.</li>
+     *   <li>{@code Midgard.SignModel(settings, ModelRequest.FromBytes(carrier))} — the REAL
+     *       Policy:1 sign (mirrors {@link #signMultiAdminUnitsViaPolicy}'s sign body).</li>
+     *   <li>Rebuild the Policy from {@link #ROW_POLICY_BODY_UNSIGNED} (the EXACT unsigned bytes
+     *       the admins approved) and {@code AddSignature(resp.Signatures[0])}, then
+     *       {@link #upsertAdminPolicyRow} with {@code Base64(policy.ToBytes())}, the VVK sig,
+     *       and {@link #ROW_NEW_THRESHOLD}. Sets STATUS=APPROVED on the managed CR.</li>
+     * </ol>
+     *
+     * <p><b>OLD-POLICY REVOCATION EXTENSION POINT.</b> After the new admin Policy is signed +
+     * stored below (see the marked TODO), a follow-up will trigger revocation of the OLD admin
+     * Policy on the ORK side (a separate ORK burn being built in parallel). The exact ORK
+     * contract is wired in that follow-up; this method is where that hook lands — it has the
+     * realm, the settings, the OLD M0 bytes (re-readable via {@link #readM0AdminPolicyBytes}
+     * BEFORE the upsert overwrites the row), and the new VVK sig in scope.
+     *
+     * <p>Fail-closed: a missing carrier, missing material, or a real sign failure throws,
+     * rolling back the commit tx — a real-provisioned realm never installs a fake-signed or
+     * stale admin Policy.
+     */
+    public void replayRegenAdminPolicy(KeycloakSession session, RealmModel realm,
+                                       IgaChangeRequestEntity cr) {
+        String carrier = cr.getRequestModel();
+        if (carrier == null || carrier.isBlank()) {
+            throw new RuntimeException("IGA threshold-policy commit: CR " + cr.getId()
+                    + " has no approval-model carrier (phase-1 buildPolicyResignApprovalModel never ran) "
+                    + "— cannot Policy:1-sign the admin-policy re-sign");
+        }
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException(
+                        "IGA threshold-policy commit: realm " + realm.getName()
+                                + " has no tide-vendor-key component (VRK not provisioned)"));
+        MultivaluedHashMap<String, String> config = vendorKey.getConfig();
+        if (config == null) {
+            throw new RuntimeException("IGA threshold-policy commit: tide-vendor-key component has no "
+                    + "config (realm " + realm.getName() + ")");
+        }
+
+        // The exact unsigned Policy bytes the admins approved + the final threshold to record.
+        byte[] unsignedPolicy = readUnsignedPolicyBytesFromCr(cr);
+        int newThreshold = readNewThresholdFromCr(cr);
+
+        try {
+            // REAL Policy:1 sign with the collected dokens (carrier verbatim — NO SetPolicy /
+            // SetAuthorizer re-set, which would invalidate the doken-bound segments).
+            ModelRequest req = ModelRequest.FromBytes(java.util.Base64.getDecoder().decode(carrier));
+            if (req == null) {
+                throw new RuntimeException("ModelRequest.FromBytes returned null for the CR carrier");
+            }
+            SignRequestSettingsMidgard settings = constructSignSettings(config);
+            SignatureResponse resp = Midgard.SignModel(settings, req);
+            if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
+                    || resp.Signatures[0] == null) {
+                throw new RuntimeException("IGA threshold-policy commit: Midgard.SignModel returned no "
+                        + "signature for realm " + realm.getName());
+            }
+            String vvkSig = resp.Signatures[0];
+
+            // Rebuild the signed Policy from the EXACT approved bytes + attach the VVK sig, so
+            // POLICY = Base64(signed Policy.ToBytes()) — byte-compatible with the M0 the rest of
+            // the stack reads (readM0AdminPolicyBytes Base64-decodes it back).
+            Policy policy = Policy.From(unsignedPolicy);
+            policy.AddSignature(java.util.Base64.getDecoder().decode(vvkSig));
+            String policyBody = java.util.Base64.getEncoder().encodeToString(policy.ToBytes());
+
+            IgaRolePolicyEntity existing = findTideRealmAdminPolicy(session, realm);
+            IgaRolePolicyEntity result = upsertAdminPolicyRow(session, realm, existing,
+                    policyBody, vvkSig, newThreshold);
+            if (result == null) {
+                throw new RuntimeException("IGA threshold-policy commit: realm " + realm.getName()
+                        + " has no tide-realm-admin role to key the admin Policy (M0) row");
+            }
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            em.flush();
+
+            // ★★ OLD-POLICY REVOCATION HOOK (follow-up) ★★
+            // The new admin Policy is now signed + stored. The OLD admin Policy's ORK-side burn
+            // is built in parallel; wire the exact ORK contract HERE in the follow-up (the OLD
+            // M0 bytes were readable above via findTideRealmAdminPolicy BEFORE this upsert, and
+            // `settings` / `realm` / `vvkSig` are all in scope). NOT implemented in this change.
+
+            log.infof("IGA threshold-policy commit: realm %s tide-realm-admin admin Policy RE-SIGNED via "
+                    + "Policy:1 quorum + installed at threshold %d (CR %s).",
+                    realm.getName(), newThreshold, cr.getId());
+
+            IgaChangeRequestEntity managed = em.find(IgaChangeRequestEntity.class, cr.getId());
+            if (managed != null) {
+                managed.setStatus("APPROVED");
+                managed.setResolvedAt(System.currentTimeMillis());
+            }
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("IGA threshold-policy commit: Policy:1 re-sign ceremony failed for "
+                    + "realm " + realm.getName() + " (CR " + cr.getId() + "): " + e.getMessage(), e);
+        }
+    }
+
+    /** Read {@link #ROW_NEW_THRESHOLD} from a REGEN CR's rows (fail-closed if absent/non-int). */
+    private static int readNewThresholdFromCr(IgaChangeRequestEntity cr) {
+        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+            Object v = row.get(ROW_NEW_THRESHOLD);
+            if (v instanceof Number n) {
+                return n.intValue();
+            }
+            if (v != null) {
+                try {
+                    return Integer.parseInt(v.toString());
+                } catch (NumberFormatException ignore) {
+                    // fall through to the throw
+                }
+            }
+        }
+        throw new RuntimeException("IGA threshold-policy CR " + cr.getId()
+                + " carries no " + ROW_NEW_THRESHOLD + " (the final threshold to install)");
+    }
+
+    /**
      * Read the threshold the current policy artifact encodes, for the IsEqualTo
      * short-circuit. Prefers the stored {@code IgaRolePolicyEntity.threshold}
      * column (authoritative + cheap); falls back to parsing {@code "threshold":N}
@@ -1386,6 +1608,13 @@ public class TideAttestor implements IgaAttestor {
      */
     public String buildMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
                                                IgaChangeRequestEntity cr) {
+        // The admin-policy threshold re-sign CR is NOT a producer-unit CR — its draft is the
+        // NEW unsigned admin Policy itself (carried verbatim in ROWS_JSON), wrapped in a
+        // Policy:1 PolicySignRequest with the EXISTING M0 policy embedded as the authorizer.
+        if (ACTION_REGEN_ADMIN_POLICY.equals(cr.getActionType())) {
+            return buildPolicyResignApprovalModel(session, realm, cr);
+        }
+
         // The M0 admin Policy bytes to embed — the genuine VVK-signed threshold Policy.
         byte[] adminPolicyBytes = readM0AdminPolicyBytes(session, realm);
         if (adminPolicyBytes == null) {
@@ -1519,6 +1748,75 @@ public class TideAttestor implements IgaAttestor {
             throw new RuntimeException("IGA multiAdmin approval: VRK creation-auth failed for realm "
                     + realm.getName() + ": " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Phase-1 approval-model build for a {@link #ACTION_REGEN_ADMIN_POLICY} CR: build the
+     * {@code Policy:1} {@link PolicySignRequest} carrier the admin quorum's enclaves approve,
+     * and persist its Base64 on the CR's {@code REQUEST_MODEL}.
+     *
+     * <p>Unlike the producer-unit path ({@link #buildMultiAdminApprovalModel}) the draft is
+     * NOT a framed AttestationUnit — it is the NEW unsigned admin {@link Policy} itself,
+     * carried VERBATIM in the CR's {@code ROWS_JSON} ({@link #ROW_POLICY_BODY_UNSIGNED}) so
+     * the bytes the admins approve and the bytes the commit signs are identical (no recompute).
+     * The EXISTING M0 admin Policy is embedded via {@code SetPolicy} so the ORK's
+     * {@code PolicyAuthorizationFlow} authorizes the re-sign against the CURRENT admin quorum
+     * (OLD quorum installs NEW threshold). Mirrors the request body of
+     * {@link #signAdminPolicyViaPolicyFlow} but persists the carrier instead of signing it.
+     *
+     * <p>{@link #acceptMultiAdminApprovalModel} needs NO branch — a PolicySignRequest
+     * round-trips through {@code ModelRequest.FromBytes} identically.
+     */
+    private String buildPolicyResignApprovalModel(KeycloakSession session, RealmModel realm,
+                                                  IgaChangeRequestEntity cr) {
+        // The NEW unsigned Policy bytes the admins approve — carried verbatim in ROWS_JSON,
+        // NOT recomputed (so phase-1 / commit cannot drift on the threshold or shape).
+        byte[] newPolicyBytes = readUnsignedPolicyBytesFromCr(cr);
+
+        // The EXISTING M0 admin Policy that authorizes the re-sign quorum (the policy
+        // bootstraps its own re-sign).
+        byte[] existingM0 = readM0AdminPolicyBytes(session, realm);
+        if (existingM0 == null) {
+            throw new RuntimeException("IGA threshold-policy approval: realm " + realm.getName()
+                    + " is multiAdmin but has no existing M0 admin Policy to bootstrap the "
+                    + "Policy:1 threshold re-sign for CR " + cr.getId());
+        }
+
+        // Policy:1 auth flow (admin quorum) over the NEW policy bytes; embed the EXISTING M0
+        // policy. Mirrors signAdminPolicyViaPolicyFlow's request construction, but we persist
+        // the carrier for the enclaves to approve rather than signing it here.
+        PolicySignRequest req = new PolicySignRequest(newPolicyBytes, POLICY_AUTH_FLOW);
+        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
+        req.SetPolicy(existingM0);
+
+        // Materialize Draft (PolicySignRequest folds the policy payload into Draft lazily via
+        // Serialize, invoked by GetDraft) BEFORE Encode() — else Encode() persists an EMPTY
+        // seg-3 draft (the enclave would approve nothing). Mirrors the AttestationUnit path.
+        try {
+            req.GetDraft();
+        } catch (Exception e) {
+            throw new RuntimeException("IGA threshold-policy approval: failed to serialize the Policy:1 "
+                    + "re-sign draft for CR " + cr.getId() + ": " + e.getMessage(), e);
+        }
+
+        String encoded = java.util.Base64.getEncoder().encodeToString(req.Encode());
+        cr.setRequestModel(encoded);
+        session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
+        log.infof("IGA threshold-policy approval (phase 1): built Policy:1 re-sign ModelRequest for "
+                + "CR %s (realm %s).", cr.getId(), realm.getName());
+        return encoded;
+    }
+
+    /** Decode {@link #ROW_POLICY_BODY_UNSIGNED} (Base64 Policy.ToBytes()) from a REGEN CR's rows. */
+    private static byte[] readUnsignedPolicyBytesFromCr(IgaChangeRequestEntity cr) {
+        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+            String b64 = str(row, ROW_POLICY_BODY_UNSIGNED);
+            if (b64 != null && !b64.isBlank()) {
+                return java.util.Base64.getDecoder().decode(b64);
+            }
+        }
+        throw new RuntimeException("IGA threshold-policy CR " + cr.getId()
+                + " carries no " + ROW_POLICY_BODY_UNSIGNED + " (unsigned admin Policy bytes)");
     }
 
     /**
@@ -2926,6 +3224,15 @@ public class TideAttestor implements IgaAttestor {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         String action = cr.getActionType();
 
+        // The admin-policy threshold re-sign CR touches NO producer attestation unit — its
+        // commit Policy:1-signs the admin Policy and installs the IGA_ROLE_POLICY row
+        // (replayRegenAdminPolicy), nothing more. It DOES carry a REQUEST_MODEL carrier, so
+        // without this guard the multiAdmin-distribution branch below would wrongly treat that
+        // carrier as a framed producer-unit request. No-op here.
+        if (ACTION_REGEN_ADMIN_POLICY.equals(action)) {
+            return;
+        }
+
         // ★ P4 multiAdmin distribution. Post-flip the firstAdmin pack is burned, so the
         // node/derived/realm/org stampers below would only stub (signProducerEnvelope's
         // multiAdmin branch → DUMMY_SIG_PREFIX). Instead, on a real-signing-capable
@@ -3668,6 +3975,15 @@ public class TideAttestor implements IgaAttestor {
             return MAPPER.readValue(rowsJson, LIST_MAP_REF);
         } catch (Exception e) {
             throw new RuntimeException("TideAttestor: failed to parse rowsJson", e);
+        }
+    }
+
+    /** Serialize ROWS_JSON the same way {@code IgaChangeRequestService} does (for the fold path). */
+    private static String serializeRows(List<Map<String, Object>> rows) {
+        try {
+            return MAPPER.writeValueAsString(rows);
+        } catch (Exception e) {
+            throw new RuntimeException("TideAttestor: failed to serialize rowsJson", e);
         }
     }
 
