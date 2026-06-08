@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -133,5 +134,58 @@ class IgaAttestationExporterReplayTest {
         assertThrows(RuntimeException.class,
                 () -> IgaAttestationExporterProvider.replayOrFailClosed(u,
                         "TIDE-DUMMY-v1:" + Base64.getEncoder().encodeToString(bytes(64, 2)), "r"));
+    }
+
+    // ---- Self-reg accept-unattested (phase 2/3): admit an UNSIGNED user_identity ----
+    //
+    // When the closure is default-roles-only on a registrationAllowed realm, the caller
+    // (exportSignedAccessTokenUnits) passes admitUnsignedSelfReg=true for the user_identity
+    // unit ONLY. A NULL/stub column then yields a SignedUnit marked isSelfRegUnsigned()=true
+    // (null sig, verbatim envelope) instead of a fail-closed throw. Every OTHER unit type,
+    // and the registration-off / privileged closures (admitUnsignedSelfReg=false), keep the
+    // existing fail-closed throw. A signed user_identity always takes the signed lane.
+
+    @Test
+    void selfRegAdmit_userIdentity_nullColumn_admittedUnsigned_notThrown() {
+        AttestationUnit u = unit(AttestationUnitType.USER_IDENTITY, "user-98bc3758");
+
+        SignedUnit admitted = IgaAttestationExporterProvider.replayOrFailClosed(
+                u, null, "selfregrealm", true);
+
+        assertNotNull(admitted);
+        assertTrue(admitted.isSelfRegUnsigned(),
+                "a default-roles-only user_identity with a NULL column must be admitted UNSIGNED");
+        assertNull(admitted.getSignature(),
+                "a self-reg-admitted user_identity carries NO signature (slot-6 bundle, not the signed batch)");
+        assertArrayEquals(u.serialize(), admitted.getEnvelope(),
+                "the admitted envelope must be the verbatim producer serialize() bytes (the ORK re-derives it)");
+    }
+
+    @Test
+    void selfRegAdmit_userIdentity_realSig_takesSignedLane() {
+        byte[] vvkSig = bytes(64, 11);
+        AttestationUnit u = unit(AttestationUnitType.USER_IDENTITY, "user-1");
+
+        // Even with admitUnsignedSelfReg=true, a present replayable sig is shipped normally.
+        SignedUnit signed = IgaAttestationExporterProvider.replayOrFailClosed(
+                u, prefixed(vvkSig), "selfregrealm", true);
+
+        assertFalse(signed.isSelfRegUnsigned(),
+                "a signed user_identity must NOT be marked self-reg-unsigned");
+        assertArrayEquals(vvkSig, signed.getSignature(),
+                "a present 64-byte sig is replayed even when self-reg admit is enabled");
+    }
+
+    @Test
+    void selfRegAdmit_disabled_stillFailsClosed_onNullColumn() {
+        // Privileged / registration-off closure: caller passes admitUnsignedSelfReg=false,
+        // so a NULL user_identity column STILL fail-closes exactly as today.
+        AttestationUnit u = unit(AttestationUnitType.USER_IDENTITY, "user-priv");
+        assertThrows(RuntimeException.class,
+                () -> IgaAttestationExporterProvider.replayOrFailClosed(u, null, "r", false),
+                "with self-reg admit OFF, a NULL user_identity must still fail closed");
+        // and the 3-arg overload (no admit) is unchanged:
+        assertThrows(RuntimeException.class,
+                () -> IgaAttestationExporterProvider.replayOrFailClosed(u, null, "r"));
     }
 }

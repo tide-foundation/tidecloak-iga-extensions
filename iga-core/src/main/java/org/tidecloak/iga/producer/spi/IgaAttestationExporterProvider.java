@@ -13,6 +13,7 @@ import org.tidecloak.iga.attestors.TideAttestor;
 import org.tidecloak.iga.producer.ExportRequest;
 import org.tidecloak.iga.producer.RealmAttestationExporter;
 import org.tidecloak.iga.producer.units.AttestationUnit;
+import org.tidecloak.iga.producer.units.AttestationUnitType;
 
 public class IgaAttestationExporterProvider implements AttestationExporterProvider {
     private static final Logger log = Logger.getLogger(IgaAttestationExporterProvider.class);
@@ -67,18 +68,46 @@ public class IgaAttestationExporterProvider implements AttestationExporterProvid
 
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
 
+        // ── Self-reg accept-unattested gate (phase 2/3, producer side) ──────────
+        // Decide ONCE, over the SAME built units this export ships, whether this is a
+        // default-roles-only user on a registrationAllowed realm. If so, a
+        // user_identity unit whose column has no replayable sig is ADMITTED UNSIGNED
+        // (routed to the ORK's slot-6 self-reg bundle by DefaultTokenManager) instead
+        // of fail-closing. The single source of truth for "default-roles-only" is the
+        // built `units` themselves: perUserUnits emits a user_role_mapping_set unit
+        // ONLY when the user holds >=1 direct (non-default) role row, so its ABSENCE
+        // here is exactly the ORK's "(b) no user_role_mapping_set" condition. A
+        // privileged user (role-mapping unit present) or a registration-off realm
+        // keeps the existing fail-closed throw for any NULL/stub column.
+        boolean registrationAllowed = realm.isRegistrationAllowed();
+        boolean hasRoleMappingUnit = units.stream()
+                .anyMatch(u -> u.type() == AttestationUnitType.USER_ROLE_MAPPING_SET);
+        boolean selfRegEligible = registrationAllowed && !hasRoleMappingUnit;
+
         // 2. For EACH unit: resolve its PR-A/A.2 column, require a real
         //    TIDE-FIRSTADMIN-v1:+b64(64B) sig, decode it, and attach (serialize(), sig).
         //    No re-sign anywhere — the burned firstAdmin pack is never touched at login.
+        //    EXCEPTION: a NULL/stub user_identity on a self-reg-eligible closure is
+        //    admitted UNSIGNED (SignedUnit.isSelfRegUnsigned()=true, null sig).
         List<SignedUnit> out = new ArrayList<>(units.size());
+        int selfRegAdmitted = 0;
         for (AttestationUnit unit : units) {
             String stored = UnitColumnMapping.readStored(em, unit);
-            out.add(replayOrFailClosed(unit, stored, realm.getName()));
+            boolean admitThisUnitUnsigned = selfRegEligible
+                    && unit.type() == AttestationUnitType.USER_IDENTITY;
+            SignedUnit su = replayOrFailClosed(unit, stored, realm.getName(), admitThisUnitUnsigned);
+            if (su.isSelfRegUnsigned()) {
+                selfRegAdmitted++;
+            }
+            out.add(su);
         }
 
         log.debugf("IGA signed unit export (uniform replay): %d unit(s) for realm %s "
-                + "client %s user %s — all replayed from column, 0 re-signed.",
-                out.size(), realm.getName(), clientId, userId);
+                + "client %s user %s — %d replayed from column, %d self-reg-admitted unsigned "
+                + "(registrationAllowed=%b, hasRoleMappingUnit=%b).",
+                out.size(), realm.getName(), clientId, userId,
+                out.size() - selfRegAdmitted, selfRegAdmitted,
+                registrationAllowed, hasRoleMappingUnit);
         return out;
     }
 
@@ -89,8 +118,34 @@ public class IgaAttestationExporterProvider implements AttestationExporterProvid
      * read contract is unit-testable without a session.
      */
     static SignedUnit replayOrFailClosed(AttestationUnit unit, String stored, String realmName) {
+        return replayOrFailClosed(unit, stored, realmName, false);
+    }
+
+    /**
+     * As {@link #replayOrFailClosed(AttestationUnit, String, String)}, but when
+     * {@code admitUnsignedSelfReg} is {@code true} AND the stored column has no
+     * replayable 64-byte sig, the unit is ADMITTED UNSIGNED (returns a
+     * {@link SignedUnit} with {@code isSelfRegUnsigned()=true} and a {@code null} sig)
+     * instead of throwing. The caller passes {@code true} ONLY for the
+     * {@code user_identity} unit of a default-roles-only, registration-allowed closure
+     * (the ORK slot-6 self-reg path). If a replayable sig IS present, it is shipped
+     * normally even when {@code admitUnsignedSelfReg} is {@code true} (a signed
+     * user_identity always takes the signed lane).
+     */
+    static SignedUnit replayOrFailClosed(AttestationUnit unit, String stored, String realmName,
+                                         boolean admitUnsignedSelfReg) {
         byte[] sig = decodeReplayableSig(stored);
         if (sig == null) {
+            if (admitUnsignedSelfReg) {
+                // Self-reg accept-unattested: a default-roles-only user on a
+                // registrationAllowed realm whose user_identity has no replayable sig is
+                // admitted UNSIGNED. DefaultTokenManager ships this verbatim envelope in
+                // the ORK's slot-6 bundle (NO trailing sig); the ORK admits it only behind
+                // a gVVK-signed RegOn proof and the no-user_role_mapping_set check. The
+                // privileged / registration-off cases never reach here (the caller passes
+                // admitUnsignedSelfReg=false for them) and still throw below.
+                return new SignedUnit(unit.serialize(), null, true);
+            }
             // The toggle-on backfill + per-CR-commit stampers must have signed this
             // column already; a NULL/stub here is a coverage hole the read must NOT
             // paper over by re-signing divergent bytes.
