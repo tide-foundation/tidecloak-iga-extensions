@@ -771,6 +771,27 @@ public class IgaUserAdapter extends UserAdapter {
     }
 
     /**
+     * Pure decision: at the self-registration terminal, should this user be ADMITTED
+     * (persist + local default-role, NO CREATE_USER CR, NO throw) rather than held in a
+     * persist-pending CREATE_USER CR?
+     *
+     * <p>True iff the realm is {@code registrationAllowed} (RegOn / accept-unattested).
+     * In that mode the producer ADMITS the user's UNSIGNED {@code user_identity} at login
+     * ({@code IgaAttestationExporterProvider.exportSignedAccessTokenUnits}
+     * {@code selfRegEligible = registrationAllowed && no user_role_mapping_set unit}), so
+     * the user is meant to sign up and log in WITHOUT an admin-approved CR. Firing the
+     * persist-pending emit there throws {@code IgaPendingApprovalException} out of
+     * {@code RegistrationUserCreation.success} — which the registration flow cannot handle
+     * — failing sign-up with {@code REGISTER_ERROR} / HTTP 400. So when RegOn is on we
+     * SKIP the CR and admit. When RegOn is off there is no reachable self-registration
+     * (the form is disabled), so the persist-pending CR lane is retained only as a
+     * defensive default for that unreachable case.</p>
+     */
+    static boolean admitSelfRegWithoutCr(boolean registrationAllowed) {
+        return registrationAllowed;
+    }
+
+    /**
      * Grant the realm default-role + join the realm default groups onto {@code this}
      * just-persisted pending user, mirroring stock KC
      * {@code JpaUserProvider.addUser} and the commit-time D3 grant
@@ -1058,13 +1079,54 @@ public class IgaUserAdapter extends UserAdapter {
                     && !IgaImportMode.inPartialImport()
                     && usernameObserved
                     && calledDirectlyFromRegistrationSuccess()) {
-                captureEmitted = true;
-                trace("setEnabled#EMIT(RegistrationUserCreation#success)");
-                log.infof("IGA user-capture: registration terminal reached "
-                        + "(setEnabled immediate caller=RegistrationUserCreation#success) "
-                        + "— firing persist-pending CREATE_USER CR for self-registered "
-                        + "user uuid=%s", super.getId());
-                emitPersistPendingCreateUserCr(REGISTRATION_TERMINAL_LABEL);
+                // ★ ACCEPT-UNATTESTED (RegOn) self-registration: do NOT file a
+                // persist-pending CREATE_USER CR and do NOT throw.
+                //
+                // When the realm is registrationAllowed (RegOn / accept-unattested)
+                // the producer ADMITS this self-reg user's UNSIGNED user_identity at
+                // login (IgaAttestationExporterProvider.exportSignedAccessTokenUnits
+                // selfRegEligible = registrationAllowed && no user_role_mapping_set
+                // unit → SignedUnit.isSelfRegUnsigned, ORK slot-6 bundle). The user
+                // is meant to log in WITHOUT an admin-approved CREATE_USER CR. Firing
+                // the persist-pending emit here throws IgaPendingApprovalException out
+                // of RegistrationUserCreation.success — which the registration flow
+                // CANNOT handle — so registration FAILS with REGISTER_ERROR / HTTP 400
+                // and the user can never complete sign-up. So on the RegOn path we
+                // SKIP the CR emit entirely: the user simply persists (enabled,
+                // attestation NULL) and registration completes normally.
+                //
+                // The local default-role mapping the login needs (so KC emits the
+                // account `aud` matching the ORK's universal-inherited realm
+                // default-role closure) is granted by IgaUserProvider.addUser's
+                // addDefaultRoles=true self-reg branch (and re-asserted here,
+                // idempotently, for robustness). The default-role id is D1b-excluded
+                // from RealmAttestationExporter.userRoleMappingSet, so NO per-user
+                // user_role_mapping_set unit is produced — the default-roles-only
+                // accept-unattested gate above still admits the unsigned user_identity.
+                //
+                // When RegOn is OFF there is no self-registration to govern (the
+                // registration form is unreachable), so the persist-pending CR lane is
+                // retained only for that (now unreachable) case as a defensive default.
+                if (admitSelfRegWithoutCr(realm.isRegistrationAllowed())) {
+                    captureEmitted = true;
+                    trace("setEnabled#REGON-ADMIT(RegistrationUserCreation#success)");
+                    grantDefaultRolesForRegistration();
+                    log.infof("IGA user-capture: registration terminal reached "
+                            + "(setEnabled immediate caller=RegistrationUserCreation#success); "
+                            + "realm registrationAllowed (accept-unattested / RegOn) — "
+                            + "ADMITTING self-registered user uuid=%s WITHOUT a CREATE_USER "
+                            + "CR (login admits the unsigned user_identity); realm "
+                            + "default-role asserted locally so the token carries the "
+                            + "account aud.", super.getId());
+                } else {
+                    captureEmitted = true;
+                    trace("setEnabled#EMIT(RegistrationUserCreation#success)");
+                    log.infof("IGA user-capture: registration terminal reached "
+                            + "(setEnabled immediate caller=RegistrationUserCreation#success); "
+                            + "realm registration NOT allowed — firing persist-pending "
+                            + "CREATE_USER CR for self-registered user uuid=%s", super.getId());
+                    emitPersistPendingCreateUserCr(REGISTRATION_TERMINAL_LABEL);
+                }
             }
         }
     }

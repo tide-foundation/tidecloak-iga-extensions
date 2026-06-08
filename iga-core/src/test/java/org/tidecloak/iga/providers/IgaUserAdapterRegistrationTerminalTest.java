@@ -218,4 +218,32 @@ class IgaUserAdapterRegistrationTerminalTest {
         assertFalse(IgaUserAdapter.isRegistrationTerminal(null),
                 "a null terminal label must not trigger the grant");
     }
+
+    // ── ACCEPT-UNATTESTED (RegOn) admit-vs-CR decision at the registration terminal ─
+    //
+    // ★ The real current-jar bug (live-reproduced on newrealm03): with RegOn ON, the
+    // registration terminal fired the persist-pending CREATE_USER emit, which throws
+    // IgaPendingApprovalException out of RegistrationUserCreation.success → registration
+    // FAILED with REGISTER_ERROR / HTTP 400 (the user could not complete sign-up), even
+    // though the default-role grant itself had landed. Fix: when the realm is
+    // registrationAllowed (the producer admits the unsigned user_identity at login), the
+    // registration terminal ADMITS the user (persist + local default-role, NO CR, NO
+    // throw) instead of filing a pending CR. admitSelfRegWithoutCr is the pure decision.
+
+    @Test
+    void regOn_admitsSelfRegWithoutCr() {
+        assertTrue(IgaUserAdapter.admitSelfRegWithoutCr(true),
+                "registrationAllowed (RegOn / accept-unattested) → the registration "
+                        + "terminal must ADMIT (persist + local default-role, no CREATE_USER "
+                        + "CR, no throw) so sign-up completes and login admits the unsigned "
+                        + "user_identity");
+    }
+
+    @Test
+    void regOff_retainsPersistPendingCrLane() {
+        assertFalse(IgaUserAdapter.admitSelfRegWithoutCr(false),
+                "registration NOT allowed → no reachable self-registration; the "
+                        + "persist-pending CREATE_USER CR lane is retained as the defensive "
+                        + "default for that unreachable case");
+    }
 }
