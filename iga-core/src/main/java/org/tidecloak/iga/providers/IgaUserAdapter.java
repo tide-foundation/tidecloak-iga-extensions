@@ -257,6 +257,28 @@ public class IgaUserAdapter extends UserAdapter {
             "org.keycloak.services.resources.admin.UsersResource";
     private static final String KC_CREATE_USER = "createUser";
 
+    /**
+     * The KC 26.5.5 self-registration form-action whose {@code success(FormContext)}
+     * method is the REGISTRATION terminal boundary. {@code RegistrationUserCreation.success}
+     * calls {@code profile.create()} (services source line :155) — which routes through
+     * {@code DefaultUserProfile.create} → {@code DeclarativeUserProfileProvider}'s
+     * {@code createUserFactory().apply} → {@code session.users().addUser(realm, username)}
+     * (the SAME 1-arg seam admin-create uses, yielding a capture-mode adapter) — and THEN,
+     * with the full model already built, calls {@code user.setEnabled(true)} DIRECTLY at
+     * services source line :159. That {@code setEnabled} call whose IMMEDIATE caller is
+     * exactly {@code RegistrationUserCreation#success} is the deterministic registration
+     * terminal-emit signal: it is post-build (profile.create has returned) and is NEVER
+     * present on the admin-create path (admin enabled is applied by
+     * {@code RepresentationToModel.updateUserFromRep}, not by RegistrationUserCreation),
+     * the replay path (capture mode is false under IGA_REPLAY_ACTIVE so no setter emits),
+     * or the partialImport path (no RegistrationUserCreation frame; the import-mode guard
+     * also accumulates rather than emits). Match is EXACT: declaring class FQN ==
+     * org.keycloak.authentication.forms.RegistrationUserCreation AND method == success.
+     */
+    private static final String KC_REGISTRATION_USER_CREATION =
+            "org.keycloak.authentication.forms.RegistrationUserCreation";
+    private static final String KC_REGISTRATION_SUCCESS = "success";
+
     // ---- accumulator (capture mode only) ----------------------------------
     private final UserRepresentation capturedRep = new UserRepresentation();
     private final Map<String, List<String>> capturedAttributes = new LinkedHashMap<>();
@@ -420,8 +442,72 @@ public class IgaUserAdapter extends UserAdapter {
         return computeImmediateCaller() == TERMINAL;
     }
 
+    /**
+     * True iff the live {@code setEnabled()} call's IMMEDIATE caller is
+     * {@code org.keycloak.authentication.forms.RegistrationUserCreation#success}
+     * — the self-registration terminal boundary (see {@link #KC_REGISTRATION_USER_CREATION}).
+     * Same {@link StackWalker} mechanism + skip rules as the admin predicate; the only
+     * difference is the matched frame. Specific to registration: admin-create's
+     * {@code setEnabled} comes from {@code RepresentationToModel.updateUserFromRep},
+     * replay runs with capture mode off, and import has no such frame.
+     */
+    private boolean calledDirectlyFromRegistrationSuccess() {
+        return computeImmediateCaller() == REGISTRATION_TERMINAL;
+    }
+
     /** Sentinel: the computed immediate caller IS UsersResource#createUser. */
     private static final String TERMINAL = "<UsersResource#createUser>";
+
+    /** Sentinel: the computed immediate caller IS RegistrationUserCreation#success. */
+    private static final String REGISTRATION_TERMINAL =
+            "<RegistrationUserCreation#success>";
+
+    /**
+     * Pure, unit-testable immediate-caller classifier. Given the ordered list of live
+     * stack-frame signatures as {@code "<FQN>#<method>"} (innermost first, EXCLUDING
+     * the current frame), apply the SAME skip rules as {@link #computeImmediateCaller}
+     * (skip all {@code IgaUserAdapter} frames, the {@code java.lang.StackWalker}
+     * machinery, and the inherited {@code UserAdapter.{equals,hashCode,getId}}
+     * self-delegations) and return:
+     * <ul>
+     *   <li>{@link #TERMINAL} if the first surviving frame is
+     *       {@code UsersResource#createUser} (admin-create terminal),</li>
+     *   <li>{@link #REGISTRATION_TERMINAL} if it is
+     *       {@code RegistrationUserCreation#success} (self-registration terminal),</li>
+     *   <li>else the raw {@code "<FQN>#<method>"} of that first surviving frame
+     *       (or {@code "<none>"} if every frame was skipped).</li>
+     * </ul>
+     * Driving this with synthetic frames lets the registration/admin/other partitions be
+     * pinned in a plain unit test (the live {@link StackWalker} cannot be mocked).
+     */
+    static String classifyImmediateCaller(java.util.List<String> frameSignatures) {
+        for (String sig : frameSignatures) {
+            int hash = sig.lastIndexOf('#');
+            String cn = hash >= 0 ? sig.substring(0, hash) : sig;
+            String mn = hash >= 0 ? sig.substring(hash + 1) : "";
+
+            if (IgaUserAdapter.class.getName().equals(cn)) {
+                continue;
+            }
+            if (cn.startsWith("java.lang.StackWalker")) {
+                continue;
+            }
+            if (UserAdapter.class.getName().equals(cn)
+                    && ("equals".equals(mn) || "hashCode".equals(mn)
+                        || "getId".equals(mn))) {
+                continue;
+            }
+            if (KC_USERS_RESOURCE.equals(cn) && KC_CREATE_USER.equals(mn)) {
+                return TERMINAL;
+            }
+            if (KC_REGISTRATION_USER_CREATION.equals(cn)
+                    && KC_REGISTRATION_SUCCESS.equals(mn)) {
+                return REGISTRATION_TERMINAL;
+            }
+            return cn + "#" + mn;
+        }
+        return "<none>";
+    }
 
     /**
      * Walk the live stack and return the genuine external "immediate caller" of
@@ -444,59 +530,18 @@ public class IgaUserAdapter extends UserAdapter {
      * {@code UserCacheSession/UserStorageManager/JpaUserProvider}).</p>
      */
     private String computeImmediateCaller() {
-        return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
-                .walk(frames -> {
-                    var it = frames.iterator();
-                    while (it.hasNext()) {
-                        StackWalker.StackFrame f = it.next();
-                        Class<?> c = f.getDeclaringClass();
-                        String cn = c.getName();
-                        String mn = f.getMethodName();
-
-                        // Skip ALL IgaUserAdapter frames (any method: getId,
-                        // calledDirectlyFromCreateUserResource,
-                        // computeImmediateCaller, lambdas/synthetics) because
-                        // the predicate runs inside an IgaUserAdapter helper;
-                        // the immediate caller must be the first NON-
-                        // IgaUserAdapter, NON-UserAdapter-self frame
-                        // (runtime-proven: getId#7/#8 → UsersResource#createUser).
-                        if (IgaUserAdapter.class.getName().equals(cn)) {
-                            continue;
-                        }
-                        // Skip the StackWalker machinery itself (JDK frames —
-                        // typically already absent, skipped defensively).
-                        if (cn.startsWith("java.lang.StackWalker")) {
-                            continue;
-                        }
-                        // Skip the inherited UserAdapter.{equals,hashCode,getId}
-                        // that delegate straight back into getId() — they are
-                        // NOT the logical caller.
-                        if (UserAdapter.class.getName().equals(cn)
-                                && ("equals".equals(mn) || "hashCode".equals(mn)
-                                    || "getId".equals(mn))) {
-                            continue;
-                        }
-
-                        // First surviving frame == the genuine external
-                        // immediate caller. RUNTIME-PROVEN match: terminal IFF
-                        // its declaring class FQN is exactly UsersResource AND
-                        // its method is exactly createUser. This uniquely
-                        // matches getId#7 (UsersResource#createUser, :175) and
-                        // getId#8 (:177) and NEVER getId#1–#6 (those resolve to
-                        // UserCacheSession#addUser/fullyInvalidateUser/
-                        // addFederatedIdentity / UserStorageManager#
-                        // addFederatedIdentity / JpaUserProvider#
-                        // addFederatedIdentity). The Quarkus invoker is BELOW
-                        // this frame, never the immediate caller, so it is not
-                        // (and must not be) matched.
-                        if (KC_USERS_RESOURCE.equals(cn)
-                                && KC_CREATE_USER.equals(mn)) {
-                            return TERMINAL;
-                        }
-                        return cn + "#" + mn;
-                    }
-                    return "<none>";
-                });
+        // Harvest the live frame signatures (innermost first) and delegate the
+        // skip/match decision to the pure, unit-testable classifier so the
+        // admin / registration / other partitions can be pinned without a live
+        // stack. The skip rules + match conditions live in ONE place
+        // (classifyImmediateCaller) — this method only adapts StackWalker to it.
+        java.util.List<String> sigs = StackWalker
+                .getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
+                .walk(frames -> frames
+                        .map(f -> f.getDeclaringClass().getName() + "#"
+                                + f.getMethodName())
+                        .collect(java.util.stream.Collectors.toList()));
+        return classifyImmediateCaller(sigs);
     }
 
     @Override
@@ -559,7 +604,25 @@ public class IgaUserAdapter extends UserAdapter {
         // UsersResource.createUser:177 (runtime getId#8) falls through.
         captureEmitted = true;
         trace("getId#EMIT(UsersResource#createUser)");
+        emitPersistPendingCreateUserCr("UsersResource#createUser");
+        // unreachable — emit always throws IgaPendingApprovalException
+        return super.getId();
+    }
 
+    /**
+     * Shared CREATE_USER persist-pending emit, fired by EITHER terminal seam:
+     * the admin-create {@code getId()} seam (immediate caller
+     * {@code UsersResource#createUser}) or the self-registration {@code setEnabled}
+     * seam (immediate caller {@code RegistrationUserCreation#success}). Both seams
+     * reach here ONLY after KC has fully built the user model on this capture
+     * adapter, so the in-memory accumulator is complete and identical to what the
+     * pre-existing admin path produced. Always throws
+     * {@link IgaPendingApprovalException} (→ HTTP 202 + Location); never returns.
+     *
+     * @param terminalLabel the human-readable terminal frame, for the EMIT/PERSIST
+     *                       log lines (admin vs registration) — diagnostics only.
+     */
+    private void emitPersistPendingCreateUserCr(String terminalLabel) {
         String userId = super.getId();
         String username = capturedRep.getUsername() != null
                 ? capturedRep.getUsername() : super.getUsername();
@@ -580,10 +643,12 @@ public class IgaUserAdapter extends UserAdapter {
         // NEW: we PERSIST the pending user. DefaultKeycloakSession#close() COMMITS
         // the request tx unless getRollbackOnly() is set (it inspects ONLY the
         // rollback flag — a propagating exception does NOT auto-rollback), so by
-        // NOT setting rollback-only the live user (already fully built by KC at
-        // UsersResource.createUser:175 — profile.create + updateUserFromRep +
-        // createGroups already ran) survives. Its UserEntity.attestation column is
-        // NULL (KC never stamps it) — that NULL is the "pending/quarantined" marker.
+        // NOT setting rollback-only the live user (already fully built by KC —
+        // admin: UsersResource.createUser:175 (profile.create + updateUserFromRep
+        // + createGroups); registration: RegistrationUserCreation.success:155
+        // profile.create — then we fire here AFTER the build) survives. Its
+        // UserEntity.attestation column is NULL (KC never stamps it) — that NULL is
+        // the "pending/quarantined" marker.
         //
         // QUARANTINE / FAIL-CLOSED until commit (two modes, mode-aware):
         //   • Tide realm (iga.attestor=="tide"): the login signed-token path
@@ -601,11 +666,11 @@ public class IgaUserAdapter extends UserAdapter {
         //     until the CREATE_USER CR commits. Tideless realms have no Tide enrollment,
         //     so the sidecar does NOT block any enroll flow.
         //
-        // The non-governed live state KC applied to the scratch user before :175
-        // (credentials/password + federated identities — the OLD rollback discarded
-        // these; CREATE_USER governs ONLY the 8 token fields, REP_JSON nulls them) is
-        // STRIPPED so the persisted live user matches the governed representation. The
-        // user sets their own password / links Tide post-approval, exactly as before.
+        // The non-governed live state KC applied to the scratch user before the
+        // terminal (credentials/password + federated identities — the OLD rollback
+        // discarded these; CREATE_USER governs ONLY the 8 token fields, REP_JSON
+        // nulls them) is STRIPPED so the persisted live user matches the governed
+        // representation. The user sets their own password / links Tide post-approval.
         // ─────────────────────────────────────────────────────────────────────
         stripNonGovernedLiveState();
 
@@ -633,11 +698,11 @@ public class IgaUserAdapter extends UserAdapter {
         // NOTE: NO setRollbackOnly() — the request tx COMMITS so the pending user
         // persists. The CR was written on a separate session above (so it is durable
         // independently), and the 202 below is still returned via the exception mapper.
-        log.infof("IGA user-capture PERSIST-PENDING: user=%s uuid=%s realm=%s "
+        log.infof("IGA user-capture PERSIST-PENDING: terminal=%s user=%s uuid=%s realm=%s "
                 + "mode=%s — live user persisted, UserEntity.attestation NULL "
                 + "(pending), %s; CREATE_USER CR=%s. Enrollable while PENDING; "
                 + "real login fail-closed until commit finalizes (stamps user_identity).",
-                username, userId, realm.getName(),
+                terminalLabel, username, userId, realm.getName(),
                 tideRealm ? "tide" : "tideless",
                 tideRealm ? "no quarantine sidecar (replayOrFailClosed guards login)"
                           : "IGA_UNSIGNED_ENTITY sidecar set (isEnabled()=false guards login)",
@@ -877,6 +942,39 @@ public class IgaUserAdapter extends UserAdapter {
         if (captureMode) {
             capturedRep.setEnabled(enabled);
             trace("setEnabled:" + enabled);
+
+            // ★ REGISTRATION TERMINAL SEAM.
+            // Self-registration never reaches the admin getId() terminal
+            // (UsersResource#createUser): RegistrationUserCreation.success
+            // (:155 profile.create → the 1-arg addUser capture seam → full model
+            // build) then calls user.setEnabled(true) DIRECTLY at services :159,
+            // AFTER the model is fully built. So when THIS setEnabled's immediate
+            // caller is exactly RegistrationUserCreation#success we are at the
+            // registration terminal: fire the SAME persist-pending CREATE_USER CR
+            // as admin-create. Gated identically to the admin seam:
+            //   • capture mode (already inside this branch),
+            //   • not already emitted (fire-once),
+            //   • NOT a partialImport (the import path accumulates via the batch,
+            //     and has no RegistrationUserCreation frame anyway — belt+braces),
+            //   • immediate caller == RegistrationUserCreation#success.
+            // Specificity: admin enabled is applied by
+            // RepresentationToModel.updateUserFromRep (NOT RegistrationUserCreation),
+            // replay runs with captureMode==false (this branch is skipped), and
+            // import is excluded by the guard below. usernameObserved is true here
+            // because profile.create applied the username before returning to
+            // success() — kept as a defensive secondary gate, mirroring getId().
+            if (!captureEmitted
+                    && !IgaImportMode.inPartialImport()
+                    && usernameObserved
+                    && calledDirectlyFromRegistrationSuccess()) {
+                captureEmitted = true;
+                trace("setEnabled#EMIT(RegistrationUserCreation#success)");
+                log.infof("IGA user-capture: registration terminal reached "
+                        + "(setEnabled immediate caller=RegistrationUserCreation#success) "
+                        + "— firing persist-pending CREATE_USER CR for self-registered "
+                        + "user uuid=%s", super.getId());
+                emitPersistPendingCreateUserCr("RegistrationUserCreation#success");
+            }
         }
     }
 
