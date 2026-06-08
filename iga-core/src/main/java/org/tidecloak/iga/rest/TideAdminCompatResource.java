@@ -3,6 +3,7 @@ package org.tidecloak.iga.rest;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.inject.Vetoed;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.FormParam;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
@@ -89,22 +90,38 @@ public class TideAdminCompatResource {
 
     @POST
     @Path("toggle-iga")
-    @Consumes(MediaType.APPLICATION_JSON)
+    // The admin-ui posts this as a browser FormData (see GeneralTab.tsx /
+    // tideProvider.toggleIGA): no explicit Content-Type is set on the request,
+    // so the browser emits multipart/form-data. We also accept
+    // application/x-www-form-urlencoded for non-browser callers. This is the
+    // original (pre-progress-feature) content type the FormData client has
+    // always produced — the JSON @Consumes briefly introduced with the progress
+    // feature broke that client with a 415 / unbound body. Both isIGAEnabled and
+    // the optional jobId are read as @FormParam from this same form payload.
+    @Consumes({MediaType.MULTIPART_FORM_DATA, MediaType.APPLICATION_FORM_URLENCODED})
     @Produces(MediaType.APPLICATION_JSON)
-    public Response toggleIga(Map<String, Object> requestBody) {
+    public Response toggleIga(@FormParam("isIGAEnabled") String isIGAEnabledParam,
+                              @FormParam("jobId") String jobIdParam) {
         auth.realm().requireManageRealm();
         boolean current = "true".equals(realm.getAttribute(IGA_ATTRIBUTE));
         boolean next = !current;
 
-        // LOCKED CONTRACT: the admin-ui may supply a jobId (uuid) in the POST
-        // body so it can poll GET .../toggle-iga/status/{jobId} for live
-        // progress while this synchronous toggle runs. jobId is OPTIONAL: when
-        // absent (or this is an OFF-toggle, which carries no progress), every
-        // progress call is a no-op and the endpoint behaves exactly as before
-        // — fully back-compatible. The body itself is optional too (the legacy
-        // admin-ui POSTs with no body at all).
-        final String jobId = extractJobId(requestBody);
+        // LOCKED CONTRACT: the admin-ui may supply a jobId (uuid) as a form field
+        // so it can poll GET .../toggle-iga/status/{jobId} for live progress while
+        // this synchronous toggle runs. jobId is OPTIONAL: when absent (or this is
+        // an OFF-toggle, which carries no progress), every progress call is a no-op
+        // and the endpoint behaves exactly as before — fully back-compatible. The
+        // isIGAEnabled form field carries the client's desired state but is purely
+        // informational here: the toggle has always been computed as next=!current
+        // (a flip), which the client mirrors (it sends the opposite of the current
+        // attribute). We keep that flip semantics for exact back-compat.
+        final String jobId = normalizeJobId(jobIdParam);
         final IgaToggleJobService jobService = new IgaToggleJobService(session);
+
+        if (logger.isDebugEnabled()) {
+            logger.debugf("IGA toggle-iga: realm=%s currentEnabled=%s -> next=%s (client isIGAEnabled=%s, jobId=%s)",
+                    realm.getName(), current, next, isIGAEnabledParam, jobId);
+        }
 
         // Progress tracking is only meaningful for a real OFF→ON on a
         // non-master realm (the only path that does slow work). For everything
@@ -549,19 +566,15 @@ public class TideAdminCompatResource {
     }
 
     /**
-     * Pull the optional {@code jobId} (uuid) from the toggle POST body. Null when
-     * absent / blank / the body itself is null (legacy no-body POST) — in which
-     * case the toggle runs exactly as before with no progress tracking.
+     * Normalize the optional {@code jobId} form field. Null when absent / blank
+     * (the OFF-toggle and the legacy no-jobId POST send no jobId field at all) —
+     * in which case the toggle runs exactly as before with no progress tracking.
      */
-    private static String extractJobId(Map<String, Object> body) {
-        if (body == null) {
+    static String normalizeJobId(String jobId) {
+        if (jobId == null) {
             return null;
         }
-        Object v = body.get("jobId");
-        if (v == null) {
-            return null;
-        }
-        String s = v.toString().trim();
+        String s = jobId.trim();
         return s.isEmpty() ? null : s;
     }
 
