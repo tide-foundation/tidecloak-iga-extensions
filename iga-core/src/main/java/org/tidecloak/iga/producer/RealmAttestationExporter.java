@@ -241,8 +241,11 @@ public final class RealmAttestationExporter {
         // The metadata seed needs the RAW stored USER_ROLE_MAPPING child set (JPQL,
         // not the effective set). Recompute it here for the role-closure seed; this is
         // the SAME query perUserUnits used for the emitted unit (byte-identical).
-        List<String> seedRoleIds = userRoleMappingSet(em, req.userId(),
-                realm.getDefaultRole() == null ? null : realm.getDefaultRole().getId());
+        // The realm default-role id is the U8 EXCLUSION (D1b) AND the metadata-seed
+        // INCLUSION (the aud fix) — captured once so getDefaultRole() is called once.
+        String realmDefaultRoleId =
+                realm.getDefaultRole() == null ? null : realm.getDefaultRole().getId();
+        List<String> seedRoleIds = userRoleMappingSet(em, req.userId(), realmDefaultRoleId);
 
         // 7) role_definition + 8) role_composite_children_set for the FULL TRANSITIVE
         //    role-METADATA closure (mirrors the engine's GrantedRoles composite
@@ -263,11 +266,15 @@ public final class RealmAttestationExporter {
         //           folds into its closure — fixes (a2) group-inherited composites),
         //      (iii) the request client's own scope→role allowlist (SCOPE_MAPPING),
         //      (iv) every assigned client_scope's allowlist (CLIENT_SCOPE_ROLE_MAPPING),
+        //      (v)  the realm default-role id (default-roles-<realm> composite) — EXCLUDED
+        //           from the per-user U8 edge (seedRoleIds) but seeded HERE so the closure
+        //           expands the default-roles composite and emits the owning `account`
+        //           client_config (the aud fix). The ORK universal-inherits the grant.
         //    each then composite-expanded. This lets the ORK expand allowlist/group
         //    composites it walks even when the user does not transitively hold them
         //    (fixes (a)). U15 allowlist sets stay RAW (unexpanded) — the ORK expands.
         Set<String> metadataRoleSeed = metadataRoleSeed(seedRoleIds, user,
-                scopeMappingRoleIds(client), assigned.values());
+                scopeMappingRoleIds(client), assigned.values(), realmDefaultRoleId);
         Set<RoleModel> roleClosure = transitiveRoleClosure(realm, new ArrayList<>(metadataRoleSeed),
                 req.userId());
         Set<String> ownerClientUuids = new LinkedHashSet<>();
@@ -848,7 +855,13 @@ public final class RealmAttestationExporter {
      *   <li>{@code clientAllowlistRoleIds} — the request client's own SCOPE_MAPPING
      *       allowlist (used by {@code getAccess} when {@code full_scope_allowed=false});</li>
      *   <li>per assigned {@code client_scope} — its CLIENT_SCOPE_ROLE_MAPPING
-     *       allowlist — fixes (a).</li>
+     *       allowlist — fixes (a);</li>
+     *   <li>{@code defaultRoleId} — the realm {@code default-roles-<realm>} composite id
+     *       (nullable). The per-user U8 edge EXCLUDES it (D1b), so it is NOT in
+     *       {@code userGrantRoleIds}; seeding it HERE lets the closure expand the
+     *       default-roles composite and emit its children's {@code role_definition} +
+     *       the owning {@code account} {@code client_config} (the aud fix). Metadata-seed
+     *       ONLY — never folded into the U8 held set (the ORK universal-inherits it).</li>
      * </ol>
      *
      * <p><b>GUARDRAIL:</b> this is a METADATA seed only. It is NOT emitted as, and does
@@ -858,10 +871,24 @@ public final class RealmAttestationExporter {
      */
     static Set<String> metadataRoleSeed(List<String> userGrantRoleIds, UserModel user,
                                         List<String> clientAllowlistRoleIds,
-                                        java.util.Collection<ClientScopeModel> assignedScopes) {
+                                        java.util.Collection<ClientScopeModel> assignedScopes,
+                                        String defaultRoleId) {
         Set<String> seed = new LinkedHashSet<>();
         if (userGrantRoleIds != null) {
             seed.addAll(userGrantRoleIds);
+        }
+        // (v) the realm default-role id (default-roles-<realm> composite). The per-user U8
+        //     edge EXCLUDES it (D1b) so it is absent from userGrantRoleIds above — but the
+        //     METADATA closure still needs it: transitiveRoleClosure must expand the
+        //     default-roles composite to emit role_definition for its account/realm-management
+        //     children, role_composite_children_set for the composite, and (via ownerClientUuids)
+        //     the client_config for the owning `account` client. Without this, the ORK
+        //     AudienceResolveClaimMapper finds account's client_config ABSENT from the login
+        //     closure → "aud has no attested source". This is METADATA-seed only: it never
+        //     enters userGrantRoleIds/the U8 held set (the universal-inherit grants it on the
+        //     ORK). Mirrors how group/allowlist composites are seeded without touching membership.
+        if (defaultRoleId != null) {
+            seed.add(defaultRoleId);
         }
         // (ii) group-role ids — every role mapped to a group the user belongs to, AND
         //      every ANCESTOR group reached by ascending the parent_group_id chain. The
