@@ -133,15 +133,21 @@ class IgaFullClosureCoverageTest {
     }
 
     /**
-     * ★ EVERY one of the 18 login-emitted unit types stamps a REAL 64B firstAdmin sig into its
-     * dedicated column — no type is un-stampable. A missing branch (the original gap) throws
+     * ★ EVERY login-emitted unit type stamps a REAL 64B firstAdmin sig into its dedicated
+     * column — no type is un-stampable. A missing branch (the original gap) throws
      * {@code IllegalStateException} from {@link UnitColumnMapping#stamp} and fails the build.
+     *
+     * <p>The closure grew from 18 to 19 with D1a's {@code realm_default_roles_set} (ordinal 18,
+     * appended at the end of the ork enum); it maps to
+     * {@code RealmEntity.realmDefaultRolesAttestation} (parallel to unit 15
+     * {@code realm_default_groups_set}).
      */
     @Test
     void allEighteenUnitTypes_stampARealSixtyFourByteColumn_byConstruction() {
-        assertEquals(18, AttestationUnitType.values().length,
-                "the login closure is exactly 18 unit types (ork enum 0..17); a new type MUST get "
-                        + "a UnitColumnMapping stamp branch or it would silently stay NULL");
+        assertEquals(19, AttestationUnitType.values().length,
+                "the login closure is 19 unit types (ork enum 0..18, realm_default_roles_set "
+                        + "appended at 18); a new type MUST get a UnitColumnMapping stamp branch "
+                        + "or it would silently stay NULL");
 
         String realSig = real64();
         Set<AttestationUnitType> stamped = EnumSet.noneOf(AttestationUnitType.class);

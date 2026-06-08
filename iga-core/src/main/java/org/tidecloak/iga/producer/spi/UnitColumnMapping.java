@@ -43,7 +43,14 @@ import org.tidecloak.iga.producer.units.ScopeRoleAllowlistSetUnit;
  * 15 realm_default_groups_set    -> RealmEntity.realmDefaultGroupsAttestation   (id = realmId)
  * 16 organization_definition     -> OrganizationEntity.attestation              (id = org id)
  * 17 organization_domain_set     -> OrganizationEntity.orgDomainAttestation     (id = org id)
+ * 18 realm_default_roles_set     -> RealmEntity.realmDefaultRolesAttestation    (id = realmId)
  * </pre>
+ *
+ * <p>Unit 18 ({@code realm_default_roles_set}, D1a) mirrors unit 15
+ * ({@code realm_default_groups_set}) exactly: a realm-level authority stamped/read on the
+ * RealmEntity by realm id. The {@code REALM.realmDefaultRolesAttestation} column is added on
+ * the tidecloak-override fork side (parallel to {@code realmDefaultGroupsAttestation}); this
+ * JPQL resolves against it at runtime.
  *
  * <p>The set-unit columns (7/8/9/10) are fanned across every row sharing the owner key
  * by the dispatcher, so reading any one row's column yields the per-set sig; the
@@ -66,6 +73,8 @@ public final class UnitColumnMapping {
                 return single(em, "SELECT e.realmConfigAttestation FROM RealmEntity e WHERE e.id = :id", t);
             case REALM_DEFAULT_GROUPS_SET:
                 return single(em, "SELECT e.realmDefaultGroupsAttestation FROM RealmEntity e WHERE e.id = :id", t);
+            case REALM_DEFAULT_ROLES_SET:
+                return single(em, "SELECT e.realmDefaultRolesAttestation FROM RealmEntity e WHERE e.id = :id", t);
             case CLIENT_CONFIG:
                 return single(em, "SELECT e.attestation FROM ClientEntity e WHERE e.id = :id", t);
             case CLIENT_SCOPE_ASSIGNMENT_SET:
@@ -122,6 +131,8 @@ public final class UnitColumnMapping {
                 return update(em, "UPDATE RealmEntity e SET e.realmConfigAttestation = :sig WHERE e.id = :id", sig, t);
             case REALM_DEFAULT_GROUPS_SET:
                 return update(em, "UPDATE RealmEntity e SET e.realmDefaultGroupsAttestation = :sig WHERE e.id = :id", sig, t);
+            case REALM_DEFAULT_ROLES_SET:
+                return update(em, "UPDATE RealmEntity e SET e.realmDefaultRolesAttestation = :sig WHERE e.id = :id", sig, t);
             case CLIENT_CONFIG:
                 return update(em, "UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id = :id", sig, t);
             case CLIENT_SCOPE_ASSIGNMENT_SET:

@@ -547,6 +547,23 @@ public class IgaReplayDispatcher {
         for (Map<String, Object> row : rows) {
             String userId = str(row, "ID");
             rebuildCreateUserFromRow(session, realm, row);
+            // ★ D3 — auto-assign the realm default-role + default groups at COMMIT-replay, so
+            // the token the new user mints carries the default-role-derived claims. The capture
+            // path (IgaUserProvider.addUser, addDefaultRoles=false) deliberately leaves the
+            // PENDING user role-less; the default-roles land HERE at commit. This runs under
+            // IGA_REPLAY_ACTIVE=true (set by replay()), so user.grantRole / user.joinGroup do
+            // NOT spawn a nested GRANT_ROLES/JOIN_GROUPS CR. Mirrors stock KC
+            // JpaUserProvider.addUser (grant getDefaultRole + join getDefaultGroupsStream).
+            // The granted default edge is NOT per-user signed (D1+D1b drop it) — the
+            // realm_default_roles_set authority + universal-inherit covers it.
+            org.keycloak.models.UserModel created = session.users().getUserById(realm, userId);
+            if (created != null) {
+                org.keycloak.models.RoleModel defaultRole = realm.getDefaultRole();
+                if (defaultRole != null) {
+                    created.grantRole(defaultRole);
+                }
+                realm.getDefaultGroupsStream().forEach(created::joinGroup);
+            }
             em.createQuery("UPDATE UserEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig)
                     .setParameter("id", userId)

@@ -2347,19 +2347,38 @@ public class TideAttestor implements IgaAttestor {
                     + " carries no resolvable USER_ID for the user_role_mapping_set unit");
         }
 
+        // ★ D1b — EXCLUDE the realm default-role id, byte-IDENTICALLY to the producer's
+        // RealmAttestationExporter#userRoleMappingSet (same AND urm.roleId <> :defaultRoleId
+        // clause). Default roles are realm-level + identical for every user; the
+        // realm_default_roles_set (unit 18) authority + universal-inherit covers them, so the
+        // per-user default-role edge is NOT signed. The two queries MUST produce byte-identical
+        // sets or the VVK verify breaks: applied to BOTH the PRE-set query AND the pending
+        // grant union below.
+        String defaultRoleId = (realm.getDefaultRole() == null) ? null : realm.getDefaultRole().getId();
+
         // PRE-change RAW stored role-id set for the user, in producer JPA order
-        // (UNFILTERED — onlyAttested=false on the producer's default export, so the
-        // pending-but-unsigned grant we are about to add is included; we mirror the
-        // unfiltered query and append the grant ourselves).
+        // (UNFILTERED by attestation — onlyAttested=false on the producer's default export, so
+        // the pending-but-unsigned grant we are about to add is included; we mirror the query
+        // and append the grant ourselves), EXCLUDING the default-role id.
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        String preJpql = "SELECT urm.roleId FROM UserRoleMappingEntity urm WHERE urm.user.id = :owner";
+        if (defaultRoleId != null) {
+            preJpql += " AND urm.roleId <> :defaultRoleId";
+        }
+        preJpql += " ORDER BY urm.roleId";
+        var preQuery = em.createQuery(preJpql).setParameter("owner", userId);
+        if (defaultRoleId != null) {
+            preQuery.setParameter("defaultRoleId", defaultRoleId);
+        }
         @SuppressWarnings("unchecked")
-        List<String> roleIds = new ArrayList<>(em.createQuery(
-                        "SELECT urm.roleId FROM UserRoleMappingEntity urm WHERE urm.user.id = :owner"
-                                + " ORDER BY urm.roleId")
-                .setParameter("owner", userId)
-                .getResultList());
-        // Apply the pending grant delta: add each granted id not already present.
+        List<String> roleIds = new ArrayList<>(preQuery.getResultList());
+        // Apply the pending grant delta: add each granted id not already present, EXCLUDING the
+        // default-role id (so the union never re-introduces what the PRE-set query excluded —
+        // keeping byte-identity with the producer helper).
         for (String roleId : grantedRoleIds) {
+            if (defaultRoleId != null && defaultRoleId.equals(roleId)) {
+                continue;
+            }
             if (!roleIds.contains(roleId)) {
                 roleIds.add(roleId);
             }
@@ -2974,13 +2993,16 @@ public class TideAttestor implements IgaAttestor {
                 case "ADOPT_CLIENT" -> stampAdoptClient(session, realm, mode, em, cr);
                 case "ADOPT_CLIENT_SCOPE" -> stampAdoptClientScope(session, realm, mode, em, cr);
                 case "ADOPT_ORGANIZATION" -> stampAdoptOrganization(session, realm, mode, em, cr);
-                // ADOPT_REALM stamps the two realm-scoped producer columns (realm_config #0,
-                // realm_default_groups_set #15) — neither had any ADOPT path before, so they
-                // fail-closed the uniform login read after toggle-on. Reuses the same realm
-                // stampers the SET_REALM_CONFIG / ADD_REALM_DEFAULT_GROUP commits use.
+                // ADOPT_REALM stamps the realm-scoped producer columns (realm_config #0,
+                // realm_default_groups_set #15, realm_default_roles_set #18) — none had any
+                // ADOPT path before, so they fail-closed the uniform login read after toggle-on.
+                // Reuses the same realm stampers the SET_REALM_CONFIG / ADD_REALM_DEFAULT_GROUP
+                // commits use (realm_default_roles has no CR-action toggle of its own — it is a
+                // create-time authority — so ADOPT_REALM is where its column is seeded).
                 case "ADOPT_REALM" -> {
                     stampRealmConfig(session, realm, mode, em, cr);
                     stampRealmDefaultGroupsSet(session, realm, mode, em, cr);
+                    stampRealmDefaultRolesSet(session, realm, mode, em, cr);
                 }
                 // ADOPT_PROTOCOL_MAPPER: the only edge ADOPT that owns a dedicated producer column
                 // (protocol_mapper, id=mapperId). The other edge ADOPTs (composite-role,
@@ -3349,6 +3371,24 @@ public class TideAttestor implements IgaAttestor {
             byte[] env = RealmAttestationExporter.realmDefaultGroupsSetStatic(realm, realm.getId()).serialize();
             String sig = signProducerEnvelope(session, realm, mode, env);
             em.createQuery("UPDATE RealmEntity e SET e.realmDefaultGroupsAttestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", sig).setParameter("id", realm.getId()).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    /**
+     * D1a — stamp the realm default-role authority (unit 18, {@code realm_default_roles_set}).
+     * Exact parallel of {@link #stampRealmDefaultGroupsSet}: sign the producer's
+     * {@code realmDefaultRolesSetStatic} envelope and stamp it into
+     * {@code RealmEntity.realmDefaultRolesAttestation} (the tidecloak-override column parallel to
+     * {@code realmDefaultGroupsAttestation}). Keeps the realm closure honest after toggle-on so the
+     * once-signed authority's column is non-NULL for the uniform login read.
+     */
+    private void stampRealmDefaultRolesSet(KeycloakSession session, RealmModel realm, String mode,
+                                           EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            byte[] env = RealmAttestationExporter.realmDefaultRolesSetStatic(realm, realm.getId()).serialize();
+            String sig = signProducerEnvelope(session, realm, mode, env);
+            em.createQuery("UPDATE RealmEntity e SET e.realmDefaultRolesAttestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig).setParameter("id", realm.getId()).executeUpdate();
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }

@@ -132,6 +132,24 @@ class ProducerBuilderDeterminismTest {
                 "realm_default_groups_set must sort the group ids");
     }
 
+    @Test
+    void realmDefaultRolesSet_carriesTheDefaultRoleId() {
+        // D1a — the realm default-role authority. target = realm UUID, payload = the single
+        // realm.getDefaultRole().getId(). Byte-parallel to realm_default_groups_set (the wire
+        // shape the ork mirrors).
+        RealmModel realm = mock(RealmModel.class);
+        RoleModel defaultRole = mock(RoleModel.class);
+        when(defaultRole.getId()).thenReturn("default-roles-" + REALM_ID);
+        when(realm.getDefaultRole()).thenReturn(defaultRole);
+
+        byte[] built = RealmAttestationExporter.realmDefaultRolesSetStatic(realm, REALM_ID).serialize();
+
+        byte[] expected = new org.tidecloak.iga.producer.units.RealmDefaultRolesSetUnit(
+                REALM_ID, "default-roles-" + REALM_ID).serialize();
+        assertArrayEquals(expected, built,
+                "realm_default_roles_set must carry the realm default-role id (target=realm)");
+    }
+
     /**
      * Byte-identity regression for the ORK "Attested unit signature validation failed" at
      * token-mint: the convergence / commit-time signer ({@code stampProducerUnitColumns})

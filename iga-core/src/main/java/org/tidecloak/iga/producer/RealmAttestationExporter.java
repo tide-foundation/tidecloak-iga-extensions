@@ -32,6 +32,7 @@ import org.tidecloak.iga.producer.units.ParentType;
 import org.tidecloak.iga.producer.units.ProtocolMapperUnit;
 import org.tidecloak.iga.producer.units.RealmConfigUnit;
 import org.tidecloak.iga.producer.units.RealmDefaultGroupsSetUnit;
+import org.tidecloak.iga.producer.units.RealmDefaultRolesSetUnit;
 import org.tidecloak.iga.producer.units.RoleCompositeChildrenSetUnit;
 import org.tidecloak.iga.producer.units.RoleDefinitionUnit;
 import org.tidecloak.iga.producer.units.ScopeAssignment;
@@ -240,7 +241,8 @@ public final class RealmAttestationExporter {
         // The metadata seed needs the RAW stored USER_ROLE_MAPPING child set (JPQL,
         // not the effective set). Recompute it here for the role-closure seed; this is
         // the SAME query perUserUnits used for the emitted unit (byte-identical).
-        List<String> seedRoleIds = userRoleMappingSet(em, req.userId());
+        List<String> seedRoleIds = userRoleMappingSet(em, req.userId(),
+                realm.getDefaultRole() == null ? null : realm.getDefaultRole().getId());
 
         // 7) role_definition + 8) role_composite_children_set for the FULL TRANSITIVE
         //    role-METADATA closure (mirrors the engine's GrantedRoles composite
@@ -325,6 +327,12 @@ public final class RealmAttestationExporter {
         //     (the ork distinguishes "no entries" from "missing").
         out.add(realmDefaultGroupsSet(realm, realmId));
 
+        // 13b) realm_default_roles_set (unit 18) — the realm's default-role authority,
+        //     target = realm UUID. Signed ONCE here; the universal-inherit covers every
+        //     user, so the per-user default-role edge is NOT signed (userRoleMappingSet
+        //     excludes it). Mirrors realm_default_groups_set exactly.
+        out.add(realmDefaultRolesSet(realm, realmId));
+
         // 14) Organization closure for the org-membership claim mapper
         //     (OrganizationMembershipClaimMapper). The mapper walks:
         //     user_identity → user_group_membership_set → (per group_id)
@@ -396,7 +404,11 @@ public final class RealmAttestationExporter {
         // set unit). Because perUserUnits is the SINGLE source for BOTH the login export and
         // the commit-time CREATE_USER carrier, gating here keeps them byte-identical: the
         // carrier frames (and the quorum signs) exactly the set the login replays.
-        List<String> roleIds = userRoleMappingSet(em, user.getId());
+        // Exclude the realm default-role id (D1b): a user holding ONLY default-roles → empty
+        // set → no user_role_mapping_set emitted (the existing empty-skip below). The id is
+        // resolved from RealmEntity by realmId so this method's public signature is unchanged
+        // (it is called by TideAttestor too).
+        List<String> roleIds = userRoleMappingSet(em, user.getId(), defaultRoleIdForRealm(em, realmId));
         if (!roleIds.isEmpty()) {
             out.add(new UserRoleMappingSetUnit(realmId, user.getId(), roleIds));
         }
@@ -477,6 +489,7 @@ public final class RealmAttestationExporter {
         // 1) Realm-level units.
         out.add(realmConfig(realm, realmId));
         out.add(realmDefaultGroupsSetStatic(realm, realmId));
+        out.add(realmDefaultRolesSetStatic(realm, realmId));
 
         // 2) All roles — realm roles + every client's roles (built-ins INCLUDED). The
         //    role_definition + role_composite_children_set for tide-realm-admin / realm-admin
@@ -1096,6 +1109,31 @@ public final class RealmAttestationExporter {
         return new RealmDefaultGroupsSetUnit(realmId, groupIds);
     }
 
+    /** The realm's default-role authority (unit 18), target = realm UUID. */
+    private RealmDefaultRolesSetUnit realmDefaultRolesSet(RealmModel realm, String realmId) {
+        return realmDefaultRolesSetStatic(realm, realmId);
+    }
+
+    /**
+     * The realm's default-role authority (unit 18), target = realm UUID. Shared
+     * {@code public static} so the commit-time signer / convergence emits byte-identical
+     * bytes. Mirrors {@link #realmDefaultGroupsSetStatic} EXACTLY (same target=realm
+     * pattern, same envelope shape) — the payload is the single
+     * {@code realm.getDefaultRole().getId()} (the {@code default-roles-<realm>} composite
+     * every user inherits) instead of the group-id list.
+     *
+     * <p>Because this realm authority is signed ONCE and the universal-inherit covers every
+     * user, the per-user default-role EDGE is NOT signed (see {@link #userRoleMappingSet} and
+     * {@code TideAttestor.buildUserRoleMappingSetUnit}, both of which exclude this id). The
+     * id is emitted verbatim ({@code getDefaultRole()} returns the single composite; there is
+     * no set to sort).
+     */
+    public static RealmDefaultRolesSetUnit realmDefaultRolesSetStatic(RealmModel realm, String realmId) {
+        RoleModel defaultRole = realm.getDefaultRole();
+        String roleId = (defaultRole == null) ? null : defaultRole.getId();
+        return new RealmDefaultRolesSetUnit(realmId, roleId);
+    }
+
     /**
      * The set of scopes whose mappers the token actually applies — mirrors the
      * engine's Stage 3 scope resolution: every DEFAULT scope (always applied) plus
@@ -1286,8 +1324,25 @@ public final class RealmAttestationExporter {
      * set, incl. the implicit {@code default-roles-<realm>} grant). Uses the same
      * JPQL shape as {@link org.tidecloak.iga.services.IgaUnsignedRowScanner}.
      */
-    private List<String> userRoleMappingSet(EntityManager em, String userId) {
+    /**
+     * The user's RAW stored USER_ROLE_MAPPING child set (role ids), EXCLUDING the realm
+     * default-role id (D1b). Default roles are realm-level + identical for every user; the
+     * realm authority {@code realm_default_roles_set} (unit 18) + universal-inherit covers
+     * them, so signing the default-role EDGE per-user is redundant. A user holding ONLY
+     * default-roles therefore returns an EMPTY set → {@link #perUserUnits} emits no
+     * {@code user_role_mapping_set} (the existing empty-skip); a user with an explicit grant
+     * returns ONLY that grant.
+     *
+     * <p>★ The EXCLUSION here MUST be byte-identical to the firstAdmin GRANT_ROLES signer's
+     * inline query ({@code TideAttestor.buildUserRoleMappingSetUnit}) — the two MUST produce
+     * the same set or the VVK verify breaks. Both add
+     * {@code AND urm.roleId <> :defaultRoleId} and end with {@code ORDER BY urm.roleId}.
+     */
+    private List<String> userRoleMappingSet(EntityManager em, String userId, String defaultRoleId) {
         String jpql = "SELECT urm.roleId FROM UserRoleMappingEntity urm WHERE urm.user.id = :owner";
+        if (defaultRoleId != null) {
+            jpql += " AND urm.roleId <> :defaultRoleId";
+        }
         if (onlyAttested) {
             jpql += " AND urm.attestation IS NOT NULL";
         }
@@ -1296,9 +1351,34 @@ public final class RealmAttestationExporter {
         // Must stay the LAST clause and mirror the firstAdmin signer's final sort
         // (TideAttestor#buildUserRoleMappingSetUnitCbor) so both emit an identical set.
         jpql += " ORDER BY urm.roleId";
+        var q = em.createQuery(jpql).setParameter("owner", userId);
+        if (defaultRoleId != null) {
+            q.setParameter("defaultRoleId", defaultRoleId);
+        }
         @SuppressWarnings("unchecked")
-        List<String> ids = em.createQuery(jpql).setParameter("owner", userId).getResultList();
+        List<String> ids = q.getResultList();
         return new ArrayList<>(ids);
+    }
+
+    /**
+     * The realm's default-role id ({@code realm.getDefaultRole().getId()}) resolved from the
+     * RealmEntity by realm id, so {@link #perUserUnits} (which holds only {@code realmId}) can
+     * pass the exclusion id into {@link #userRoleMappingSet} without changing its public
+     * signature. Returns {@code null} if the realm or its default role is not resolvable (the
+     * exclusion clause is then a no-op — the back-compat behaviour).
+     */
+    private String defaultRoleIdForRealm(EntityManager em, String realmId) {
+        try {
+            return em.createQuery(
+                            "SELECT r.defaultRoleId FROM RealmEntity r WHERE r.id = :realmId", String.class)
+                    .setParameter("realmId", realmId)
+                    .getSingleResult();
+        } catch (RuntimeException e) {
+            // NoResultException (realm gone) → null = no-op exclusion (back-compat). Also
+            // degrades safely under unit-test mocks that do not stub the typed RealmEntity
+            // query: the exclusion is then a no-op, exactly as before D1b.
+            return null;
+        }
     }
 
     // -------------------------------------------------------------------------

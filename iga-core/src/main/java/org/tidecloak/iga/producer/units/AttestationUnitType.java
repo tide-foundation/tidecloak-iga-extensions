@@ -1,7 +1,7 @@
 package org.tidecloak.iga.producer.units;
 
 /**
- * The 18 admin-attestable unit types, mirroring the ork enum
+ * The admin-attestable unit types, mirroring the ork enum
  * {@code Ork.Models.TideRequests.Authorization.TidecloakToken.AttestationUnitType}
  * ({@code Ork/.../TidecloakToken/AttestationUnit.cs:61-81}) field-for-field and
  * in the SAME declared order.
@@ -38,6 +38,7 @@ package org.tidecloak.iga.producer.units;
  * role_composite_children_set=10  client_scope_assignment_set=11
  * client_mapper_set=12  client_scope_mapper_set=13  scope_role_allowlist_set=14
  * realm_default_groups_set=15  organization_definition=16  organization_domain_set=17
+ * realm_default_roles_set=18
  * </pre>
  */
 public enum AttestationUnitType {
@@ -59,7 +60,14 @@ public enum AttestationUnitType {
     SCOPE_ROLE_ALLOWLIST_SET("scope_role_allowlist_set", 14),
     REALM_DEFAULT_GROUPS_SET("realm_default_groups_set", 15),
     ORGANIZATION_DEFINITION("organization_definition", 16),
-    ORGANIZATION_DOMAIN_SET("organization_domain_set", 17);
+    ORGANIZATION_DOMAIN_SET("organization_domain_set", 17),
+    // Appended at the END (never reordered — the ork enum is "append at end; never
+    // reorder", enforced by ASSERT_ORDER_LOCKED below). The realm's default-role
+    // authority (D1a): signed ONCE at realm level, universal-inherit covers every user,
+    // so the per-user default-role edge is dropped (RealmAttestationExporter.userRoleMappingSet
+    // / TideAttestor.buildUserRoleMappingSetUnit both exclude it). The ork mirror is
+    // RealmDefaultRolesSetAttestationUnit with this SAME ordinal (18).
+    REALM_DEFAULT_ROLES_SET("realm_default_roles_set", 18);
 
     /** snake_case, case-sensitive — the ork enum constant NAME (spec / logs only). */
     private final String wireName;
