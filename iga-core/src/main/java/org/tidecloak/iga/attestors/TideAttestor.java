@@ -2687,7 +2687,14 @@ public class TideAttestor implements IgaAttestor {
             }
 
             // ---- REALM-scoped units ----
-            case "SET_REALM_ATTRIBUTE", "SET_REALM_CONFIG" ->
+            // REMOVE_REALM_ATTRIBUTE changes the SAME realm node a SET does (the post-change
+            // realm has the attribute gone), so it must frame the SAME realm_config unit. Without
+            // it the CR framed 0 units → the carrier fell back to canonicalForRegularCr's non-CBOR
+            // canonical, which the ORK rejects as "envelope must be a CBOR map". Keycloak fires a
+            // REMOVE_REALM_ATTRIBUTE CR when e.g. the user-registration toggle normalizes the
+            // registration flow and clears the webAuthn passwordless policy attributes
+            // (webAuthnPolicyAcceptableAaguids et al).
+            case "SET_REALM_ATTRIBUTE", "SET_REALM_CONFIG", "REMOVE_REALM_ATTRIBUTE" ->
                     units.add(RealmAttestationExporter.realmConfig(realm, realmId));
             case "ADD_REALM_DEFAULT_GROUP", "REMOVE_REALM_DEFAULT_GROUP" ->
                     units.add(RealmAttestationExporter.realmDefaultGroupsSetStatic(realm, realmId));
@@ -2970,7 +2977,9 @@ public class TideAttestor implements IgaAttestor {
                         stampScopeRoleAllowlistScope(session, realm, mode, em, cr);
 
                 // ---- REALM-scoped units ----
-                case "SET_REALM_ATTRIBUTE", "SET_REALM_CONFIG" ->
+                // REMOVE_REALM_ATTRIBUTE re-signs/stamps the SAME realm_config column as a SET
+                // (post-change realm node), keeping framing == distribution for the realm node.
+                case "SET_REALM_ATTRIBUTE", "SET_REALM_CONFIG", "REMOVE_REALM_ATTRIBUTE" ->
                         stampRealmConfig(session, realm, mode, em, cr);
                 case "ADD_REALM_DEFAULT_GROUP", "REMOVE_REALM_DEFAULT_GROUP" ->
                         stampRealmDefaultGroupsSet(session, realm, mode, em, cr);

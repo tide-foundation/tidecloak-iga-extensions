@@ -321,6 +321,42 @@ class TideAttestorBuildAllCrUnitsTest {
     }
 
     @Test
+    void removeRealmAttributeCr_enumeratesTheRealmConfigUnit_validCborMap() {
+        // ★ Regression guard for the "envelope must be a CBOR map" ORK reject (realm newrealm03,
+        // CR 4da33c64 REMOVE_REALM_ATTRIBUTE of webAuthnPolicyAcceptableAaguids + the 5 other
+        // webAuthn passwordless attrs that Keycloak clears when the user-registration toggle
+        // normalizes the registration flow). REMOVE_REALM_ATTRIBUTE was MISSING from
+        // enumerateLiveCrUnits' switch, so it framed 0 producer units → the carrier fell back to
+        // canonicalForRegularCr/canonicalizeNode, which emits a plain UTF-8 "node=...\n" canonical
+        // (a CBOR TEXT STRING, not a map). The ORK's CborEnvelope.Decode (AttestationUnit.cs:120-129)
+        // requires the root to be a CBOR map and throws "envelope must be a CBOR map" on the
+        // text-string root → PreSign 500 → the CR never commits. A realm-attribute REMOVAL changes
+        // the SAME realm node a SET does, so it must frame the SAME realm_config unit.
+        when(cr.getActionType()).thenReturn("REMOVE_REALM_ATTRIBUTE");
+        when(cr.getRowsJson()).thenReturn(
+                "[{\"REALM_ID\":\"" + REALM_ID + "\",\"NAME\":\"webAuthnPolicyAcceptableAaguids\"}]");
+
+        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
+
+        assertEquals(1, units.size(),
+                "REMOVE_REALM_ATTRIBUTE must frame exactly the realm_config unit (like "
+                        + "SET_REALM_ATTRIBUTE), NOT fall through to the non-CBOR canonical carrier");
+        assertEquals(AttestationUnitType.REALM_CONFIG, units.get(0).type());
+        assertEquals(REALM_ID, units.get(0).targetId(), "realm-scoped units target the realm id");
+
+        // ★ The crux of the ORK reject: the framed unit MUST serialize to a top-level CBOR MAP
+        // (major type 5: 0xA0-0xBF), the only shape CborEnvelope.Decode accepts. The canonicalizeNode
+        // fallback would serialize to a CBOR text string (major type 3: 0x60-0x7F / 0x78), which is
+        // exactly what the ORK rejected.
+        byte[] cbor = units.get(0).serialize();
+        int major = (cbor[0] & 0xE0) >> 5;
+        assertEquals(5, major,
+                "the framed REMOVE_REALM_ATTRIBUTE unit envelope must be a CBOR map (major type 5); "
+                        + "got major type " + major + " (3 == text string == the non-CBOR canonical "
+                        + "fallback the ORK rejects as 'envelope must be a CBOR map')");
+    }
+
+    @Test
     void scopeAddRoleCr_enumeratesTheScopeRoleAllowlistSet_forClientScopeParent() {
         ClientScopeModel scope = mock(ClientScopeModel.class);
         when(scope.getId()).thenReturn(SCOPE_ID);
