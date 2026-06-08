@@ -1403,12 +1403,13 @@ public class TideAttestor implements IgaAttestor {
      *       and {@link #ROW_NEW_THRESHOLD}. Sets STATUS=APPROVED on the managed CR.</li>
      * </ol>
      *
-     * <p><b>OLD-POLICY REVOCATION EXTENSION POINT.</b> After the new admin Policy is signed +
-     * stored below (see the marked TODO), a follow-up will trigger revocation of the OLD admin
-     * Policy on the ORK side (a separate ORK burn being built in parallel). The exact ORK
-     * contract is wired in that follow-up; this method is where that hook lands — it has the
-     * realm, the settings, the OLD M0 bytes (re-readable via {@link #readM0AdminPolicyBytes}
-     * BEFORE the upsert overwrites the row), and the new VVK sig in scope.
+     * <p><b>OLD-POLICY REVOCATION is driven at phase-1, not here.</b> The OLD admin Policy (M0)
+     * burn is triggered by the rotation flag set in {@link #buildPolicyResignApprovalModel}
+     * ({@code PolicySignRequest.SetRevokeAuthorizingPolicyOnSign} → {@code Draft} index 2 =
+     * {@code 0x01}), which is part of the cryptographically authorized {@code Draft} the admin
+     * quorum's dokens cover. At this commit the ORK re-signs the Policy:1 request and — seeing
+     * the flag plus the structural self-rotation (same KeyId/ContractId/ModelIds) — burns the
+     * old M0. This method performs NO separate revocation step.
      *
      * <p>Fail-closed: a missing carrier, missing material, or a real sign failure throws,
      * rolling back the commit tx — a real-provisioned realm never installs a fake-signed or
@@ -1471,11 +1472,11 @@ public class TideAttestor implements IgaAttestor {
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
             em.flush();
 
-            // ★★ OLD-POLICY REVOCATION HOOK (follow-up) ★★
-            // The new admin Policy is now signed + stored. The OLD admin Policy's ORK-side burn
-            // is built in parallel; wire the exact ORK contract HERE in the follow-up (the OLD
-            // M0 bytes were readable above via findTideRealmAdminPolicy BEFORE this upsert, and
-            // `settings` / `realm` / `vvkSig` are all in scope). NOT implemented in this change.
+            // OLD-POLICY REVOCATION is NOT driven here. The burn is triggered by the phase-1
+            // Draft flag (PolicySignRequest.SetRevokeAuthorizingPolicyOnSign, set in
+            // buildPolicyResignApprovalModel and covered by the collected admin dokens) plus the
+            // ORK's own structural self-rotation check at this Policy:1 re-sign — no replay-time
+            // revocation step exists.
 
             log.infof("IGA threshold-policy commit: realm %s tide-realm-admin admin Policy RE-SIGNED via "
                     + "Policy:1 quorum + installed at threshold %d (CR %s).",
@@ -1788,6 +1789,17 @@ public class TideAttestor implements IgaAttestor {
         PolicySignRequest req = new PolicySignRequest(newPolicyBytes, POLICY_AUTH_FLOW);
         req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
         req.SetPolicy(existingM0);
+
+        // OLD-POLICY REVOCATION (phase-1): set the rotation flag INSIDE the cryptographically
+        // authorized Draft — PolicySignRequest.Serialize appends a trailing {0x01} segment
+        // (Draft index 2) when this is set. Because the flag lives in the Draft (hashed by
+        // GetDataToAuthorize, signed by the admin quorum's dokens), the collected dokens COVER
+        // the burn intent, and the ORK burns the OLD admin Policy (M0) at commit when it re-signs.
+        // This MUST be called before GetDraft()/Encode() materialize the Draft — a flag added at
+        // replay would be uncovered by the already-collected dokens and ignored / break the sig.
+        // (The ORK ALSO independently requires a structural self-rotation — same KeyId/ContractId/
+        // ModelIds — which this admin-policy re-sign satisfies by construction.)
+        req.SetRevokeAuthorizingPolicyOnSign();
 
         // Materialize Draft (PolicySignRequest folds the policy payload into Draft lazily via
         // Serialize, invoked by GetDraft) BEFORE Encode() — else Encode() persists an EMPTY

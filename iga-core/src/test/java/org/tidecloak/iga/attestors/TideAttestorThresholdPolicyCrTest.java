@@ -14,8 +14,10 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserProvider;
+import org.midgard.Serialization.Tools;
 import org.midgard.models.ModelRequest;
 import org.midgard.models.Policy.Policy;
+import org.midgard.models.RequestExtensions.PolicySignRequest;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -32,6 +34,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -348,5 +351,64 @@ class TideAttestorThresholdPolicyCrTest {
         // The draft IS the new unsigned policy bytes (PolicySignRequest's payload draft).
         byte[] draft = parsed.GetDraft();
         assertTrue(draft != null && draft.length > 0, "carrier must carry a non-empty draft (the new policy)");
+    }
+
+    // --- old-policy revocation flag in the authorized Draft (phase-1) --------
+
+    @Test
+    void approvalModelCarrier_setsRevocationFlag_atDraftIndex2() throws Exception {
+        // The REGEN phase-1 carrier must set the OLD-policy rotation flag INSIDE the
+        // cryptographically authorized Draft: PolicySignRequest.SetRevokeAuthorizingPolicyOnSign
+        // appends a trailing {0x01} segment at Draft index 2 (segment 0 = new policy payload,
+        // segment 1 = contract-to-upload, segment 2 = the revoke flag). Decoding the persisted
+        // carrier via ModelRequest.FromBytes and reading Draft segment 2 must yield {0x01}, so
+        // the collected admin dokens cover the burn intent and the ORK burns the old M0 at commit.
+        byte[] newPolicy = TideAttestor.buildUnsignedAdminPolicyBytes(3, VVK_ID);
+        String newPolicyB64 = Base64.getEncoder().encodeToString(newPolicy);
+
+        IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
+        cr.setId("regen-cr-flag");
+        cr.setRealmId(REALM_ID);
+        cr.setActionType("REGEN_ADMIN_POLICY");
+        cr.setEntityType("ADMIN_POLICY");
+        cr.setEntityId(TIDE_ROLE_ID);
+        cr.setRowsJson("[{\"OLD_THRESHOLD\":1,\"NEW_THRESHOLD\":3,\"ROLE_ID\":\"" + TIDE_ROLE_ID
+                + "\",\"VVK_ID\":\"" + VVK_ID + "\",\"POLICY_BODY_UNSIGNED\":\"" + newPolicyB64 + "\"}]");
+
+        byte[] m0 = TideAttestor.buildUnsignedAdminPolicyBytes(1, VVK_ID);
+        IgaRolePolicyEntity m0Row = policyAtThreshold(1);
+        m0Row.setPolicy(Base64.getEncoder().encodeToString(m0));
+        stubPolicyLookup(m0Row);
+
+        String carrier = attestor.buildMultiAdminApprovalModel(session, realm, cr);
+
+        ModelRequest parsed = ModelRequest.FromBytes(Base64.getDecoder().decode(carrier));
+        byte[] draft = parsed.GetDraft();
+        byte[] revokeSeg = Tools.TryGetValue(draft, 2);
+        assertNotNull(revokeSeg, "REGEN carrier Draft must carry a segment at index 2 (the revoke flag)");
+        assertArrayEquals(new byte[]{0x01}, revokeSeg,
+                "REGEN carrier Draft index 2 must be the {0x01} old-policy-revocation flag");
+
+        // Segment 0 is the verbatim new unsigned policy payload (flag is on the request Draft,
+        // NOT the policy bytes) — POLICY_BODY_UNSIGNED is unchanged by the flag.
+        assertArrayEquals(newPolicy, Tools.GetValue(draft, 0),
+                "REGEN carrier Draft index 0 must be the verbatim unsigned new policy bytes");
+    }
+
+    @Test
+    void nonRegenPolicyRequest_hasNoRevocationFlag_atDraftIndex2() throws Exception {
+        // Negative control: a Policy:1 request built WITHOUT SetRevokeAuthorizingPolicyOnSign
+        // (the shape of a normal, non-REGEN approval carrier) carries ONLY the policy payload
+        // segment — Draft index 2 is absent. Proves the {0x01} at index 2 is the rotation flag,
+        // not an unconditional artifact of the carrier encoding.
+        byte[] policyBytes = TideAttestor.buildUnsignedAdminPolicyBytes(3, VVK_ID);
+        PolicySignRequest req = new PolicySignRequest(policyBytes, "Policy:1");
+        byte[] draft = req.GetDraft();
+
+        assertArrayEquals(policyBytes, Tools.GetValue(draft, 0),
+                "non-revoke carrier Draft index 0 is the policy payload");
+        byte[] seg2 = Tools.TryGetValue(draft, 2);
+        assertTrue(seg2 == null || !Arrays.equals(new byte[]{0x01}, seg2),
+                "non-REGEN carrier Draft must NOT carry the {0x01} revoke flag at index 2");
     }
 }
