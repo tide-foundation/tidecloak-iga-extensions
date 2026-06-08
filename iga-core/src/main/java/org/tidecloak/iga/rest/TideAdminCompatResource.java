@@ -976,9 +976,13 @@ public class TideAdminCompatResource {
 
         UserModel admin = currentUserModel();
 
-        IgaFirstAdminAutoCommit.BulkEngine engine = actionTypeIn -> {
+        IgaFirstAdminAutoCommit.BulkEngine engine = crIdIn -> {
             Map<String, Object> bulkBody = new LinkedHashMap<>();
-            bulkBody.put("actionTypeIn", actionTypeIn);
+            // Drive the bulk engine by the EXACT per-CR-eligible ids (not action
+            // type): the narrowed scope means a single action type can hold both
+            // eligible and ineligible CRs (system vs admin-authored ADOPT, benign
+            // vs non-default composite), so an action-type drain would over-commit.
+            bulkBody.put("crIdIn", crIdIn);
             bulkBody.put("limit", 1000); // bulk endpoint hard cap
             Response resp = new IgaAdminResource(session, realm, auth).bulkAuthorize(bulkBody);
             Object entity = resp.getEntity();

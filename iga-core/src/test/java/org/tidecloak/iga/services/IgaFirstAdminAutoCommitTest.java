@@ -40,16 +40,18 @@ class IgaFirstAdminAutoCommitTest {
 
     @Test
     void baselineConfigActions_areAllowListed() {
-        // A representative sample of the baseline/default config action types.
+        // The NARROWED baseline/default config action types: realm settings/config,
+        // realm default groups, realm default scopes, default-role composite, and the
+        // ADOPT_* family. (ADOPT auto-eligibility is further gated per-CR on the target
+        // being a system/stock-default entity — see the ADOPT tests below.)
         assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("SET_REALM_ATTRIBUTE"));
         assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("REMOVE_REALM_ATTRIBUTE"));
-        assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("REALM_DEFAULT_SCOPE_ADD"));
-        assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("CREATE_CLIENT_SCOPE"));
-        assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("CREATE_CLIENT"));
-        assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("CREATE_ROLE"));
-        assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("ADD_PROTOCOL_MAPPER"));
-        assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("SCOPE_ADD_ROLE"));
+        assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("SET_REALM_CONFIG"));
         assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("ADD_REALM_DEFAULT_GROUP"));
+        assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("REMOVE_REALM_DEFAULT_GROUP"));
+        assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("REALM_DEFAULT_SCOPE_ADD"));
+        assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("REALM_DEFAULT_SCOPE_REMOVE"));
+        assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("ADD_COMPOSITE"));
         assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("ADOPT_ROLE"));
         assertTrue(IgaFirstAdminAutoCommit.isBaselineConfigActionType("ADOPT_CLIENT_SCOPE_CLIENT"));
     }
@@ -65,11 +67,75 @@ class IgaFirstAdminAutoCommitTest {
         assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("ADD_ORG_MEMBER"));
     }
 
+    /**
+     * The NARROWED scope (user correction 2026-06-08): only realm DEFAULTS auto-sign.
+     * Action types that create admin-authored custom entities (clients, roles, scopes,
+     * groups, mappers, scope assignments) are NO LONGER on the allow-list — they must
+     * stay MANUAL even during firstAdmin.
+     */
+    @Test
+    void manuallyAddedEntityActions_areExcluded() {
+        assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("CREATE_CLIENT"),
+                "manually-added client → manual");
+        assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("CREATE_ROLE"),
+                "manually-added role → manual");
+        assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("CREATE_GROUP"),
+                "manually-added group → manual");
+        assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("CREATE_CLIENT_SCOPE"),
+                "manually-added client-scope → manual");
+        assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("ADD_PROTOCOL_MAPPER"),
+                "manually-added protocol mapper → manual");
+        assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("ASSIGN_SCOPE"),
+                "client scope assignment → manual");
+        assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("SCOPE_ADD_ROLE"),
+                "scope→role → manual");
+        assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("SCOPE_MAPPING_ADD"),
+                "scope-mapping → manual");
+    }
+
     @Test
     void unknownAction_isTreatedAsGoverned() {
         assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType("SOME_FUTURE_ACTION"));
         assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType(null));
         assertFalse(IgaFirstAdminAutoCommit.isBaselineConfigActionType(""));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ADOPT_* — system/stock-default gate (ATTESTATION_ONLY marker)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Test
+    void adopt_systemEntity_isAutoCommittable() {
+        KeycloakSession session = mock(KeycloakSession.class);
+        RealmModel realm = defaultRoleRealm();
+        // The toggle-on scan marks a system/stock-default ADOPT CR with
+        // ATTESTATION_ONLY=true in its ROWS_JSON (IgaSystemEntityFilter.shouldSkip).
+        IgaChangeRequestEntity cr = adoptCr("ADOPT_CLIENT", true);
+        assertTrue(IgaFirstAdminAutoCommit.isAutoCommittable(session, realm, cr),
+                "an ADOPT CR targeting a system/stock-default entity is auto-committable");
+    }
+
+    @Test
+    void adopt_manuallyAddedEntity_isNotAutoCommittable() {
+        KeycloakSession session = mock(KeycloakSession.class);
+        RealmModel realm = defaultRoleRealm();
+        // An ADOPT CR for an admin-authored (non-system) entity carries NO
+        // ATTESTATION_ONLY marker (it writes a quarantine sidecar instead) → manual.
+        IgaChangeRequestEntity cr = adoptCr("ADOPT_CLIENT", false);
+        assertFalse(IgaFirstAdminAutoCommit.isAutoCommittable(session, realm, cr),
+                "an ADOPT CR targeting a manually-added (non-system) entity must NOT auto-commit");
+    }
+
+    @Test
+    void adopt_edge_systemVsManual() {
+        KeycloakSession session = mock(KeycloakSession.class);
+        RealmModel realm = defaultRoleRealm();
+        assertTrue(IgaFirstAdminAutoCommit.isAutoCommittable(session, realm,
+                        adoptCr("ADOPT_PROTOCOL_MAPPER", true)),
+                "system edge ADOPT (attestation-only) → auto");
+        assertFalse(IgaFirstAdminAutoCommit.isAutoCommittable(session, realm,
+                        adoptCr("ADOPT_PROTOCOL_MAPPER", false)),
+                "manually-added edge ADOPT (no marker) → manual");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -127,18 +193,19 @@ class IgaFirstAdminAutoCommitTest {
         UserModel admin = mock(UserModel.class);
 
         List<IgaChangeRequestEntity> pending = new ArrayList<>();
-        pending.add(simpleCr("c1", "SET_REALM_ATTRIBUTE"));
-        pending.add(simpleCr("c2", "CREATE_CLIENT_SCOPE"));
-        pending.add(simpleCr("c3", "CREATE_USER"));        // excluded
-        pending.add(simpleCr("c4", "GRANT_ROLES"));        // excluded
+        pending.add(simpleCr("c1", "SET_REALM_ATTRIBUTE"));     // realm default → eligible
+        pending.add(simpleCr("c2", "REALM_DEFAULT_SCOPE_ADD")); // realm default → eligible
+        pending.add(simpleCr("c3", "CREATE_USER"));             // excluded
+        pending.add(simpleCr("c4", "GRANT_ROLES"));             // excluded
+        pending.add(simpleCr("c5", "CREATE_CLIENT_SCOPE"));     // excluded (manually-added)
 
-        AtomicReference<List<String>> seenActionTypes = new AtomicReference<>();
-        IgaFirstAdminAutoCommit.BulkEngine engine = actionTypeIn -> {
-            seenActionTypes.set(actionTypeIn);
-            // pretend the engine committed each requested action type once.
+        AtomicReference<List<String>> seenCrIds = new AtomicReference<>();
+        IgaFirstAdminAutoCommit.BulkEngine engine = crIdIn -> {
+            seenCrIds.set(crIdIn);
+            // pretend the engine committed each requested CR id once.
             List<Map<String, Object>> out = new ArrayList<>();
-            for (String at : actionTypeIn) {
-                out.add(Map.of("crId", at, "status", "COMMITTED"));
+            for (String id : crIdIn) {
+                out.add(Map.of("crId", id, "status", "COMMITTED"));
             }
             return out;
         };
@@ -151,14 +218,15 @@ class IgaFirstAdminAutoCommitTest {
                     IgaFirstAdminAutoCommit.sweep(session, realm, admin, pending, engine);
 
             assertTrue(result.ran, "firstAdmin + VRK active → sweep runs");
-            assertEquals(2, result.eligible, "only the 2 baseline-config CRs are eligible");
+            assertEquals(2, result.eligible, "only the 2 realm-default CRs are eligible");
             assertEquals(2, result.committed);
-            // CREATE_USER / GRANT_ROLES must NOT appear in the bulk request.
-            List<String> requested = seenActionTypes.get();
-            assertTrue(requested.contains("SET_REALM_ATTRIBUTE"));
-            assertTrue(requested.contains("CREATE_CLIENT_SCOPE"));
-            assertFalse(requested.contains("CREATE_USER"));
-            assertFalse(requested.contains("GRANT_ROLES"));
+            // The sweep drives the engine by exact CR id, not action type.
+            List<String> requested = seenCrIds.get();
+            assertTrue(requested.contains("c1"));
+            assertTrue(requested.contains("c2"));
+            assertFalse(requested.contains("c3"), "CREATE_USER CR must not be swept");
+            assertFalse(requested.contains("c4"), "GRANT_ROLES CR must not be swept");
+            assertFalse(requested.contains("c5"), "manually-added CREATE_CLIENT_SCOPE CR must not be swept");
         }
     }
 
@@ -237,9 +305,61 @@ class IgaFirstAdminAutoCommitTest {
 
             assertTrue(result.ran);
             assertEquals(1, result.eligible, "only the realm-attribute CR is eligible; the tainted composite is held back");
-            assertTrue(seen.get().contains("SET_REALM_ATTRIBUTE"));
-            assertFalse(seen.get().contains("ADD_COMPOSITE"),
+            // Engine is driven by CR id; the tainted composite's id ("composite-cr") must
+            // never enter the bulk request.
+            assertTrue(seen.get().contains("c1"));
+            assertFalse(seen.get().contains("composite-cr"),
                     "the tainted default-role composite must never enter the auto-commit bulk request");
+        }
+    }
+
+    @Test
+    void sweep_manuallyAddedAndNonSystemAdopt_stayPending() {
+        KeycloakSession session = mock(KeycloakSession.class);
+        RealmModel realm = defaultRoleRealm();
+        UserModel admin = mock(UserModel.class);
+
+        List<IgaChangeRequestEntity> pending = new ArrayList<>();
+        pending.add(simpleCr("c1", "SET_REALM_ATTRIBUTE"));            // realm default → AUTO
+        pending.add(adoptCr("adopt-sys", "ADOPT_CLIENT", true));      // system entity → AUTO
+        // The manually-added entities + non-system adopt — must NOT enter the bulk request.
+        pending.add(simpleCr("c3", "CREATE_CLIENT"));                 // admin-authored client → manual
+        pending.add(simpleCr("c4", "CREATE_ROLE"));                   // admin-authored role → manual
+        pending.add(simpleCr("c5", "CREATE_CLIENT_SCOPE"));           // admin-authored scope → manual
+        pending.add(simpleCr("c6", "CREATE_GROUP"));                  // admin-authored group → manual
+        pending.add(simpleCr("c7", "ADD_PROTOCOL_MAPPER"));          // admin-authored mapper → manual
+        pending.add(adoptCr("adopt-manual", "ADOPT_CLIENT", false));  // admin-authored adopt → manual
+
+        AtomicReference<List<String>> seen = new AtomicReference<>();
+        IgaFirstAdminAutoCommit.BulkEngine engine = crIdIn -> {
+            seen.set(crIdIn);
+            List<Map<String, Object>> out = new ArrayList<>();
+            for (String id : crIdIn) out.add(Map.of("crId", id, "status", "COMMITTED"));
+            return out;
+        };
+
+        try (MockedStatic<TideAttestor> ta = mockStatic(TideAttestor.class)) {
+            ta.when(() -> TideAttestor.isFirstAdminMode(session, realm)).thenReturn(true);
+            ta.when(() -> TideAttestor.isRealSigningCapableRealm(realm)).thenReturn(true);
+
+            IgaFirstAdminAutoCommit.SweepResult result =
+                    IgaFirstAdminAutoCommit.sweep(session, realm, admin, pending, engine);
+
+            assertTrue(result.ran);
+            assertEquals(2, result.eligible,
+                    "only the realm-attribute CR + the SYSTEM ADOPT CR are eligible");
+            List<String> requested = seen.get();
+            assertTrue(requested.contains("c1"));
+            assertTrue(requested.contains("adopt-sys"),
+                    "the SYSTEM adopt CR IS swept (its target is a stock-default entity)");
+            // The non-system adopt + every manually-added entity CR must never be requested.
+            assertFalse(requested.contains("adopt-manual"),
+                    "the non-system (admin-authored) ADOPT CR must stay manual");
+            assertFalse(requested.contains("c3"));
+            assertFalse(requested.contains("c4"));
+            assertFalse(requested.contains("c5"));
+            assertFalse(requested.contains("c6"));
+            assertFalse(requested.contains("c7"));
         }
     }
 
@@ -294,6 +414,26 @@ class IgaFirstAdminAutoCommitTest {
         lenient().when(cr.getActionType()).thenReturn("ADD_COMPOSITE");
         lenient().when(cr.getRowsJson()).thenReturn(
                 "[{\"COMPOSITE\":\"" + parentRoleId + "\",\"CHILD_ROLE\":\"" + childRoleId + "\"}]");
+        return cr;
+    }
+
+    /**
+     * An ADOPT CR whose ROWS_JSON carries (or omits) the {@code ATTESTATION_ONLY}
+     * marker — the per-CR flag the toggle-on scan writes when (and only when) the
+     * target entity is a system/stock-default per {@code IgaSystemEntityFilter}.
+     */
+    private static IgaChangeRequestEntity adoptCr(String actionType, boolean attestationOnly) {
+        return adoptCr("adopt-cr-" + actionType + "-" + attestationOnly, actionType, attestationOnly);
+    }
+
+    private static IgaChangeRequestEntity adoptCr(String id, String actionType, boolean attestationOnly) {
+        IgaChangeRequestEntity cr = mock(IgaChangeRequestEntity.class);
+        lenient().when(cr.getId()).thenReturn(id);
+        lenient().when(cr.getActionType()).thenReturn(actionType);
+        lenient().when(cr.getRowsJson()).thenReturn(
+                attestationOnly
+                        ? "[{\"ID\":\"e1\",\"ATTESTATION_ONLY\":true}]"
+                        : "[{\"ID\":\"e1\"}]");
         return cr;
     }
 }

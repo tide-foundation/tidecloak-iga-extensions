@@ -82,6 +82,19 @@ public final class IgaFirstAdminAutoCommit {
     private static final String ROWS_KEY_COMPOSITE_PARENT = "COMPOSITE";
 
     /**
+     * {@code ROWS_JSON} key the toggle-on ADOPT scan writes (value {@code true})
+     * when, and only when, the ADOPT target is a SYSTEM/stock-default entity per
+     * {@link IgaSystemEntityFilter} ({@code shouldSkip}/{@code shouldSkipEdge}).
+     * A system ADOPT CR is "attestation-only" (signs on commit, no quarantine
+     * sidecar); an ADOPT CR for a manually-added (admin-authored) entity has NO
+     * such marker (it writes a quarantine sidecar). This is the exact, already-
+     * persisted classification the sweep needs — we do NOT re-resolve the target
+     * to the filter at sweep time; the scan recorded it. See
+     * {@code IgaChangeRequestService.createAdoptCr/createAdoptEdgeCr/createAdoptRealmCr}.
+     */
+    static final String ROWS_KEY_ATTESTATION_ONLY = "ATTESTATION_ONLY";
+
+    /**
      * The baseline / default configuration action types that are safe to
      * auto-commit while the realm is in firstAdmin mode.
      *
@@ -98,7 +111,11 @@ public final class IgaFirstAdminAutoCommit {
      * ({@code IgaReplayExtension}).</p>
      */
     public static final Set<String> BASELINE_CONFIG_ACTION_TYPES = Set.of(
-            // ADOPT_* — the toggle-on scan's attestation of pre-existing baseline state.
+            // ADOPT_* — the toggle-on scan's attestation of pre-existing state. ON THE
+            // ALLOW-LIST, but additionally gated PER CR by isSystemDefaultAdopt: only an
+            // ADOPT CR whose target is a system/stock-default entity (marked
+            // ATTESTATION_ONLY=true by the scan via IgaSystemEntityFilter) auto-signs. An
+            // ADOPT CR for a MANUALLY-ADDED (non-system) entity stays manual.
             "ADOPT_REALM",
             "ADOPT_ROLE",
             "ADOPT_GROUP",
@@ -112,36 +129,32 @@ public final class IgaFirstAdminAutoCommit {
             "ADOPT_DEFAULT_CLIENT_SCOPE",
             "ADOPT_SCOPE_MAPPING",
 
-            // Realm attribute / config writes (baseline realm settings).
+            // Realm attribute / config writes (realm-level settings + registration/login).
             "SET_REALM_ATTRIBUTE",
             "REMOVE_REALM_ATTRIBUTE",
             "SET_REALM_CONFIG",
 
-            // Default client-scope assignment to the realm.
+            // Realm default client-scopes (which scope is a realm default — config, not
+            // scope creation).
             "REALM_DEFAULT_SCOPE_ADD",
             "REALM_DEFAULT_SCOPE_REMOVE",
 
-            // Client-scope creation + default/optional assignment to clients.
-            "CREATE_CLIENT_SCOPE",
-            "ASSIGN_SCOPE",
-            "SCOPE_ADD_ROLE",
-            "SCOPE_MAPPING_ADD",
-
-            // Client + role + group structural creation.
-            "CREATE_CLIENT",
-            "CREATE_ROLE",
-            "CREATE_GROUP",
-
-            // Protocol mappers (baseline token-shaping config).
-            "ADD_PROTOCOL_MAPPER",
-
-            // Realm default groups.
+            // Realm default groups (which group is a realm default).
             "ADD_REALM_DEFAULT_GROUP",
             "REMOVE_REALM_DEFAULT_GROUP",
 
             // Default-role composite — ONLY when the parent is default-roles-<realm>
             // AND it stays benign (MF2). See isAutoCommittable.
             "ADD_COMPOSITE"
+
+            // DELIBERATELY EXCLUDED (narrowed scope, user correction 2026-06-08): the
+            // action types that create ADMIN-AUTHORED custom entities —
+            //   CREATE_CLIENT, CREATE_ROLE, CREATE_GROUP, CREATE_CLIENT_SCOPE,
+            //   ADD_PROTOCOL_MAPPER, ASSIGN_SCOPE, SCOPE_ADD_ROLE, SCOPE_MAPPING_ADD.
+            // These stay MANUAL even during firstAdmin (only realm DEFAULTS auto-sign).
+            // Stock default entities are normally created IGA-OFF and surface via ADOPT_*
+            // (covered above, system-gated); we do NOT special-case a stock entity that an
+            // admin happens to create under IGA-on — default to manual.
     );
 
     private IgaFirstAdminAutoCommit() {
@@ -201,9 +214,66 @@ public final class IgaFirstAdminAutoCommit {
     }
 
     /**
+     * Is this action type an {@code ADOPT_*} action? Local prefix check (the
+     * ADOPT family is enumerated in {@code IgaReplayExtension}; every member is
+     * prefixed {@code ADOPT_}). Used to apply the system-default per-CR gate.
+     */
+    static boolean isAdoptAction(String actionType) {
+        return actionType != null && actionType.startsWith("ADOPT_");
+    }
+
+    /**
+     * Per-CR system-default gate for an {@code ADOPT_*} CR. Auto-eligibility
+     * requires the ADOPT target to be a SYSTEM/stock-default entity — exactly
+     * the entities the toggle-on scan marked {@link #ROWS_KEY_ATTESTATION_ONLY}
+     * ({@code = true}) in the CR's {@code ROWS_JSON} (account/account-console,
+     * stock realm-management/account/offline_access/uma_authorization roles,
+     * stock client scopes + their mappers, the realm/realm-config, the
+     * default-roles composite, default groups). An ADOPT CR for a MANUALLY-ADDED
+     * (non-system, admin-authored) entity has NO marker → returns false → stays
+     * manual.
+     *
+     * <p>Reads the already-persisted classification rather than re-resolving the
+     * target through {@link IgaSystemEntityFilter}: the scan resolved
+     * {@code (entityType, entityName, parentClientId)} → {@code shouldSkip} at
+     * scan time and stamped the boolean onto the CR, so the sweep is a pure read
+     * of the CR's own rows.</p>
+     */
+    static boolean isSystemDefaultAdopt(IgaChangeRequestEntity cr) {
+        if (cr == null) {
+            return false;
+        }
+        String rowsJson = cr.getRowsJson();
+        if (rowsJson == null || rowsJson.isBlank()) {
+            return false;
+        }
+        try {
+            List<Map<String, Object>> rows = MAPPER.readValue(rowsJson, LIST_MAP_REF);
+            if (rows == null) {
+                return false;
+            }
+            for (Map<String, Object> row : rows) {
+                if (row == null) continue;
+                Object v = row.get(ROWS_KEY_ATTESTATION_ONLY);
+                if (Boolean.TRUE.equals(v)
+                        || (v != null && "true".equalsIgnoreCase(v.toString()))) {
+                    return true;
+                }
+            }
+        } catch (Exception parseFail) {
+            log.debugf(parseFail, "IGA firstAdmin auto-commit: failed to parse ADOPT rows for CR %s",
+                    cr.getId());
+        }
+        return false;
+    }
+
+    /**
      * Full per-CR auto-commit eligibility decision. A CR is auto-committable iff:
      * <ul>
      *   <li>its action type is on the {@link #BASELINE_CONFIG_ACTION_TYPES} allow-list; AND</li>
+     *   <li>if {@code ADOPT_*}: the target is a SYSTEM/stock-default entity (the
+     *       scan marked it {@link #ROWS_KEY_ATTESTATION_ONLY}). An ADOPT CR for a
+     *       manually-added (non-system) entity stays manual; AND</li>
      *   <li>if {@code ADD_COMPOSITE}: its parent is the realm default-role AND the
      *       resulting default-role composite is still benign per
      *       {@link DefaultRoleCompositeGuard} (MF2 fail-closed — a privileged child
@@ -218,6 +288,13 @@ public final class IgaFirstAdminAutoCommit {
         String actionType = cr.getActionType();
         if (!isBaselineConfigActionType(actionType)) {
             return false;
+        }
+        if (isAdoptAction(actionType)) {
+            // Only a system/stock-default ADOPT is baseline config; a manually-added
+            // (non-system) entity's ADOPT stays manual.
+            if (!isSystemDefaultAdopt(cr)) {
+                return false;
+            }
         }
         if ("ADD_COMPOSITE".equals(actionType)) {
             // Only a default-role composite is baseline config...
@@ -247,12 +324,16 @@ public final class IgaFirstAdminAutoCommit {
     @FunctionalInterface
     public interface BulkEngine {
         /**
-         * Run the bulk authorize+commit over the PENDING CRs whose action type is in
-         * {@code actionTypeIn}. Returns the engine's per-CR results array (each entry a
-         * map with at least {@code crId} and {@code status} = COMMITTED/REJECTED/SKIPPED),
-         * or an empty list if nothing matched.
+         * Run the bulk authorize+commit over EXACTLY the PENDING CRs whose id is in
+         * {@code crIdIn}. The sweep selects CRs by id (not by action type) because
+         * eligibility is decided PER CR — a single action type may hold both eligible
+         * and ineligible CRs (e.g. a system {@code ADOPT_CLIENT} vs a manually-added
+         * {@code ADOPT_CLIENT}, or a benign vs non-default {@code ADD_COMPOSITE}), so an
+         * action-type drain would over-commit. Returns the engine's per-CR results array
+         * (each entry a map with at least {@code crId} and {@code status} =
+         * COMMITTED/REJECTED/SKIPPED), or an empty list if nothing matched.
          */
-        List<Map<String, Object>> runBulk(List<String> actionTypeIn);
+        List<Map<String, Object>> runBulk(List<String> crIdIn);
     }
 
     /** Outcome summary for the toggle response + logging. */
@@ -326,32 +407,36 @@ public final class IgaFirstAdminAutoCommit {
             return SweepResult.skipped("VRK_NOT_ACTIVE");
         }
 
-        // Per-CR allow-list filter (incl. the ADD_COMPOSITE default-role + MF2 gate),
-        // collapsed to the distinct action-type set the engine is driven over.
-        List<String> autoActionTypes = new ArrayList<>();
-        int eligible = 0;
+        // Per-CR allow-list filter (incl. the ADOPT system-default gate AND the
+        // ADD_COMPOSITE default-role + MF2 gate). We collect the exact eligible CR
+        // IDS — NOT action types — because the narrowed scope means a single action
+        // type can hold both eligible and ineligible CRs (a system ADOPT vs an
+        // admin-authored ADOPT; a benign default-role composite vs a non-default
+        // composite). Driving the engine by id guarantees an ineligible sibling is
+        // never swept in.
+        List<String> autoCrIds = new ArrayList<>();
         if (pendingCrs != null) {
             for (IgaChangeRequestEntity cr : pendingCrs) {
                 if (isAutoCommittable(session, realm, cr)) {
-                    eligible++;
-                    String at = cr.getActionType();
-                    if (!autoActionTypes.contains(at)) {
-                        autoActionTypes.add(at);
+                    String id = cr.getId();
+                    if (id != null && !autoCrIds.contains(id)) {
+                        autoCrIds.add(id);
                     }
                 }
             }
         }
+        int eligible = autoCrIds.size();
 
-        if (autoActionTypes.isEmpty()) {
+        if (autoCrIds.isEmpty()) {
             log.infof("IGA firstAdmin auto-commit: realm %s — no auto-committable baseline-config CRs pending.",
                     realm.getName());
             return SweepResult.ran(0, 0, 0, 0);
         }
 
-        log.infof("IGA firstAdmin auto-commit: realm %s — sweeping %d baseline-config CR(s) across action types %s.",
-                realm.getName(), eligible, autoActionTypes);
+        log.infof("IGA firstAdmin auto-commit: realm %s — sweeping %d baseline-config CR(s) by id.",
+                realm.getName(), eligible);
 
-        List<Map<String, Object>> results = engine.runBulk(autoActionTypes);
+        List<Map<String, Object>> results = engine.runBulk(autoCrIds);
 
         int committed = 0, rejected = 0, skipped = 0;
         if (results != null) {

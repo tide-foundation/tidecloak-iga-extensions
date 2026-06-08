@@ -70,4 +70,48 @@ class IgaTideClaimsExemptionTest {
                         "any-uuid", "p6b-scope", null, false),
                 "other custom scopes must still be governed (quarantined)");
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // tide-admin-console — Tide-realm default client (auto-created at Tide
+    // enablement by VendorResource.setupTideAdminConsole). It must be classified
+    // by the ADOPT scan exactly like KC's built-in admin/account consoles:
+    // system → attestation-only ADOPT CR (marked ATTESTATION_ONLY) → auto-signed
+    // by the narrowed firstAdmin auto-commit sweep. A custom/admin-authored
+    // client must NOT be classified as system → its ADOPT stays MANUAL.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Test
+    void tideAdminConsoleClient_isSystemDefault_attestationOnly() {
+        RealmModel realm = realm();
+        // CLIENT entity whose clientId is "tide-admin-console" → soft-skip
+        // (system) under default settings → the scan stamps ATTESTATION_ONLY →
+        // its ADOPT_CLIENT CR auto-signs under the narrowed firstAdmin scope.
+        assertTrue(IgaSystemEntityFilter.shouldSkip(realm,
+                        IgaReplayExtension.ENTITY_TYPE_CLIENT,
+                        "client-uuid", "tide-admin-console", null, false),
+                "tide-admin-console is a Tide-realm default client → system/attestation-only ADOPT");
+    }
+
+    @Test
+    void tideAdminConsoleClientRoles_softSkipWithParent() {
+        RealmModel realm = realm();
+        // A client-role under tide-admin-console (parentClientId="tide-admin-console")
+        // soft-skips as a unit with its parent client, exactly like roles under
+        // realm-management/account.
+        assertTrue(IgaSystemEntityFilter.shouldSkip(realm,
+                        IgaReplayExtension.ENTITY_TYPE_ROLE,
+                        "role-uuid", "some-client-role", "tide-admin-console", false),
+                "client-roles under tide-admin-console soft-skip with their parent");
+    }
+
+    @Test
+    void customClient_isNotSystem_adoptStaysManual() {
+        RealmModel realm = realm();
+        // An admin-authored client (not a built-in, not tide-admin-console) is
+        // NOT system → no ATTESTATION_ONLY marker → its ADOPT_CLIENT stays MANUAL.
+        assertFalse(IgaSystemEntityFilter.shouldSkip(realm,
+                        IgaReplayExtension.ENTITY_TYPE_CLIENT,
+                        "client-uuid", "my-custom-app", null, false),
+                "an admin-authored client must NOT be classified system → ADOPT stays manual");
+    }
 }

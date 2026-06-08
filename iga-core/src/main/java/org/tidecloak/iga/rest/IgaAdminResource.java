@@ -662,24 +662,45 @@ public class IgaAdminResource {
                     .entity(Map.of("error", "Missing JSON body"))
                     .build();
         }
-        Object actionTypeInObj = body.get("actionTypeIn");
-        if (!(actionTypeInObj instanceof List<?>) || ((List<?>) actionTypeInObj).isEmpty()) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error",
-                            "actionTypeIn is required and must be a non-empty list of action-type strings"))
-                    .build();
+        // Optional per-CR id selector. When present + non-empty it takes
+        // precedence over actionTypeIn: candidates are exactly those PENDING CRs
+        // whose id is listed. The firstAdmin auto-commit sweep uses this because
+        // eligibility is decided PER CR (a single action type may hold both
+        // eligible and ineligible CRs — e.g. a system ADOPT_CLIENT vs an
+        // admin-authored ADOPT_CLIENT), so an action-type-only drain would
+        // over-commit. Existing callers (admin-UI bulk-approve) keep using
+        // actionTypeIn and are byte-for-byte unaffected.
+        List<String> crIdIn = new ArrayList<>();
+        Object crIdInObj = body.get("crIdIn");
+        if (crIdInObj instanceof List<?>) {
+            for (Object o : (List<?>) crIdInObj) {
+                if (o == null) continue;
+                String s = o.toString();
+                if (!s.isBlank()) crIdIn.add(s);
+            }
         }
+        boolean byId = !crIdIn.isEmpty();
+
         List<String> actionTypes = new ArrayList<>();
-        for (Object o : (List<Object>) actionTypeInObj) {
-            if (o == null) continue;
-            String s = o.toString();
-            if (!s.isBlank()) actionTypes.add(s);
-        }
-        if (actionTypes.isEmpty()) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error",
-                            "actionTypeIn must contain at least one non-blank action-type string"))
-                    .build();
+        Object actionTypeInObj = body.get("actionTypeIn");
+        if (!byId) {
+            if (!(actionTypeInObj instanceof List<?>) || ((List<?>) actionTypeInObj).isEmpty()) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error",
+                                "actionTypeIn is required and must be a non-empty list of action-type strings"))
+                        .build();
+            }
+            for (Object o : (List<Object>) actionTypeInObj) {
+                if (o == null) continue;
+                String s = o.toString();
+                if (!s.isBlank()) actionTypes.add(s);
+            }
+            if (actionTypes.isEmpty()) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error",
+                                "actionTypeIn must contain at least one non-blank action-type string"))
+                        .build();
+            }
         }
 
         Long olderThan = null;
@@ -740,6 +761,8 @@ public class IgaAdminResource {
         final int finalLimit = limit;
         final Long finalOlderThan = olderThan;
         final List<String> finalActionTypes = actionTypes;
+        final List<String> finalCrIdIn = crIdIn;
+        final boolean finalById = byId;
         final UserModel finalAdmin = admin;
 
         IgaBulkLock.Result<Map<String, Object>> lockResult = IgaBulkLock.runIfNotRunning(
@@ -753,8 +776,9 @@ public class IgaAdminResource {
                     long skipped = 0;
 
                     IgaChangeRequestService service = getService();
-                    List<IgaChangeRequestEntity> candidates =
-                            service.listPendingByActionTypeIn(realm.getId(), finalActionTypes, finalOlderThan, finalLimit);
+                    List<IgaChangeRequestEntity> candidates = finalById
+                            ? service.listPendingByIdIn(realm.getId(), finalCrIdIn, finalLimit)
+                            : service.listPendingByActionTypeIn(realm.getId(), finalActionTypes, finalOlderThan, finalLimit);
 
                     for (IgaChangeRequestEntity candidate : candidates) {
                         String crId = candidate.getId();

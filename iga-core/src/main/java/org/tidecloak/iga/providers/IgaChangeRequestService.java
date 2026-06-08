@@ -889,6 +889,39 @@ public class IgaChangeRequestService {
         return query.setMaxResults(limit).getResultList();
     }
 
+    /**
+     * Project the PENDING CRs in {@code realmId} whose id is in {@code crIds}.
+     * Ordered by createdAt ASC, capped at {@code limit}. Unlike
+     * {@link #listPendingByActionTypeIn} this keys on the exact CR ids — used by
+     * the firstAdmin auto-commit sweep, which classifies eligibility PER CR
+     * (e.g. an ADOPT_* CR is only auto-eligible when its target is a
+     * system/stock-default entity, and a default-role ADD_COMPOSITE only when
+     * benign) and so cannot drive the bulk engine by action type alone (a single
+     * action type may contain both eligible and ineligible CRs).
+     *
+     * @param realmId target realm
+     * @param crIds   non-empty list of CR ids to match (already PENDING-filtered
+     *                + de-duplicated by the caller); empty → empty result
+     * @param limit   max rows to return
+     */
+    public List<IgaChangeRequestEntity> listPendingByIdIn(String realmId,
+                                                          List<String> crIds,
+                                                          int limit) {
+        if (crIds == null || crIds.isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+        return em.createQuery(
+                        "SELECT cr FROM IgaChangeRequestEntity cr " +
+                                "WHERE cr.realmId = :realmId " +
+                                "AND cr.status = 'PENDING' " +
+                                "AND cr.id IN :crIds " +
+                                "ORDER BY cr.createdAt ASC", IgaChangeRequestEntity.class)
+                .setParameter("realmId", realmId)
+                .setParameter("crIds", crIds)
+                .setMaxResults(limit)
+                .getResultList();
+    }
+
     // -------------------------------------------------------------------------
     // Already-attested guard. See createAdoptCr JavaDoc.
     // -------------------------------------------------------------------------

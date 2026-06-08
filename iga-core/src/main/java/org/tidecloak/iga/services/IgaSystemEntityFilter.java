@@ -25,9 +25,10 @@ import java.util.Set;
  *       <li>KC's built-in per-realm admin clients
  *           ({@code realm-management}, {@code account},
  *           {@code account-console}, {@code security-admin-console},
- *           {@code broker}, {@code admin-cli}) AND every client-role under
- *           them. Avoids quarantining the very surface used to commit change
- *           requests.</li>
+ *           {@code broker}, {@code admin-cli}) plus the Tide-realm default
+ *           {@code tide-admin-console} (auto-created at Tide enablement),
+ *           AND every client-role under them. Avoids quarantining the very
+ *           surface used to commit change requests.</li>
  *       <li>KC's default client-scopes
  *           ({@link #DEFAULT_CLIENT_SCOPE_NAMES} — profile, email, roles,
  *           role_list, …). Avoids quarantining the token-issuance plumbing
@@ -64,7 +65,18 @@ public final class IgaSystemEntityFilter {
             "account-console",
             "security-admin-console",
             "broker",
-            "admin-cli"
+            "admin-cli",
+            // Tide-realm default: the KC-hosted Tide admin console, auto-created
+            // (create-if-absent) for every Tide-enabled realm by
+            // VendorResource.setupTideAdminConsole (called from SignIdpSettings),
+            // via KeycloakModelUtils.createPublicClient — i.e. created IGA-OFF and
+            // surfaced on toggle-on as an ADOPT_CLIENT. It is a realm DEFAULT, not
+            // an admin-authored client, so it is treated exactly like KC's built-in
+            // admin/account consoles: attestation-only ADOPT (signed on commit, no
+            // quarantine sidecar) + its client-roles soft-skip with it. Without
+            // this, its ADOPT_CLIENT CR would lack the ATTESTATION_ONLY marker and
+            // stay MANUAL under the narrowed firstAdmin auto-commit scope.
+            "tide-admin-console"
     );
 
     /**
