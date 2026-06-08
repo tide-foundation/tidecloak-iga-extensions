@@ -69,4 +69,23 @@
         </addColumn>
     </changeSet>
 
+    <!--
+      iga-2.9.0-5: REALM.REALM_DEFAULT_ROLES_ATTESTATION (unit 18 realm_default_roles_set).
+
+      Sign-once default-roles authority. The new realm_default_roles_set producer
+      attestation-unit is owned by the REALM row and stamps its 64-byte VVK
+      signature onto this column (parallel to REALM_DEFAULT_GROUPS_ATTESTATION /
+      unit 15). iga-core UnitColumnMapping reads/stamps it via the JPQL
+      r.realmDefaultRolesAttestation; the matching JPA field is added on the
+      tidecloak-override fork (RealmEntity.realmDefaultRolesAttestation). Mirrors the
+      existing ATTESTATION column shape: VARCHAR(2048), nullable. Added as a separate
+      changeset (the iga-2.9.0-1..4 changesets above are already applied on existing
+      databases, so a new id is required for Liquibase to run this on them).
+    -->
+    <changeSet id="iga-2.9.0-5" author="tidecloak-iga">
+        <addColumn tableName="REALM">
+            <column name="REALM_DEFAULT_ROLES_ATTESTATION" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
 </databaseChangeLog>
