@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.10.0: IGA_TOGGLE_JOB — live-progress record for the synchronous
+      IGA toggle-on.
+
+      POST /admin/realms/{realm}/tide-admin/toggle-iga runs synchronously and
+      the slow stages (ADOPT scan, and especially the firstAdmin baseline-config
+      auto-commit / ORK-VVK signing sweep) freeze the admin UI. To expose live
+      progress the toggle now writes a per-jobId IGA_TOGGLE_JOB row, updated in
+      independently-committed sub-transactions as each stage transitions, that a
+      concurrent GET .../toggle-iga/status/{jobId} polls.
+
+      Columns:
+        JOB_ID           (pk, the admin-ui-supplied uuid)
+        REALM_ID         (owning realm)
+        STATE            (running|completed|failed)
+        CURRENT_STAGE_ID (the running stage id, or NULL)
+        STAGES_JSON      (the full serialized stages array)
+        ERROR_JSON       (serialized {stageId,message}, or NULL)
+        CREATED_AT / UPDATED_AT (epoch millis; UPDATED_AT drives lazy cleanup)
+    -->
+
+    <changeSet id="iga-2.10.0-1" author="tidecloak-iga">
+        <createTable tableName="IGA_TOGGLE_JOB">
+            <column name="JOB_ID" type="VARCHAR(36)">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="PK_IGA_TOGGLE_JOB"/>
+            </column>
+            <column name="REALM_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="STATE" type="VARCHAR(20)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CURRENT_STAGE_ID" type="VARCHAR(64)"/>
+            <column name="STAGES_JSON" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ERROR_JSON" type="TEXT"/>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="UPDATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+
+    <changeSet id="iga-2.10.0-2" author="tidecloak-iga">
+        <createIndex tableName="IGA_TOGGLE_JOB" indexName="IDX_IGA_TOGGLE_JOB_UPDATED">
+            <column name="UPDATED_AT"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>

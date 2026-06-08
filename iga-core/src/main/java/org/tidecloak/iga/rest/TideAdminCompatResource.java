@@ -2,9 +2,11 @@ package org.tidecloak.iga.rest;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.inject.Vetoed;
+import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -36,6 +38,7 @@ import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.services.IgaAdoptCancel;
 import org.tidecloak.iga.services.IgaAdoptScan;
 import org.tidecloak.iga.services.IgaFirstAdminAutoCommit;
+import org.tidecloak.iga.services.IgaToggleJobService;
 
 import jakarta.persistence.EntityManager;
 import java.util.ArrayList;
@@ -86,11 +89,40 @@ public class TideAdminCompatResource {
 
     @POST
     @Path("toggle-iga")
+    @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
-    public Response toggleIga() {
+    public Response toggleIga(Map<String, Object> requestBody) {
         auth.realm().requireManageRealm();
         boolean current = "true".equals(realm.getAttribute(IGA_ATTRIBUTE));
         boolean next = !current;
+
+        // LOCKED CONTRACT: the admin-ui may supply a jobId (uuid) in the POST
+        // body so it can poll GET .../toggle-iga/status/{jobId} for live
+        // progress while this synchronous toggle runs. jobId is OPTIONAL: when
+        // absent (or this is an OFF-toggle, which carries no progress), every
+        // progress call is a no-op and the endpoint behaves exactly as before
+        // — fully back-compatible. The body itself is optional too (the legacy
+        // admin-ui POSTs with no body at all).
+        final String jobId = extractJobId(requestBody);
+        final IgaToggleJobService jobService = new IgaToggleJobService(session);
+
+        // Progress tracking is only meaningful for a real OFF→ON on a
+        // non-master realm (the only path that does slow work). For everything
+        // else trackProgress stays false and every jobService call is a no-op
+        // (jobId-null short-circuits inside the service too). Initialize the
+        // full stage checklist (all pending) up-front so the UI can render it
+        // immediately.
+        final boolean trackProgress = jobId != null && !current && next && !"master".equals(realm.getName());
+        if (trackProgress) {
+            jobService.start(jobId, realm.getId(), IgaToggleJobService.stages(
+                    new IgaToggleJobService.Stage("setup-realm", "Setting up realm"),
+                    new IgaToggleJobService.Stage("adopt-scan", "Adopting existing configuration"),
+                    new IgaToggleJobService.Stage("refresh-sessions", "Refreshing sessions"),
+                    new IgaToggleJobService.Stage("sign-defaults", "Signing default roles & config"),
+                    new IgaToggleJobService.Stage("finalize", "Finalizing")));
+            jobService.stageRunning(jobId, "setup-realm", null, null);
+        }
+
         // OFF→ON, non-master: auto-create the tide-realm-admin approver
         // role BEFORE the isIGAEnabled flip below. Creating it pre-flip means
         // IGA is still OFF, so the addRole/addCompositeRole/setSingleAttribute
@@ -176,6 +208,14 @@ public class TideAdminCompatResource {
         writeIgaAttributeDirect(IGA_ATTRIBUTE, Boolean.toString(next));
         logger.infof("IGA has been toggled to : %s for realm %s", next, realm.getName());
 
+        // setup-realm complete: approver role + attestor/EdDSA + the
+        // isIGAEnabled flip are all done. (If the scan below 409s on the
+        // sidecar cap the flag is rolled back, but the stage record will be
+        // overwritten with a failed/finalized state at that point.)
+        if (trackProgress) {
+            jobService.stageDone(jobId, "setup-realm", null, null);
+        }
+
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("enabled", next);
 
@@ -186,6 +226,10 @@ public class TideAdminCompatResource {
             boolean includeSystem = "true".equals(realm.getAttribute(INCLUDE_SYSTEM_ATTRIBUTE));
             String requestedBy = currentUserId();
             String realmId = realm.getId();
+
+            if (trackProgress) {
+                jobService.stageRunning(jobId, "adopt-scan", null, null);
+            }
 
             IgaAdoptScan.ScanResult[] resultHolder = new IgaAdoptScan.ScanResult[1];
             SidecarCapExceededException[] capHolder = new SidecarCapExceededException[1];
@@ -228,6 +272,11 @@ public class TideAdminCompatResource {
                 // isIgaActive() route this revert through SET_REALM_ATTRIBUTE
                 // CR creation instead of an actual rollback).
                 writeIgaAttributeDirect(IGA_ATTRIBUTE, Boolean.toString(current));
+                if (trackProgress) {
+                    jobService.fail(jobId, "adopt-scan",
+                            "SIDECAR_CAP_EXCEEDED: cap=" + capHolder[0].getCap()
+                                    + " current=" + capHolder[0].getCurrent());
+                }
                 Map<String, Object> capBody = new LinkedHashMap<>();
                 capBody.put("error", "SIDECAR_CAP_EXCEEDED");
                 capBody.put("realmId", capHolder[0].getRealmId());
@@ -237,6 +286,13 @@ public class TideAdminCompatResource {
             }
 
             if (resultHolder[0] != null) {
+                // adopt-scan done — report entities scanned as current/total
+                // (scanned == total examined; the scan is complete).
+                if (trackProgress) {
+                    long scanned = resultHolder[0].totalEntitiesScanned;
+                    jobService.stageDone(jobId, "adopt-scan", scanned, scanned);
+                    jobService.stageRunning(jobId, "refresh-sessions", null, null);
+                }
                 // Invalidate every live user session on the realm
                 // so any user newly quarantined by the OFF→ON scan cannot
                 // ride an existing cookie/refresh token past the toggle. The
@@ -282,6 +338,11 @@ public class TideAdminCompatResource {
                 body.put("scan", resultHolder[0]
                         .withSessionsInvalidated(invalidated).toMap());
 
+                if (trackProgress) {
+                    jobService.stageDone(jobId, "refresh-sessions", invalidated, invalidated);
+                    jobService.stageRunning(jobId, "sign-defaults", null, null);
+                }
+
                 // NO auto-sign at toggle (redesign 2026-06-06). The toggle now ONLY
                 // emits PENDING ADOPT CRs for the full login closure (governed entities
                 // get a normal quarantining ADOPT CR; KC system/infrastructure entities
@@ -316,9 +377,18 @@ public class TideAdminCompatResource {
                 // are inherited verbatim. Best-effort: a sweep failure must never abort
                 // the toggle (the attribute is committed and the response is about to send).
                 try {
-                    IgaFirstAdminAutoCommit.SweepResult sweep = runFirstAdminAutoCommitSweep();
+                    IgaFirstAdminAutoCommit.SweepResult sweep =
+                            runFirstAdminAutoCommitSweep(trackProgress ? jobService : null,
+                                    trackProgress ? jobId : null);
                     if (sweep != null) {
                         body.put("autoCommit", sweep.toMap());
+                    }
+                    if (trackProgress) {
+                        // committed/eligible as the final count; a skipped sweep
+                        // (gates not met) reports 0/0 — still a completed stage.
+                        long committed = sweep != null ? sweep.committed : 0L;
+                        long eligible = sweep != null ? sweep.eligible : 0L;
+                        jobService.stageDone(jobId, "sign-defaults", committed, eligible);
                     }
                 } catch (RuntimeException sweepEx) {
                     logger.errorf(sweepEx, "IGA toggle-on firstAdmin auto-commit sweep FAILED for realm %s "
@@ -328,13 +398,39 @@ public class TideAdminCompatResource {
                     sweepErr.put("error", sweepEx.getClass().getSimpleName());
                     sweepErr.put("message", String.valueOf(sweepEx.getMessage()));
                     body.put("autoCommit", sweepErr);
+                    // The sweep failing does NOT roll back the toggle (the
+                    // attribute is committed); reflect that truthfully — the
+                    // sign-defaults stage failed, the job failed, but the toggle
+                    // response is still a normal 200.
+                    if (trackProgress) {
+                        jobService.fail(jobId, "sign-defaults",
+                                sweepEx.getClass().getSimpleName() + ": " + sweepEx.getMessage());
+                    }
                 }
 
+                // finalize — advisory admin-coverage warning + job completion.
+                // Skipped if the sweep already marked the job failed above (a
+                // failed job must not be flipped back to running/completed —
+                // stageRunning/complete guard on STATE==running internally).
+                if (trackProgress) {
+                    jobService.stageRunning(jobId, "finalize", null, null);
+                }
                 String warning = buildAdminCoverageWarning(session, realm);
                 if (warning != null) {
                     body.put("warning", warning);
                 }
+                if (trackProgress) {
+                    jobService.stageDone(jobId, "finalize", null, null);
+                    jobService.complete(jobId);
+                }
             } else if (errHolder[0] != null) {
+                // Scan failed entirely (not a cap rejection). The toggle stays
+                // enabled but no ADOPT CRs were emitted — reflect the adopt-scan
+                // stage failure truthfully.
+                if (trackProgress) {
+                    jobService.fail(jobId, "adopt-scan",
+                            errHolder[0].getClass().getSimpleName() + ": " + errHolder[0].getMessage());
+                }
                 Map<String, Object> scanErr = new LinkedHashMap<>();
                 scanErr.put("error", errHolder[0].getClass().getSimpleName());
                 scanErr.put("message", String.valueOf(errHolder[0].getMessage()));
@@ -428,6 +524,45 @@ public class TideAdminCompatResource {
         auth.realm().requireViewRealm();
         boolean enabled = "true".equals(realm.getAttribute(IGA_ATTRIBUTE));
         return Response.ok(Map.of("enabled", enabled)).build();
+    }
+
+    /**
+     * Live-progress poll for a toggle-on job (LOCKED CONTRACT). Returns the
+     * {@code IGA_TOGGLE_JOB} row for {@code jobId} as:
+     * <pre>{ jobId, state(running|completed|failed), currentStageId,
+     *        stages:[ {id,label,status,current,total} ], error|null }</pre>
+     * 404 if the jobId is unknown. Authz: same realm-admin gate as the toggle
+     * (manage-realm).
+     */
+    @GET
+    @Path("toggle-iga/status/{jobId}")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response toggleIgaStatus(@PathParam("jobId") String jobId) {
+        auth.realm().requireManageRealm();
+        Map<String, Object> status = new IgaToggleJobService(session).getStatus(session, jobId);
+        if (status == null) {
+            return Response.status(Response.Status.NOT_FOUND)
+                    .entity(Map.of("error", "UNKNOWN_JOB", "jobId", String.valueOf(jobId)))
+                    .build();
+        }
+        return Response.ok(status).build();
+    }
+
+    /**
+     * Pull the optional {@code jobId} (uuid) from the toggle POST body. Null when
+     * absent / blank / the body itself is null (legacy no-body POST) — in which
+     * case the toggle runs exactly as before with no progress tracking.
+     */
+    private static String extractJobId(Map<String, Object> body) {
+        if (body == null) {
+            return null;
+        }
+        Object v = body.get("jobId");
+        if (v == null) {
+            return null;
+        }
+        String s = v.toString().trim();
+        return s.isEmpty() ? null : s;
     }
 
     /**
@@ -964,7 +1099,8 @@ public class TideAdminCompatResource {
      * never throws for a normal skip — only a genuine engine failure propagates and
      * is caught by the caller as best-effort.</p>
      */
-    private IgaFirstAdminAutoCommit.SweepResult runFirstAdminAutoCommitSweep() {
+    private IgaFirstAdminAutoCommit.SweepResult runFirstAdminAutoCommitSweep(
+            IgaToggleJobService jobService, String jobId) {
         IgaChangeRequestService service = new IgaChangeRequestService(
                 session.getProvider(JpaConnectionProvider.class).getEntityManager(), session);
         // Pull only the baseline-config allow-list action types as candidates (governed
@@ -977,30 +1113,53 @@ public class TideAdminCompatResource {
         UserModel admin = currentUserModel();
 
         IgaFirstAdminAutoCommit.BulkEngine engine = crIdIn -> {
-            Map<String, Object> bulkBody = new LinkedHashMap<>();
             // Drive the bulk engine by the EXACT per-CR-eligible ids (not action
             // type): the narrowed scope means a single action type can hold both
             // eligible and ineligible CRs (system vs admin-authored ADOPT, benign
             // vs non-default composite), so an action-type drain would over-commit.
-            bulkBody.put("crIdIn", crIdIn);
-            bulkBody.put("limit", 1000); // bulk endpoint hard cap
-            Response resp = new IgaAdminResource(session, realm, auth).bulkAuthorize(bulkBody);
-            Object entity = resp.getEntity();
-            if (entity instanceof Map<?, ?> respMap) {
-                Object results = respMap.get("results");
-                if (results instanceof List<?> list) {
-                    List<Map<String, Object>> out = new ArrayList<>();
-                    for (Object o : list) {
-                        if (o instanceof Map<?, ?> m) {
-                            @SuppressWarnings("unchecked")
-                            Map<String, Object> cast = (Map<String, Object>) m;
-                            out.add(cast);
+            //
+            // PROGRESS: this is the slow ORK-signing stage. To surface live
+            // counts we process the eligible ids in small CHUNKS and emit a
+            // stageProgress(committed/total) after each chunk, so a poller sees
+            // the count climb as the sweep iterates. The bulk endpoint hard cap
+            // is 1000; the chunk size stays well under it. Functionally the
+            // chunking is transparent — each chunk re-enters the same hardened,
+            // mutex-guarded bulkAuthorize engine.
+            final int total = crIdIn.size();
+            final int chunkSize = 25;
+            List<Map<String, Object>> out = new ArrayList<>();
+            int committedSoFar = 0;
+            if (jobId != null) {
+                jobService.stageProgress(jobId, "sign-defaults", 0L, (long) total);
+            }
+            for (int from = 0; from < total; from += chunkSize) {
+                int to = Math.min(from + chunkSize, total);
+                List<String> chunk = crIdIn.subList(from, to);
+                Map<String, Object> bulkBody = new LinkedHashMap<>();
+                bulkBody.put("crIdIn", new ArrayList<>(chunk));
+                bulkBody.put("limit", 1000); // bulk endpoint hard cap
+                Response resp = new IgaAdminResource(session, realm, auth).bulkAuthorize(bulkBody);
+                Object entity = resp.getEntity();
+                if (entity instanceof Map<?, ?> respMap) {
+                    Object results = respMap.get("results");
+                    if (results instanceof List<?> list) {
+                        for (Object o : list) {
+                            if (o instanceof Map<?, ?> m) {
+                                @SuppressWarnings("unchecked")
+                                Map<String, Object> cast = (Map<String, Object>) m;
+                                out.add(cast);
+                                if ("COMMITTED".equals(String.valueOf(cast.get("status")))) {
+                                    committedSoFar++;
+                                }
+                            }
                         }
                     }
-                    return out;
+                }
+                if (jobId != null) {
+                    jobService.stageProgress(jobId, "sign-defaults", (long) committedSoFar, (long) total);
                 }
             }
-            return List.of();
+            return out;
         };
 
         return IgaFirstAdminAutoCommit.sweep(session, realm, admin, candidates, engine);
