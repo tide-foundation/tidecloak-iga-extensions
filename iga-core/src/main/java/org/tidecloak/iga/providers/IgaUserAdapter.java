@@ -811,6 +811,19 @@ public class IgaUserAdapter extends UserAdapter {
             // Defensive: only ever invoked from the capture-mode persist-pending emit.
             return;
         }
+        // ★ MF2 (HIGH) defense-in-depth: never grant a tainted default-role composite to a
+        // self-registered user. If default-roles-<realm> expands to anything privileged, the
+        // self-reg user would inherit it via composite expansion (invisible to the D1b
+        // user_role_mapping_set unit). Skip the grant — the producer's selfRegEligible guard
+        // also refuses to admit the unsigned identity, so the user fails closed at login.
+        if (!org.tidecloak.iga.services.DefaultRoleCompositeGuard
+                .isBenignDefaultRoleComposite(realm)) {
+            log.warnf("IGA self-reg PERSIST-PENDING: NOT granting the realm default-role to "
+                    + "self-registered user uuid=%s — realm '%s' default-role composite is "
+                    + "NON-BENIGN (privileged composite child). Self-reg falls back to "
+                    + "fail-closed at login (MF2 guard).", super.getId(), realm.getName());
+            return;
+        }
         org.keycloak.models.RoleModel defaultRole = realm.getDefaultRole();
         if (defaultRole != null) {
             grantRole(defaultRole);

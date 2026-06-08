@@ -79,10 +79,26 @@ public class IgaAttestationExporterProvider implements AttestationExporterProvid
         // here is exactly the ORK's "(b) no user_role_mapping_set" condition. A
         // privileged user (role-mapping unit present) or a registration-off realm
         // keeps the existing fail-closed throw for any NULL/stub column.
+        // ★ MF2 (HIGH): the D1b user_role_mapping_set absence only proves the user holds
+        // no DIRECT (non-default) role row — it does NOT walk the default-role composite.
+        // A privileged role added as a COMPOSITE CHILD of default-roles-<realm> is conferred
+        // via composite expansion at token time (no direct USER_ROLE_MAPPING row), so it is
+        // invisible here. Guard the composite: if it expands to anything non-benign, do NOT
+        // admit the unsigned user_identity — the closure fails closed (the per-unit
+        // replayOrFailClosed throw) instead of shipping a privileged unsigned token.
         boolean registrationAllowed = realm.isRegistrationAllowed();
         boolean hasRoleMappingUnit = units.stream()
                 .anyMatch(u -> u.type() == AttestationUnitType.USER_ROLE_MAPPING_SET);
-        boolean selfRegEligible = registrationAllowed && !hasRoleMappingUnit;
+        boolean benignComposite = org.tidecloak.iga.services.DefaultRoleCompositeGuard
+                .isBenignDefaultRoleComposite(realm);
+        boolean selfRegEligible = registrationAllowed && !hasRoleMappingUnit && benignComposite;
+        if (registrationAllowed && !hasRoleMappingUnit && !benignComposite) {
+            log.errorf("IGA signed unit export (MF2 guard): realm %s — default-roles-only "
+                    + "user_identity is NOT admitted unsigned because the default-role composite "
+                    + "is NON-BENIGN (a privileged composite child would grant privilege to an "
+                    + "unsigned self-registered user). Falling through to fail-closed.",
+                    realm.getName());
+        }
 
         // 2. For EACH unit: resolve its PR-A/A.2 column, require a real
         //    TIDE-FIRSTADMIN-v1:+b64(64B) sig, decode it, and attach (serialize(), sig).

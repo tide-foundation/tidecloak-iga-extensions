@@ -287,77 +287,152 @@ public class IgaUserProvider extends JpaUserProvider {
             "org.keycloak.services.managers.ClientManager";
 
     /**
+     * The stock KC broker first-login authenticator. Its presence in the live 1-arg
+     * {@code addUser} stack marks the create as an IdP-broker first-login
+     * ({@code IdpCreateUserIfUniqueAuthenticator.authenticateImpl:90} →
+     * {@code session.users().addUser(realm, username)}). This fires for EVERY brokered
+     * IdP — Tide AND external (non-Tide) — so the frame ALONE does NOT distinguish a
+     * genuine Tide self-enrollment from an external-IdP first-login. The allow-list gate
+     * pairs this frame with a positive Tide-broker check ({@link #isTideBrokerEnrollment})
+     * that reads the brokered IdP id from the auth session and admits ONLY the Tide IdP.
+     */
+    private static final String KC_IDP_CREATE_USER =
+            "org.keycloak.authentication.authenticators.broker.IdpCreateUserIfUniqueAuthenticator";
+
+    /** The Tide social/broker IdP provider id (TideIdentityProviderFactory.PROVIDER_ID). */
+    private static final String TIDE_IDP_PROVIDER_ID = "tide";
+
+    /** The auth-session note key the broker context is serialized under (AbstractIdpAuthenticator). */
+    private static final String BROKERED_CONTEXT_NOTE = "BROKERED_CONTEXT";
+
+    /**
      * Live-stack + RegOn predicate driving the {@code addDefaultRoles=true} scoping in
-     * the 1-arg {@link #addUser(RealmModel, String)} capture branch. Walks the live
-     * stack once and delegates to the pure, unit-testable
-     * {@link #shouldGrantDefaultRolesOnSelfCreate(java.util.List, boolean)}.
+     * the 1-arg {@link #addUser(RealmModel, String)} capture branch (★ F2 ALLOW-LIST).
+     * Walks the live stack once, resolves the genuine-self-enrollment signal (registration
+     * form OR Tide-broker first-login), and ANDs it with the ★ MF2 benign-composite guard
+     * so a tainted {@code default-roles-<realm>} (a privileged composite child) refuses
+     * self-reg eligibility (the user falls back to the normal fail-closed / CR path) rather
+     * than conferring privilege to an unsigned self-registrant.
      */
     private boolean shouldGrantDefaultRolesOnSelfCreate(RealmModel realm) {
         java.util.List<String> frames = StackWalker.getInstance()
                 .walk(s -> s.map(f -> f.getClassName() + "#" + f.getMethodName())
                         .collect(java.util.stream.Collectors.toList()));
-        return shouldGrantDefaultRolesOnSelfCreate(frames, realm.isRegistrationAllowed());
+        boolean selfEnroll = isSelfEnrollmentFrame(frames, realm.isRegistrationAllowed(),
+                isTideBrokerEnrollment());
+        if (!selfEnroll) {
+            return false;
+        }
+        // ★ MF2: never grant (and never mark eligible) a tainted default-role composite.
+        if (!org.tidecloak.iga.services.DefaultRoleCompositeGuard
+                .isBenignDefaultRoleComposite(realm)) {
+            log.warnf("IGA self-enroll REFUSED (MF2 guard): realm '%s' default-role "
+                    + "composite is NON-BENIGN (privileged child present). NOT granting "
+                    + "default-roles at creation and NOT admitting unsigned — the self-reg "
+                    + "falls back to the normal fail-closed / CR path.", realm.getName());
+            return false;
+        }
+        return true;
     }
 
     /**
-     * Pure, unit-testable PATH-ROBUST self-enrollment classifier. Given the live
-     * stack-frame signatures as {@code "<FQN>#<method>"} (any order) and the realm's
-     * RegOn flag, return true iff the just-created user should receive the LOCAL realm
-     * default-role at creation.
+     * Live-stack Tide-broker enrollment check: true iff the current auth session carries a
+     * brokered-identity context whose IdP id is the Tide provider ({@value #TIDE_IDP_PROVIDER_ID}).
+     * This is the POSITIVE Tide self-enrollment signal that the generic
+     * {@link #KC_IDP_CREATE_USER} frame cannot provide (the frame fires for external IdPs too).
+     * The genuine Tide-enrolled browser registration creates its user via the stock broker
+     * first-login authenticator (Tide IdP-extensions do NOT override it), so the brokered IdP
+     * id is {@value #TIDE_IDP_PROVIDER_ID} for exactly that flow and some external alias for a
+     * non-Tide IdP. Defensive: any failure to resolve the context → false (no grant).
+     */
+    private boolean isTideBrokerEnrollment() {
+        try {
+            org.keycloak.sessions.AuthenticationSessionModel authSession =
+                    igaSession.getContext() == null ? null
+                            : igaSession.getContext().getAuthenticationSession();
+            if (authSession == null) {
+                return false;
+            }
+            org.keycloak.authentication.authenticators.broker.util.SerializedBrokeredIdentityContext ctx =
+                    org.keycloak.authentication.authenticators.broker.util.SerializedBrokeredIdentityContext
+                            .readFromAuthenticationSession(authSession, BROKERED_CONTEXT_NOTE);
+            return ctx != null && TIDE_IDP_PROVIDER_ID.equals(ctx.getIdentityProviderId());
+        } catch (RuntimeException e) {
+            // Out of an auth-session context, or a malformed note — treat as not-Tide-broker.
+            return false;
+        }
+    }
+
+    /**
+     * Pure, unit-testable ★ F2 ALLOW-LIST self-enrollment classifier. Given the live
+     * stack-frame signatures as {@code "<FQN>#<method>"} (any order), the realm's RegOn
+     * flag, and whether the current auth session is a Tide-broker enrollment, return true
+     * iff the just-created user should receive the LOCAL realm default-role at creation.
      *
-     * <p>Decision (RegOn-gated, admin/service-account excluded):
+     * <p><b>Why an allow-list (the F2 fix).</b> The former gate was a DENY-list — it
+     * granted under RegOn for EVERYTHING except {@link #KC_USERS_RESOURCE}{@code #createUser}
+     * and {@link #KC_CLIENT_MANAGER}. That silently granted default-roles (→ admitted
+     * unsigned) to TWO non-self-reg paths that ALSO reach the 1-arg {@code addUser} under
+     * RegOn: token-exchange user creation ({@code AbstractTokenExchangeProvider}) and
+     * external (non-Tide) IdP first-login ({@link #KC_IDP_CREATE_USER}). Those are the
+     * delivery vehicle for MF2. The allow-list grants ONLY for a recognised genuine
+     * self-registration frame.</p>
+     *
+     * <p>Decision (RegOn-gated; grant requires a POSITIVE self-enrollment signal):
      * <ol>
-     *   <li>If {@code registrationAllowed} is false → {@code false}
-     *       (no open-registration posture; nothing is granted at creation, the
-     *       stock-suppressed behaviour).</li>
-     *   <li>Else if an admin-create frame ({@link #KC_USERS_RESOURCE}{@code #createUser})
-     *       is present → {@code false} (its CR commits and the D3 replay grant assigns
-     *       default-roles; granting here would double-grant).</li>
-     *   <li>Else if a service-account frame ({@link #KC_CLIENT_MANAGER}) is present →
-     *       {@code false} (internal create, no account aud needed).</li>
-     *   <li>Else → {@code true} — genuine self-enrollment. This covers BOTH the
-     *       registration form (a {@link #KC_REGISTRATION_USER_CREATION} frame, the
-     *       former {@link #isSelfRegistrationFrame} subset) AND the Tide-enrolled
-     *       IdP-broker / link-tide-account import (which arrives as
-     *       {@code UserCacheSession#addUser} with NO RegistrationUserCreation frame —
-     *       the path the Round-1 StackWalker gate missed).</li>
+     *   <li>If {@code registrationAllowed} is false → {@code false} (no open-registration
+     *       posture; stock-suppressed).</li>
+     *   <li>Else grant iff EITHER:
+     *     <ul>
+     *       <li>the registration FORM is present
+     *           ({@link #KC_REGISTRATION_USER_CREATION} — the browser self-sign-up); OR</li>
+     *       <li>this is a genuine Tide-broker first-login enrollment:
+     *           {@code tideBrokerEnrollment} is true (the brokered IdP id is the Tide
+     *           provider, resolved from the auth-session broker context by the live caller).
+     *           The frame for this is the stock {@link #KC_IDP_CREATE_USER}; the Tide IdP
+     *           uses the stock broker authenticator (no override), so the IdP-id check is
+     *           what separates a Tide enrollment from an external-IdP first-login.</li>
+     *     </ul>
+     *   </li>
+     *   <li>Otherwise → {@code false}. This now EXCLUDES, by omission from the allow-list:
+     *       admin-create ({@link #KC_USERS_RESOURCE}), service-account
+     *       ({@link #KC_CLIENT_MANAGER}), token-exchange ({@code AbstractTokenExchangeProvider}),
+     *       AND external (non-Tide) IdP first-login (the generic {@link #KC_IDP_CREATE_USER}
+     *       frame WITHOUT a Tide broker context).</li>
      * </ol>
      *
-     * <p>Why RegOn rather than a positive broker frame: the user has explicitly
-     * accepted the open-registration posture (RegOn on ⇒ any unsigned default-roles
-     * user is admitted at login), and keying on RegOn makes the grant path-robust
-     * across the registration form AND every Tide self-enrollment entry (broker,
-     * link-tide, cache-wrapped {@code addUser}) without enumerating fragile broker
-     * frame signatures. Admin-create and service-account are the only paths that must
-     * NOT grant, and both have a stable, distinctive frame to exclude.</p>
+     * <p>The genuine Tide-enrolled browser registration the user confirmed working creates
+     * its user via the stock broker first-login authenticator (Tide IdP-extensions do NOT
+     * override it) brokered from the Tide IdP, so {@code tideBrokerEnrollment} is true for
+     * exactly that flow and it keeps granting. The plain registration form keeps granting
+     * via the form frame.</p>
      */
-    static boolean shouldGrantDefaultRolesOnSelfCreate(
-            java.util.List<String> frameSignatures, boolean registrationAllowed) {
+    static boolean isSelfEnrollmentFrame(
+            java.util.List<String> frameSignatures, boolean registrationAllowed,
+            boolean tideBrokerEnrollment) {
         if (!registrationAllowed) {
             return false;
         }
-        if (frameSignatures == null) {
-            // RegOn but no stack to inspect: default to granting (genuine
-            // self-enrollment is the dominant RegOn create path). Admin/service-account
-            // always have a live stack with their excluding frame, so this branch is
-            // only reached in tests / degenerate cases.
+        // Positive Tide-broker enrollment signal (IdP id = "tide"), resolved by the live
+        // caller from the auth-session broker context. Independent of the frame list.
+        if (tideBrokerEnrollment) {
             return true;
         }
+        if (frameSignatures == null) {
+            return false;
+        }
+        // Registration FORM frame → genuine browser self-sign-up.
         for (String sig : frameSignatures) {
             if (sig == null) {
                 continue;
             }
             int hash = sig.lastIndexOf('#');
             String cn = hash >= 0 ? sig.substring(0, hash) : sig;
-            String mn = hash >= 0 ? sig.substring(hash + 1) : "";
-            if (KC_USERS_RESOURCE.equals(cn) && "createUser".equals(mn)) {
-                return false;
-            }
-            if (KC_CLIENT_MANAGER.equals(cn)) {
-                return false;
+            if (KC_REGISTRATION_USER_CREATION.equals(cn)) {
+                return true;
             }
         }
-        return true;
+        return false;
     }
 
     /**
@@ -366,14 +441,13 @@ public class IgaUserProvider extends JpaUserProvider {
      * {@link #KC_REGISTRATION_USER_CREATION} frame is present.
      *
      * <p>NOTE: this is the NARROW (registration-form-only) signal. The live
-     * default-role grant gate is now the broader, path-robust
-     * {@link #shouldGrantDefaultRolesOnSelfCreate(java.util.List, boolean)} (RegOn-gated,
-     * admin/service-account excluded), which ALSO covers the Tide-enrolled
-     * broker/link-tide import that has no RegistrationUserCreation frame. This
-     * predicate is retained as the documented registration-form subset (a true here
-     * implies the broader gate grants too, given RegOn) and is exercised by the
-     * registration-form unit tests. Frame-list-driven so the partition is pinnable
-     * without a live {@link StackWalker}.</p>
+     * default-role grant gate is now the ★ F2 ALLOW-LIST classifier
+     * {@link #isSelfEnrollmentFrame(java.util.List, boolean, boolean)} (RegOn-gated; grants
+     * only for the registration form OR a positive Tide-broker enrollment). This predicate
+     * is retained as the documented registration-form subset (a true here implies the
+     * allow-list grants too, given RegOn) and is exercised by the registration-form unit
+     * tests. Frame-list-driven so the partition is pinnable without a live
+     * {@link StackWalker}.</p>
      */
     static boolean isSelfRegistrationFrame(java.util.List<String> frameSignatures) {
         if (frameSignatures == null) {
