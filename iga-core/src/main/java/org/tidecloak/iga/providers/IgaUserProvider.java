@@ -96,9 +96,53 @@ public class IgaUserProvider extends JpaUserProvider {
             // a capture-mode IgaUserAdapter; KC's createUser flow builds the
             // full model on it and the terminal IgaUserAdapter#getId seam emits
             // the CREATE_USER CR + rollback-only + throws (→ 202 + Location).
+            //
+            // ★ accept-unattested SELF-REGISTRATION default-role grant.
+            // For the self-registration flow ONLY (a RegistrationUserCreation
+            // frame in the live stack — see inSelfRegistrationFlow), pass
+            // addDefaultRoles=true to the 5-arg local-storage super.addUser. KC's
+            // JpaUserProvider.addUser then grants realm.getDefaultRole() + joins
+            // the default groups on the REAL JpaUser (a plain UserAdapter — line
+            // 124-131 of JpaUserProvider), BEFORE we wrap it in the capture
+            // adapter. That grant is therefore NOT routed through the IGA capture
+            // path → no nested GRANT_ROLES CR — and it PERSISTS on the live user.
+            //
+            // WHY: an accept-unattested self-reg user is admitted UNSIGNED at
+            // login and its CREATE_USER CR never commits, so the D3 commit-replay
+            // default-role grant (IgaReplayDispatcher.replayCreateUser :559-566)
+            // never runs. Without granting here the self-reg user is ROLELESS →
+            // KC builds the token with empty resource_access → no `account`
+            // audience → the ORK TVE rejects "attested claim 'aud' is suppressed
+            // in token" (the producer closure attests aud=[account] from the
+            // universal-inherited realm default-role's account children).
+            //
+            // CLOSURE INVARIANT (gate still admits): the realm default-role id is
+            // the D1b exclusion in RealmAttestationExporter.perUserUnits — a user
+            // holding ONLY default-roles → empty role_ids → NO user_role_mapping_set
+            // unit. So the user HOLDS default-roles (token carries the account aud)
+            // AND the producer closure has no role-mapping unit (the
+            // default-roles-only gate still admits the unsigned user_identity).
+            //
+            // SCOPE: the 1-arg overload is NOT registration-only — admin-create
+            // (UsersResource#createUser, via profile.create()), service-account
+            // (ClientManager), token-exchange and IdP-broker all reach this branch.
+            // Only the self-registration flow gets default-roles here; admin-create
+            // keeps the CR + D3 commit-replay grant (granting at creation too would
+            // double-grant), and the internal callers keep stock-suppressed creation.
+            boolean grantDefaultRoles = inSelfRegistrationFlow();
             String userId = KeycloakModelUtils.generateId();
             UserModel base = super.addUser(realm, userId,
-                    username == null ? null : username.toLowerCase(), false, false);
+                    username == null ? null : username.toLowerCase(),
+                    grantDefaultRoles, false);
+            if (grantDefaultRoles) {
+                log.infof("IGA capture CREATE_USER: self-registration flow detected "
+                        + "(RegistrationUserCreation frame) — granted realm default-role + "
+                        + "default groups on the live user (uuid=%s) at creation so the "
+                        + "accept-unattested self-reg token carries the account aud; the "
+                        + "default-role is D1b-excluded so no user_role_mapping_set unit is "
+                        + "produced (gate still admits the unsigned user_identity).",
+                        userId);
+            }
             if (base == null) return null;
             if (base instanceof org.keycloak.models.jpa.UserAdapter ua) {
                 UserEntity entity = ua.getEntity();
@@ -183,6 +227,65 @@ public class IgaUserProvider extends JpaUserProvider {
             return new IgaUserAdapter(igaSession, realm, em, entity);
         }
         return base;
+    }
+
+    /**
+     * The KC 26.5.5 self-registration form-action class. {@code success(FormContext)}
+     * (services {@code RegistrationUserCreation.success:155}) calls
+     * {@code profile.create()} → {@code DefaultUserProfile.create} →
+     * {@code DeclarativeUserProfileProvider}'s {@code createUserFactory().apply} →
+     * {@code session.users().addUser(realm, username)} (the 1-arg seam above). So when
+     * the 1-arg {@code addUser} runs inside the self-registration flow, this class is
+     * present in the live stack (above the user-profile factory). It is NOT present for
+     * admin-create ({@code UsersResource#createUser} is the {@code profile.create()}
+     * entry instead), service-account ({@code ClientManager}), token-exchange
+     * ({@code AbstractTokenExchangeProvider}), IdP-broker
+     * ({@code IdpCreateUserIfUniqueAuthenticator}) or master bootstrap
+     * ({@code ApplianceBootstrap}) — the other 1-arg callers.
+     */
+    private static final String KC_REGISTRATION_USER_CREATION =
+            "org.keycloak.authentication.forms.RegistrationUserCreation";
+
+    /**
+     * Live-stack predicate: is the current {@code addUser} call running inside the
+     * self-registration flow (a {@link #KC_REGISTRATION_USER_CREATION} frame anywhere
+     * in the stack)? Drives the {@code addDefaultRoles=true} scoping in the 1-arg
+     * {@link #addUser(RealmModel, String)} capture branch. Walks the live stack once
+     * and delegates the decision to the pure, unit-testable
+     * {@link #isSelfRegistrationFrame(java.util.List)}.
+     */
+    private boolean inSelfRegistrationFlow() {
+        java.util.List<String> frames = StackWalker.getInstance()
+                .walk(s -> s.map(f -> f.getClassName() + "#" + f.getMethodName())
+                        .collect(java.util.stream.Collectors.toList()));
+        return isSelfRegistrationFrame(frames);
+    }
+
+    /**
+     * Pure, unit-testable self-registration classifier. Given the live stack-frame
+     * signatures as {@code "<FQN>#<method>"} (any order), return true iff a
+     * {@link #KC_REGISTRATION_USER_CREATION} frame is present — the
+     * registration-SPECIFIC marker that scopes the default-role grant ON for
+     * self-registration while leaving admin-create and the other internal 1-arg
+     * {@code addUser} callers stock-suppressed. Frame-list-driven so the
+     * registration-vs-admin/other partition is pinnable without a live
+     * {@link StackWalker}.
+     */
+    static boolean isSelfRegistrationFrame(java.util.List<String> frameSignatures) {
+        if (frameSignatures == null) {
+            return false;
+        }
+        for (String sig : frameSignatures) {
+            if (sig == null) {
+                continue;
+            }
+            int hash = sig.lastIndexOf('#');
+            String cn = hash >= 0 ? sig.substring(0, hash) : sig;
+            if (KC_REGISTRATION_USER_CREATION.equals(cn)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // addFederatedIdentity is NOT overridden — federated identities are IdP
