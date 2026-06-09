@@ -230,6 +230,12 @@ public class IgaReplayDispatcher {
             case "REQUEST_SERVER_CERT" -> replayRequestServerCert(cr);
             case "INSTALL_LICENSE", "ROTATE_LICENSE" -> replayLicenseAction(cr);
 
+            // ----- Governed IGA disable -----
+            // Turning IGA OFF is captured (TideAdminCompatResource.toggleIga) as a
+            // DISABLE_IGA CR requiring admin approval; the teardown the toggle used
+            // to run inline runs HERE on commit, in order, within the replay tx.
+            case "DISABLE_IGA" -> replayDisableIga(session, realm, rows, em);
+
             // ----- Admin-policy threshold re-sign (steady-state multiAdmin) -----
             // NOT a model mutation: it Policy:1-signs the NEW admin Policy (carried in
             // ROWS_JSON, approved via the two-phase ceremony) with the collected dokens and
@@ -2090,6 +2096,86 @@ public class IgaReplayDispatcher {
                 .setParameter("pid", parentId)
                 .setParameter("name", name)
                 .executeUpdate();
+    }
+
+    // -------------------------------------------------------------------------
+    // Governed IGA disable (DISABLE_IGA)
+    //
+    // The teardown that TideAdminCompatResource.toggleIga used to run inline on
+    // ON→OFF now runs HERE, only after the DISABLE_IGA change request commits
+    // (admin-approved at the realm-default quorum). It runs IN ORDER inside the
+    // replay transaction (IGA_REPLAY_ACTIVE is already true, set by replay()):
+    //
+    //   1. isIGAEnabled=false — the actual flag write, suppressed (IGA_REPLAY_ACTIVE
+    //      is active, so IgaRealmAdapter.setAttribute passes straight through to
+    //      super and does NOT re-capture this as a SET_REALM_ATTRIBUTE CR).
+    //   2. IgaAdoptCancel.cancel — cancel every PENDING ADOPT_* CR + clear the
+    //      realm's sidecar register (reused as-is; it uses the replay session's
+    //      EntityManager, no inner runJobInTransaction, so it runs in THIS tx).
+    //   3. cache eviction — user-cache + realm client/role/group/scope/org/idp
+    //      cache, so post-disable reads reflect the IGA-off state.
+    //   4. RS256 revert — on a Tide realm (tide IdP + tide-vendor-key present) whose
+    //      defaultSignatureAlgorithm is EdDSA, revert to RS256 (no Tide signing path
+    //      once IGA is off). Mirrors the OFF-toggle logic that used to live inline.
+    //
+    // Re-ON-safe / revokes NOTHING: this teardown does NOT burn any pack, flip any
+    // MODE, or retire any VVK/VRK; IGA_ROLE_POLICY is left intact as audit. A later
+    // OFF→ON toggle re-runs the ADOPT scan and re-enables cleanly.
+    //
+    // STUB / no ORK: DISABLE_IGA is NOT a producer-envelope-signed action
+    // (TideAttestor.isProducerEnvelopeSignedAction returns false), so combineFinal
+    // produced a stub signature — there is NO ORK/Policy:1 round-trip here and OFF is
+    // never blocked by ORK reachability. The dispatcher tail then sets STATUS=APPROVED.
+    // -------------------------------------------------------------------------
+
+    private static void replayDisableIga(KeycloakSession session, RealmModel realm,
+                                         List<Map<String, Object>> rows, EntityManager em) {
+        if (realm == null) {
+            throw new IllegalStateException("DISABLE_IGA replay: realm not loadable");
+        }
+        // Bind the realm onto the session context for the cancel/cache helpers
+        // that expect a realm-bound session (mirrors IgaAdoptCancel.cancel).
+        session.getContext().setRealm(realm);
+
+        // 1. isIGAEnabled=false. IGA_REPLAY_ACTIVE is already true (replay() set
+        //    it), so IgaRealmAdapter.setAttribute short-circuits to super — this is
+        //    a real flag write, NOT a re-captured CR. The ROWS_JSON row carries
+        //    NAME=isIGAEnabled VALUE=false for audit; we apply it directly here.
+        realm.setAttribute("isIGAEnabled", "false");
+        log.infof("IGA DISABLE_IGA replay: realm %s — isIGAEnabled set to false (committed via governed change request).",
+                realm.getName());
+
+        // 2. Cancel PENDING ADOPT CRs + clear sidecar (reused as-is; runs in this tx).
+        org.tidecloak.iga.services.IgaAdoptCancel.CancelResult cancel =
+                org.tidecloak.iga.services.IgaAdoptCancel.cancel(session, realm);
+        log.infof("IGA DISABLE_IGA replay: realm %s — cancelled %d PENDING ADOPT CR(s), cleared %d sidecar row(s).",
+                realm.getName(), cancel.cancelledAdoptCrs, cancel.sidecarRowsCleared);
+
+        // 3. Evict the user-cache + realm client/role/group/scope/org/idp cache so
+        //    post-disable reads reflect the IGA-off state (the IGA quarantine no
+        //    longer applies). Same shared helpers the toggle endpoint uses.
+        org.tidecloak.iga.services.IgaRealmCacheEviction.evictRealmUserCache(session, realm);
+        org.tidecloak.iga.services.IgaRealmCacheEviction.evictRealmCache(session, realm);
+
+        // 4. RS256 revert on a Tide realm whose default sig algorithm is EdDSA.
+        //    EdDSA on a realm is only valid while a Tide signing path exists
+        //    (tide IdP + tide-vendor-key) AND IGA is on; with IGA now off, revert
+        //    to RS256. IGA_REPLAY_ACTIVE keeps this from being captured. Mirrors
+        //    the inline OFF-toggle logic this teardown replaces.
+        org.keycloak.models.IdentityProviderModel tideIdp =
+                session.identityProviders().getByAlias("tide");
+        org.keycloak.component.ComponentModel tideVendorKey = realm.getComponentsStream()
+                .filter(x -> "tide-vendor-key".equals(x.getProviderId()))
+                .findFirst()
+                .orElse(null);
+        if (tideIdp != null && tideVendorKey != null) {
+            String currentAlgorithm = realm.getDefaultSignatureAlgorithm();
+            if ("EdDSA".equalsIgnoreCase(currentAlgorithm)) {
+                realm.setDefaultSignatureAlgorithm("RS256");
+                log.infof("IGA DISABLE_IGA replay: realm %s — default signature algorithm reverted to RS256.",
+                        realm.getName());
+            }
+        }
     }
 
     // -------------------------------------------------------------------------

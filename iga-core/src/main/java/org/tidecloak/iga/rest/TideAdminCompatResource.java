@@ -245,6 +245,68 @@ public class TideAdminCompatResource {
             }
         }
 
+        // ON→OFF (non-master): turning IGA OFF is itself a privileged, governed
+        // change — a single manage-realm admin must NOT be able to unilaterally
+        // disable governance. Instead of flipping isIGAEnabled=false and running
+        // the teardown inline here, CAPTURE the disable into a governed
+        // DISABLE_IGA change request and return 202 pending-approval. The flag
+        // STAYS true until that CR commits; the teardown (cancel ADOPTs, evict
+        // caches, RS256 revert, and the actual isIGAEnabled=false write) runs in
+        // IgaReplayDispatcher.replayDisableIga on commit. This applies in BOTH
+        // firstAdmin AND multiAdmin (DISABLE_IGA is deliberately NOT on the
+        // IgaFirstAdminAutoCommit allow-list, so even a firstAdmin must
+        // explicitly authorize+commit it). The CR is created on a FRESH session/
+        // transaction (the same emit pattern the Iga*Adapters use) so it survives
+        // the request-tx rollback the 202 triggers; the request tx is then marked
+        // rollback-only and IgaPendingApprovalException is thrown (→ 202 +
+        // Location). DISABLE_IGA is a non-producer action, so its commit produces
+        // a stub signature with no ORK/Policy:1 round-trip — OFF is never blocked
+        // by ORK reachability. master is excluded by symmetry (IGA is never on for
+        // master; the master-realm escape hatch keeps its direct-write behavior
+        // below).
+        if (current && !next && !"master".equals(realm.getName())) {
+            String requestedBy = currentUserId();
+            String realmId = realm.getId();
+            String[] crIdHolder = new String[1];
+            KeycloakModelUtils.runJobInTransaction(
+                    session.getKeycloakSessionFactory(),
+                    crSession -> {
+                        RealmModel crRealm = crSession.realms().getRealm(realmId);
+                        if (crRealm == null) {
+                            throw new IllegalStateException(
+                                    "DISABLE_IGA capture: realm " + realmId + " not loadable in CR session");
+                        }
+                        EntityManager crEm = crSession.getProvider(JpaConnectionProvider.class).getEntityManager();
+                        IgaChangeRequestService crService = new IgaChangeRequestService(crEm, crSession);
+                        // Single-pending-REALM-CR rule (shared with the other
+                        // realm-attribute/config CRs): if a REALM-scoped CR is
+                        // already pending on this realm, refuse with a clean 409
+                        // rather than stacking a second pending REALM CR. The
+                        // IgaConflictException maps to 409 (not 500).
+                        IgaChangeRequestEntity existing =
+                                crService.findPending(realmId, "REALM", realmId);
+                        if (existing != null) {
+                            throw new org.tidecloak.iga.providers.IgaConflictException(existing.getId());
+                        }
+                        // ROWS_JSON carries the isIGAEnabled=false write the
+                        // replay applies; shape mirrors a realm-attribute row so
+                        // the teardown can set it under IGA_REPLAY_ACTIVE.
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        row.put("REALM_ID", realmId);
+                        row.put("NAME", IGA_ATTRIBUTE);
+                        row.put("VALUE", "false");
+                        crIdHolder[0] = crService.create(
+                                crRealm, "REALM", realmId, "DISABLE_IGA",
+                                List.of(row), requestedBy).getId();
+                    });
+            session.getTransactionManager().setRollbackOnly();
+            logger.infof("IGA toggle ON->OFF for realm %s captured as DISABLE_IGA change request %s "
+                            + "(awaiting admin approval; isIGAEnabled stays true until commit).",
+                    realm.getName(), crIdHolder[0]);
+            throw new org.tidecloak.iga.providers.IgaPendingApprovalException(
+                    crIdHolder[0], "REALM", "DISABLE_IGA");
+        }
+
         // The toggle endpoint IS the governing action (gated by
         // requireManageRealm); routing the toggle attribute write through the
         // IGA capture interceptor would create a SET_REALM_ATTRIBUTE CR
@@ -255,6 +317,8 @@ public class TideAdminCompatResource {
         // wrapper for the duration of the attribute write so the realm
         // attribute is actually flipped (matching the cancel + scan
         // contracts that assume the attribute is real after toggle).
+        // NOTE: the ON->OFF (non-master) case never reaches here — it 202'd
+        // above. This write therefore only ever flips OFF->ON, or master.
         writeIgaAttributeDirect(IGA_ATTRIBUTE, Boolean.toString(next));
         logger.infof("IGA has been toggled to : %s for realm %s", next, realm.getName());
 
@@ -487,81 +551,15 @@ public class TideAdminCompatResource {
             }
         }
 
-        // ON→OFF: cancel PENDING ADOPT CRs + clear sidecar inside
-        // its own transaction (mirror of the OFF→ON pattern above). Master
-        // is excluded by symmetry: IGA is never enabled on master, so an
-        // ON→OFF for master is impossible in practice; the guard is
-        // defensive.
-        if (current && !next && !"master".equals(realm.getName())) {
-            String realmId = realm.getId();
-            IgaAdoptCancel.CancelResult[] offHolder = new IgaAdoptCancel.CancelResult[1];
-            Throwable[] offErrHolder = new Throwable[1];
-            try {
-                KeycloakModelUtils.runJobInTransaction(
-                        session.getKeycloakSessionFactory(),
-                        cancelSession -> {
-                            RealmModel cancelRealm = cancelSession.realms().getRealm(realmId);
-                            if (cancelRealm == null) {
-                                throw new IllegalStateException(
-                                        "IGA toggle-off cancel: realm " + realmId + " not loadable in cancel session");
-                            }
-                            offHolder[0] = IgaAdoptCancel.cancel(cancelSession, cancelRealm);
-                        });
-            } catch (RuntimeException ex) {
-                // Same policy as the scan: toggle attribute ALREADY committed
-                // in the outer transaction. Surface the error in the
-                // response but do NOT roll back — a half-cleared realm is
-                // recoverable; a stuck toggle is not.
-                offErrHolder[0] = ex;
-                logger.errorf(ex, "IGA toggle-off cancel FAILED for realm %s — toggle remains " +
-                        "disabled, sidecar/ADOPT-CR state may be partial.", realm.getName());
-            }
-
-            if (offHolder[0] != null) {
-                body.put("scanOff", offHolder[0].toMap());
-            } else if (offErrHolder[0] != null) {
-                Map<String, Object> err = new LinkedHashMap<>();
-                err.put("error", offErrHolder[0].getClass().getSimpleName());
-                err.put("message", String.valueOf(offErrHolder[0].getMessage()));
-                body.put("scanOff", err);
-            }
-            // Symmetric to the OFF→ON eviction: evict the user-cache on
-            // ON→OFF too. While IGA was ON, a quarantined user's cached
-            // UserAdapter held enabled=false (snapshot of IgaUserAdapter
-            // returning false). After ON→OFF the IGA quarantine no longer
-            // applies (IgaQuarantineCache.isUserUnsignedWithRoles short-circuits
-            // when !isIgaActive), but the stale cache snapshot would still
-            // report enabled=false until the entry happened to expire. Evict
-            // so the next session.users() lookup re-loads through
-            // IgaUserProvider → IgaUserAdapter and reflects the IGA-off state.
-            evictRealmUserCache(session, realm);
-            // Symmetric eviction for the client/role/group/scope realm-cache.
-            // While IGA was ON, the cached ClientAdapter for a
-            // client that toggled-on hit the quarantine path may hold
-            // enabled=false from the IgaClientAdapter snapshot. After ON→OFF
-            // the quarantine no longer applies, but the realm-cache snapshot
-            // would still report enabled=false until the entry expires. Evict
-            // so the next session.clients()/realm.getRole/group/scope read
-            // re-loads through the IGA providers and reflects the IGA-off
-            // state. Symmetric to the OFF→ON call above and the user-cache
-            // eviction on this same branch.
-            evictRealmCache(session, realm);
-
-            // Restore old IGA behavior (dropped during decoupling): when IGA is disabled on a Tide realm,
-            // default signature algorithm cannot remain EdDSA (no Tide signing path) -> revert to RS256.
-            IdentityProviderModel tideIdp = session.identityProviders().getByAlias("tide");
-            ComponentModel tideVendorKey = realm.getComponentsStream()
-                    .filter(x -> "tide-vendor-key".equals(x.getProviderId()))
-                    .findFirst()
-                    .orElse(null);
-            if (tideIdp != null && tideVendorKey != null) {
-                String currentAlgorithm = realm.getDefaultSignatureAlgorithm();
-                if ("EdDSA".equalsIgnoreCase(currentAlgorithm)) {
-                    writeDefaultSignatureAlgorithmDirect("RS256");
-                    logger.info("IGA disabled, default signature algorithm reverted to RS256");
-                }
-            }
-        }
+        // ON→OFF teardown MOVED to commit. The inline ON→OFF teardown that used
+        // to live here (cancel PENDING ADOPTs + clear sidecar, evict the
+        // user/realm caches, RS256 revert, and the isIGAEnabled=false write) is
+        // now executed by IgaReplayDispatcher.replayDisableIga when the
+        // DISABLE_IGA change request created above commits — NOT synchronously at
+        // toggle time. A non-master ON→OFF therefore 202'd before reaching this
+        // point and never falls through here; master keeps the direct-write path
+        // (the writeIgaAttributeDirect above) with no teardown, exactly as before
+        // (IGA is never on for master, so there is nothing to tear down).
 
         return Response.ok(body).build();
     }
@@ -832,25 +830,10 @@ public class TideAdminCompatResource {
      * abort the toggle.</p>
      */
     private static void evictRealmUserCache(KeycloakSession session, RealmModel realm) {
-        try {
-            UserCache cache = UserStorageUtil.userCache(session);
-            if (cache == null) {
-                logger.debugf("IGA toggle user-cache eviction: realm=%s — UserCache provider not installed (skipped)",
-                        realm.getName());
-                return;
-            }
-            cache.evict(realm);
-            logger.infof("IGA toggle user-cache eviction: realm=%s — evicted (next user lookup will re-load through IgaUserProvider so the quarantine override fires)",
-                    realm.getName());
-        } catch (RuntimeException ex) {
-            // Never let a cache-eviction failure abort the toggle — the
-            // realm attribute is already committed and the response is
-            // about to be sent. Subsequent reads may show stale isEnabled
-            // until the entry expires, but the toggle stays consistent.
-            logger.errorf(ex,
-                    "IGA toggle user-cache eviction FAILED for realm %s — quarantine reads may be stale until cache entries expire.",
-                    realm.getName());
-        }
+        // Delegated to the shared util so the DISABLE_IGA commit-replay teardown
+        // (IgaReplayDispatcher.replayDisableIga, a different package) runs the
+        // IDENTICAL eviction the toggle used to do inline.
+        org.tidecloak.iga.services.IgaRealmCacheEviction.evictRealmUserCache(session, realm);
     }
 
     /**
@@ -909,202 +892,11 @@ public class TideAdminCompatResource {
      * eviction is preferable to an aborted toggle.</p>
      */
     private static void evictRealmCache(KeycloakSession session, RealmModel realm) {
-        // NOTE: the IgaOrganizationProvider extends-Infinispan refactor
-        // makes FUTURE reads traverse the cache → IGA chain naturally, but it does NOT
-        // invalidate entries that were ALREADY cached before this toggle flipped. A
-        // CachedClient / CachedRole / CachedOrganization loaded pre-toggle still holds
-        // its snapshot until natural expiry, so its IGA-wrapped accessor is never
-        // re-consulted — the per-entity invalidations below remain load-bearing for
-        // the toggle's "flip applies to already-loaded entities" guarantee. Do not
-        // delete on the assumption that the architectural fix subsumed them.
-        CacheRealmProvider cache;
-        try {
-            cache = session.getProvider(CacheRealmProvider.class);
-        } catch (RuntimeException lookupEx) {
-            logger.warnf(lookupEx,
-                    "IGA toggle realm-cache eviction: realm=%s — CacheRealmProvider lookup failed (skipped); quarantine reads on cached clients/roles/groups/scopes may be stale until entries expire.",
-                    realm.getName());
-            return;
-        }
-        if (cache == null) {
-            logger.debugf("IGA toggle realm-cache eviction: realm=%s — CacheRealmProvider not installed (skipped)",
-                    realm.getName());
-            return;
-        }
-
-        String realmId = realm.getId();
-        int clients = 0, roles = 0, groups = 0, scopes = 0, orgs = 0, idps = 0;
-
-        // Clients — the immediate client-quarantine fix surface.
-        try {
-            for (ClientModel client : realm.getClientsStream().toList()) {
-                try {
-                    cache.registerClientInvalidation(client.getId(), client.getClientId(), realmId);
-                    clients++;
-                } catch (RuntimeException ex) {
-                    logger.debugf(ex,
-                            "IGA toggle realm-cache eviction: client=%s (uuid=%s) realm=%s — registerClientInvalidation failed (continuing).",
-                            client.getClientId(), client.getId(), realm.getName());
-                }
-            }
-        } catch (RuntimeException ex) {
-            logger.warnf(ex,
-                    "IGA toggle realm-cache eviction: realm=%s — client iteration failed after evicting %d (continuing with roles/groups/scopes).",
-                    realm.getName(), clients);
-        }
-
-        // Realm-level roles + per-client roles. IgaRoleAdapter holds the
-        // role-side IGA hooks; a cached RoleAdapter snapshot would bypass them.
-        try {
-            for (RoleModel role : session.roles().getRealmRolesStream(realm).toList()) {
-                try {
-                    cache.registerRoleInvalidation(role.getId(), role.getName(), realmId);
-                    roles++;
-                } catch (RuntimeException ex) {
-                    logger.debugf(ex,
-                            "IGA toggle realm-cache eviction: realm-role=%s (id=%s) realm=%s — registerRoleInvalidation failed (continuing).",
-                            role.getName(), role.getId(), realm.getName());
-                }
-            }
-            for (ClientModel client : realm.getClientsStream().toList()) {
-                try {
-                    for (RoleModel role : session.roles().getClientRolesStream(client).toList()) {
-                        try {
-                            cache.registerRoleInvalidation(role.getId(), role.getName(), client.getId());
-                            roles++;
-                        } catch (RuntimeException ex) {
-                            logger.debugf(ex,
-                                    "IGA toggle realm-cache eviction: client-role=%s (id=%s) container=%s realm=%s — registerRoleInvalidation failed (continuing).",
-                                    role.getName(), role.getId(), client.getId(), realm.getName());
-                        }
-                    }
-                } catch (RuntimeException ex) {
-                    logger.debugf(ex,
-                            "IGA toggle realm-cache eviction: realm=%s client=%s — client-roles iteration failed (continuing).",
-                            realm.getName(), client.getClientId());
-                }
-            }
-        } catch (RuntimeException ex) {
-            logger.warnf(ex,
-                    "IGA toggle realm-cache eviction: realm=%s — role iteration failed after evicting %d (continuing with groups/scopes).",
-                    realm.getName(), roles);
-        }
-
-        // Groups.
-        try {
-            for (GroupModel group : realm.getGroupsStream().toList()) {
-                try {
-                    cache.registerGroupInvalidation(group.getId());
-                    groups++;
-                } catch (RuntimeException ex) {
-                    logger.debugf(ex,
-                            "IGA toggle realm-cache eviction: group=%s (id=%s) realm=%s — registerGroupInvalidation failed (continuing).",
-                            group.getName(), group.getId(), realm.getName());
-                }
-            }
-        } catch (RuntimeException ex) {
-            logger.warnf(ex,
-                    "IGA toggle realm-cache eviction: realm=%s — group iteration failed after evicting %d (continuing with scopes).",
-                    realm.getName(), groups);
-        }
-
-        // Client scopes.
-        try {
-            for (ClientScopeModel scope : realm.getClientScopesStream().toList()) {
-                try {
-                    cache.registerClientScopeInvalidation(scope.getId(), realmId);
-                    scopes++;
-                } catch (RuntimeException ex) {
-                    logger.debugf(ex,
-                            "IGA toggle realm-cache eviction: scope=%s (id=%s) realm=%s — registerClientScopeInvalidation failed (continuing).",
-                            scope.getName(), scope.getId(), realm.getName());
-                }
-            }
-        } catch (RuntimeException ex) {
-            logger.warnf(ex,
-                    "IGA toggle realm-cache eviction: realm=%s — client-scope iteration failed after evicting %d.",
-                    realm.getName(), scopes);
-        }
-
-        // Organizations. KC's CacheRealmProvider has no public
-        // registerOrgInvalidation primitive (the InfinispanOrganizationProvider's
-        // registerOrganizationInvalidation is package-private), but the cached
-        // CachedOrganization is keyed on the org id alone
-        // and that key
-        // is invalidated via the public CacheRealmProvider.registerInvalidation(id)
-        // call — see the same primitive used in
-        // IgaReplayExtension.evictCacheForAdopt's ADOPT_ORGANIZATION branch.
-        //
-        // Iterate via OrganizationProvider (the SPI surface KC uses everywhere
-        // else); skip silently if the realm doesn't have orgs feature on
-        // (provider returns empty stream) or the provider isn't installed at
-        // all. Best-effort wrapping mirrors the clients/roles/groups/scopes
-        // branches above.
-        try {
-            OrganizationProvider orgProvider = session.getProvider(OrganizationProvider.class);
-            if (orgProvider != null) {
-                for (OrganizationModel org : orgProvider.getAllStream().toList()) {
-                    try {
-                        cache.registerInvalidation(org.getId());
-                        orgs++;
-                    } catch (RuntimeException ex) {
-                        logger.debugf(ex,
-                                "IGA toggle realm-cache eviction: org=%s (id=%s) realm=%s — registerInvalidation failed (continuing).",
-                                org.getName(), org.getId(), realm.getName());
-                    }
-                }
-            }
-        } catch (RuntimeException ex) {
-            logger.warnf(ex,
-                    "IGA toggle realm-cache eviction: realm=%s — organization iteration failed after evicting %d.",
-                    realm.getName(), orgs);
-        }
-
-        // Identity providers. IdPs aren't quarantineable entities
-        // (toggle-on doesn't scan IdPs, no IGA_UNSIGNED_ENTITY rows) but the
-        // IdP-aware scope resolver reads iga.approverRole /
-        // iga.threshold off IdentityProviderModel.getConfig() via
-        // session.identityProviders().getByAlias(...). That path goes through
-        // InfinispanIdentityProviderStorageProvider which caches the
-        // CachedIdentityProvider snapshot under two keys: the internalId and
-        // realmId + "." + alias + ".idp.alias" (both suffix constants are
-        // private in KC). Without invalidating
-        // those entries, an iga.approverRole / iga.threshold edit on an IdP
-        // made BEFORE toggle-on could remain stale post-toggle, letting an
-        // ORG_ADD_IDP / ORG_REMOVE_IDP CR resolve against pre-edit config and
-        // produce the wrong gate verdict. We reconstruct the alias key here
-        // (KC's suffix string is identical and the realmId-prefixed shape is
-        // stable across the cache lifecycle).
-        //
-        // Iterate via realm.getIdentityProvidersStream() — the deprecated
-        // accessor is still the simplest surface; the canonical
-        // IdentityProviderStorageProvider.getAllStream() requires constructing
-        // an IdentityProviderQuery which adds noise for no functional gain
-        // here.
-        try {
-            for (IdentityProviderModel idp : realm.getIdentityProvidersStream().toList()) {
-                try {
-                    if (idp.getInternalId() != null) {
-                        cache.registerInvalidation(idp.getInternalId());
-                    }
-                    if (idp.getAlias() != null) {
-                        cache.registerInvalidation(realmId + "." + idp.getAlias() + ".idp.alias");
-                    }
-                    idps++;
-                } catch (RuntimeException ex) {
-                    logger.debugf(ex,
-                            "IGA toggle realm-cache eviction: idp=%s (id=%s) realm=%s — registerInvalidation failed (continuing).",
-                            idp.getAlias(), idp.getInternalId(), realm.getName());
-                }
-            }
-        } catch (RuntimeException ex) {
-            logger.warnf(ex,
-                    "IGA toggle realm-cache eviction: realm=%s — idp iteration failed after evicting %d.",
-                    realm.getName(), idps);
-        }
-
-        logger.infof("IGA toggle realm-cache eviction: realm=%s — evicted clients=%d roles=%d groups=%d scopes=%d orgs=%d idps=%d (next client/role/group/scope/org/idp read will re-load through IGA providers so the quarantine override fires)",
-                realm.getName(), clients, roles, groups, scopes, orgs, idps);
+        // Delegated to the shared util so the DISABLE_IGA commit-replay teardown
+        // (IgaReplayDispatcher.replayDisableIga, a different package) runs the
+        // IDENTICAL client/role/group/scope/org/idp eviction the toggle used to do
+        // inline.
+        org.tidecloak.iga.services.IgaRealmCacheEviction.evictRealmCache(session, realm);
     }
 
     /**

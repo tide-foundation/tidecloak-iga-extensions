@@ -529,7 +529,15 @@ public class IgaAdminResource {
         // EVERY login-emitted unit (all 18 types) carries a real 64B sig BY CONSTRUCTION.
         // Idempotent (only NULL/stub columns), firstAdmin+capable gated, fail-closed, admin-
         // triggered (fires here at approval, never at toggle). No-op while ADOPT CRs pend.
-        org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, realm);
+        //
+        // SKIP for DISABLE_IGA: the convergence does an ORK signing ceremony (on a
+        // firstAdmin real-signing realm once no ADOPTs pend — and replayDisableIga
+        // just cancelled every pending ADOPT). Turning IGA OFF must never be blocked
+        // by ORK reachability, and re-stamping producer columns on a realm being
+        // disabled is pointless — so the disable commit does not run convergence.
+        if (!"DISABLE_IGA".equals(cr.getActionType())) {
+            org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, realm);
+        }
 
         // Re-sign the Tide IdP settings when this commit changed a realm-config
         // field that feeds the enclave-verified VendorSettings (RegOn =
