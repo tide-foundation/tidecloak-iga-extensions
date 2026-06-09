@@ -50,6 +50,17 @@ public class IgaRealmProvider extends JpaRealmProvider {
     private boolean isIgaActive(RealmModel realm) {
         IgaChangeRequestService service = getService();
         if (!service.isIgaEnabled(realm)) return false;
+        // Scoped vendor/system provisioning bypass (see
+        // IgaChangeRequestService.IGA_VENDOR_PROVISIONING). While VendorResource's
+        // license/keygen provisioning block is active on this session, provider-
+        // level captures pass straight through to super: this single chokepoint
+        // covers createGroup/addRealmRole/addClientRole/addClient/addClientScope
+        // (the CREATE_* accumulate-then-veto branches) AND the addClientScopes /
+        // removeClientScope ASSIGN_SCOPE/REMOVE_SCOPE seam — so provisionTideClaims
+        // Scope's tide-claims attach applies directly, MODE-INDEPENDENTLY (no longer
+        // limited to the firstAdmin tide-claims passthrough). Inert when the flag is
+        // absent — ongoing admin edits stay governed.
+        if (service.isVendorProvisioning()) return false;
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }

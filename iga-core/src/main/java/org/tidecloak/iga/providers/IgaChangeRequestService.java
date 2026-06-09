@@ -32,6 +32,40 @@ public class IgaChangeRequestService {
     private static final TypeReference<List<Map<String, Object>>> LIST_MAP_REF =
             new TypeReference<List<Map<String, Object>>>() {};
 
+    /**
+     * Session-attribute key for the scoped <em>vendor/system provisioning</em> capture bypass.
+     *
+     * <p>When a {@link KeycloakSession} carries this attribute set to {@link Boolean#TRUE},
+     * IGA capture is SUPPRESSED for that session's privileged model writes: the write is
+     * applied DIRECTLY (via {@code super}/the real JPA write), NO change request is created,
+     * and the one-pending-CR-per-entity conflict check is skipped. It is the general,
+     * <strong>mode-independent</strong> generalization of the firstAdmin tide-claims
+     * passthrough — intended for the Tide license/keygen provisioning flow
+     * ({@code VendorResource.SetUpTideRealm} / {@code confirmInitialVRK} keygen /
+     * {@code provisionTideClaimsScope} / {@code applyRagnarokSettings}), whose realm-config +
+     * {@code ASSIGN_SCOPE} writes would otherwise be captured into CRs and DEADLOCK the
+     * synchronous provisioning against the pending {@code ADOPT_REALM} CR.</p>
+     *
+     * <p>Contract / scope:
+     * <ul>
+     *   <li>It ONLY suppresses IGA <em>capture</em> — the underlying write still applies and
+     *       no other auth/security check is weakened.</li>
+     *   <li>It is <em>session-scoped</em>: the CALLER (VendorResource, in idp-extensions) sets
+     *       it before the provisioning block and CLEARS it in a {@code finally}. iga-core only
+     *       HONORS it. When absent, every write is captured/governed exactly as today.</li>
+     *   <li>It is DISTINCT from {@code IGA_REPLAY_ACTIVE} — the replay flag also disables
+     *       read-time quarantine ({@code IgaQuarantineCache.isReplayActive}) and import-mode
+     *       detection, side effects we do NOT want during live vendor provisioning. A dedicated
+     *       flag keeps the bypass to exactly "suppress capture, apply directly".</li>
+     * </ul>
+     *
+     * <p>idp-extensions has a compile-time ({@code provided}) dependency on iga-core, so
+     * {@code VendorResource} sets it via the fully-qualified constant:
+     * {@code session.setAttribute(IgaChangeRequestService.IGA_VENDOR_PROVISIONING, Boolean.TRUE);}
+     * </p>
+     */
+    public static final String IGA_VENDOR_PROVISIONING = "iga.vendorProvisioning";
+
     private final EntityManager em;
     private final KeycloakSession session;
 
@@ -47,6 +81,20 @@ public class IgaChangeRequestService {
     public boolean isIgaEnabled(RealmModel realm) {
         if ("master".equals(realm.getName())) return false;
         return "true".equals(realm.getAttribute("isIGAEnabled"));
+    }
+
+    /**
+     * True iff the current session is inside a scoped vendor/system provisioning block
+     * (see {@link #IGA_VENDOR_PROVISIONING}). When true, IGA capture chokepoints must
+     * pass the write straight through (apply directly, create no CR, skip the
+     * pending-CR conflict check). Accepts both the canonical {@link Boolean#TRUE} the
+     * caller sets and the string {@code "true"} for parity with the
+     * {@code IGA_REPLAY_ACTIVE} string idiom — so a value set either way is honored.
+     */
+    public boolean isVendorProvisioning() {
+        if (session == null) return false;
+        Object flag = session.getAttribute(IGA_VENDOR_PROVISIONING);
+        return Boolean.TRUE.equals(flag) || "true".equals(flag);
     }
 
     /**

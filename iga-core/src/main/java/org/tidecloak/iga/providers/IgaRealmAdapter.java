@@ -67,6 +67,14 @@ public class IgaRealmAdapter extends RealmAdapter {
         // an admin enabling IGA for the first time falls into the !active
         // branch and the write is applied directly.
         if (!service.isIgaEnabled(this)) return false;
+        // Scoped vendor/system provisioning bypass: while VendorResource's
+        // license/keygen provisioning block is active on this session, realm-
+        // config + realm-attribute writes apply DIRECTLY (no CR, no pending-CR
+        // conflict) — this single chokepoint covers every Tier-1/Tier-2 setter,
+        // setAttribute/removeAttribute, default-group and default-scope override
+        // (each of which gates on isIgaActive() before recording). Inert when the
+        // flag is absent — ongoing admin edits stay governed.
+        if (service.isVendorProvisioning()) return false;
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }

@@ -205,6 +205,9 @@ public class IgaGroupAdapter extends GroupAdapter {
         if (captureMode) return false;
         IgaChangeRequestService service = getService();
         if (!service.isIgaEnabled(realm)) return false;
+        // Scoped vendor/system provisioning bypass (see
+        // IgaChangeRequestService.IGA_VENDOR_PROVISIONING): apply directly, no capture.
+        if (service.isVendorProvisioning()) return false;
         Object replay = session.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }
