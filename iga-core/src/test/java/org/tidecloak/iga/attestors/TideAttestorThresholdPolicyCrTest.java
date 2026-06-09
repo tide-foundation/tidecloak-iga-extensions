@@ -617,16 +617,17 @@ class TideAttestorThresholdPolicyCrTest {
         assertTrue(draft != null && draft.length > 0, "carrier must carry a non-empty draft (the new policy)");
     }
 
-    // --- old-policy revocation flag in the authorized Draft (phase-1) --------
+    // --- old-policy revocation flag is NO LONGER set inline (phase-1) --------
 
     @Test
-    void approvalModelCarrier_setsRevocationFlag_atDraftIndex2() throws Exception {
-        // The REGEN phase-1 carrier must set the OLD-policy rotation flag INSIDE the
-        // cryptographically authorized Draft: PolicySignRequest.SetRevokeAuthorizingPolicyOnSign
-        // appends a trailing {0x01} segment at Draft index 2 (segment 0 = new policy payload,
-        // segment 1 = contract-to-upload, segment 2 = the revoke flag). Decoding the persisted
-        // carrier via ModelRequest.FromBytes and reading Draft segment 2 must yield {0x01}, so
-        // the collected admin dokens cover the burn intent and the ORK burns the old M0 at commit.
+    void approvalModelCarrier_doesNotSetRevocationFlag_atDraftIndex2() throws Exception {
+        // The inline burn was REMOVED: buildPolicyResignApprovalModel no longer calls
+        // PolicySignRequest.SetRevokeAuthorizingPolicyOnSign, so the cryptographically authorized
+        // Draft carries ONLY the new policy payload (segment 0) — NO {0x01} revoke flag at Draft
+        // index 2. Burning the old M0 mid-batch broke the other CRs (AuthorizerNotAllowed) and
+        // wedged the realm on rollback; revocation is decoupled into a separate post-commit step.
+        // Decoding the persisted carrier via ModelRequest.FromBytes and reading Draft segment 2
+        // must therefore yield NO {0x01} flag.
         byte[] newPolicy = TideAttestor.buildUnsignedAdminPolicyBytes(3, VVK_ID);
         String newPolicyB64 = Base64.getEncoder().encodeToString(newPolicy);
 
@@ -649,12 +650,11 @@ class TideAttestorThresholdPolicyCrTest {
         ModelRequest parsed = ModelRequest.FromBytes(Base64.getDecoder().decode(carrier));
         byte[] draft = parsed.GetDraft();
         byte[] revokeSeg = Tools.TryGetValue(draft, 2);
-        assertNotNull(revokeSeg, "REGEN carrier Draft must carry a segment at index 2 (the revoke flag)");
-        assertArrayEquals(new byte[]{0x01}, revokeSeg,
-                "REGEN carrier Draft index 2 must be the {0x01} old-policy-revocation flag");
+        assertTrue(revokeSeg == null || !Arrays.equals(new byte[]{0x01}, revokeSeg),
+                "REGEN carrier Draft index 2 must NOT carry the {0x01} revoke flag (burn decoupled)");
 
-        // Segment 0 is the verbatim new unsigned policy payload (flag is on the request Draft,
-        // NOT the policy bytes) — POLICY_BODY_UNSIGNED is unchanged by the flag.
+        // Segment 0 is still the verbatim new unsigned policy payload — the re-sign still signs
+        // the new M0; only the burn flag was removed.
         assertArrayEquals(newPolicy, Tools.GetValue(draft, 0),
                 "REGEN carrier Draft index 0 must be the verbatim unsigned new policy bytes");
     }
@@ -676,6 +676,56 @@ class TideAttestorThresholdPolicyCrTest {
                 "non-REGEN carrier Draft must NOT carry the {0x01} revoke flag at index 2");
     }
 
+    // --- decoupled retire of the OLD M0 (PART B — non-wedging best-effort) -----
+
+    /**
+     * The decoupled retire is NON-WEDGING: on a non-real-signing-capable (dev/test) realm —
+     * the default test realm has no tide-vendor-key component — it computes the target id and
+     * short-circuits to a no-op WITHOUT throwing. A retire that threw here would roll back the
+     * already-committed new M0, exactly the wedge the decoupling removes.
+     */
+    @Test
+    void retireOldAdminPolicy_nonCapableRealm_isNoOpAndDoesNotThrow() {
+        // A well-formed signed OLD M0 body (unsigned bytes + a dummy 64-byte signature so
+        // Policy.From(...).GetId() succeeds). Base64 is what IgaRolePolicyEntity.POLICY stores.
+        byte[] unsigned = TideAttestor.buildUnsignedAdminPolicyBytes(1, VVK_ID);
+        Policy p = Policy.From(unsigned);
+        p.AddSignature(new byte[64]);
+        byte[] signedOldM0 = p.ToBytes();
+
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() ->
+                attestor.retireOldAdminPolicyBestEffort(realm, new org.keycloak.common.util.MultivaluedHashMap<>(),
+                        signedOldM0, "regen-cr-retire"));
+    }
+
+    /**
+     * NON-WEDGING on a malformed/empty old body: a null or undecodable OLD M0 must be swallowed
+     * (logged), never thrown — the new M0 is already committed.
+     */
+    @Test
+    void retireOldAdminPolicy_nullOrBadBytes_swallowsAndDoesNotThrow() {
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() ->
+                attestor.retireOldAdminPolicyBestEffort(realm, new org.keycloak.common.util.MultivaluedHashMap<>(),
+                        null, "regen-cr-retire-null"));
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() ->
+                attestor.retireOldAdminPolicyBestEffort(realm, new org.keycloak.common.util.MultivaluedHashMap<>(),
+                        new byte[]{1, 2, 3}, "regen-cr-retire-garbage"));
+    }
+
+    /**
+     * Sanity: the target id the retire would carry in {@code Draft[0]} is exactly
+     * {@code Policy.GetId()} = SHA-512(DataToVerify) = 64 bytes — the ORK
+     * {@code RetirePolicyRequest} contract (Draft[0] must be 64 bytes).
+     */
+    @Test
+    void oldM0_targetId_isSha512_64Bytes() {
+        byte[] unsigned = TideAttestor.buildUnsignedAdminPolicyBytes(1, VVK_ID);
+        Policy p = Policy.From(unsigned);
+        p.AddSignature(new byte[64]);
+        byte[] id = Policy.From(p.ToBytes()).GetId();
+        assertEquals(64, id.length, "RetirePolicy Draft[0] target id is SHA-512 (64 bytes)");
+    }
+
     // --- vendor creation-auth wiring (enclave-validation regression) ----------
 
     @Test
@@ -684,8 +734,9 @@ class TideAttestorThresholdPolicyCrTest {
         // creation time"): the REGEN policy carrier MUST take the SAME seg-7 VRK creation-auth the
         // producer-unit path takes. We spy the capability gate to the capable branch and assert
         // buildPolicyResignApprovalModel routes through initializeApprovalRequestWithVrk over the
-        // SAME PolicySignRequest whose Draft was already materialized (policy@0 + revoke-flag@2),
-        // so the seg-7 signature covers the full, non-empty Draft the enclave validates.
+        // SAME PolicySignRequest whose Draft was already materialized (policy@0; no revoke flag —
+        // burn decoupled), so the seg-7 signature covers the full, non-empty Draft the enclave
+        // validates.
         byte[] newPolicy = TideAttestor.buildUnsignedAdminPolicyBytes(3, VVK_ID);
         String newPolicyB64 = Base64.getEncoder().encodeToString(newPolicy);
 
@@ -714,9 +765,12 @@ class TideAttestorThresholdPolicyCrTest {
             assertEquals("Policy:1", req.Id(),
                     "the carrier handed to vendor-init must be the Policy:1 re-sign request");
             byte[] d = req.GetDraft();
-            assertArrayEquals(new byte[]{0x01}, Tools.TryGetValue(d, 2),
-                    "Draft must already carry the revoke flag @2 BEFORE creation-auth (the seg-7 "
-                            + "signature must cover it)");
+            assertTrue(d != null && d.length > 0,
+                    "Draft must be materialized (non-empty) BEFORE creation-auth so the seg-7 "
+                            + "signature covers it");
+            byte[] seg2 = Tools.TryGetValue(d, 2);
+            assertTrue(seg2 == null || !Arrays.equals(new byte[]{0x01}, seg2),
+                    "Draft must NOT carry the revoke flag @2 (burn decoupled)");
             reached[0] = true;
             return null;
         }).when(spy).initializeApprovalRequestWithVrk(eq(realm), any(ModelRequest.class));
