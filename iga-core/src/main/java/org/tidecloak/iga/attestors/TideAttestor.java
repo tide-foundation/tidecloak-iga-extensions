@@ -1266,6 +1266,20 @@ public class TideAttestor implements IgaAttestor {
         return null;
     }
 
+    /**
+     * Count the recorded per-approver {@link IgaAuthorizationEntity} rows for a CR. Used by the
+     * phase-1 accumulation short-circuit ({@link #buildMultiAdminApprovalModel}) to decide whether
+     * this is the FIRST open (0 → build a fresh vendor-initialized carrier) or a 2nd..Nth open
+     * (≥1 → return the already-accumulated carrier so the enclave appends the next doken).
+     */
+    int countRecordedApprovals(KeycloakSession session, IgaChangeRequestEntity cr) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        return em.createNamedQuery("IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
+                .setParameter("changeRequestId", cr.getId())
+                .getResultList()
+                .size();
+    }
+
     /** Delete every {@link IgaAuthorizationEntity} for a CR (re-sign required after a fold). */
     private static void clearAuthorizations(EntityManager em, IgaChangeRequestEntity cr) {
         List<IgaAuthorizationEntity> auths = em.createNamedQuery(
@@ -1845,6 +1859,39 @@ public class TideAttestor implements IgaAttestor {
      */
     public String buildMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
                                                IgaChangeRequestEntity cr) {
+        // ★ ACCUMULATION SHORT-CIRCUIT (covers BOTH the producer-unit and REGEN_ADMIN_POLICY
+        // paths — this is the ONE place both flow through). The phase-1 build is invoked once
+        // per admin who opens the approval popup. The enclave APPENDS its doken onto whatever
+        // carrier we hand it (AddPolicyAuthorizationToSerializedRequest), so for the 2nd..Nth
+        // approver we MUST return the ALREADY-ACCUMULATED carrier (prior dokens + the original
+        // VRK creation-auth) — NOT a freshly vendor-initialized 0-doken carrier. Rebuilding
+        // fresh on every open is the threshold-2+ bug: each admin received a zero-doken carrier
+        // and appended only their own, so the committed request carried just 1 doken and the ORK
+        // rejected with "Not enough approvals to meet threshold".
+        //
+        // First open (0 recorded approvals): fall through and build fresh (vendor-initialized,
+        // 0 dokens) exactly as before.
+        //
+        // Interaction with the policy-CR fold (pendingPolicyCrIsUnchanged, commit f0b290b): when
+        // the policy content is UNCHANGED the fold PRESERVES request_model + authorizations, so a
+        // re-open here finds ≥1 approval + a non-blank carrier and ACCUMULATES (returns existing).
+        // When the policy genuinely changes (re-pin) the fold CLEARS request_model + clears the
+        // authorizations (0 approvals) → this short-circuit does NOT fire → we build fresh. Both
+        // paths are therefore consistent.
+        //
+        // Expiry edge: if the existing carrier's creation-auth has lapsed, returning it verbatim
+        // is still correct — the embedded dokens cover their own signed bytes; re-initializing
+        // would change those bytes and invalidate every prior doken. So we return it untouched.
+        String existingCarrier = cr.getRequestModel();
+        if (existingCarrier != null && !existingCarrier.isBlank()
+                && countRecordedApprovals(session, cr) >= 1) {
+            log.infof("IGA multiAdmin approval (phase 1): CR %s (action=%s) already has %d recorded "
+                            + "approval(s) + a non-blank carrier — returning the ACCUMULATED carrier "
+                            + "verbatim (the enclave appends the next doken) instead of rebuilding fresh.",
+                    cr.getId(), cr.getActionType(), countRecordedApprovals(session, cr));
+            return existingCarrier;
+        }
+
         // The admin-policy threshold re-sign CR is NOT a producer-unit CR — its draft is the
         // NEW unsigned admin Policy itself (carried verbatim in ROWS_JSON), wrapped in a
         // Policy:1 PolicySignRequest with the EXISTING M0 policy embedded as the authorizer.

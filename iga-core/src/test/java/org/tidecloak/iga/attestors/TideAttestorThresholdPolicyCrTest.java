@@ -617,6 +617,123 @@ class TideAttestorThresholdPolicyCrTest {
         assertTrue(draft != null && draft.length > 0, "carrier must carry a non-empty draft (the new policy)");
     }
 
+    // --- phase-1 doken ACCUMULATION: 2nd..Nth open returns the existing carrier ---
+    //
+    // The threshold-2+ bug: phase-1 UNCONDITIONALLY rebuilt a fresh, vendor-initialized,
+    // 0-doken carrier on every enclave open, so admin #2 received a zero-doken carrier and
+    // appended only their own doken (admin #1's was lost) → the committed request carried 1
+    // doken → ORK "Not enough approvals to meet threshold of '2'". The fix: when a CR already
+    // has ≥1 recorded approval AND a non-blank request_model, return that ACCUMULATED carrier
+    // verbatim so the enclave appends the next doken onto the prior ones. First open (0
+    // approvals) still builds fresh.
+
+    /** Stub IgaAuthorization.findByChangeRequest to report {@code n} recorded approvals. */
+    @SuppressWarnings("unchecked")
+    private void stubRecordedApprovals(int n) {
+        List<IgaAuthorizationEntity> rows = new ArrayList<>();
+        for (int i = 0; i < n; i++) rows.add(new IgaAuthorizationEntity());
+        TypedQuery<IgaAuthorizationEntity> q = mock(TypedQuery.class);
+        when(em.createNamedQuery(eq("IgaAuthorization.findByChangeRequest"), eq(IgaAuthorizationEntity.class)))
+                .thenReturn(q);
+        when(q.setParameter(anyString(), any())).thenReturn(q);
+        when(q.getResultList()).thenReturn(rows);
+    }
+
+    @Test
+    void approvalModel_regenCr_secondOpen_returnsAccumulatedCarrier_doesNotRebuild() {
+        // A REGEN_ADMIN_POLICY CR that already carries ≥1 doken (1 recorded approval) + a
+        // non-blank accumulated carrier. The 2nd open MUST return that carrier VERBATIM (so the
+        // enclave appends admin #2's doken) and must NOT rebuild — proven by stubbing NO policy
+        // lookup: a rebuild would call readM0AdminPolicyBytes → NPE/throw, but the short-circuit
+        // returns before any rebuild work.
+        IgaChangeRequestEntity cr = pendingPolicyCr("regen-accumulate");
+        String accumulated = "ACCUMULATED-CARRIER-WITH-DOKEN-1";
+        cr.setRequestModel(accumulated);
+        stubRecordedApprovals(1);
+
+        String returned = attestor.buildMultiAdminApprovalModel(session, realm, cr);
+
+        assertEquals(accumulated, returned,
+                "2nd open of a REGEN CR with ≥1 approval returns the ACCUMULATED carrier verbatim");
+        assertEquals(accumulated, cr.getRequestModel(), "carrier left untouched (not re-initialized)");
+    }
+
+    @Test
+    void approvalModel_unitCr_secondOpen_returnsAccumulatedCarrier_doesNotRebuild() {
+        // Same accumulation contract for a producer-unit CR (GRANT_ROLES → AttestationUnit:1).
+        // ≥1 recorded approval + a non-blank carrier → return verbatim, never rebuild. A rebuild
+        // would run buildAllCrUnitCbor / readM0AdminPolicyBytes (unstubbed → throw), so a clean
+        // return of the accumulated string proves the short-circuit fired BEFORE any rebuild.
+        IgaChangeRequestEntity cr = grantCr("grant-accumulate");
+        cr.setStatus("PENDING");
+        String accumulated = "ACCUMULATED-UNIT-CARRIER-WITH-DOKEN-1";
+        cr.setRequestModel(accumulated);
+        stubRecordedApprovals(1);
+
+        String returned = attestor.buildMultiAdminApprovalModel(session, realm, cr);
+
+        assertEquals(accumulated, returned,
+                "2nd open of a unit CR with ≥1 approval returns the ACCUMULATED carrier verbatim");
+        assertEquals(accumulated, cr.getRequestModel(), "carrier left untouched (not re-initialized)");
+    }
+
+    @Test
+    void approvalModel_firstOpen_zeroApprovals_buildsFresh_notShortCircuited() {
+        // FIRST open: 0 recorded approvals → the short-circuit does NOT fire and the REGEN path
+        // builds a fresh carrier from the M0 policy (the unchanged pre-fix behaviour). We exercise
+        // the REGEN path (deterministic, no live ORK) and assert a fresh, round-trippable carrier
+        // is produced and persisted — i.e. the short-circuit was bypassed.
+        byte[] newPolicy = TideAttestor.buildUnsignedAdminPolicyBytes(3, VVK_ID);
+        String newPolicyB64 = Base64.getEncoder().encodeToString(newPolicy);
+        IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
+        cr.setId("regen-first-open");
+        cr.setRealmId(REALM_ID);
+        cr.setActionType("REGEN_ADMIN_POLICY");
+        cr.setEntityType("ADMIN_POLICY");
+        cr.setEntityId(TIDE_ROLE_ID);
+        cr.setRowsJson("[{\"OLD_THRESHOLD\":1,\"NEW_THRESHOLD\":3,\"ROLE_ID\":\"" + TIDE_ROLE_ID
+                + "\",\"VVK_ID\":\"" + VVK_ID + "\",\"POLICY_BODY_UNSIGNED\":\"" + newPolicyB64 + "\"}]");
+        byte[] m0 = TideAttestor.buildUnsignedAdminPolicyBytes(1, VVK_ID);
+        IgaRolePolicyEntity m0Row = policyAtThreshold(1);
+        m0Row.setPolicy(Base64.getEncoder().encodeToString(m0));
+        stubPolicyLookup(m0Row);
+        stubRecordedApprovals(0); // FIRST open
+
+        String carrier = attestor.buildMultiAdminApprovalModel(session, realm, cr);
+
+        assertNotNull(carrier, "first open builds a fresh carrier");
+        assertEquals(carrier, cr.getRequestModel(), "fresh carrier persisted on the CR");
+    }
+
+    @Test
+    void approvalModel_blankCarrierWithApproval_buildsFresh_notShortCircuited() {
+        // Defensive: ≥1 approval but a BLANK request_model (carrier somehow cleared) → the
+        // short-circuit must NOT fire (there is nothing to accumulate onto), so it builds fresh
+        // via the REGEN path rather than returning blank.
+        byte[] newPolicy = TideAttestor.buildUnsignedAdminPolicyBytes(3, VVK_ID);
+        String newPolicyB64 = Base64.getEncoder().encodeToString(newPolicy);
+        IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
+        cr.setId("regen-blank-carrier");
+        cr.setRealmId(REALM_ID);
+        cr.setActionType("REGEN_ADMIN_POLICY");
+        cr.setEntityType("ADMIN_POLICY");
+        cr.setEntityId(TIDE_ROLE_ID);
+        cr.setRowsJson("[{\"OLD_THRESHOLD\":1,\"NEW_THRESHOLD\":3,\"ROLE_ID\":\"" + TIDE_ROLE_ID
+                + "\",\"VVK_ID\":\"" + VVK_ID + "\",\"POLICY_BODY_UNSIGNED\":\"" + newPolicyB64 + "\"}]");
+        cr.setRequestModel("   "); // blank
+        byte[] m0 = TideAttestor.buildUnsignedAdminPolicyBytes(1, VVK_ID);
+        IgaRolePolicyEntity m0Row = policyAtThreshold(1);
+        m0Row.setPolicy(Base64.getEncoder().encodeToString(m0));
+        stubPolicyLookup(m0Row);
+        stubRecordedApprovals(1);
+
+        String carrier = attestor.buildMultiAdminApprovalModel(session, realm, cr);
+
+        assertNotNull(carrier);
+        assertTrue(!carrier.isBlank(), "blank carrier + approval still builds a fresh non-blank carrier");
+        assertEquals(carrier, cr.getRequestModel());
+    }
+
     // --- old-policy revocation flag is NO LONGER set inline (phase-1) --------
 
     @Test
