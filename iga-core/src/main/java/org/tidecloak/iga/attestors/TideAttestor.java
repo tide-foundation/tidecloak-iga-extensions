@@ -209,6 +209,26 @@ public class TideAttestor implements IgaAttestor {
     private static final long FIRSTADMIN_SIGN_EXPIRY_SECONDS = 180L;
 
     /**
+     * Expiry (seconds-from-build) for the PERSISTED multiAdmin two-phase approval-model
+     * carriers ({@link #buildMultiAdminApprovalModel} / {@link #buildPolicyResignApprovalModel}).
+     *
+     * <p>Unlike the immediate single-ceremony signs (M0 policy / firstAdmin unit /
+     * regen-resign — which round-trip the ORK in seconds, so {@link #FIRSTADMIN_SIGN_EXPIRY_SECONDS}
+     * = 3 min is plenty), these carriers are built once at the FIRST admin's enclave open and
+     * then sit PENDING while each subsequent admin signs — admins may sign hours or days apart.
+     * The expiry is part of the signed {@code Draft} the dokens cover, so it is set ONCE at the
+     * first phase-1 build and preserved verbatim by the accumulation short-circuit; it must
+     * therefore be a generous OUTER bound on a realistic multi-admin approval window. The
+     * request is GATED by the collected dokens + the iga-core threshold (the expiry is just a
+     * stale-carrier backstop), so a long value is safe. 7 days.
+     *
+     * <p>This fixes the {@code "Expiry cannot be in the past"} {@link RuntimeException} thrown at
+     * commit by {@code ModelRequest.FromBytes} when a real multi-admin approval (admin1 signs,
+     * admin2 signs later, then commit) exceeded the old 3-minute carrier window.
+     */
+    private static final long MULTIADMIN_APPROVAL_EXPIRY_SECONDS = 7L * 24L * 60L * 60L; // 7 days
+
+    /**
      * Defensive upper bound on the number of producer unit-envelopes packed into a SINGLE
      * {@link #signUnitsWithFirstAdminVvk} / {@code AttestationUnit:1} ORK request. The ork
      * imposes NO hard cap (only a {@code >= 1} minimum — {@code AttestationUnitSignRequest.cs}
@@ -1946,10 +1966,14 @@ public class TideAttestor implements IgaAttestor {
         // VERBATIM CBOR via the byte[][] overload (NOT List<?>/Object — those re-CBOR-wrap
         // each element through Jackson, corrupting the envelope).
         req.SetUnits(unitCbors);
-        // Longer expiry than the 30s default — admin approval is a human round-trip. Set
-        // BEFORE materializing the draft / creation-auth (Expiry folds into both the
-        // data-to-authorize hash and InitializeTideRequestWithVrk's expireAtTime).
-        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
+        // LONG expiry — this carrier is PERSISTED and re-read (ModelRequest.FromBytes) at
+        // commit, possibly hours/days after this first phase-1 build (admins sign asynchronously).
+        // A 3-minute window expired the carrier before the quorum assembled ("Expiry cannot be
+        // in the past"). Set the generous outer bound ONCE here; the accumulation short-circuit
+        // returns this carrier verbatim for the 2nd..Nth admin, preserving this expiry (and the
+        // dokens that cover it). Set BEFORE materializing the draft / creation-auth (Expiry folds
+        // into both the data-to-authorize hash and InitializeTideRequestWithVrk's expireAtTime).
+        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + MULTIADMIN_APPROVAL_EXPIRY_SECONDS);
         // Embed the M0 admin Policy the enclave authorizes the request against.
         req.SetPolicy(adminPolicyBytes);
 
@@ -2086,7 +2110,12 @@ public class TideAttestor implements IgaAttestor {
         // policy. Mirrors signAdminPolicyViaPolicyFlow's request construction, but we persist
         // the carrier for the enclaves to approve rather than signing it here.
         PolicySignRequest req = new PolicySignRequest(newPolicyBytes, POLICY_AUTH_FLOW);
-        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
+        // LONG expiry — like buildMultiAdminApprovalModel, this carrier is PERSISTED and re-read
+        // (ModelRequest.FromBytes) at commit, hours/days after this first phase-1 build. The old
+        // 3-minute window expired the re-sign carrier before the quorum assembled ("Expiry cannot
+        // be in the past"). Set the generous outer bound ONCE here; the accumulation short-circuit
+        // preserves it verbatim for later approvers (and the dokens that cover it).
+        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + MULTIADMIN_APPROVAL_EXPIRY_SECONDS);
         req.SetPolicy(existingM0);
 
         // OLD-POLICY REVOCATION WAS DROPPED ENTIRELY. We deliberately do NOT call
@@ -2491,13 +2520,16 @@ public class TideAttestor implements IgaAttestor {
      *       stub. The tide-realm-admin POLICY bootstrap is NO LONGER non-eligible: its
      *       {@code user_role_mapping_set} now takes the real ceremony (the M0 policy bytes
      *       are signed separately in {@code combineFinal}).</li>
-     *   <li>{@code multiAdmin} — when the realm is REAL-SIGNING-CAPABLE the collected-doken
-     *       carrier ({@code cr.requestModel}) is reloaded and signed via the real
-     *       {@code Midgard.SignModel(Policy:1)} ceremony ({@link #signMultiAdminUnitViaPolicy}),
-     *       fail-closed; the stamped value is the real ORK signature, NOT the
-     *       {@link #DUMMY_SIG_PREFIX} digest. A NON-capable dev/test realm keeps the
-     *       {@link #DUMMY_SIG_PREFIX} stub (no carrier / no orks). Any non-firstAdmin,
-     *       non-multiAdmin mode also keeps the stub.</li>
+     *   <li>{@code multiAdmin} — when the CR is a PRODUCER-ENVELOPE-signed action AND the realm
+     *       is REAL-SIGNING-CAPABLE, the collected-doken carrier ({@code cr.requestModel}) is
+     *       reloaded and signed via the real {@code Midgard.SignModel(Policy:1)} ceremony
+     *       ({@link #signMultiAdminUnitViaPolicy}), fail-closed; the stamped value is the real
+     *       ORK signature, NOT the {@link #DUMMY_SIG_PREFIX} digest. A NON-producer-envelope CR
+     *       (DISABLE_IGA / SET_REALM_ATTRIBUTE / SET_REALM_CONFIG / …) keeps the stub here — it
+     *       has no producer carrier to Policy:1-sign, and any real per-unit column it owns is
+     *       signed POST-replay in {@link #distributeMultiAdminUnitSigs} from committed state.
+     *       A NON-capable dev/test realm also keeps the {@link #DUMMY_SIG_PREFIX} stub (no
+     *       carrier / no orks). Any non-firstAdmin, non-multiAdmin mode also keeps the stub.</li>
      * </ul>
      * The distinction between modes is NOT local-vs-network — both ceremonies go
      * Midgard → ORK in production; it is (a) admin quorum and (b) key /
@@ -2522,10 +2554,22 @@ public class TideAttestor implements IgaAttestor {
             }
             return stubSign(FIRSTADMIN_SIG_PREFIX, canonical);             // firstAdmin stub (not capable / non-producer-envelope CRs)
         }
-        if (MODE_MULTI_ADMIN.equals(mode) && isRealSigningCapable(realm)) {
+        // multiAdmin: ONLY producer-envelope-signed actions carry a real per-unit producer
+        // carrier worth Policy:1-signing here. A NON-producer-envelope action (DISABLE_IGA and
+        // the realm-config CRs SET_REALM_ATTRIBUTE / SET_REALM_CONFIG / REMOVE_REALM_ATTRIBUTE,
+        // etc.) has NO producer attestation unit — its combineFinal value is a stub marker the
+        // dispatcher fans onto the per-row attestation column (audit), while any real per-unit
+        // producer column it DOES touch (e.g. the realm_config node for SET_REALM_ATTRIBUTE) is
+        // signed POST-replay in distributeMultiAdminUnitSigs from committed live state, NOT here.
+        // Gating on realCeremonyEligible (mirroring the firstAdmin branch above) keeps these
+        // non-producer CRs OUT of signMultiAdminUnitsViaPolicy → ModelRequest.FromBytes, which
+        // (a) is correct (DISABLE_IGA was designed to commit as a stub — OFF must never be blocked
+        // by ORK reachability) and (b) avoids the "Expiry cannot be in the past" failure their
+        // canonical-fallback carrier would otherwise hit at commit.
+        if (MODE_MULTI_ADMIN.equals(mode) && realCeremonyEligible && isRealSigningCapable(realm)) {
             return signMultiAdminUnitViaPolicy(session, realm, cr);        // REAL Midgard.SignModel(Policy:1) over the collected-doken carrier (fail-closed)
         }
-        return stubSign(DUMMY_SIG_PREFIX, canonical);                     // multiAdmin (not capable) / non-firstAdmin stub
+        return stubSign(DUMMY_SIG_PREFIX, canonical);                     // multiAdmin (not capable / non-producer-envelope) / non-firstAdmin stub
     }
 
     /**
