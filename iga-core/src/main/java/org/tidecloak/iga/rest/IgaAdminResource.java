@@ -840,6 +840,18 @@ public class IgaAdminResource {
                             ? service.listPendingByIdIn(realm.getId(), finalCrIdIn, finalLimit)
                             : service.listPendingByActionTypeIn(realm.getId(), finalActionTypes, finalOlderThan, finalLimit);
 
+                    // REGEN_ADMIN_POLICY must commit LAST — its commit writes the new
+                    // IGA_ROLE_POLICY.threshold, which re-gates any still-pending grants upward;
+                    // grants must commit under the old threshold first. The commit gate reads the
+                    // ENCODED threshold (1b08bb0), so if the policy CR drained first it would bump
+                    // 1->2 and strand the still-PENDING tide-realm-admin GRANT_ROLES at 1/2. The
+                    // loop below commits candidates in list order, so this stable sort (which only
+                    // pushes REGEN_ADMIN_POLICY to the end, preserving the relative order of every
+                    // other CR) strictly enforces policy-last in the COMMIT, not just the listing.
+                    candidates = new ArrayList<>(candidates);
+                    candidates.sort(java.util.Comparator.comparingInt(
+                            c -> "REGEN_ADMIN_POLICY".equals(c.getActionType()) ? 1 : 0));
+
                     for (IgaChangeRequestEntity candidate : candidates) {
                         String crId = candidate.getId();
                         Map<String, Object> outcome = processOneCr(crId, finalAdmin);
