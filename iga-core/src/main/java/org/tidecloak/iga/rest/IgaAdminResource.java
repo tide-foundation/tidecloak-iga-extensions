@@ -405,6 +405,47 @@ public class IgaAdminResource {
                     .build();
         }
 
+        // Fail-closed ordering gate for the multiAdmin threshold flip: a
+        // REGEN_ADMIN_POLICY commit writes IGA_ROLE_POLICY.threshold 1->2 (the
+        // tide-realm-admin admin-count bump), which instantly RE-GATES every
+        // still-PENDING tide-realm-admin GRANT/REVOKE assignment CR from 1/1 to
+        // 1/2 — stranding them with a 412 "need 1 more signature". The admin UI
+        // commits CRs per-CR in selection order (NOT via bulkAuthorize, so the
+        // REGEN-last sort there does not cover this path), so if the policy CR
+        // is committed before its grants, the grants strand. Refuse to commit
+        // the policy CR while ANY tide-realm-admin assignment CR it covers is
+        // still PENDING — forcing the grants to commit first so the threshold
+        // bump only lands after they're attested at the old (1) threshold.
+        //
+        // Commit-only guard: this lives ONLY here, NOT in the SIGN/authorize/
+        // approval-model paths and NOT via dependsOn/computeBlockState — so the
+        // policy CR's cr.blocked stays false and it remains signable alongside
+        // the grants in one enclave session (the exact reason dependsOn was
+        // removed for this linkage). Reuses the existing READ-ONLY policy/
+        // assignment linkage (same source as relatedPolicyCrId). A no-op for
+        // non-REGEN CRs, for firstAdmin/non-tide realms (linkage == none()), and
+        // for REGEN CRs whose grants are all already committed (empty set).
+        if (TideAttestor.ACTION_REGEN_ADMIN_POLICY.equals(cr.getActionType())) {
+            TideAttestor.PolicyCrLinkage policyLinkage;
+            try {
+                policyLinkage = new TideAttestor(session).resolvePolicyCrLinkage(session, realm);
+            } catch (RuntimeException ex) {
+                log.warnf(ex, "IGA REGEN_ADMIN_POLICY commit-ordering linkage resolution failed "
+                        + "for realm %s (CR %s) — failing closed.", realm.getName(), cr.getId());
+                policyLinkage = null;
+            }
+            if (policyLinkage != null && cr.getId().equals(policyLinkage.policyCrId)
+                    && !policyLinkage.assignmentCrIds.isEmpty()) {
+                return Response.status(Response.Status.PRECONDITION_FAILED)
+                        .entity(Map.of(
+                                "error", "PENDING_ADMIN_GRANTS",
+                                "message", "Commit the tide-realm-admin grant change request(s) "
+                                        + "first — the threshold policy must be applied last.",
+                                "pendingAssignmentCrIds", List.copyOf(policyLinkage.assignmentCrIds)))
+                        .build();
+            }
+        }
+
         UserModel admin = currentUser();
         if (admin == null) {
             return Response.status(Response.Status.UNAUTHORIZED)
