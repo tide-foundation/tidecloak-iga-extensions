@@ -197,8 +197,23 @@ public class IgaAdminResource {
         }
 
         IgaChangeRequestService service = getService();
+
+        // Auto-bundle hint: resolve the realm's current PENDING threshold-policy CR + the pending
+        // tide-realm-admin assignment set it covers ONCE per list call (not per-CR), so each
+        // assignment CR's representation can carry relatedPolicyCrId. READ-ONLY (multiAdmin only;
+        // none() otherwise). Guarded so it can never break the listing.
+        TideAttestor.PolicyCrLinkage policyLinkage;
+        try {
+            policyLinkage = new TideAttestor(session).resolvePolicyCrLinkage(session, realm);
+        } catch (RuntimeException ex) {
+            log.warnf(ex, "IGA relatedPolicyCrId linkage resolution failed for realm %s "
+                    + "(listing unaffected; relatedPolicyCrId left null).", realm.getName());
+            policyLinkage = TideAttestor.PolicyCrLinkage.none();
+        }
+        final TideAttestor.PolicyCrLinkage linkage = policyLinkage;
+
         return results.stream()
-                .map(cr -> toRepresentation(cr, service))
+                .map(cr -> toRepresentation(cr, service, linkage))
                 .collect(Collectors.toList());
     }
 
@@ -2112,6 +2127,21 @@ public class IgaAdminResource {
 
     private IgaChangeRequestRepresentation toRepresentation(IgaChangeRequestEntity cr,
                                                               IgaChangeRequestService service) {
+        // Single-CR callers (GET /{id}, authorize/commit/PUT responses): resolve the policy-CR
+        // linkage on the fly (READ-ONLY; multiAdmin only) so they tag relatedPolicyCrId too.
+        // The list endpoint uses the 3-arg overload and resolves the linkage ONCE per call.
+        TideAttestor.PolicyCrLinkage linkage;
+        try {
+            linkage = new TideAttestor(session).resolvePolicyCrLinkage(session, realm);
+        } catch (RuntimeException ex) {
+            linkage = TideAttestor.PolicyCrLinkage.none();
+        }
+        return toRepresentation(cr, service, linkage);
+    }
+
+    private IgaChangeRequestRepresentation toRepresentation(IgaChangeRequestEntity cr,
+                                                              IgaChangeRequestService service,
+                                                              TideAttestor.PolicyCrLinkage policyLinkage) {
         IgaChangeRequestRepresentation rep = new IgaChangeRequestRepresentation();
         rep.setId(cr.getId());
         rep.setRealmId(cr.getRealmId());
@@ -2195,6 +2225,19 @@ public class IgaAdminResource {
                 BlockState bs = computeBlockState(deps);
                 rep.setBlocked(bs.blocked);
                 rep.setBlockedReason(bs.reason);
+            }
+        } catch (Exception ignored) {
+        }
+
+        // relatedPolicyCrId — INFORMATIONAL auto-bundle hint for the admin UI (NOT a blocking
+        // dependsOn). For a PENDING tide-realm-admin GRANT/REVOKE assignment CR covered by the
+        // realm's current pending REGEN_ADMIN_POLICY CR, point at that policy CR's id so the UI
+        // can auto-include it when the admin selects the assignment. The policy CR itself and all
+        // other CRs (non-tide-realm-admin, firstAdmin, non-tide realms) stay null.
+        try {
+            if (policyLinkage != null && policyLinkage.policyCrId != null
+                    && policyLinkage.assignmentCrIds.contains(cr.getId())) {
+                rep.setRelatedPolicyCrId(policyLinkage.policyCrId);
             }
         } catch (Exception ignored) {
         }

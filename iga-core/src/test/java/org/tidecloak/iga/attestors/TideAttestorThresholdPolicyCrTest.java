@@ -759,4 +759,74 @@ class TideAttestorThresholdPolicyCrTest {
         assertNotNull(carrier, "non-capable realm still builds the carrier (dev/test wiring)");
         verify(spy, never()).initializeApprovalRequestWithVrk(any(), any());
     }
+
+    // --- relatedPolicyCrId linkage (read-only auto-bundle hint) ---------------
+
+    /** A pending REGEN_ADMIN_POLICY CR keyed to the tide-realm-admin role, with a fixed id. */
+    private IgaChangeRequestEntity pendingPolicyCr(String id) {
+        IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
+        cr.setId(id);
+        cr.setRealmId(REALM_ID);
+        cr.setActionType("REGEN_ADMIN_POLICY");
+        cr.setEntityType("ADMIN_POLICY");
+        cr.setEntityId(TIDE_ROLE_ID);
+        cr.setStatus("PENDING");
+        return cr;
+    }
+
+    /** Drive resolveMode to return a non-multiAdmin (firstAdmin) mode via an IgaAuthorizer row. */
+    private void stubFirstAdminMode() {
+        IgaAuthorizerEntity row = new IgaAuthorizerEntity();
+        row.setRealmId(REALM_ID);
+        row.setMode(TideAttestor.MODE_FIRST_ADMIN);
+        @SuppressWarnings("unchecked")
+        TypedQuery<IgaAuthorizerEntity> q = mock(TypedQuery.class);
+        when(em.createNamedQuery(eq("IgaAuthorizer.findByRealm"), eq(IgaAuthorizerEntity.class)))
+                .thenReturn(q);
+        when(q.setParameter(anyString(), any())).thenReturn(q);
+        when(q.getResultStream()).thenAnswer(inv -> Stream.of(row));
+    }
+
+    @Test
+    void resolvePolicyCrLinkage_tagsAssignmentCrsWithPendingPolicyCrId() {
+        // multiAdmin realm with a pending policy CR + two pending tide-realm-admin GRANTs.
+        stubMultiAdminMode();
+        stubFindPending(pendingPolicyCr("regen-cr-1"));
+        stubPendingAssignments(2, 0);
+
+        TideAttestor.PolicyCrLinkage linkage = attestor.resolvePolicyCrLinkage(session, realm);
+
+        assertEquals("regen-cr-1", linkage.policyCrId);
+        assertTrue(linkage.assignmentCrIds.contains("pend-GRANT_ROLES-0"));
+        assertTrue(linkage.assignmentCrIds.contains("pend-GRANT_ROLES-1"));
+        assertEquals(2, linkage.assignmentCrIds.size());
+        // The policy CR itself is NOT in its own assignment set, so the representation builder
+        // leaves the policy CR's relatedPolicyCrId null.
+        assertTrue(!linkage.assignmentCrIds.contains("regen-cr-1"),
+                "the policy CR itself is not in its own assignment set");
+    }
+
+    @Test
+    void resolvePolicyCrLinkage_noPendingPolicyCr_yieldsNullLinkage() {
+        // multiAdmin realm with pending assignments but NO pending policy CR (threshold unchanged):
+        // nothing to auto-bundle → policyCrId null, empty set.
+        stubMultiAdminMode();
+        stubFindPending(null);
+
+        TideAttestor.PolicyCrLinkage linkage = attestor.resolvePolicyCrLinkage(session, realm);
+
+        assertNull(linkage.policyCrId);
+        assertTrue(linkage.assignmentCrIds.isEmpty());
+    }
+
+    @Test
+    void resolvePolicyCrLinkage_firstAdminRealm_yieldsNullLinkage() {
+        // resolveMode != multiAdmin → none(), regardless of any pending policy CR.
+        stubFirstAdminMode();
+
+        TideAttestor.PolicyCrLinkage linkage = attestor.resolvePolicyCrLinkage(session, realm);
+
+        assertNull(linkage.policyCrId);
+        assertTrue(linkage.assignmentCrIds.isEmpty());
+    }
 }

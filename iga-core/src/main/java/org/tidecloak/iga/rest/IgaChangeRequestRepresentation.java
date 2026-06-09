@@ -28,6 +28,7 @@ public class IgaChangeRequestRepresentation {
     private List<String> dependsOn;
     private boolean blocked;
     private String blockedReason;
+    private String relatedPolicyCrId;
 
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
@@ -88,4 +89,7 @@ public class IgaChangeRequestRepresentation {
 
     public String getBlockedReason() { return blockedReason; }
     public void setBlockedReason(String blockedReason) { this.blockedReason = blockedReason; }
+
+    public String getRelatedPolicyCrId() { return relatedPolicyCrId; }
+    public void setRelatedPolicyCrId(String relatedPolicyCrId) { this.relatedPolicyCrId = relatedPolicyCrId; }
 }

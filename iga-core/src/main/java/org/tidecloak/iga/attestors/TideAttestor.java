@@ -1066,6 +1066,62 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
+     * READ-ONLY linkage holder for the admin-UI auto-bundle hint: the id of the realm's current
+     * PENDING {@link #ACTION_REGEN_ADMIN_POLICY} CR (or {@code null}) plus the set of PENDING
+     * tide-realm-admin assignment CR ids it covers. Computed once per change-request list call so
+     * the representation builder can tag each assignment CR with {@code relatedPolicyCrId} WITHOUT
+     * touching the blocking {@code dependsOn}. Empty/null on firstAdmin and non-tide realms.
+     */
+    public static final class PolicyCrLinkage {
+        /** The id of the current PENDING REGEN_ADMIN_POLICY CR, or {@code null} if none exists. */
+        public final String policyCrId;
+        /** The PENDING tide-realm-admin GRANT/REVOKE assignment CR ids the policy CR covers. */
+        public final java.util.Set<String> assignmentCrIds;
+
+        PolicyCrLinkage(String policyCrId, java.util.Set<String> assignmentCrIds) {
+            this.policyCrId = policyCrId;
+            this.assignmentCrIds = assignmentCrIds;
+        }
+
+        public static PolicyCrLinkage none() {
+            return new PolicyCrLinkage(null, java.util.Collections.emptySet());
+        }
+    }
+
+    /**
+     * READ-ONLY: resolve the linkage between the realm's current PENDING threshold-policy CR
+     * ({@link #ACTION_REGEN_ADMIN_POLICY}) and the PENDING tide-realm-admin assignment CRs it
+     * covers, for the admin-UI auto-bundle hint ({@code relatedPolicyCrId}). Side-effect-free:
+     * it only READS the already-ensured pending policy CR (created/folded separately at enclave
+     * open via {@link #ensureThresholdPolicyCrForEnclave}) and the pending assignment set, using
+     * the SAME helpers ({@link #findTideRealmAdminPolicy}'s keying via
+     * {@code findPending(ENTITY_TYPE_ADMIN_POLICY, tideRoleId)} and
+     * {@link #pendingTideRealmAdminAssignmentCrIds}). Returns {@link PolicyCrLinkage#none()} for
+     * firstAdmin / non-tide realms, for a realm with no resolvable tide-realm-admin role, or when
+     * no pending policy CR exists (so all assignment CRs simply stay {@code relatedPolicyCrId=null}).
+     */
+    public PolicyCrLinkage resolvePolicyCrLinkage(KeycloakSession session, RealmModel realm) {
+        if (!MODE_MULTI_ADMIN.equals(resolveMode(session, realm))) {
+            return PolicyCrLinkage.none();
+        }
+        String tideRoleId = tideRealmAdminRoleId(realm);
+        if (tideRoleId == null) {
+            return PolicyCrLinkage.none();
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaChangeRequestService service = new IgaChangeRequestService(em, session);
+        IgaChangeRequestEntity pending =
+                service.findPending(realm.getId(), ENTITY_TYPE_ADMIN_POLICY, tideRoleId);
+        if (pending == null) {
+            // No pending policy CR → nothing to auto-bundle; leave every CR's relatedPolicyCrId null.
+            return PolicyCrLinkage.none();
+        }
+        java.util.Set<String> assignmentCrIds = new java.util.LinkedHashSet<>(
+                pendingTideRealmAdminAssignmentCrIds(session, realm, tideRoleId));
+        return new PolicyCrLinkage(pending.getId(), assignmentCrIds);
+    }
+
+    /**
      * The NET membership delta of all PENDING tide-realm-admin assignment CRs in the realm:
      * {@code +1} per pending {@code GRANT_ROLES} and {@code -1} per pending {@code REVOKE_ROLES}
      * whose ROWS_JSON targets the {@code tide-realm-admin} role id. Used at CAPTURE to project
