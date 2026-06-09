@@ -676,56 +676,6 @@ class TideAttestorThresholdPolicyCrTest {
                 "non-REGEN carrier Draft must NOT carry the {0x01} revoke flag at index 2");
     }
 
-    // --- decoupled retire of the OLD M0 (PART B — non-wedging best-effort) -----
-
-    /**
-     * The decoupled retire is NON-WEDGING: on a non-real-signing-capable (dev/test) realm —
-     * the default test realm has no tide-vendor-key component — it computes the target id and
-     * short-circuits to a no-op WITHOUT throwing. A retire that threw here would roll back the
-     * already-committed new M0, exactly the wedge the decoupling removes.
-     */
-    @Test
-    void retireOldAdminPolicy_nonCapableRealm_isNoOpAndDoesNotThrow() {
-        // A well-formed signed OLD M0 body (unsigned bytes + a dummy 64-byte signature so
-        // Policy.From(...).GetId() succeeds). Base64 is what IgaRolePolicyEntity.POLICY stores.
-        byte[] unsigned = TideAttestor.buildUnsignedAdminPolicyBytes(1, VVK_ID);
-        Policy p = Policy.From(unsigned);
-        p.AddSignature(new byte[64]);
-        byte[] signedOldM0 = p.ToBytes();
-
-        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() ->
-                attestor.retireOldAdminPolicyBestEffort(realm, new org.keycloak.common.util.MultivaluedHashMap<>(),
-                        signedOldM0, "regen-cr-retire"));
-    }
-
-    /**
-     * NON-WEDGING on a malformed/empty old body: a null or undecodable OLD M0 must be swallowed
-     * (logged), never thrown — the new M0 is already committed.
-     */
-    @Test
-    void retireOldAdminPolicy_nullOrBadBytes_swallowsAndDoesNotThrow() {
-        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() ->
-                attestor.retireOldAdminPolicyBestEffort(realm, new org.keycloak.common.util.MultivaluedHashMap<>(),
-                        null, "regen-cr-retire-null"));
-        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() ->
-                attestor.retireOldAdminPolicyBestEffort(realm, new org.keycloak.common.util.MultivaluedHashMap<>(),
-                        new byte[]{1, 2, 3}, "regen-cr-retire-garbage"));
-    }
-
-    /**
-     * Sanity: the target id the retire would carry in {@code Draft[0]} is exactly
-     * {@code Policy.GetId()} = SHA-512(DataToVerify) = 64 bytes — the ORK
-     * {@code RetirePolicyRequest} contract (Draft[0] must be 64 bytes).
-     */
-    @Test
-    void oldM0_targetId_isSha512_64Bytes() {
-        byte[] unsigned = TideAttestor.buildUnsignedAdminPolicyBytes(1, VVK_ID);
-        Policy p = Policy.From(unsigned);
-        p.AddSignature(new byte[64]);
-        byte[] id = Policy.From(p.ToBytes()).GetId();
-        assertEquals(64, id.length, "RetirePolicy Draft[0] target id is SHA-512 (64 bytes)");
-    }
-
     // --- vendor creation-auth wiring (enclave-validation regression) ----------
 
     @Test

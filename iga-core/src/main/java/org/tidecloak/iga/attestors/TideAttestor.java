@@ -1641,15 +1641,13 @@ public class TideAttestor implements IgaAttestor {
      *       and {@link #ROW_NEW_THRESHOLD}. Sets STATUS=APPROVED on the managed CR.</li>
      * </ol>
      *
-     * <p><b>OLD-POLICY REVOCATION is NO LONGER driven inline.</b> The phase-1 rotation flag
-     * ({@code PolicySignRequest.SetRevokeAuthorizingPolicyOnSign} → {@code Draft} index 2) was
-     * REMOVED from {@link #buildPolicyResignApprovalModel}, because burning the old M0 the instant
-     * this re-sign succeeded broke the other CRs in the same bulk commit (they present the same M0
-     * as their authorizer → {@code AuthorizerNotAllowed}) and, being a non-transactional per-ORK
-     * side effect, wedged the realm on rollback. This re-sign now signs ONLY the new M0; the old
-     * M0 stays valid (superseded by the newly-stored M0). Revocation is decoupled into a separate
-     * idempotent post-commit retire step — see the {@code TODO(decoupled-retire)} seam in the body,
-     * which captures the old M0 id before the upsert overwrites the row.
+     * <p><b>OLD-POLICY REVOCATION was dropped entirely — there is NO revocation/retire step.</b>
+     * The phase-1 rotation flag ({@code PolicySignRequest.SetRevokeAuthorizingPolicyOnSign} →
+     * {@code Draft} index 2) is NOT set in {@link #buildPolicyResignApprovalModel} (burning the old
+     * M0 the instant this re-sign succeeded broke the other CRs in the same bulk commit — they
+     * present the same M0 as their authorizer → {@code AuthorizerNotAllowed} — and, being a
+     * non-transactional per-ORK side effect, wedged the realm on rollback). This re-sign signs ONLY
+     * the new M0 and stores it; the old M0 is simply superseded by the newly-stored M0.
      *
      * <p>Fail-closed: a missing carrier, missing material, or a real sign failure throws,
      * rolling back the commit tx — a real-provisioned realm never installs a fake-signed or
@@ -1703,22 +1701,6 @@ public class TideAttestor implements IgaAttestor {
             String policyBody = java.util.Base64.getEncoder().encodeToString(policy.ToBytes());
 
             IgaRolePolicyEntity existing = findTideRealmAdminPolicy(session, realm);
-            // Capture the OLD M0 *policy bytes* BEFORE the upsert overwrites the row in place.
-            // POLICY = Base64(signed Policy.ToBytes()); the decoupled retire targets the OLD M0's
-            // crypto id (Policy.GetId() = SHA-512(DataToVerify)), NOT the iga_role_policy row id.
-            // Read it now, while `existing` still holds the superseded policy body.
-            byte[] oldM0Bytes = null;
-            if (existing != null && existing.getPolicy() != null && !existing.getPolicy().isBlank()) {
-                try {
-                    oldM0Bytes = java.util.Base64.getDecoder().decode(existing.getPolicy());
-                } catch (RuntimeException decodeEx) {
-                    // Non-fatal: a malformed old body just means we can't compute a retire target.
-                    // The new M0 still commits; the retire is skipped (logged below).
-                    log.warnf("IGA threshold-policy commit: could not Base64-decode the OLD M0 policy "
-                            + "body for realm %s (CR %s) — decoupled retire of the old M0 will be "
-                            + "skipped: %s", realm.getName(), cr.getId(), decodeEx.getMessage());
-                }
-            }
             IgaRolePolicyEntity result = upsertAdminPolicyRow(session, realm, existing,
                     policyBody, vvkSig, newThreshold);
             if (result == null) {
@@ -1728,14 +1710,9 @@ public class TideAttestor implements IgaAttestor {
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
             em.flush();
 
-            // OLD-POLICY REVOCATION is NO LONGER driven inline (the phase-1
-            // SetRevokeAuthorizingPolicyOnSign flag was removed from buildPolicyResignApprovalModel
-            // — see the comment there). The re-sign signs ONLY the new M0; the old M0 stays valid
-            // and is now superseded by the newly-stored M0 above. Revocation is DECOUPLED into the
-            // separate, idempotent, NON-WEDGING post-commit retire below: the new M0 is already
-            // durably committed (STATUS will be set APPROVED), so a retire failure NEVER rolls back
-            // the commit — it just leaves the (now-superseded) old M0 valid until a later retry.
-            retireOldAdminPolicyBestEffort(realm, config, oldM0Bytes, cr.getId());
+            // OLD-POLICY REVOCATION is NOT performed. Revocation was dropped entirely: the re-sign
+            // signs ONLY the new M0 and stores it (upsert above) + updates IGA_ROLE_POLICY.threshold.
+            // The old M0 is simply superseded by the newly-stored M0 — there is no burn/retire step.
 
             log.infof("IGA threshold-policy commit: realm %s tide-realm-admin admin Policy RE-SIGNED via "
                     + "Policy:1 quorum + installed at threshold %d (CR %s).",
@@ -1771,115 +1748,6 @@ public class TideAttestor implements IgaAttestor {
         }
         throw new RuntimeException("IGA threshold-policy CR " + cr.getId()
                 + " carries no " + ROW_NEW_THRESHOLD + " (the final threshold to install)");
-    }
-
-    /**
-     * DECOUPLED, idempotent, NON-WEDGING retire of the superseded OLD M0 admin Policy, issued
-     * AFTER the new M0 is durably committed by {@link #replayRegenAdminPolicy}. This is the
-     * replacement for the removed inline {@code SetRevokeAuthorizingPolicyOnSign} burn.
-     *
-     * <h3>Contract (ORK {@code RetirePolicyRequest}, Name="RetirePolicy" Version="1")</h3>
-     * <ul>
-     *   <li>{@code AllowedAuthorizationFlows = [AuthorizerPack]} (VRK flow), {@code UserType.VVK},
-     *       {@code ForUseWithCommittedUser = true}.</li>
-     *   <li>{@code Draft[0]} = the 64-byte target policy id to revoke = {@code Policy.GetId()} =
-     *       SHA-512 of the OLD M0's {@code DataToVerify}.</li>
-     *   <li>VRK-authorized: the realm VRK creation-auth signs {@code GetDataToAuthorize()} (hash of
-     *       Draft) via the MAIN gVRK AuthorizerPack triplet (NOT the burned firstAdmin pack), then
-     *       {@code Midgard.SignModel(settings, request)}. Idempotent on the ORK (a duplicate revoke
-     *       is a no-op success).</li>
-     * </ul>
-     *
-     * <h3>NON-WEDGING guarantee</h3>
-     * The new M0 is ALREADY committed when this runs. Any failure here (the ORK image not yet
-     * rebuilt with {@code RetirePolicyRequest}, the MAIN gVRK pack not yet listing
-     * {@code RetirePolicy:1}, a transient network error, OR — currently — the absence of the
-     * Midgard Java wrapper needed to BUILD the request) is caught, logged as a warning, and
-     * SWALLOWED. The old M0 simply stays valid (superseded) until a later retry. A retire failure
-     * must NEVER roll back / fail the commit.
-     *
-     * <h3>⚠ BLOCKED: Midgard Java {@code RetirePolicyRequest} wrapper missing</h3>
-     * To BUILD a {@code RetirePolicy:1} AuthorizerPack-flow request from Java we need a Midgard
-     * wrapper class (mirroring {@code AttestationUnitSignRequest}/{@code PolicySignRequest}) that:
-     * <pre>
-     *   public class RetirePolicyRequest extends ModelRequest {
-     *       // Name="RetirePolicy", Version="1", AuthFlow = authFlow (we pass "VRK:1")
-     *       public RetirePolicyRequest(byte[] targetPolicyId64, String authFlow) { ... }
-     *       // Draft = TideMemory{ seg0 = targetPolicyId64 } (the 64-byte SHA-512 policy id)
-     *       // inherits SetAuthorization / SetAuthorizer / SetAuthorizerCertificate / GetDataToAuthorize
-     *   }
-     * </pre>
-     * No such wrapper exists in {@code Midgard/Java/.../RequestExtensions/} today, and
-     * {@code ModelRequest.InitializeTideRequestWithVrk} is the wrong path (it is {@code Policy:1}-
-     * gated and builds a doken-collection carrier, not a directly-VRK-signed AuthorizerPack request).
-     * Until the wrapper lands, this method computes the target id, validates it, and logs the
-     * pending retire as a guarded no-op (so PART A — the inline-burn removal — deploys cleanly).
-     *
-     * @param realm        the realm whose old M0 is being retired (log/context).
-     * @param config       the tide-vendor-key component config (gVRK / gVRKCertificate / VRK).
-     * @param oldM0Bytes   signed {@code Policy.ToBytes()} of the superseded M0 (may be {@code null}).
-     * @param crId         the REGEN CR id (log context).
-     */
-    void retireOldAdminPolicyBestEffort(RealmModel realm, MultivaluedHashMap<String, String> config,
-                                        byte[] oldM0Bytes, String crId) {
-        try {
-            if (oldM0Bytes == null || oldM0Bytes.length == 0) {
-                log.warnf("IGA threshold-policy commit: no OLD M0 policy bytes captured for realm %s "
-                        + "(CR %s) — nothing to retire (new M0 already committed).",
-                        realm.getName(), crId);
-                return;
-            }
-
-            // Compute the 64-byte target id = Policy.GetId() = SHA-512(DataToVerify).
-            byte[] targetPolicyId = Policy.From(oldM0Bytes).GetId();
-            if (targetPolicyId == null || targetPolicyId.length != 64) {
-                log.warnf("IGA threshold-policy commit: OLD M0 Policy.GetId() for realm %s (CR %s) was "
-                        + "%d bytes (expected 64) — skipping decoupled retire.",
-                        realm.getName(), crId, targetPolicyId == null ? 0 : targetPolicyId.length);
-                return;
-            }
-
-            // Only attempt the real retire when the realm can actually sign (real gVRK + VRK present);
-            // dev/test realms carry no real VRK and would just fail the SignModel.
-            if (!approvalRequestNeedsVrkInit(realm)) {
-                log.infof("IGA threshold-policy commit: realm %s (CR %s) is not real-signing-capable — "
-                        + "decoupled retire of OLD M0 id %s is a no-op (dev/test).",
-                        realm.getName(), crId,
-                        java.util.Base64.getEncoder().encodeToString(targetPolicyId));
-                return;
-            }
-
-            // ── SEND STEP — BLOCKED on the Midgard Java RetirePolicyRequest wrapper ──────────────
-            // The full intended construction (once the wrapper exists) is:
-            //
-            //   SignRequestSettingsMidgard settings = constructSignSettings(config);
-            //   RetirePolicyRequest req = new RetirePolicyRequest(targetPolicyId, VRK_AUTH_FLOW);
-            //   req.SetCustomExpiry((System.currentTimeMillis()/1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
-            //   // MAIN gVRK AuthorizerPack triplet (post-flip; NOT the burned firstAdmin pack):
-            //   String gVrk     = config.getFirst(CFG_GVRK);
-            //   String gVrkCert = config.getFirst(CFG_GVRK_CERTIFICATE);
-            //   req.SetAuthorization(Midgard.SignWithVrk(req.GetDataToAuthorize(),
-            //                                            settings.VendorRotatingPrivateKey));
-            //   req.SetAuthorizer(HexFormat.of().parseHex(gVrk));
-            //   req.SetAuthorizerCertificate(Base64.getDecoder().decode(gVrkCert));
-            //   Midgard.SignModel(settings, req);   // idempotent revoke on the ORK
-            //
-            // No Midgard Java RetirePolicyRequest wrapper exists yet, so we CANNOT build the Draft[0]
-            // target / AuthorizerPack request from Java. Per the non-wedging contract this is a
-            // guarded no-op: the new M0 is committed; the old M0 stays valid (superseded) until the
-            // wrapper lands and a retry retires it.
-            // TODO(decoupled-retire/midgard-wrapper): add Midgard Java RetirePolicyRequest (shape in
-            // the javadoc above), then replace this log with the SEND STEP block above.
-            log.warnf("IGA threshold-policy commit: decoupled retire of OLD M0 id %s for realm %s "
-                    + "(CR %s) is PENDING — Midgard Java RetirePolicyRequest wrapper not yet available. "
-                    + "New M0 is committed; old M0 stays valid (superseded) until a retry.",
-                    java.util.Base64.getEncoder().encodeToString(targetPolicyId), realm.getName(), crId);
-        } catch (Exception e) {
-            // NON-WEDGING: never let a retire failure roll back the (already-committed) new M0.
-            log.warnf("IGA threshold-policy commit: decoupled retire of the OLD M0 failed for realm %s "
-                    + "(CR %s) — swallowed (new M0 already committed; old M0 stays valid until retry): %s",
-                    realm.getName(), crId, e.getMessage());
-        }
     }
 
     /**
@@ -2174,17 +2042,16 @@ public class TideAttestor implements IgaAttestor {
         req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
         req.SetPolicy(existingM0);
 
-        // OLD-POLICY REVOCATION IS NO LONGER DRIVEN INLINE. We deliberately do NOT call
+        // OLD-POLICY REVOCATION WAS DROPPED ENTIRELY. We deliberately do NOT call
         // req.SetRevokeAuthorizingPolicyOnSign() here. Setting that flag made the ORK BURN the
         // old M0 admin Policy the instant this Policy:1 re-sign succeeded — which (a) broke the
         // OTHER CRs in the same bulk commit (the tide-realm-admin GRANT_ROLES present that same
         // M0 as their authorizer → AuthorizerNotAllowed once burned), and (b) is an irreversible
         // per-ORK side effect NOT transactional with TideCloak, so a rollback left the realm
         // WEDGED (old M0 burned on the ORKs, iga_role_policy still pointing at it). The re-sign
-        // now ONLY signs the NEW M0; the old M0 stays valid (superseded by the newly-stored M0).
-        // The ORK reads an absent flag as "no burn" (back-compat). Revocation is decoupled into a
-        // separate post-commit retire step — see the TODO(decoupled-retire) seam in
-        // replayRegenAdminPolicy.
+        // now ONLY signs the NEW M0 and stores it; the old M0 stays valid (superseded by the
+        // newly-stored M0). The ORK reads an absent flag as "no burn" (back-compat). There is NO
+        // revocation/retire step.
 
         // Materialize Draft (PolicySignRequest folds the policy payload into Draft lazily via
         // Serialize, invoked by GetDraft) BEFORE Encode() — else Encode() persists an EMPTY

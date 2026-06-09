@@ -840,16 +840,6 @@ public class IgaAdminResource {
                             ? service.listPendingByIdIn(realm.getId(), finalCrIdIn, finalLimit)
                             : service.listPendingByActionTypeIn(realm.getId(), finalActionTypes, finalOlderThan, finalLimit);
 
-                    // Commit REGEN_ADMIN_POLICY CRs LAST within the batch. The admin-policy re-sign
-                    // installs a NEW M0; the non-policy CRs (e.g. tide-realm-admin GRANT_ROLES)
-                    // present the CURRENT M0 as their authorizer, so draining them first keeps them
-                    // authorized by the M0 they were built against. Hygiene for when the decoupled
-                    // OLD-M0 retire lands (see TODO(decoupled-retire) in TideAttestor); a stable sort
-                    // preserves the existing relative order of all other CRs.
-                    candidates = new ArrayList<>(candidates);
-                    candidates.sort(java.util.Comparator.comparingInt(
-                            c -> "REGEN_ADMIN_POLICY".equals(c.getActionType()) ? 1 : 0));
-
                     for (IgaChangeRequestEntity candidate : candidates) {
                         String crId = candidate.getId();
                         Map<String, Object> outcome = processOneCr(crId, finalAdmin);

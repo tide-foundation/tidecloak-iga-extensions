@@ -236,11 +236,10 @@ public class IgaReplayDispatcher {
             // installs it into IGA_ROLE_POLICY at the new threshold. Delegated to the
             // TideAttestor (which owns the Midgard/Policy material + upsert). It sets
             // STATUS=APPROVED itself; the dispatcher tail's re-set is harmless/idempotent.
-            // OLD-policy (M0) revocation is NOT a replay step and is NO LONGER driven inline at
-            // all: the phase-1 SetRevokeAuthorizingPolicyOnSign flag was removed (it burned the
-            // old M0 mid-batch → AuthorizerNotAllowed / realm wedge). The re-sign signs only the
-            // new M0; revocation is decoupled into a separate post-commit retire step (see the
-            // TODO(decoupled-retire) seam in TideAttestor.replayRegenAdminPolicy).
+            // OLD-policy (M0) revocation was dropped entirely — there is NO replay-time or
+            // post-commit retire step. The phase-1 SetRevokeAuthorizingPolicyOnSign flag is not set
+            // (it burned the old M0 mid-batch → AuthorizerNotAllowed / realm wedge). The re-sign
+            // signs only the new M0 and stores it; the old M0 is superseded by the newly-stored M0.
             case "REGEN_ADMIN_POLICY" ->
                     new org.tidecloak.iga.attestors.TideAttestor(session)
                             .replayRegenAdminPolicy(session, realm, cr);
