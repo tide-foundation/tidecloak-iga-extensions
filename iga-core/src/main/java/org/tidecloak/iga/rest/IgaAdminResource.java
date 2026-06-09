@@ -530,12 +530,15 @@ public class IgaAdminResource {
         // Idempotent (only NULL/stub columns), firstAdmin+capable gated, fail-closed, admin-
         // triggered (fires here at approval, never at toggle). No-op while ADOPT CRs pend.
         //
-        // SKIP for DISABLE_IGA: the convergence does an ORK signing ceremony (on a
-        // firstAdmin real-signing realm once no ADOPTs pend — and replayDisableIga
-        // just cancelled every pending ADOPT). Turning IGA OFF must never be blocked
-        // by ORK reachability, and re-stamping producer columns on a realm being
-        // disabled is pointless — so the disable commit does not run convergence.
-        if (!"DISABLE_IGA".equals(cr.getActionType())) {
+        // SKIP for DISABLE_IGA and OFFBOARD_REALM: the convergence does an ORK signing
+        // ceremony (on a firstAdmin real-signing realm once no ADOPTs pend). Turning
+        // IGA OFF must never be blocked by ORK reachability, and re-stamping producer
+        // columns on a realm being disabled is pointless. OFFBOARD_REALM tears the
+        // realm down entirely (ragnarok teardown ran in the replay above), so
+        // re-stamping its producer columns is likewise pointless and must not block
+        // the offboard on ORK reachability — so neither commit runs convergence.
+        if (!"DISABLE_IGA".equals(cr.getActionType())
+                && !org.tidecloak.iga.attestors.TideAttestor.ACTION_OFFBOARD_REALM.equals(cr.getActionType())) {
             org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, realm);
         }
 

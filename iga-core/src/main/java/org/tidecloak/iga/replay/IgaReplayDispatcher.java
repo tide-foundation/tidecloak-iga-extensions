@@ -236,6 +236,13 @@ public class IgaReplayDispatcher {
             // to run inline runs HERE on commit, in order, within the replay tx.
             case "DISABLE_IGA" -> replayDisableIga(session, realm, rows, em);
 
+            // ----- Governed Ragnarok realm offboard (OFFBOARD_REALM) -----
+            // Mirrors DISABLE_IGA: an irreversible, admin-approved (min-3) realm
+            // teardown captured as a CR. The REAL teardown lives in ragnarok and is
+            // looked up via the RagnarokOffboardService SPI here (iga-core does NOT
+            // depend on ragnarok). Fail-closed when the SPI is absent.
+            case "OFFBOARD_REALM" -> replayOffboardRealm(session, realm, rows, em);
+
             // ----- Admin-policy threshold re-sign (steady-state multiAdmin) -----
             // NOT a model mutation: it Policy:1-signs the NEW admin Policy (carried in
             // ROWS_JSON, approved via the two-phase ceremony) with the collected dokens and
@@ -2175,6 +2182,64 @@ public class IgaReplayDispatcher {
                 log.infof("IGA DISABLE_IGA replay: realm %s — default signature algorithm reverted to RS256.",
                         realm.getName());
             }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Governed Ragnarok realm offboard (OFFBOARD_REALM)
+    //
+    // Captured as an irreversible, admin-approved (min-3) CR (mirroring
+    // DISABLE_IGA). The REAL teardown lives in ragnarok; iga-core does NOT depend
+    // on ragnarok, so the teardown is reached via the RagnarokOffboardService SPI
+    // looked up by TYPE on the session. This runs INSIDE the replay tx
+    // (IGA_REPLAY_ACTIVE is already true) so any model writes the offboard performs
+    // pass straight through the IGA capture wrappers, and an exception rolls the
+    // whole replay tx back — nothing is torn down and the CR stays committable-retry.
+    //
+    // FAIL-CLOSED when the SPI is absent: if ragnarok is not deployed,
+    // session.getProvider(RagnarokOffboardService.class) returns null. We MUST NOT
+    // silently flip STATUS=APPROVED (that would "commit" an offboard that never ran)
+    // — instead we throw, rolling back the replay tx so the CR remains committable
+    // once ragnarok ships.
+    //
+    // STUB / no ORK: OFFBOARD_REALM is NOT a producer-envelope-signed action
+    // (TideAttestor.isProducerEnvelopeSignedAction returns false), so combineFinal
+    // produced a stub signature — no ORK/Policy:1 round-trip gates the CR
+    // attestation. The dispatcher tail then sets STATUS=APPROVED.
+    // -------------------------------------------------------------------------
+
+    private static void replayOffboardRealm(KeycloakSession session, RealmModel realm,
+                                            List<Map<String, Object>> rows, EntityManager em) {
+        if (realm == null) {
+            throw new IllegalStateException("OFFBOARD_REALM replay: realm not loadable");
+        }
+        // Bind the realm on the session context so the ragnarok teardown can rely on
+        // a realm-bound session (same contract as replayDisableIga).
+        session.getContext().setRealm(realm);
+
+        org.tidecloak.iga.providers.RagnarokOffboardService svc =
+                session.getProvider(org.tidecloak.iga.providers.RagnarokOffboardService.class);
+        if (svc == null) {
+            // Fail-closed: ragnarok not deployed → do NOT pretend the offboard ran.
+            throw new IllegalStateException(
+                    "OFFBOARD_REALM replay: no RagnarokOffboardService provider registered (ragnarok not "
+                            + "deployed). Refusing to commit an offboard that did not run — the replay tx rolls "
+                            + "back and CR " + realm.getName() + " stays committable-retry until ragnarok ships.");
+        }
+
+        try {
+            org.tidecloak.iga.providers.RagnarokOffboardResult result =
+                    svc.offboardRealm(session, realm, em);
+            log.infof("IGA OFFBOARD_REALM replay: realm %s — ragnarok offboard complete (success=%s): %s",
+                    realm.getName(),
+                    result != null && result.success(),
+                    result != null ? result.summary() : "(no summary)");
+        } catch (org.tidecloak.iga.providers.RagnarokOffboardException e) {
+            // Surface as an unchecked exception so the replay tx rolls back (nothing
+            // torn down) and the commit fails with a clear message.
+            throw new RuntimeException(
+                    "OFFBOARD_REALM replay: ragnarok offboard failed for realm " + realm.getName()
+                            + " — replay tx rolled back, nothing torn down: " + e.getMessage(), e);
         }
     }
 

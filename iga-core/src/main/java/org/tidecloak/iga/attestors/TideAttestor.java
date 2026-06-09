@@ -118,6 +118,31 @@ public class TideAttestor implements IgaAttestor {
     private static final double THRESHOLD_PERCENTAGE = 0.7;
 
     /**
+     * Action type for a governed Ragnarok realm-offboard (mirrors
+     * {@code DISABLE_IGA}): non-producer (stub-signed CR, no ORK Policy:1 carrier
+     * round-trip), NOT auto-committable even for firstAdmin (irreversible), NOT an
+     * ADOPT action. The real teardown runs on commit via the
+     * {@link org.tidecloak.iga.providers.RagnarokOffboardService} SPI looked up by
+     * {@code IgaReplayDispatcher}.
+     */
+    public static final String ACTION_OFFBOARD_REALM = "OFFBOARD_REALM";
+
+    /**
+     * Realm attribute overriding the minimum distinct-admin approvals required to
+     * commit an {@code OFFBOARD_REALM} CR. Optional; absent/invalid →
+     * {@link #OFFBOARD_MIN_ADMINS_DEFAULT}.
+     */
+    public static final String ATTR_OFFBOARD_MIN_ADMINS = "iga.offboardMinAdmins";
+
+    /**
+     * Default minimum distinct-admin approvals to commit an irreversible
+     * {@code OFFBOARD_REALM} CR. An offboard requires
+     * {@code max(normalQuorumThreshold, OFFBOARD_MIN_ADMINS)} signatures, so even a
+     * small realm cannot tear itself down on a single (or sub-3) quorum.
+     */
+    public static final int OFFBOARD_MIN_ADMINS_DEFAULT = 3;
+
+    /**
      * The realm's VRK key-provider component. Its presence is
      * the VRK-availability precondition for the firstAdmin lazy seed: absent → no
      * VRK to sign with, so the seed is skipped and resolveMode's no-row branch
@@ -331,6 +356,15 @@ public class TideAttestor implements IgaAttestor {
 
     @Override
     public int getThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr) {
+        // OFFBOARD_REALM is irreversible: it MUST require a minimum number of distinct
+        // admin approvals REGARDLESS of mode (even firstAdmin's single-signer 1-of-1 is
+        // not enough to tear a realm down). The gate is max(normal quorum, min-admins),
+        // so a larger multiAdmin quorum still wins, but the floor can never drop below
+        // the configured minimum (default 3). Computed FIRST, before the firstAdmin
+        // short-circuit, so firstAdmin offboards are NOT 1-of-1.
+        if (cr != null && ACTION_OFFBOARD_REALM.equals(cr.getActionType())) {
+            return Math.max(normalQuorumThreshold(session, realm, cr), resolveOffboardMinAdmins(realm));
+        }
         // firstAdmin is single-signer onboarding: ALWAYS 1, unconditionally — it
         // does not consult per-scope overrides, the realm attribute, or the admin
         // count. The constant-first equals() is null-safe for resolveMode's null return.
@@ -377,6 +411,79 @@ public class TideAttestor implements IgaAttestor {
         // No IGA_ROLE_POLICY row yet (or a row with no encoded threshold) — pre-bootstrap /
         // legacy. Fall back to the live floor so the gate is still sensibly populated.
         return Math.max(1, (int) (THRESHOLD_PERCENTAGE * countActiveTideRealmAdmins(realm, session)));
+    }
+
+    /**
+     * The realm-default quorum an {@code OFFBOARD_REALM} CR would gate at on its
+     * own, IGNORING the offboard minimum — i.e. the same realm-default value the
+     * multiAdmin branch of {@link #getThreshold} resolves to (encoded M0 policy
+     * threshold → live {@code floor(0.7 × N)} fallback). In firstAdmin / Tideless
+     * mode this is 1. {@link #getThreshold} takes {@code max(this, min-admins)}, so
+     * a realm whose normal quorum already EXCEEDS the offboard minimum still
+     * requires the larger quorum, while a small realm is floored at the minimum.
+     *
+     * <p>OFFBOARD_REALM is a realm-node action with no per-scope entity, so the
+     * per-scope override / ADOPT short-circuits never apply to it; this helper goes
+     * straight to the realm-default gate.
+     */
+    private int normalQuorumThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr) {
+        if (MODE_FIRST_ADMIN.equals(resolveMode(session, realm))) {
+            return 1;
+        }
+        IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
+        if (policy != null) {
+            Integer encoded = currentEncodedThreshold(policy);
+            if (encoded != null) {
+                return Math.max(1, encoded);
+            }
+        }
+        return Math.max(1, (int) (THRESHOLD_PERCENTAGE * countActiveTideRealmAdmins(realm, session)));
+    }
+
+    /**
+     * The configured minimum distinct-admin approvals for an
+     * {@code OFFBOARD_REALM} CR: realm attribute {@link #ATTR_OFFBOARD_MIN_ADMINS}
+     * if present and a valid integer ≥ 1, else {@link #OFFBOARD_MIN_ADMINS_DEFAULT}
+     * (3). A non-positive / non-numeric attribute is ignored (falls back to the
+     * default) so the offboard floor can never be silently weakened below 1.
+     */
+    private static int resolveOffboardMinAdmins(RealmModel realm) {
+        String raw = realm != null ? realm.getAttribute(ATTR_OFFBOARD_MIN_ADMINS) : null;
+        if (raw != null) {
+            try {
+                int v = Integer.parseInt(raw.trim());
+                if (v >= 1) {
+                    return v;
+                }
+            } catch (NumberFormatException ignored) {
+                // fall through to default
+            }
+        }
+        return OFFBOARD_MIN_ADMINS_DEFAULT;
+    }
+
+    /**
+     * Public pre-flight helper for the offboard CREATOR (ragnarok): the number of
+     * distinct admin approvals an {@code OFFBOARD_REALM} CR would require to commit
+     * in {@code realm} right now ({@code max(normalQuorumThreshold, min-admins)}).
+     * Ragnarok can compare this against the count of admins that CAN sign and
+     * pre-reject triggering an un-approvable offboard, rather than filing a CR that
+     * can never reach threshold.
+     */
+    public int offboardRealmThreshold(KeycloakSession session, RealmModel realm) {
+        return Math.max(normalQuorumThreshold(session, realm, null), resolveOffboardMinAdmins(realm));
+    }
+
+    /**
+     * Public pre-flight helper: the count of ACTIVE tide-realm-admins in
+     * {@code realm} (committed, enabled, Tide-identity grant). Exposed so the
+     * offboard creator (ragnarok) can check it against
+     * {@link #offboardRealmThreshold} before filing an {@code OFFBOARD_REALM} CR —
+     * if fewer admins exist than the threshold requires, the offboard could never
+     * be approved, so it should be refused at creation time.
+     */
+    public static int countActiveTideRealmAdminsForOffboard(KeycloakSession session, RealmModel realm) {
+        return countActiveTideRealmAdmins(realm, session);
     }
 
     // -------------------------------------------------------------------------
