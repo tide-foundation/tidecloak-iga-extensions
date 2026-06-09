@@ -461,6 +461,88 @@ class TideAttestorThresholdPolicyCrTest {
         assertTrue(pending.getRowsJson().contains("\"NEW_THRESHOLD\":2"));
     }
 
+    // --- signature-preservation: unchanged fold is a NO-OP ------------------
+
+    /**
+     * Build a PENDING REGEN_ADMIN_POLICY CR whose ROWS_JSON is already pinned to {@code threshold}
+     * EXACTLY as the production fold/create path would write it (so the unchanged-detection guard
+     * sees a matching NEW_THRESHOLD + POLICY_BODY_UNSIGNED). The NON-capable test realm has no
+     * vvkId, so the pinned policy bytes use {@code buildUnsignedAdminPolicyBytes(threshold, null)}.
+     */
+    private IgaChangeRequestEntity pinnedPolicyCr(int oldThreshold, int newThreshold) {
+        IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
+        cr.setId("pending-regen");
+        cr.setRealmId(REALM_ID);
+        cr.setEntityType("ADMIN_POLICY");
+        cr.setEntityId(TIDE_ROLE_ID);
+        cr.setActionType("REGEN_ADMIN_POLICY");
+        cr.setStatus("PENDING");
+        String bodyB64 = Base64.getEncoder().encodeToString(
+                TideAttestor.buildUnsignedAdminPolicyBytes(newThreshold, null));
+        cr.setRowsJson("[{\"OLD_THRESHOLD\":" + oldThreshold + ",\"NEW_THRESHOLD\":" + newThreshold
+                + ",\"ROLE_ID\":\"" + TIDE_ROLE_ID + "\",\"VVK_ID\":null,"
+                + "\"POLICY_BODY_UNSIGNED\":\"" + bodyB64 + "\"}]");
+        return cr;
+    }
+
+    @Test
+    void fold_isNoOp_whenPendingSetUnchanged_preservesRecordedSignatures() {
+        // The CORE bug fix: an existing pending policy CR is ALREADY pinned to the projected
+        // threshold (2), carries a recorded authorization + a signed REQUEST_MODEL carrier, and the
+        // pending tide-realm-admin set has NOT changed. Re-opening the enclave must be a NO-OP:
+        // ROWS_JSON, REQUEST_MODEL, and the authorizations are PRESERVED — no rewrite, no clear.
+        stubMultiAdminMode();
+        stubPolicyLookup(policyAtThreshold(1));        // committed policy still encodes the OLD 1
+        IgaChangeRequestEntity pending = pinnedPolicyCr(1, 2); // CR already pinned to projected 2
+        pending.setRequestModel("SIGNED-CARRIER-FROM-PHASE2"); // an admin already signed
+        pending.setDependsOnList(new ArrayList<>());
+        stubFindPending(pending);
+        stubActiveAdminCount(2);
+        stubPendingAssignments(2, 0); // net +2 -> projected 4 -> floor(0.7*4)=2 == pinned 2
+
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
+
+        verify(em, never()).persist(any());                       // not created
+        // The signature-bearing fields are UNTOUCHED — this is the regression the bug wiped.
+        assertEquals("SIGNED-CARRIER-FROM-PHASE2", pending.getRequestModel(),
+                "unchanged re-open must PRESERVE the recorded REQUEST_MODEL (signature carrier)");
+        // No authorizations were cleared (the named-query for clearing was never even issued).
+        verify(em, never()).remove(any());
+        org.mockito.Mockito.verify(em, never()).createNamedQuery(
+                eq("IgaAuthorization.findByChangeRequest"), eq(IgaAuthorizationEntity.class));
+        // ROWS_JSON still pinned to the SAME threshold.
+        assertTrue(pending.getRowsJson().contains("\"NEW_THRESHOLD\":2"));
+    }
+
+    @Test
+    void fold_rewritesAndClears_whenPendingSetChanges_dropsStaleSignatures() {
+        // The CR is pinned to threshold 2 but the pending set has GROWN so the projected threshold
+        // now moves to 3 (different content to sign). The old signatures are genuinely invalid →
+        // the fold MUST rewrite ROWS_JSON, null REQUEST_MODEL, and clear authorizations.
+        stubMultiAdminMode();
+        stubPolicyLookup(policyAtThreshold(1));
+        IgaChangeRequestEntity pending = pinnedPolicyCr(1, 2); // pinned to the OLD projected 2
+        pending.setRequestModel("STALE-SIGNED-CARRIER");
+        pending.setDependsOnList(new ArrayList<>());
+        stubFindPending(pending);
+        IgaAuthorizationEntity a1 = new IgaAuthorizationEntity();
+        TypedQuery<IgaAuthorizationEntity> authQ = mock(TypedQuery.class);
+        when(em.createNamedQuery(eq("IgaAuthorization.findByChangeRequest"), eq(IgaAuthorizationEntity.class)))
+                .thenReturn(authQ);
+        when(authQ.setParameter(anyString(), any())).thenReturn(authQ);
+        when(authQ.getResultList()).thenReturn(List.of(a1));
+        stubActiveAdminCount(2);
+        stubPendingAssignments(3, 0); // net +3 -> projected 5 -> floor(0.7*5)=3 != pinned 2 -> CHANGED
+
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
+
+        verify(em, never()).persist(any());                  // still a fold, not a create
+        verify(em, times(1)).remove(a1);                     // stale signature dropped
+        assertNull(pending.getRequestModel(), "changed set clears the stale signed carrier");
+        assertTrue(pending.getRowsJson().contains("\"NEW_THRESHOLD\":3"),
+                "ROWS_JSON re-pinned to the new projected threshold");
+    }
+
     // --- revoke lowers threshold ---------------------------------------------
 
     @Test

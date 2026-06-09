@@ -1013,10 +1013,26 @@ public class TideAttestor implements IgaAttestor {
         }
 
         if (pending != null) {
-            // FOLD: rewrite the pending CR's payload to the projected threshold and CLEAR its
-            // authorizations — the new threshold demands a fresh quorum; the phase-1 carrier
-            // (REQUEST_MODEL) is now stale. Idempotent: re-opening with the SAME pending set
-            // recomputes the SAME bytes, so nothing observably changes.
+            // UNCHANGED-DETECTION GUARD (signature-preservation): the enclave re-opens/polls
+            // constantly. If the pending policy CR ALREADY encodes the SAME projected threshold
+            // AND the SAME unsigned policy bytes (i.e. the pending tide-realm-admin assignment set
+            // hasn't changed what's being signed), folding would be a destructive no-op — it would
+            // wipe ROWS_JSON / NULL the phase-2 REQUEST_MODEL carrier / CLEAR the recorded
+            // authorizations that admins accumulated since this CR was last (re)pinned. So when
+            // nothing about the signed content moved, DO NOTHING: preserve the accumulated
+            // signatures exactly like the assignment CRs do. This is the overwhelmingly common path.
+            if (pendingPolicyCrIsUnchanged(pending, newThreshold, policyBodyUnsigned)) {
+                log.debugf("IGA threshold-policy CR unchanged at enclave open: realm %s "
+                        + "tide-realm-admin pending CR %s already encodes threshold %d and the same "
+                        + "pinned policy bytes (net pending delta %+d, projected admins %d) — fold is a "
+                        + "no-op, recorded authorizations/REQUEST_MODEL PRESERVED.",
+                        realm.getName(), pending.getId(), newThreshold, netPending, postCommitCount);
+                return pending.getId();
+            }
+            // FOLD: the pending tide-realm-admin assignment set actually CHANGED → a different
+            // threshold/policy must be signed. Rewrite the pending CR's payload to the new projected
+            // threshold and CLEAR its authorizations — the old signatures are genuinely invalid (they
+            // signed a different threshold); the phase-1/2 carrier (REQUEST_MODEL) is now stale too.
             //
             // NO dependsOn: the policy CR's NEW threshold is PINNED in ROWS_JSON / POLICY_BODY_UNSIGNED
             // at fold time and its Policy:1 re-sign is authorized by the EXISTING M0 quorum (available
@@ -1028,10 +1044,10 @@ public class TideAttestor implements IgaAttestor {
             clearAuthorizations(em, pending);
             pending.setDependsOnList(new ArrayList<>());
             em.flush();
-            log.infof("IGA threshold-policy CR folded at enclave open: realm %s tide-realm-admin "
-                    + "threshold %d -> %d (net pending delta %+d, projected admins %d); pending CR %s "
-                    + "rewritten, authorizations cleared, dependsOn cleared (pinned threshold; "
-                    + "signable alongside assignments %s).",
+            log.infof("IGA threshold-policy CR RE-PINNED at enclave open (signed content CHANGED): "
+                    + "realm %s tide-realm-admin threshold %d -> %d (net pending delta %+d, projected "
+                    + "admins %d); pending CR %s rewritten, authorizations cleared, dependsOn cleared "
+                    + "(pinned threshold; signable alongside assignments %s).",
                     realm.getName(), oldThreshold, newThreshold, netPending, postCommitCount,
                     pending.getId(), assignmentCrIds);
             return pending.getId();
@@ -1125,6 +1141,46 @@ public class TideAttestor implements IgaAttestor {
         Policy policy = new Policy(POLICY_TYPE, "any", vvkId == null ? "" : vvkId,
                 ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params);
         return policy.ToBytes();
+    }
+
+    /**
+     * Signature-preservation guard for the enclave-open fold: is the existing pending
+     * {@code REGEN_ADMIN_POLICY} CR already pinned to the SAME content we'd otherwise re-pin?
+     *
+     * <p>"Same content" = the SAME {@link #ROW_NEW_THRESHOLD} AND the SAME
+     * {@link #ROW_POLICY_BODY_UNSIGNED} (the Base64 unsigned Policy bytes that determine exactly
+     * what the admins sign). These are the only fields whose change makes the accumulated
+     * signatures invalid. Volatile/derivative fields ({@code OLD_THRESHOLD}, {@code dependsOn},
+     * {@code REQUEST_MODEL}) are deliberately NOT compared. If the CR's rows are unreadable
+     * (malformed / missing keys), we return {@code false} so the caller re-pins (fail-safe toward
+     * a correct, freshly-signed CR rather than preserving an unparseable one).
+     */
+    private static boolean pendingPolicyCrIsUnchanged(IgaChangeRequestEntity pending,
+                                                      int newThreshold, String newPolicyBodyUnsigned) {
+        try {
+            if (readNewThresholdFromCr(pending) != newThreshold) {
+                return false;
+            }
+            // Compare the pinned unsigned policy bytes verbatim (Base64 string equality is
+            // sufficient — buildUnsignedAdminPolicyBytes is deterministic for a given threshold/vvk,
+            // so identical inputs yield an identical Base64 string).
+            String existingB64 = pendingPolicyBodyUnsignedB64(pending);
+            return existingB64 != null && existingB64.equals(newPolicyBodyUnsigned);
+        } catch (RuntimeException unreadable) {
+            // Malformed/legacy rows that can't be projected → don't claim "unchanged"; re-pin.
+            return false;
+        }
+    }
+
+    /** Raw Base64 {@link #ROW_POLICY_BODY_UNSIGNED} string from a REGEN CR's rows (null if absent). */
+    private static String pendingPolicyBodyUnsignedB64(IgaChangeRequestEntity cr) {
+        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+            String b64 = str(row, ROW_POLICY_BODY_UNSIGNED);
+            if (b64 != null && !b64.isBlank()) {
+                return b64;
+            }
+        }
+        return null;
     }
 
     /** Delete every {@link IgaAuthorizationEntity} for a CR (re-sign required after a fold). */
