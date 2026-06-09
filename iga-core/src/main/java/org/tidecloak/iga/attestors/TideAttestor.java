@@ -2056,11 +2056,40 @@ public class TideAttestor implements IgaAttestor {
                 throw new RuntimeException("IGA OFFBOARD_REALM approval: ragnarok returned a null/blank "
                         + "Offboard:1 doken carrier for CR " + cr.getId() + " — fail-closed.");
             }
+            // ★ FIX (ORK PolicyAuthorizationFlow): attach the M0 tide-realm-admin threshold Policy
+            // to the ragnarok-built Offboard:1 carrier. The vendor-initialized carrier ragnarok
+            // returns has NO Policy segment, so at commit the ORK's PolicyAuthorizationFlow throws
+            // "Model does not have a policy passed with it" — it needs the carried Policy to
+            // validate the collected admin dokens against the tide-realm-admin threshold. The
+            // working unit/regen paths both do req.SetPolicy(readM0AdminPolicyBytes(...)); the
+            // offboard carrier omitted it. We attach it iga-core-side rather than in ragnarok
+            // because the FromBytes→SetPolicy→Encode round-trip is fully segment-faithful (all 10
+            // TideMemory segments are preserved by ModelRequest.Encode) AND SetPolicy does NOT
+            // disturb the creation-auth or any doken: ModelRequest.GetDataToAuthorize() hashes ONLY
+            // [Id + SHA-512(Draft) + Expiry] — segment 9 (Policy) is NOT in that digest, and the
+            // seg-7 vendor creation-auth + every appended doken sign over GetDataToAuthorize, so
+            // attaching the Policy leaves them valid. This mirrors the REGEN/unit order (SetPolicy
+            // is part of the same authorize-data-independent envelope).
+            byte[] m0AdminPolicy = readM0AdminPolicyBytes(session, realm);
+            if (m0AdminPolicy == null) {
+                // Shouldn't happen post-flip (multiAdmin realms always have a committed M0), but
+                // fail-closed with a clear message rather than seed a carrier the ORK will reject.
+                throw new RuntimeException("IGA OFFBOARD_REALM approval: realm " + realm.getName()
+                        + " has no established tide-realm-admin admin Policy (M0) to embed in the "
+                        + "Offboard:1 carrier for CR " + cr.getId() + " — offboard requires an "
+                        + "established admin policy. Fail-closed.");
+            }
+            ModelRequest offboardReq = ModelRequest.FromBytes(java.util.Base64.getDecoder().decode(carrier));
+            offboardReq.SetPolicy(m0AdminPolicy);
+            carrier = java.util.Base64.getEncoder().encodeToString(offboardReq.Encode());
+
             cr.setRequestModel(carrier);
             session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
             log.infof("IGA OFFBOARD_REALM approval (phase 1): seeded the ragnarok-built Offboard:1 doken "
-                    + "carrier for CR %s (realm %s) — the enclave appends admin dokens; accumulated at "
-                    + "commit by svc.offboardRealm(...,carrier).", cr.getId(), realm.getName());
+                    + "carrier for CR %s (realm %s) WITH the M0 admin Policy attached (%d-byte policy) — "
+                    + "the enclave appends admin dokens; the ORK PolicyAuthorizationFlow validates them "
+                    + "against the carried Policy; accumulated at commit by svc.offboardRealm(...,carrier).",
+                    cr.getId(), realm.getName(), m0AdminPolicy.length);
             return carrier;
         }
 

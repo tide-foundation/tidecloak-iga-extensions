@@ -1093,26 +1093,65 @@ class TideAttestorThresholdPolicyCrTest {
     }
 
     @Test
-    void approvalModel_offboardCr_firstOpen_seedsSpiBuiltCarrier() throws Exception {
-        // FIRST open (0 approvals): the OFFBOARD branch asks the SPI for the Offboard:1 carrier
-        // and persists it as the CR REQUEST_MODEL — it does NOT fall through to the AttestationUnit
-        // / canonical producer-unit path.
+    void approvalModel_offboardCr_firstOpen_seedsSpiBuiltCarrierWithM0Policy() throws Exception {
+        // FIRST open (0 approvals): the OFFBOARD branch asks the SPI for the Offboard:1 carrier,
+        // ATTACHES the M0 admin Policy to it (so the ORK PolicyAuthorizationFlow can validate the
+        // dokens), and persists the policy-attached carrier as the CR REQUEST_MODEL — it does NOT
+        // fall through to the AttestationUnit / canonical producer-unit path.
         IgaChangeRequestEntity cr = offboardCr("offboard-first");
         stubRecordedApprovals(0);
+        // M0 admin Policy must be present for the attach (post-flip invariant).
+        byte[] m0PolicyRaw = "m0-admin-threshold-policy".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        IgaRolePolicyEntity m0 = new IgaRolePolicyEntity();
+        m0.setPolicy(java.util.Base64.getEncoder().encodeToString(m0PolicyRaw));
+        stubPolicyLookup(m0);
+
         org.tidecloak.iga.providers.RagnarokOffboardService svc =
                 mock(org.tidecloak.iga.providers.RagnarokOffboardService.class);
         when(session.getProvider(org.tidecloak.iga.providers.RagnarokOffboardService.class))
                 .thenReturn(svc);
-        String spiCarrier = "BASE64-OFFBOARD1-VENDOR-INIT-CARRIER";
+        // A real vendor-style Offboard:1 ModelRequest carrier WITHOUT a Policy (segment 9 empty) —
+        // the shape ragnarok returns. The fix decodes it, attaches M0, and re-encodes.
+        String spiCarrier = encodeOffboardCarrierNoPolicy();
         when(svc.buildOffboardApprovalCarrier(eq(session), eq(realm))).thenReturn(spiCarrier);
 
         String returned = attestor.buildMultiAdminApprovalModel(session, realm, cr);
 
-        assertEquals(spiCarrier, returned,
-                "first open of an OFFBOARD CR returns the SPI-built Offboard:1 carrier");
-        assertEquals(spiCarrier, cr.getRequestModel(),
-                "the SPI carrier is persisted on the CR REQUEST_MODEL for the enclave to append dokens to");
+        // The returned carrier is the policy-ATTACHED carrier, not the policy-less SPI output.
+        assertEquals(returned, cr.getRequestModel(),
+                "the policy-attached carrier is persisted on the CR REQUEST_MODEL for the enclave");
+        byte[] seg9 = org.midgard.Serialization.Tools.GetValue(
+                java.util.Base64.getDecoder().decode(returned), 9);
+        org.junit.jupiter.api.Assertions.assertArrayEquals(m0PolicyRaw, seg9,
+                "the seeded OFFBOARD carrier must carry the M0 admin Policy at segment 9");
+        // The vendor Draft/expiry/creation-auth (the dokens sign over GetDataToAuthorize) are
+        // untouched by SetPolicy — proven by the data-to-authorize being identical pre/post.
+        org.midgard.models.ModelRequest before = org.midgard.models.ModelRequest.FromBytes(
+                java.util.Base64.getDecoder().decode(spiCarrier));
+        org.midgard.models.ModelRequest after = org.midgard.models.ModelRequest.FromBytes(
+                java.util.Base64.getDecoder().decode(returned));
+        assertEquals(before.GetDataToAuthorize(), after.GetDataToAuthorize(),
+                "SetPolicy must not change GetDataToAuthorize (Id+Draft+Expiry) — dokens stay valid");
         verify(svc, times(1)).buildOffboardApprovalCarrier(eq(session), eq(realm));
+    }
+
+    /** A vendor-style Offboard:1 ModelRequest carrier with an EMPTY policy segment (seg 9). */
+    private static String encodeOffboardCarrierNoPolicy() {
+        long expiry = (System.currentTimeMillis() / 1000) + 7L * 24 * 60 * 60;
+        byte[] expiryBytes = new byte[8];
+        for (int i = 0; i < 8; i++) expiryBytes[i] = (byte) (expiry >>> (8 * i));
+        byte[] encoded = org.midgard.Serialization.Tools.CreateTideMemory(
+                "Offboard".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                "1".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                expiryBytes,
+                "offboard-draft".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                "Policy:1".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                new byte[0],
+                new byte[0],
+                "vendor-creation-auth".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                new byte[0],
+                new byte[0]);
+        return java.util.Base64.getEncoder().encodeToString(encoded);
     }
 
     @Test
