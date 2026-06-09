@@ -3567,15 +3567,18 @@ public class TideAttestor implements IgaAttestor {
                 case "ADOPT_CLIENT_SCOPE" -> stampAdoptClientScope(session, realm, mode, em, cr);
                 case "ADOPT_ORGANIZATION" -> stampAdoptOrganization(session, realm, mode, em, cr);
                 // ADOPT_REALM stamps the realm-scoped producer columns (realm_config #0,
-                // realm_default_groups_set #15, realm_default_roles_set #18) — none had any
-                // ADOPT path before, so they fail-closed the uniform login read after toggle-on.
-                // Reuses the same realm stampers the SET_REALM_CONFIG / ADD_REALM_DEFAULT_GROUP
-                // commits use (realm_default_roles has no CR-action toggle of its own — it is a
-                // create-time authority — so ADOPT_REALM is where its column is seeded).
+                // realm_default_groups_set #15, realm_default_roles_set #18). Deferred via
+                // signAndStampUnit like the node ADOPTs — NOT the shared stampRealm* stampers,
+                // which are also used by the live SET_REALM_CONFIG / ADD_REALM_DEFAULT_GROUP
+                // commits and MUST keep real per-commit signing (no convergence backstop).
                 case "ADOPT_REALM" -> {
-                    stampRealmConfig(session, realm, mode, em, cr);
-                    stampRealmDefaultGroupsSet(session, realm, mode, em, cr);
-                    stampRealmDefaultRolesSet(session, realm, mode, em, cr);
+                    String rid = realm.getId();
+                    signAndStampUnit(session, realm, mode, em,
+                            RealmAttestationExporter.realmConfig(realm, rid));
+                    signAndStampUnit(session, realm, mode, em,
+                            RealmAttestationExporter.realmDefaultGroupsSetStatic(realm, rid));
+                    signAndStampUnit(session, realm, mode, em,
+                            RealmAttestationExporter.realmDefaultRolesSetStatic(realm, rid));
                 }
                 // ADOPT_PROTOCOL_MAPPER: the only edge ADOPT that owns a dedicated producer column
                 // (protocol_mapper, id=mapperId). The other edge ADOPTs (composite-role,
@@ -3948,24 +3951,6 @@ public class TideAttestor implements IgaAttestor {
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
 
-    /**
-     * D1a — stamp the realm default-role authority (unit 18, {@code realm_default_roles_set}).
-     * Exact parallel of {@link #stampRealmDefaultGroupsSet}: sign the producer's
-     * {@code realmDefaultRolesSetStatic} envelope and stamp it into
-     * {@code RealmEntity.realmDefaultRolesAttestation} (the tidecloak-override column parallel to
-     * {@code realmDefaultGroupsAttestation}). Keeps the realm closure honest after toggle-on so the
-     * once-signed authority's column is non-NULL for the uniform login read.
-     */
-    private void stampRealmDefaultRolesSet(KeycloakSession session, RealmModel realm, String mode,
-                                           EntityManager em, IgaChangeRequestEntity cr) {
-        try {
-            byte[] env = RealmAttestationExporter.realmDefaultRolesSetStatic(realm, realm.getId()).serialize();
-            String sig = signProducerEnvelope(session, realm, mode, env);
-            em.createQuery("UPDATE RealmEntity e SET e.realmDefaultRolesAttestation = :sig WHERE e.id = :id")
-                    .setParameter("sig", sig).setParameter("id", realm.getId()).executeUpdate();
-        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
-    }
-
     private void stampOrgDomainSet(KeycloakSession session, RealmModel realm, String mode,
                                    EntityManager em, IgaChangeRequestEntity cr) {
         try {
@@ -3992,12 +3977,18 @@ public class TideAttestor implements IgaAttestor {
     // login read). The whole point of routing BOTH the stamp here and the login read
     // through the producer + UnitColumnMapping is that they cannot drift.
 
-    /** Sign one producer unit envelope and stamp it into its dedicated column(s). */
+    /**
+     * Stamp one ADOPT-owned producer unit's column with a NON-REAL placeholder (the same
+     * stub {@link #signProducerEnvelope} writes on a non-capable realm) instead of doing a
+     * per-CR ORK VVK ceremony. The real 64B sig is produced once, batched, by
+     * {@code IgaToggleOnBackfill.convergeAfterCommit} after the ADOPT set drains; the login
+     * read fail-closes on the 32B stub until then, so no login can observe it.
+     */
     private void signAndStampUnit(KeycloakSession session, RealmModel realm, String mode,
                                   EntityManager em, AttestationUnit unit) {
         if (unit == null) return;
-        String sig = signProducerEnvelope(session, realm, mode, unit.serialize());
-        UnitColumnMapping.stamp(em, unit, sig);
+        String prefix = MODE_FIRST_ADMIN.equals(mode) ? FIRSTADMIN_SIG_PREFIX : DUMMY_SIG_PREFIX;
+        UnitColumnMapping.stamp(em, unit, stubSign(prefix, unit.serialize()));
     }
 
     private void stampAdoptUser(KeycloakSession session, RealmModel realm, String mode,
