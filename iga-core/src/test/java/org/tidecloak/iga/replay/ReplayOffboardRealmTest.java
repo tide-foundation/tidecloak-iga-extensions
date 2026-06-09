@@ -14,13 +14,11 @@ import static org.mockito.Mockito.when;
 import jakarta.persistence.EntityManager;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.keycloak.models.KeycloakContext;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.providers.RagnarokOffboardException;
 import org.tidecloak.iga.providers.RagnarokOffboardResult;
 import org.tidecloak.iga.providers.RagnarokOffboardService;
@@ -32,28 +30,45 @@ import org.tidecloak.iga.providers.RagnarokOffboardService;
  *
  * <p>Contract pinned here:
  * <ul>
- *   <li>SPI present → {@code offboardRealm(session, realm, em)} is invoked exactly once;</li>
+ *   <li>SPI present + carrier non-blank → {@code offboardRealm(session, realm, em, carrier)}
+ *       is invoked exactly once, with the CR's accumulated {@code REQUEST_MODEL} carrier;</li>
  *   <li>SPI absent (ragnarok not deployed → {@code getProvider} returns {@code null}) →
  *       the replay THROWS (fail-closed): the replay tx rolls back, nothing is torn down,
  *       and the dispatcher tail that flips {@code STATUS=APPROVED} is never reached;</li>
+ *   <li>carrier null/blank (no dokens collected) → fail-closed throw (never run
+ *       Midgard.Offboard without admin-quorum dokens);</li>
  *   <li>a {@link RagnarokOffboardException} from the SPI is surfaced as an unchecked
  *       exception so the replay tx rolls back.</li>
  * </ul>
  */
 class ReplayOffboardRealmTest {
 
+    private static final String CARRIER = "BASE64-OFFBOARD1-DOKEN-CARRIER";
+
     private static Method replayOffboardRealm() throws Exception {
         Method m = IgaReplayDispatcher.class.getDeclaredMethod(
                 "replayOffboardRealm", KeycloakSession.class, RealmModel.class,
-                List.class, EntityManager.class);
+                IgaChangeRequestEntity.class, EntityManager.class);
         m.setAccessible(true);
         return m;
     }
 
+    private static IgaChangeRequestEntity crWithCarrier(String carrier) {
+        IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
+        cr.setActionType("OFFBOARD_REALM");
+        cr.setRequestModel(carrier);
+        return cr;
+    }
+
     private static void invoke(KeycloakSession session, RealmModel realm, EntityManager em)
             throws Throwable {
+        invoke(session, realm, crWithCarrier(CARRIER), em);
+    }
+
+    private static void invoke(KeycloakSession session, RealmModel realm,
+                               IgaChangeRequestEntity cr, EntityManager em) throws Throwable {
         try {
-            replayOffboardRealm().invoke(null, session, realm, new ArrayList<Map<String, Object>>(), em);
+            replayOffboardRealm().invoke(null, session, realm, cr, em);
         } catch (InvocationTargetException e) {
             throw e.getCause();
         }
@@ -73,7 +88,7 @@ class ReplayOffboardRealmTest {
         RealmModel realm = mock(RealmModel.class);
         when(realm.getName()).thenReturn("offboard-me");
         RagnarokOffboardService svc = mock(RagnarokOffboardService.class);
-        when(svc.offboardRealm(any(), any(), any()))
+        when(svc.offboardRealm(any(), any(), any(), any()))
                 .thenReturn(RagnarokOffboardResult.ok("torn down 3 things"));
         KeycloakSession session = sessionWith(realm, svc);
         EntityManager em = mock(EntityManager.class);
@@ -86,7 +101,24 @@ class ReplayOffboardRealmTest {
             }
         });
 
-        verify(svc, times(1)).offboardRealm(eq(session), eq(realm), eq(em));
+        // The accumulated CR carrier (REQUEST_MODEL) is handed to the SPI verbatim.
+        verify(svc, times(1)).offboardRealm(eq(session), eq(realm), eq(em), eq(CARRIER));
+    }
+
+    @Test
+    void carrierNullOrBlank_failsClosed_neverInvokesSpi() throws Throwable {
+        RealmModel realm = mock(RealmModel.class);
+        when(realm.getName()).thenReturn("offboard-me");
+        RagnarokOffboardService svc = mock(RagnarokOffboardService.class);
+        KeycloakSession session = sessionWith(realm, svc);
+        EntityManager em = mock(EntityManager.class);
+
+        // No accumulated doken carrier on the CR → refuse to run Midgard.Offboard.
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+                () -> invoke(session, realm, crWithCarrier("   "), em));
+        assertTrue(ex.getMessage().contains("doken carrier"),
+                "fail-closed message must name the missing doken carrier — was: " + ex.getMessage());
+        verify(svc, never()).offboardRealm(any(), any(), any(), any());
     }
 
     @Test
@@ -114,7 +146,7 @@ class ReplayOffboardRealmTest {
         RealmModel realm = mock(RealmModel.class);
         when(realm.getName()).thenReturn("offboard-me");
         RagnarokOffboardService svc = mock(RagnarokOffboardService.class);
-        when(svc.offboardRealm(any(), any(), any()))
+        when(svc.offboardRealm(any(), any(), any(), any()))
                 .thenThrow(new RagnarokOffboardException("teardown step 2 failed"));
         KeycloakSession session = sessionWith(realm, svc);
         EntityManager em = mock(EntityManager.class);

@@ -241,7 +241,7 @@ public class IgaReplayDispatcher {
             // teardown captured as a CR. The REAL teardown lives in ragnarok and is
             // looked up via the RagnarokOffboardService SPI here (iga-core does NOT
             // depend on ragnarok). Fail-closed when the SPI is absent.
-            case "OFFBOARD_REALM" -> replayOffboardRealm(session, realm, rows, em);
+            case "OFFBOARD_REALM" -> replayOffboardRealm(session, realm, cr, em);
 
             // ----- Admin-policy threshold re-sign (steady-state multiAdmin) -----
             // NOT a model mutation: it Policy:1-signs the NEW admin Policy (carried in
@@ -2202,14 +2202,21 @@ public class IgaReplayDispatcher {
     // — instead we throw, rolling back the replay tx so the CR remains committable
     // once ragnarok ships.
     //
-    // STUB / no ORK: OFFBOARD_REALM is NOT a producer-envelope-signed action
-    // (TideAttestor.isProducerEnvelopeSignedAction returns false), so combineFinal
-    // produced a stub signature — no ORK/Policy:1 round-trip gates the CR
-    // attestation. The dispatcher tail then sets STATUS=APPROVED.
+    // STUB CR ATTESTATION + REAL DOKEN CARRIER (two separate things):
+    //  * OFFBOARD_REALM is NOT a producer-envelope-signed action
+    //    (TideAttestor.isProducerEnvelopeSignedAction returns false), so combineFinal
+    //    produced a STUB signature for the CR's own ATTESTATION column — no ORK/Policy:1
+    //    round-trip gates the CR attestation.
+    //  * BUT the destructive Midgard.Offboard ORK ceremony the SPI runs needs a quorum of
+    //    admin DOKENS. Those are collected on the CR's REQUEST_MODEL via a real Offboard:1
+    //    carrier that ragnarok seeds (svc.buildOffboardApprovalCarrier, on the first open)
+    //    and the two-phase enclave approval accumulates into. We hand that accumulated
+    //    carrier to svc.offboardRealm(...,carrierB64) here so the ceremony has its dokens.
+    // The dispatcher tail then sets STATUS=APPROVED.
     // -------------------------------------------------------------------------
 
     private static void replayOffboardRealm(KeycloakSession session, RealmModel realm,
-                                            List<Map<String, Object>> rows, EntityManager em) {
+                                            IgaChangeRequestEntity cr, EntityManager em) {
         if (realm == null) {
             throw new IllegalStateException("OFFBOARD_REALM replay: realm not loadable");
         }
@@ -2227,9 +2234,23 @@ public class IgaReplayDispatcher {
                             + "back and CR " + realm.getName() + " stays committable-retry until ragnarok ships.");
         }
 
+        // The accumulated Offboard:1 doken carrier the two-phase approval built up on the CR's
+        // REQUEST_MODEL (seeded by svc.buildOffboardApprovalCarrier on the first open, then each
+        // approving admin's enclave appended a doken). The destructive Midgard.Offboard ORK
+        // ceremony needs these dokens — fail-closed if the carrier is missing (an offboard can
+        // never run without its admin-quorum dokens).
+        String dokenCarrierB64 = cr == null ? null : cr.getRequestModel();
+        if (dokenCarrierB64 == null || dokenCarrierB64.isBlank()) {
+            throw new IllegalStateException(
+                    "OFFBOARD_REALM replay: CR has no accumulated Offboard:1 doken carrier "
+                            + "(REQUEST_MODEL is null/blank) for realm " + realm.getName()
+                            + " — refusing to run Midgard.Offboard without admin-quorum dokens. The replay tx "
+                            + "rolls back and the CR stays committable-retry.");
+        }
+
         try {
             org.tidecloak.iga.providers.RagnarokOffboardResult result =
-                    svc.offboardRealm(session, realm, em);
+                    svc.offboardRealm(session, realm, em, dokenCarrierB64);
             log.infof("IGA OFFBOARD_REALM replay: realm %s — ragnarok offboard complete (success=%s): %s",
                     realm.getName(),
                     result != null && result.success(),

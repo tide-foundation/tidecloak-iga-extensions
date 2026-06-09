@@ -2019,6 +2019,51 @@ public class TideAttestor implements IgaAttestor {
             return existingCarrier;
         }
 
+        // OFFBOARD_REALM is NON-producer (its own CR attestation stub-signs — no AttestationUnit
+        // envelope), but the destructive Midgard.Offboard ORK ceremony ragnarok runs at commit
+        // needs a quorum of admin DOKENS. iga-core doesn't know the Offboard:1 request shape —
+        // ragnarok does — so on the FIRST open (no recorded approvals; the accumulation
+        // short-circuit above did NOT fire) we ask the SPI to seed a vendor-initialized Offboard:1
+        // carrier and persist it as the CR's REQUEST_MODEL. The two-phase enclave approval then
+        // appends each admin's doken onto it (AddPolicyAuthorizationToSerializedRequest), and the
+        // accumulation short-circuit above returns it verbatim for the 2nd..Nth approver so the
+        // dokens stack. The accumulated carrier is handed to svc.offboardRealm(...,carrier) at
+        // commit (IgaReplayDispatcher.replayOffboardRealm). This is the doken-carrier ONLY — the
+        // CR's own ATTESTATION column still stub-signs in combineFinal (OFFBOARD_REALM is not a
+        // producer-envelope action, so it never routes through signMultiAdminUnitsViaPolicy).
+        // FAIL-CLOSED if the SPI is absent: an offboard can't be approved with no Offboard carrier.
+        if (ACTION_OFFBOARD_REALM.equals(cr.getActionType())) {
+            org.tidecloak.iga.providers.RagnarokOffboardService svc =
+                    session.getProvider(org.tidecloak.iga.providers.RagnarokOffboardService.class);
+            if (svc == null) {
+                throw new RuntimeException("IGA OFFBOARD_REALM approval: no RagnarokOffboardService "
+                        + "provider registered (ragnarok not deployed) — cannot build the Offboard:1 "
+                        + "doken carrier for CR " + cr.getId() + ". An offboard cannot be approved "
+                        + "without a real carrier to collect admin dokens into.");
+            }
+            String carrier;
+            try {
+                // Ragnarok builds the vendor-initialized Offboard:1 ModelRequest with a LONG expiry
+                // (it MUST — the carrier is persisted and re-read at commit, hours/days later; a
+                // short window would expire it mid-approval, "Expiry cannot be in the past"). The
+                // SPI contract requires at least the MULTIADMIN_APPROVAL_EXPIRY_SECONDS (7d) window.
+                carrier = svc.buildOffboardApprovalCarrier(session, realm);
+            } catch (org.tidecloak.iga.providers.RagnarokOffboardException e) {
+                throw new RuntimeException("IGA OFFBOARD_REALM approval: ragnarok failed to build the "
+                        + "Offboard:1 doken carrier for CR " + cr.getId() + ": " + e.getMessage(), e);
+            }
+            if (carrier == null || carrier.isBlank()) {
+                throw new RuntimeException("IGA OFFBOARD_REALM approval: ragnarok returned a null/blank "
+                        + "Offboard:1 doken carrier for CR " + cr.getId() + " — fail-closed.");
+            }
+            cr.setRequestModel(carrier);
+            session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
+            log.infof("IGA OFFBOARD_REALM approval (phase 1): seeded the ragnarok-built Offboard:1 doken "
+                    + "carrier for CR %s (realm %s) — the enclave appends admin dokens; accumulated at "
+                    + "commit by svc.offboardRealm(...,carrier).", cr.getId(), realm.getName());
+            return carrier;
+        }
+
         // The admin-policy threshold re-sign CR is NOT a producer-unit CR — its draft is the
         // NEW unsigned admin Policy itself (carried verbatim in ROWS_JSON), wrapped in a
         // Policy:1 PolicySignRequest with the EXISTING M0 policy embedded as the authorizer.

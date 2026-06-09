@@ -42,17 +42,70 @@ import org.keycloak.provider.Provider;
 public interface RagnarokOffboardService extends Provider {
 
     /**
-     * Run the full Ragnarok offboard for {@code realm} inside the supplied
-     * (replay) transaction. Offboard-last + idempotent.
+     * <b>Phase-1</b> of the OFFBOARD_REALM admin-quorum ceremony: build the
+     * vendor-initialized {@code Offboard:1} approval carrier that iga-core
+     * accumulates admin dokens into.
      *
-     * @param session the replay {@link KeycloakSession} ({@code IGA_REPLAY_ACTIVE}
-     *                is set; realm is bound on the context)
-     * @param realm   the realm being offboarded
-     * @param em      the replay transaction's {@link EntityManager}
+     * <h3>Why ragnarok owns this</h3>
+     * The {@code OFFBOARD_REALM} CR is NON-producer (its own CR attestation is
+     * stub-signed — there is no {@code AttestationUnit} producer envelope to frame).
+     * But the destructive {@code Midgard.Offboard} ORK ceremony the SPI runs at
+     * commit DOES require a quorum of admin dokens. iga-core therefore needs a
+     * real doken-bearing carrier to collect those dokens into — and only ragnarok
+     * knows the {@code Offboard:1} request shape. iga-core calls this once on the
+     * FIRST open of the approval popup (no recorded approvals), persists the
+     * returned Base64 on the CR's {@code REQUEST_MODEL}, and the two-phase enclave
+     * approval ({@code AddPolicyAuthorizationToSerializedRequest}) appends each
+     * admin's doken onto it; the accumulated carrier is handed back to
+     * {@link #offboardRealm} at commit.
+     *
+     * <h3>Implementation contract (mirror {@code RagnarokSettingProcessor.saveDraftReq})</h3>
+     * <ul>
+     *   <li>Build a {@code ModelRequest.New("Offboard","1","Policy:1",
+     *       Tools.CreateTideMemory(gVRK, gVRKCertificate))} and
+     *       {@code InitializeTideRequestWithVrk("Offboard:1")} so the carrier
+     *       carries the seg-7 vendor creation-auth (the enclave's "approved
+     *       initially by the vendor" check).</li>
+     *   <li>Set a <b>long</b> expiry (admins sign asynchronously over hours/days;
+     *       a short window expires the carrier mid-approval → "Expiry cannot be in
+     *       the past"). iga-core uses a 7-day window for its other carriers; the SPI
+     *       MUST set at least as long an expiry.</li>
+     *   <li>Return {@code Base64(request.Encode())}.</li>
+     * </ul>
+     *
+     * @param session the {@link KeycloakSession} (realm bound on the context)
+     * @param realm   the realm an offboard is being proposed for
+     * @return the Base64 of a vendor-initialized {@code Offboard:1} {@code ModelRequest}
+     *         (the enclave appends admin dokens to it; long expiry)
+     * @throws RagnarokOffboardException if the carrier cannot be built (e.g. the
+     *         realm has no VRK material) — fail-closed: an offboard can never be
+     *         approved without a real {@code Offboard:1} carrier to collect dokens.
+     */
+    String buildOffboardApprovalCarrier(KeycloakSession session, RealmModel realm)
+            throws RagnarokOffboardException;
+
+    /**
+     * <b>Commit</b> of the OFFBOARD_REALM ceremony: run the full Ragnarok offboard
+     * for {@code realm} inside the supplied (replay) transaction, using the
+     * accumulated admin dokens. Offboard-last + idempotent.
+     *
+     * <p>The implementation does
+     * {@code Midgard.Offboard(settings, ModelRequest.FromBytes(dokenCarrier), eVVK)}
+     * with the collected dokens, then the local realm teardown.
+     *
+     * @param session         the replay {@link KeycloakSession} ({@code IGA_REPLAY_ACTIVE}
+     *                        is set; realm is bound on the context)
+     * @param realm           the realm being offboarded
+     * @param em              the replay transaction's {@link EntityManager}
+     * @param dokenCarrierB64 the CR's accumulated {@code REQUEST_MODEL} — the
+     *                        {@code Offboard:1} carrier {@link #buildOffboardApprovalCarrier}
+     *                        seeded, now bearing every approving admin's doken. Never
+     *                        blank for a committed offboard (iga-core fail-closes if it is).
      * @return a {@link RagnarokOffboardResult} summarising the teardown
      * @throws RagnarokOffboardException if the teardown cannot complete — rolls
      *                                   back the replay tx (nothing torn down)
      */
-    RagnarokOffboardResult offboardRealm(KeycloakSession session, RealmModel realm, EntityManager em)
+    RagnarokOffboardResult offboardRealm(KeycloakSession session, RealmModel realm, EntityManager em,
+                                         String dokenCarrierB64)
             throws RagnarokOffboardException;
 }
