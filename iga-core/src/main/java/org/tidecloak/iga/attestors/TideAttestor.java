@@ -329,6 +329,33 @@ public class TideAttestor implements IgaAttestor {
         if (cr != null && IgaReplayExtension.isAdoptAction(cr.getActionType())) {
             return 1;                                                              // ADOPT bypass wins
         }
+        // multiAdmin realm-default gate: the CURRENTLY-IN-EFFECT quorum is the ENCODED
+        // threshold in the signed M0 admin Policy (IGA_ROLE_POLICY.threshold) — the value
+        // the ORK enforces and the REGEN_ADMIN_POLICY CR keeps updated. We deliberately do
+        // NOT recompute the live floor(0.7 × countActiveTideRealmAdmins) here:
+        //   - Mid-batch stability: when a batch of tide-realm-admin GRANT/REVOKE CRs commits,
+        //     the live admin count moves AS the assignment CRs commit, which would re-gate the
+        //     still-uncommitted REGEN_ADMIN_POLICY CR (and any sibling) upward to a quorum the
+        //     batch was never signed for → unsatisfiable commit block. The encoded threshold is
+        //     stable across the whole in-flight batch.
+        //   - Authorization model: the REGEN_ADMIN_POLICY commit re-signs the new Policy under
+        //     the EXISTING M0 quorum (Policy:1), i.e. OLD_THRESHOLD signatures. Gating the batch
+        //     at the encoded (old) threshold is exactly that quorum. Only AFTER the policy CR
+        //     commits and writes the NEW encoded threshold do subsequent operations see it.
+        //   - Order-independence: whether the policy CR commits before or after the assignment
+        //     CRs, every CR in the batch gates at the same old encoded value until the policy CR
+        //     itself lands.
+        // The live floor stays the source of the policy CR's PROJECTED NEW_THRESHOLD only
+        // (computed separately in the regen-emit path), never the commit gate.
+        IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
+        if (policy != null) {
+            Integer encoded = currentEncodedThreshold(policy);
+            if (encoded != null) {
+                return Math.max(1, encoded);
+            }
+        }
+        // No IGA_ROLE_POLICY row yet (or a row with no encoded threshold) — pre-bootstrap /
+        // legacy. Fall back to the live floor so the gate is still sensibly populated.
         return Math.max(1, (int) (THRESHOLD_PERCENTAGE * countActiveTideRealmAdmins(realm, session)));
     }
 

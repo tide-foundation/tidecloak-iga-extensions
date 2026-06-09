@@ -760,6 +760,124 @@ class TideAttestorThresholdPolicyCrTest {
         verify(spy, never()).initializeApprovalRequestWithVrk(any(), any());
     }
 
+    // --- getThreshold: the commit gate uses the STABLE encoded threshold -------
+    //
+    // The bug: getThreshold's multiAdmin realm-default branch recomputed the LIVE
+    // floor(0.7 × countActiveTideRealmAdmins). When a batch of tide-realm-admin
+    // assignment CRs commits, the live count jumps mid-batch, which would re-gate the
+    // still-uncommitted REGEN_ADMIN_POLICY CR (signed under the OLD quorum) upward to a
+    // threshold it can never reach → commit blocked. The gate must instead read the
+    // ENCODED IGA_ROLE_POLICY.threshold (the currently-in-effect quorum the ORK enforces),
+    // which only changes when the policy CR itself commits.
+
+    /** Stub session.users()/roles() to resolve NO per-scope (role/user) — empty IgaScopeResolver scope. */
+    private void stubNoPerScope() {
+        org.keycloak.models.RoleProvider roles = mock(org.keycloak.models.RoleProvider.class);
+        when(session.roles()).thenReturn(roles);
+        when(roles.getRoleById(eq(realm), anyString())).thenReturn(null);
+        when(session.users()).thenReturn(users);
+        when(users.getUserById(eq(realm), anyString())).thenReturn(null);
+    }
+
+    @Test
+    void getThreshold_multiAdmin_usesEncodedThreshold_notLiveFloor() {
+        // 3 LIVE active admins → live floor(0.7*3)=2. But the ENCODED policy threshold is 1.
+        // The gate MUST read the encoded 1 (the in-effect quorum), NOT recompute 2.
+        stubMultiAdminMode();
+        stubActiveAdminCount(3);
+        stubPolicyLookup(policyAtThreshold(1));
+
+        int threshold = attestor.getThreshold(session, realm, pendingPolicyCr("regen-cr-gate"));
+
+        assertEquals(1, threshold,
+                "commit gate reads the encoded IGA_ROLE_POLICY.threshold (1), not the live floor(0.7*3)=2");
+    }
+
+    @Test
+    void getThreshold_multiAdmin_assignmentCrAlsoGatesAtEncoded_orderIndependent() {
+        // A tide-realm-admin GRANT_ROLES CR in the SAME batch must ALSO gate at the encoded
+        // threshold, so intra-batch commit order can't push it (or its siblings) upward.
+        // Live count 3 → floor 2; encoded 1 → gate is 1.
+        stubMultiAdminMode();
+        stubActiveAdminCount(3);
+        stubPolicyLookup(policyAtThreshold(1));
+        stubNoPerScope();
+
+        int threshold = attestor.getThreshold(session, realm, grantCr("batch-grant"));
+
+        assertEquals(1, threshold,
+                "assignment CR in the batch gates at the encoded threshold (1), order-independent");
+    }
+
+    @Test
+    void getThreshold_multiAdmin_afterPolicyCommit_seesNewEncodedThreshold() {
+        // AFTER the REGEN_ADMIN_POLICY CR commits, IGA_ROLE_POLICY.threshold is now 2.
+        // A SUBSEQUENT operation's gate reads the new encoded value.
+        stubMultiAdminMode();
+        stubActiveAdminCount(3);
+        stubPolicyLookup(policyAtThreshold(2));
+
+        int threshold = attestor.getThreshold(session, realm, pendingPolicyCr("next-op"));
+
+        assertEquals(2, threshold,
+                "after the policy CR commits, subsequent ops gate at the NEW encoded threshold (2)");
+    }
+
+    @Test
+    void getThreshold_multiAdmin_steadyState_encodedEqualsLiveFloor_unchanged() {
+        // No change in flight: encoded == floor(0.7*count). 10 admins → floor 7, encoded 7.
+        // The gate value is identical whether we read encoded or recompute.
+        stubMultiAdminMode();
+        stubActiveAdminCount(10);
+        stubPolicyLookup(policyAtThreshold(7));
+
+        int threshold = attestor.getThreshold(session, realm, pendingPolicyCr("steady"));
+
+        assertEquals(7, threshold, "steady-state gate is the same encoded==live-floor value");
+    }
+
+    @Test
+    void getThreshold_multiAdmin_noPolicyRow_fallsBackToLiveFloor() {
+        // Pre-bootstrap / legacy: no IGA_ROLE_POLICY row → fall back to the live floor so the
+        // gate stays sensibly populated. 3 admins → floor(0.7*3)=2.
+        stubMultiAdminMode();
+        stubActiveAdminCount(3);
+        stubPolicyLookup(null);
+
+        int threshold = attestor.getThreshold(session, realm, pendingPolicyCr("no-policy"));
+
+        assertEquals(2, threshold, "no policy row → fall back to live floor(0.7*3)=2");
+    }
+
+    @Test
+    void getThreshold_liveMyrealmScenario_policyCrGatesAtOldEncoded_afterAssignmentsCommit() {
+        // Mirrors the live myrealm bug repro EXACTLY: 1 committed tide-realm-admin, encoded
+        // threshold 1, a pending REGEN_ADMIN_POLICY CR pinned OLD=1/NEW=2, and two pending
+        // tide-realm-admin GRANT_ROLES CRs. After BOTH grants commit, the live admin count
+        // becomes 3 → live floor(0.7*3)=2. The OLD code would re-gate the still-uncommitted
+        // policy CR to 2 (signed under quorum 1, 1 sig) → BLOCKED. The fix gates it at the
+        // encoded threshold 1, so its single signature commits.
+        stubMultiAdminMode();
+        stubActiveAdminCount(3);                  // post-assignment live count (the mid-batch jump)
+        stubPolicyLookup(policyAtThreshold(1));   // encoded threshold still 1 until the policy CR commits
+
+        int threshold = attestor.getThreshold(session, realm, pendingPolicyCr("6809ebac"));
+
+        assertEquals(1, threshold,
+                "live myrealm policy CR commit gate reads OLD encoded threshold 1, NOT the post-assignment "
+                        + "live floor(0.7*3)=2 — so its single signature commits");
+    }
+
+    @Test
+    void getThreshold_firstAdmin_alwaysOne() {
+        // firstAdmin onboarding stays single-signer 1, regardless of encoded threshold / live count.
+        stubFirstAdminMode();
+
+        int threshold = attestor.getThreshold(session, realm, pendingPolicyCr("first-admin"));
+
+        assertEquals(1, threshold, "firstAdmin mode is unconditionally threshold 1");
+    }
+
     // --- relatedPolicyCrId linkage (read-only auto-bundle hint) ---------------
 
     /** A pending REGEN_ADMIN_POLICY CR keyed to the tide-realm-admin role, with a fixed id. */
