@@ -79,7 +79,7 @@ public class IgaAttestationExporterProvider implements AttestationExporterProvid
         // here is exactly the ORK's "(b) no user_role_mapping_set" condition. A
         // privileged user (role-mapping unit present) or a registration-off realm
         // keeps the existing fail-closed throw for any NULL/stub column.
-        // ★ MF2 (HIGH): the D1b user_role_mapping_set absence only proves the user holds
+        // MF2 (HIGH): the D1b user_role_mapping_set absence only proves the user holds
         // no DIRECT (non-default) role row — it does NOT walk the default-role composite.
         // A privileged role added as a COMPOSITE CHILD of default-roles-<realm> is conferred
         // via composite expansion at token time (no direct USER_ROLE_MAPPING row), so it is

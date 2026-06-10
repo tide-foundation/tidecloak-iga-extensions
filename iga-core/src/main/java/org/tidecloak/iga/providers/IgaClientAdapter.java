@@ -43,7 +43,7 @@ import java.util.Set;
  *       model (web origins, redirect URIs, attributes, protocol mappers, flow
  *       flags, …). The LAST mutation Keycloak makes in that path,
  *       {@code ClientModel.updateClient()}
- *       ({@code RepresentationToModel.createClient} line 404, KC 26.5.5), is the
+ *       ({@code RepresentationToModel.createClient}, KC 26.5.5), is the
  *       <b>terminal seam</b>: at that point every admin-supplied field is on the
  *       model, so {@link #updateClient()} snapshots the live model into a
  *       {@link ClientRepresentation} via
@@ -157,11 +157,11 @@ public class IgaClientAdapter extends ClientAdapter {
      * Terminal seam for CREATE_CLIENT (capture mode only).
      *
      * <p>{@code RepresentationToModel.createClient} (KC 26.5.5,
-     * {@code org.keycloak.models.utils.RepresentationToModel:404}) calls
+     * {@code org.keycloak.models.utils.RepresentationToModel}) calls
      * {@code client.updateClient()} as its FINAL model mutation, AFTER
      * {@code updateClientProperties} (name/enabled/flows/redirectUris/
-     * webOrigins/attributes — line 347), the protocol-mapper rebuild (line 391)
-     * and {@code updateClientScopes} (line 402). So when this fires every
+     * webOrigins/attributes), the protocol-mapper rebuild
+     * and {@code updateClientScopes}. So when this fires every
      * admin-supplied field is already on the live model. We snapshot the
      * complete model into a {@link ClientRepresentation} with Keycloak's own
      * {@link ModelToRepresentation#toRepresentation}, fold it into the
@@ -299,8 +299,8 @@ public class IgaClientAdapter extends ClientAdapter {
         //     KeycloakErrorHandler#getResponse uses (tx.setRollbackOnly() then
         //     return a response) — here applied to a 2xx instead of a 4xx/5xx.
         //   * Without this flag getRollbackOnly() is false, so close() would
-        //     commit() the request tx and leak the scratch client — the
-        //     observed duplicate-key bug. This is the fix.
+        //     commit() the request tx and leak the scratch client (a
+        //     duplicate-key collision).
         igaSession.getTransactionManager().setRollbackOnly();
 
         throw new IgaPendingApprovalException(crIdHolder[0], "CLIENT", "CREATE_CLIENT");

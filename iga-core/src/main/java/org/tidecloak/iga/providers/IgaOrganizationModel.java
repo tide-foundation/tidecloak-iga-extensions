@@ -38,9 +38,9 @@ import java.util.stream.Stream;
  *       applied to a genuine scratch {@code OrganizationAdapter}) and intercepts
  *       only at the terminal seam {@link #setDomains} —
  *       {@code RepresentationToModel.toModel} (KC 26.5.5,
- *       {@code org.keycloak.models.utils.RepresentationToModel:1729}) calls
- *       {@code model.setDomains(...)} as its FINAL, unconditional setter (line
- *       1736) AFTER setName/setAlias/setEnabled/setRedirectUrl/setDescription/
+ *       {@code org.keycloak.models.utils.RepresentationToModel}) calls
+ *       {@code model.setDomains(...)} as its FINAL, unconditional setter
+ *       AFTER setName/setAlias/setEnabled/setRedirectUrl/setDescription/
  *       setAttributes. There snapshot → CR(REP_JSON) in a separate tx →
  *       request-tx rollback-only → {@code IgaPendingApprovalException}.</li>
  *   <li><b>Create-capture mode</b> ({@code captureCreate == true}): wraps a
@@ -49,7 +49,7 @@ import java.util.stream.Stream;
  *       {@code super.create}. {@code OrganizationsResource.create} (POST
  *       .../organizations) calls {@code provider.create(name, alias)} then the
  *       SAME {@code RepresentationToModel.toModel(rep, model)} (KC 26.5.5
- *       {@code OrganizationsResource:114-115}), so the identical terminal seam
+ *       {@code OrganizationsResource}), so the identical terminal seam
  *       {@link #setDomains} applies — it just writes a {@code CREATE_ORGANIZATION}
  *       CR instead of {@code UPDATE_ORGANIZATION}, and the scratch org is
  *       discarded by the request-tx rollback exactly like a captured client.</li>
@@ -103,11 +103,11 @@ public class IgaOrganizationModel implements OrganizationModel {
      * Terminal seam for CREATE_ORGANIZATION / UPDATE_ORGANIZATION.
      *
      * <p>{@code RepresentationToModel.toModel(rep, model)} (KC 26.5.5,
-     * {@code org.keycloak.models.utils.RepresentationToModel:1729}) ends with
-     * {@code model.setDomains(...)} (line 1736) — the FINAL, unconditional
+     * {@code org.keycloak.models.utils.RepresentationToModel}) ends with
+     * {@code model.setDomains(...)} — the FINAL, unconditional
      * setter, AFTER setName/setAlias/setEnabled/setRedirectUrl/setDescription/
-     * setAttributes (lines 1733-1735). Both the create
-     * ({@code OrganizationsResource.create:114-115}) and update
+     * setAttributes. Both the create
+     * ({@code OrganizationsResource.create}) and update
      * ({@code OrganizationResource.update}) admin paths run that exact builder,
      * so when this fires every admin-supplied org field (including the just
      * supplied {@code domains} argument) is the desired final state. We snapshot
@@ -270,10 +270,10 @@ public class IgaOrganizationModel implements OrganizationModel {
     //
     // KC checkpoints surfaced by org.isEnabled() (cross-checked vs
     // /home/sasha/project/tidecloak/services/src/main/java/org/keycloak/...):
-    //   Organizations.isReadOnlyOrganizationMember:290           (managed members go read-only)
-    //   OrganizationAuthenticator.authenticate:215               (org-aware login refused)
-    //   IdpAddOrganizationMemberAuthenticator:82                 (IdP-brokered org membership blocked)
-    //   RegistrationPage.validate:69                             (org-scoped registration blocked)
+    //   Organizations.isReadOnlyOrganizationMember     (managed members go read-only)
+    //   OrganizationAuthenticator.authenticate         (org-aware login refused)
+    //   IdpAddOrganizationMemberAuthenticator          (IdP-brokered org membership blocked)
+    //   RegistrationPage.validate                      (org-scoped registration blocked)
     //
     // Defers to super.isEnabled() (i.e. the wrapped delegate's real flag)
     // first so an admin-disabled org stays disabled regardless. If the

@@ -187,10 +187,10 @@ public final class IgaScopeResolver {
                 // IdP, so collect scope contributions from both entities. The
                 // existing ResolvedScope merge semantics — union of required
                 // approver roles, max of thresholds (see
-                // resolveThresholdInternal:280) — apply automatically once
+                // resolveThresholdInternal) — apply automatically once
                 // both helpers write into the same `scope` instance. IdP
                 // attributes live in IdentityProviderModel.getConfig()
-                // (server-spi:208) so a separate resolver branch reads them
+                // (server-spi) so a separate resolver branch reads them
                 // out of the IdP's config map.
                 resolveOrganizationScopesFromRows(session, realm, cr, scope, "ORG_ID");
                 resolveIdpScopesFromRows(session, realm, cr, scope, "IDP_ALIAS");
@@ -465,11 +465,11 @@ public final class IgaScopeResolver {
      * Walk the CR rows for the IdP alias column ({@code IDP_ALIAS}) and harvest
      * scope contributions from each linked IdP. Used by ORG_ADD_IDP /
      * ORG_REMOVE_IDP — the row shape carries both ORG_ID and IDP_ALIAS (see
-     * IgaOrganizationProvider.recordIdp:337-343), so this helper is a sibling
+     * IgaOrganizationProvider.recordIdp), so this helper is a sibling
      * to {@link #resolveOrganizationScopesFromRows} called from the same case
      * branch. We look the IdP up via {@code session.identityProviders()
      * .getByAlias(alias)} (the canonical SPI surface KC uses everywhere else,
-     * e.g. OrganizationIdentityProvidersResource.addIdentityProvider:131); if
+     * e.g. OrganizationIdentityProvidersResource.addIdentityProvider); if
      * the IdP can't be resolved (e.g. it's already been detached at commit
      * time for ORG_REMOVE_IDP), the row is silently skipped — the org-side
      * contribution still gates the change, and the resolver is best-effort.
@@ -496,7 +496,7 @@ public final class IgaScopeResolver {
     /**
      * Harvest iga.approverRole / iga.threshold from an IdP's config map.
      * IdentityProviderModel exposes only the full config map
-     * ({@link IdentityProviderModel#getConfig()} — server-spi:208), so we
+     * ({@link IdentityProviderModel#getConfig()} — server-spi), so we
      * read the keys directly. Mirrors {@link #collectClientScope} (single
      * value per key, no per-attribute list shape).
      */

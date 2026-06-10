@@ -144,10 +144,10 @@ public class IgaOrganizationProvider extends InfinispanOrganizationProvider {
     public IgaOrganizationProvider(KeycloakSession session) {
         // super constructs the Infinispan layer, which lazily resolves its
         // delegate via session.getProvider(OrganizationProvider.class, "jpa")
-        // (InfinispanOrganizationProvider.getDelegate:73-79) — i.e. KC's
+        // (InfinispanOrganizationProvider.getDelegate) — i.e. KC's
         // JpaOrganizationProviderFactory at id "jpa". Wraps invitationManager
         // through InfinispanInvitationManager(getDelegate().getInvitationManager())
-        // eagerly in the super constructor (line 56).
+        // eagerly in the super constructor.
         super(session);
         this.igaSession = session;
     }
@@ -389,8 +389,8 @@ public class IgaOrganizationProvider extends InfinispanOrganizationProvider {
      * row is STILL present. If replay later calls
      * {@code invitationManager.create(org, email, firstName, lastName)} with the
      * same {@code (organization_id, email)} pair, the
-     * {@code UK_ORG_INVITATION_EMAIL} unique constraint (jpa-changelog-26.5.0.xml
-     * line 231-233) is violated and the commit transaction aborts with
+     * {@code UK_ORG_INVITATION_EMAIL} unique constraint (jpa-changelog-26.5.0.xml)
+     * is violated and the commit transaction aborts with
      * SQLState 23505 (translated by KC into HTTP 409 on the {@code /commit}
      * call). To avoid that without weakening deny semantics, the seam captures
      * the original invitation id here; {@link IgaReplayDispatcher

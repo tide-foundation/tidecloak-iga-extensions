@@ -350,7 +350,7 @@ public class IgaRealmAdapter extends RealmAdapter {
     //                                                              == IgaRealmProvider.getRealm
     //                                                              == THIS adapter]
     //     → updated.addDefaultClientScope(scope, defaultScope) [THIS override]
-    // i.e. the cache adapter (model/infinispan RealmAdapter:1647-1655) DELEGATES
+    // i.e. the cache adapter (model/infinispan RealmAdapter) DELEGATES
     // to the model adapter via getDelegateForUpdate(), so unlike the
     // CLIENT_SCOPE_CLIENT attach (which the cache ClientAdapter routes straight
     // to the provider, bypassing the model adapter — see IgaRealmProvider

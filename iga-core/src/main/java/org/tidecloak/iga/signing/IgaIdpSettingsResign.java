@@ -19,7 +19,7 @@ import java.util.Map;
  * The Heimdall enclave verifies a VVK signature ({@code settingsSig}) over
  * {@code VendorSettings = {RegOn, BackupOn, LogoURL, ImageURL}}, where
  * {@code RegOn = realm.isRegistrationAllowed()}
- * ({@code VendorResource.java:1077}). {@code signIdpSettings} runs only at
+ * ({@code VendorResource}). {@code signIdpSettings} runs only at
  * provisioning and VRK rotation. The IGA realm-config commit path
  * ({@code IgaReplayDispatcher.replaySetRealmConfig} ->
  * {@code realm.setRegistrationAllowed}) applies the change but never re-signs, so

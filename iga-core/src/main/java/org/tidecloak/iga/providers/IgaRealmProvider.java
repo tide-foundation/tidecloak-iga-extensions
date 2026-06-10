@@ -150,7 +150,6 @@ public class IgaRealmProvider extends JpaRealmProvider {
         // the scratch group is discarded atomically; one 202 + Location is
         // returned by IgaPendingApprovalExceptionMapper.
         //
-        // ROOT CAUSE NOTE:
         // A "still NPEs at GroupsPartialImport" symptom is NOT an IGA
         // capture-mode artifact. KC's getModelId is
         // `findGroupModel(...).getId()` where findGroupModel ==
@@ -159,22 +158,18 @@ public class IgaRealmProvider extends JpaRealmProvider {
         // guard (`if (path == null) return null;`) when the GroupRepresentation in
         // the partialImport payload omits `path`, so `.getId()` on the next
         // line NPEs UNCONDITIONALLY, regardless of whether the scratch group
-        // is persisted, regardless of IGA. Confirmed by running an
-        // IGA-DISABLED vanilla-KC realm with `{"groups":[{"name":"vp-group",
-        // "attributes":{...}}]}` (no path): identical HTTP 500 / identical
-        // GroupsPartialImport NPE / identical KC-SERVICES0037 stack.
-        // KC's own AbstractPartialImportTest.addGroups always sets BOTH
-        // setName AND setPath("/" + GROUP_PREFIX + i) — pathless group reps
+        // is persisted and regardless of IGA (an IGA-disabled vanilla-KC realm
+        // NPEs identically on a pathless group rep). Pathless group reps
         // are malformed per KC's partialImport contract, not an IGA defect.
         // Roles/users don't NPE because RealmRolesPartialImport.getModelId
         // uses `.orElse(null)` and
         // UsersPartialImport.getModelId uses a createdIds cache populated by
         // create().
         //
-        // The corresponding E2E payload now sets `path` on the group rep so
+        // The corresponding E2E payload sets `path` on the group rep so
         // KC's intra-import getModelId resolves the (real, persisted, super-
         // created) scratch group via findGroupByPath → getGroupByName
-        // (JpaRealmProvider.getGroupByName:516-539 — name+parent+type=REALM
+        // (JpaRealmProvider.getGroupByName — name+parent+type=REALM
         // criteria query that finds the scratch group flushed by super.
         // createGroup above).
         if (IgaImportMode.isImportMode(igaSession, realm)) {
@@ -211,7 +206,7 @@ public class IgaRealmProvider extends JpaRealmProvider {
             // IgaGroupAdapter is returned in capture mode: every per-setter
             // override falls through to the real adapter, and the LAST mutation
             // KC makes in that path — GroupModel.setDescription()
-            // (GroupResource.updateGroup line 300, KC 26.5.5) — is the terminal
+            // (GroupResource.updateGroup, KC 26.5.5) — is the terminal
             // seam where the now-complete model is snapshotted to a
             // GroupRepresentation, the CREATE_GROUP change request (with full
             // REP_JSON) is written in a separate transaction, the REQUEST
@@ -300,11 +295,11 @@ public class IgaRealmProvider extends JpaRealmProvider {
             // each composite child's identity (because
             // ModelToRepresentation.toRepresentation(RoleModel) does NOT
             // serialize composites — KC 26.5.5
-            // ModelToRepresentation:424-434), and the LAST unconditional model
+            // ModelToRepresentation), and the LAST unconditional model
             // call KC makes in createRole — role.getName() at
-            // RoleContainerResource.createRole line 225, AFTER setDescription
-            // (168), the setAttribute loop (170-175) and the conditional
-            // addCompositeRole loop (186-222) — is the terminal seam where the
+            // RoleContainerResource.createRole, AFTER setDescription,
+            // the setAttribute loop and the conditional
+            // addCompositeRole loop — is the terminal seam where the
             // now-complete model is snapshotted into a RoleRepresentation
             // (base via ModelToRepresentation.toRepresentation PLUS
             // setComposite(true)+setComposites(...) reconstructed from the
@@ -487,8 +482,8 @@ public class IgaRealmProvider extends JpaRealmProvider {
             // genuine ClientAdapter. The IgaClientAdapter is returned in
             // capture mode: every per-setter override falls through to the real
             // adapter, and the LAST mutation KC makes in that path —
-            // ClientModel.updateClient() (RepresentationToModel.createClient
-            // line 404, KC 26.5.5) — is the terminal seam where the now
+            // ClientModel.updateClient() (RepresentationToModel.createClient,
+            // KC 26.5.5) — is the terminal seam where the now
             // complete model is snapshotted to a ClientRepresentation, the
             // CREATE_CLIENT change request (with full REP_JSON) is written in a
             // separate transaction, the REQUEST transaction is marked

@@ -1029,7 +1029,7 @@ public class IgaAdminResource {
             // Reject a duplicate signature from the same admin — mirrors the
             // per-CR authorize endpoint's pre-check. In bulk this typically
             // means the operator already ran a previous bulk that partially
-            // signed but didn't commit; we then proceed straight to commit
+            // signed but didn't commit; proceed straight to commit
             // rather than fail (the existing signature counts toward
             // threshold).
             List<IgaAuthorizationEntity> existing = em.createNamedQuery(
@@ -1107,7 +1107,7 @@ public class IgaAdminResource {
             }
 
             // POST-replay per-unit-type column stamp (uniform Design B) — IDENTICAL to the
-            // single-CR commit path (commit():417-419). Without this, a bulk-approved CR
+            // single-CR commit path (commit()). Without this, a bulk-approved CR
             // (e.g. the toggle-on ADOPT closure) replays but never stamps the node/derived/
             // realm producer attestation-units into their DEDICATED per-unit columns. On a
             // firstAdmin real-signing-capable realm those stampers route through
@@ -2240,7 +2240,7 @@ public class IgaAdminResource {
         }
 
         // threshold + readyToCommit. Both MUST come from the SAME authoritative
-        // value the commit gate enforces (IgaAdminResource.commit:345 →
+        // value the commit gate enforces (IgaAdminResource.commit →
         // attestor.getThreshold), so the representation can never report a number
         // that disagrees with enforcement. Threshold resolution depends on
         // rows_json + realm state, so guard it.

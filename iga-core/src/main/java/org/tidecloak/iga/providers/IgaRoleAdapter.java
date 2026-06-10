@@ -65,18 +65,18 @@ import java.util.Set;
  *       enlist-synchronization was considered (the design doc's
  *       {@code DefaultKeycloakTransactionManager#enlistAfterCompletion} idea)
  *       but is UNSOUND in KC 26.5.5: {@code DefaultKeycloakTransactionManager
- *       #commit()} (verified, lines 114-167) commits the main {@code
+ *       #commit()} commits the main {@code
  *       transactions} list (which holds the request {@code JpaKeycloakTransaction}
- *       enlisted by {@code DefaultJpaConnectionProviderFactory:108}) FIRST and
+ *       enlisted by {@code DefaultJpaConnectionProviderFactory}) FIRST and
  *       only then iterates {@code afterCompletion} — so an afterCompletion hook
  *       cannot veto the already-committed scratch role, and it also runs at
  *       session-close, far too late to turn the response into a 202.
  *
- *       <h3>Terminal seam chosen: {@code getName()} at createRole line 225</h3>
- *       {@code role.getName()} (RoleContainerResource.createRole line 225, then
- *       227) is the FIRST and only {@code getName()} call in {@code createRole}
- *       and it is UNCONDITIONAL and strictly AFTER {@code setDescription} (168),
- *       the attribute loop (170-175) and the composite loop (186-222) — i.e.
+ *       <h3>Terminal seam chosen: {@code getName()} at createRole</h3>
+ *       {@code role.getName()} (RoleContainerResource.createRole) is the FIRST
+ *       and only {@code getName()} call in {@code createRole}
+ *       and it is UNCONDITIONAL and strictly AFTER {@code setDescription},
+ *       the attribute loop and the composite loop — i.e.
  *       the model is fully built when it fires, for BOTH composite and
  *       non-composite roles. It is therefore the exact role analogue of
  *       client's {@code updateClient()} / group's {@code setDescription()}.
@@ -93,7 +93,7 @@ import java.util.Set;
  *       description, attributes, clientRole, containerId) and — because
  *       {@code ModelToRepresentation.toRepresentation(RoleModel)} sets only the
  *       {@code composite} boolean and NEVER {@code setComposites(...)}
- *       (verified, KC 26.5.5 ModelToRepresentation:424-434) — ALSO sets
+ *       (verified, KC 26.5.5 ModelToRepresentation) — ALSO sets
  *       {@code setComposite(true)} + {@code setComposites(Composites{realm,
  *       client})} reconstructed from the {@link #addCompositeRole} calls this
  *       adapter intercepted. The {@code CREATE_ROLE} change request (with full
@@ -139,7 +139,7 @@ public class IgaRoleAdapter extends RoleAdapter {
     private final Set<String> capturedRealmComposites = new LinkedHashSet<>();
     private final Map<String, List<String>> capturedClientComposites = new LinkedHashMap<>();
 
-    /** Fire-once guard: only the first getName() at createRole:225 emits. */
+    /** Fire-once guard: only the first getName() at createRole emits. */
     private boolean captureEmitted = false;
 
     /**
@@ -202,10 +202,10 @@ public class IgaRoleAdapter extends RoleAdapter {
     // -------------------------------------------------------------------------
     // Terminal seam for CREATE_ROLE (capture mode only): role.getName().
     //
-    // RoleContainerResource.createRole calls role.getName() at line 225
-    // (adminEvent.resourcePath) and 227 (Response.created) — the FIRST and only
-    // getName() in the method, UNCONDITIONAL and strictly AFTER setDescription
-    // (168), the attribute loop (170-175) and the composite loop (186-222). So
+    // RoleContainerResource.createRole calls role.getName()
+    // (adminEvent.resourcePath, then Response.created) — the FIRST and only
+    // getName() in the method, UNCONDITIONAL and strictly AFTER setDescription,
+    // the attribute loop and the composite loop. So
     // when this fires the model is fully built for BOTH composite and
     // non-composite roles. We snapshot it, fold the recorded composites in, and
     // emit the CREATE_ROLE CR + rollback-only + throw exactly as
@@ -290,7 +290,7 @@ public class IgaRoleAdapter extends RoleAdapter {
         // Base snapshot via Keycloak's own serializer: name, description,
         // attributes, clientRole, containerId. NOTE: this sets only the
         // `composite` boolean (role.isComposite()) and NEVER setComposites(...)
-        // (KC 26.5.5 ModelToRepresentation:424-434) — so we MUST reconstruct
+        // (KC 26.5.5 ModelToRepresentation) — so we MUST reconstruct
         // the composites from the addCompositeRole calls we intercepted.
         RoleRepresentation rep = ModelToRepresentation.toRepresentation(this);
         // Pin identity so replay recreates the role with the SAME UUID the

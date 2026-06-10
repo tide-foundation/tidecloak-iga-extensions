@@ -346,7 +346,7 @@ public final class IgaImportMode {
      * {@link #registerImportRole} / {@link #registerImportUser}: the
      * {@code CREATE_CLIENT} row is harvested at batch-emit time by
      * {@link IgaClientAdapter#buildImportClientPendingCr()}
-     * AFTER {@code RepresentationToModel.createClient} (KC 26.5.5 line 404) has
+     * AFTER {@code RepresentationToModel.createClient} (KC 26.5.5) has
      * called its terminal {@code updateClient()} on the pass-through scratch
      * model (every {@code updateClientProperties} field / protocol-mapper /
      * scope already applied to the real, super-persisted scratch client). So
@@ -453,10 +453,10 @@ public final class IgaImportMode {
         @Override
         public void commit() {
             // Runs in DefaultKeycloakTransactionManager#commit's `prepare`
-            // loop (:124-130), AFTER the partialImport callable completed
+            // loop, AFTER the partialImport callable completed
             // (every entity built + accumulated) and BEFORE the scratch JPA
-            // `transactions` commit (:135). Throwing here triggers
-            // rollback(exception) (:131-134 → :187-208): the scratch JPA tx
+            // `transactions` commit. Throwing here triggers
+            // rollback(exception): the scratch JPA tx
             // is rolled back (every imported entity discarded atomically) and
             // the exception is rethrown → mapper → single 202.
             active = false;

@@ -153,11 +153,10 @@ public class IgaInvitationManager implements InvitationManager {
                         originalInvitationId = existing.getId();
                     }
                 } catch (Exception ignored) {
-                    // Best-effort lookup: on capture we still record the CR
+                    // Best-effort lookup: on capture the CR is still recorded
                     // (action type already determined) and replay falls back
                     // to the no-id path. The unique-constraint would still
-                    // fire at replay, but that's strictly no-worse than the
-                    // pre-fix behaviour and surfaces a clear error.
+                    // fire at replay, surfacing a clear error.
                 }
             }
 

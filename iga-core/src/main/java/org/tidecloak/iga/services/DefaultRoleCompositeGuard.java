@@ -11,7 +11,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 
 /**
- * ★ MF2 (HIGH) guard — validates that the realm composite default-role
+ * MF2 (HIGH) guard — validates that the realm composite default-role
  * ({@code default-roles-<realm>}) expands ONLY to a benign, non-privileged
  * baseline before the accept-unattested self-registration model trusts it.
  *

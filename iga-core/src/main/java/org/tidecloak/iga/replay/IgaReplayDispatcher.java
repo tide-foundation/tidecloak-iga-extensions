@@ -312,11 +312,11 @@ public class IgaReplayDispatcher {
     // -------------------------------------------------------------------------
     // Reusable entity-rebuild helpers (CREATE_* from REP_JSON).
     //
-    // ★ BYTE-IDENTITY CONTRACT. Each helper rebuilds the live entity from the
-    // CR row EXACTLY as the per-action replay used to inline — pinning the
+    // BYTE-IDENTITY CONTRACT. Each helper rebuilds the live entity from the
+    // CR row EXACTLY as the per-action replay does — pinning the
     // captured id/name and applying the captured REP_JSON via the SAME
     // RepresentationToModel.* builder Keycloak's REST resource uses. The
-    // replayCreate* methods above now call THESE helpers, and so does the
+    // replayCreate* methods above call THESE helpers, and so does the
     // phase-1 multiAdmin from-REP_JSON node-unit builder
     // ({@code IgaCreateUnitBuilder}): it runs the helper into a SCRATCH entity
     // (nested runJobInTransaction, IGA_REPLAY_ACTIVE=true), reads the live
@@ -335,7 +335,7 @@ public class IgaReplayDispatcher {
         String username = str(row, "USERNAME");
         String repJson = str(row, "REP_JSON");
 
-        // ★ ENROLL-BEFORE-COMMIT: if a LIVE persisted user with this id already exists
+        // ENROLL-BEFORE-COMMIT: if a LIVE persisted user with this id already exists
         // (i.e. the pending CREATE_USER user was persisted pre-commit and ENROLLED via
         // LinkTideAccount while the CR was PENDING — adding vuid/tideUserKey under
         // IGA_REPLAY_ACTIVE with no re-sign), the REP_JSON snapshot captured at create
@@ -574,7 +574,7 @@ public class IgaReplayDispatcher {
         for (Map<String, Object> row : rows) {
             String userId = str(row, "ID");
             rebuildCreateUserFromRow(session, realm, row);
-            // ★ D3 — auto-assign the realm default-role + default groups at COMMIT-replay, so
+            // D3 — auto-assign the realm default-role + default groups at COMMIT-replay, so
             // the token the new user mints carries the default-role-derived claims. The capture
             // path (IgaUserProvider.addUser, addDefaultRoles=false) deliberately leaves the
             // PENDING user role-less; the default-roles land HERE at commit. This runs under
@@ -596,7 +596,7 @@ public class IgaReplayDispatcher {
                     .setParameter("id", userId)
                     .executeUpdate();
         }
-        // ★ FINALIZE the persisted-pending user (enroll-before-commit / Tideless
+        // FINALIZE the persisted-pending user (enroll-before-commit / Tideless
         // quarantine): clear any IGA_UNSIGNED_ENTITY sidecar row this CREATE_USER
         // CR registered when the pending user was PERSISTED quarantined (the
         // Tideless path in IgaUserAdapter.getId). Keyed on the CR id, so it is a
@@ -2108,8 +2108,7 @@ public class IgaReplayDispatcher {
     // -------------------------------------------------------------------------
     // Governed IGA disable (DISABLE_IGA)
     //
-    // The teardown that TideAdminCompatResource.toggleIga used to run inline on
-    // ON→OFF now runs HERE, only after the DISABLE_IGA change request commits
+    // The ON→OFF teardown runs HERE, only after the DISABLE_IGA change request commits
     // (admin-approved at the realm-default quorum). It runs IN ORDER inside the
     // replay transaction (IGA_REPLAY_ACTIVE is already true, set by replay()):
     //
@@ -2123,7 +2122,7 @@ public class IgaReplayDispatcher {
     //      cache, so post-disable reads reflect the IGA-off state.
     //   4. RS256 revert — on a Tide realm (tide IdP + tide-vendor-key present) whose
     //      defaultSignatureAlgorithm is EdDSA, revert to RS256 (no Tide signing path
-    //      once IGA is off). Mirrors the OFF-toggle logic that used to live inline.
+    //      once IGA is off).
     //
     // Re-ON-safe / revokes NOTHING: this teardown does NOT burn any pack, flip any
     // MODE, or retire any VVK/VRK; IGA_ROLE_POLICY is left intact as audit. A later
