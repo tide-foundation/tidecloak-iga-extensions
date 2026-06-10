@@ -37,12 +37,12 @@ import java.util.Map;
  *       the COMPLETE incoming {@link GroupRepresentation} (name, attributes,
  *       description) to the real model. The LAST mutation that path makes,
  *       {@code GroupModel.setDescription(rep.getDescription())}
- *       (KC 26.5.5 {@code GroupResource.updateGroup}, line 300 — called
+ *       (KC 26.5.5 {@code GroupResource.updateGroup} — called
  *       unconditionally for BOTH the top-level
- *       {@code GroupsResource.addTopLevelGroup} (line 221) and child
- *       {@code GroupResource.addChild} (line 251) create paths, strictly AFTER
- *       the optional {@code setName} (line 280) and the attribute
- *       set/remove loop (lines 288-298)), is the <b>terminal seam</b>:
+ *       {@code GroupsResource.addTopLevelGroup} and child
+ *       {@code GroupResource.addChild} create paths, strictly AFTER
+ *       the optional {@code setName} and the attribute
+ *       set/remove loop), is the <b>terminal seam</b>:
  *       {@link #setDescription(String)} snapshots the now-complete model into a
  *       {@link GroupRepresentation} via
  *       {@link ModelToRepresentation#toRepresentation(GroupModel, boolean)},
@@ -205,6 +205,9 @@ public class IgaGroupAdapter extends GroupAdapter {
         if (captureMode) return false;
         IgaChangeRequestService service = getService();
         if (!service.isIgaEnabled(realm)) return false;
+        // Scoped vendor/system provisioning bypass (see
+        // IgaChangeRequestService.IGA_VENDOR_PROVISIONING): apply directly, no capture.
+        if (service.isVendorProvisioning()) return false;
         Object replay = session.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }
@@ -213,14 +216,14 @@ public class IgaGroupAdapter extends GroupAdapter {
      * Terminal seam for CREATE_GROUP (capture mode only).
      *
      * <p>{@code GroupResource.updateGroup} (KC 26.5.5,
-     * {@code org.keycloak.services.resources.admin.GroupResource:300}) calls
+     * {@code org.keycloak.services.resources.admin.GroupResource}) calls
      * {@code model.setDescription(rep.getDescription())} as its FINAL model
-     * mutation, AFTER the optional {@code setName} (line 280) and the attribute
-     * set/remove loop (lines 288-298). Both create entrypoints route here:
+     * mutation, AFTER the optional {@code setName} and the attribute
+     * set/remove loop. Both create entrypoints route here:
      * {@code GroupsResource.addTopLevelGroup} calls {@code realm.createGroup(name)}
-     * then {@code GroupResource.updateGroup(rep, child, ...)} (line 221), and
+     * then {@code GroupResource.updateGroup(rep, child, ...)}, and
      * {@code GroupResource.addChild} calls {@code realm.createGroup(name, parent)}
-     * then {@code updateGroup(rep, child, ...)} (line 251). So when this fires
+     * then {@code updateGroup(rep, child, ...)}. So when this fires
      * every admin-supplied group field is on the live model. We snapshot it to a
      * {@link GroupRepresentation} with Keycloak's own
      * {@link ModelToRepresentation#toRepresentation(GroupModel, boolean)}, fold

@@ -132,6 +132,27 @@ public final class IgaScopeResolver {
             case "REMOVE_REALM_DEFAULT_GROUP":
             case "CREATE_CLIENT_SCOPE":
                 break;
+            // -----------------------------------------------------------------
+            // Whole-entity deletes. Per-target scope where the entity can carry
+            // its own iga.approverRole/iga.threshold:
+            //   DELETE_ROLE   → the target role's own scope (collectRoleScope)
+            //   DELETE_CLIENT → the target client's own scope (collectClientScope)
+            // DELETE_USER / DELETE_GROUP / DELETE_CLIENT_SCOPE resolve to the
+            // realm default (empty scope): users/groups carry no first-class
+            // delete-approver of their own here (user-rec: realm-default for
+            // user/group), and client scopes have no first-class iga.approverRole
+            // today (mirrors CREATE_CLIENT_SCOPE / *_CLIENT_SCOPE_ATTRIBUTE).
+            // -----------------------------------------------------------------
+            case "DELETE_ROLE":
+                resolveRoleScopesFromRows(session, realm, cr, scope, "ROLE_ID");
+                break;
+            case "DELETE_CLIENT":
+                resolveClientScopesFromRows(session, realm, cr, scope, "CLIENT_UUID");
+                break;
+            case "DELETE_USER":
+            case "DELETE_GROUP":
+            case "DELETE_CLIENT_SCOPE":
+                break;
             case "UPDATE_CLIENT_WEB_ORIGINS":
             case "UPDATE_CLIENT_REDIRECT_URIS":
                 resolveClientScopesFromRows(session, realm, cr, scope, "client_id");
@@ -187,10 +208,10 @@ public final class IgaScopeResolver {
                 // IdP, so collect scope contributions from both entities. The
                 // existing ResolvedScope merge semantics — union of required
                 // approver roles, max of thresholds (see
-                // resolveThresholdInternal:280) — apply automatically once
+                // resolveThresholdInternal) — apply automatically once
                 // both helpers write into the same `scope` instance. IdP
                 // attributes live in IdentityProviderModel.getConfig()
-                // (server-spi:208) so a separate resolver branch reads them
+                // (server-spi) so a separate resolver branch reads them
                 // out of the IdP's config map.
                 resolveOrganizationScopesFromRows(session, realm, cr, scope, "ORG_ID");
                 resolveIdpScopesFromRows(session, realm, cr, scope, "IDP_ALIAS");
@@ -465,11 +486,11 @@ public final class IgaScopeResolver {
      * Walk the CR rows for the IdP alias column ({@code IDP_ALIAS}) and harvest
      * scope contributions from each linked IdP. Used by ORG_ADD_IDP /
      * ORG_REMOVE_IDP — the row shape carries both ORG_ID and IDP_ALIAS (see
-     * IgaOrganizationProvider.recordIdp:337-343), so this helper is a sibling
+     * IgaOrganizationProvider.recordIdp), so this helper is a sibling
      * to {@link #resolveOrganizationScopesFromRows} called from the same case
      * branch. We look the IdP up via {@code session.identityProviders()
      * .getByAlias(alias)} (the canonical SPI surface KC uses everywhere else,
-     * e.g. OrganizationIdentityProvidersResource.addIdentityProvider:131); if
+     * e.g. OrganizationIdentityProvidersResource.addIdentityProvider); if
      * the IdP can't be resolved (e.g. it's already been detached at commit
      * time for ORG_REMOVE_IDP), the row is silently skipped — the org-side
      * contribution still gates the change, and the resolver is best-effort.
@@ -496,7 +517,7 @@ public final class IgaScopeResolver {
     /**
      * Harvest iga.approverRole / iga.threshold from an IdP's config map.
      * IdentityProviderModel exposes only the full config map
-     * ({@link IdentityProviderModel#getConfig()} — server-spi:208), so we
+     * ({@link IdentityProviderModel#getConfig()} — server-spi), so we
      * read the keys directly. Mirrors {@link #collectClientScope} (single
      * value per key, no per-attribute list shape).
      */

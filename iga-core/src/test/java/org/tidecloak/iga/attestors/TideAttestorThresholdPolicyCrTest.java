@@ -1068,4 +1068,138 @@ class TideAttestorThresholdPolicyCrTest {
         assertNull(linkage.policyCrId);
         assertTrue(linkage.assignmentCrIds.isEmpty());
     }
+
+    // --- OFFBOARD_REALM doken carrier (SPI-provided Offboard:1) ---------------
+    //
+    // OFFBOARD_REALM is NON-producer (its OWN CR attestation stub-signs — there is no
+    // AttestationUnit envelope), but the destructive Midgard.Offboard ORK ceremony ragnarok runs
+    // at commit needs a quorum of admin DOKENS. iga-core can't build an Offboard:1 carrier (it
+    // doesn't know the request shape), so on the FIRST open of the approval popup it asks the
+    // RagnarokOffboardService SPI for a vendor-initialized Offboard:1 carrier and persists it as
+    // the CR's REQUEST_MODEL. The two-phase enclave approval appends each admin's doken onto it,
+    // and the accumulation short-circuit returns it verbatim for the 2nd..Nth approver so dokens
+    // stack — exactly like the producer-unit / REGEN paths, but the commit-time sign is the SPI's
+    // Midgard.Offboard, NOT signMultiAdminUnitsViaPolicy.
+
+    private IgaChangeRequestEntity offboardCr(String id) {
+        IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
+        cr.setId(id);
+        cr.setRealmId(REALM_ID);
+        cr.setActionType(TideAttestor.ACTION_OFFBOARD_REALM);
+        cr.setEntityType("REALM");
+        cr.setEntityId(REALM_ID);
+        cr.setStatus("PENDING");
+        return cr;
+    }
+
+    @Test
+    void approvalModel_offboardCr_firstOpen_seedsSpiBuiltCarrierWithM0Policy() throws Exception {
+        // FIRST open (0 approvals): the OFFBOARD branch asks the SPI for the Offboard:1 carrier,
+        // ATTACHES the M0 admin Policy to it (so the ORK PolicyAuthorizationFlow can validate the
+        // dokens), and persists the policy-attached carrier as the CR REQUEST_MODEL — it does NOT
+        // fall through to the AttestationUnit / canonical producer-unit path.
+        IgaChangeRequestEntity cr = offboardCr("offboard-first");
+        stubRecordedApprovals(0);
+        // M0 admin Policy must be present for the attach (post-flip invariant).
+        byte[] m0PolicyRaw = "m0-admin-threshold-policy".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        IgaRolePolicyEntity m0 = new IgaRolePolicyEntity();
+        m0.setPolicy(java.util.Base64.getEncoder().encodeToString(m0PolicyRaw));
+        stubPolicyLookup(m0);
+
+        org.tidecloak.iga.providers.RagnarokOffboardService svc =
+                mock(org.tidecloak.iga.providers.RagnarokOffboardService.class);
+        when(session.getProvider(org.tidecloak.iga.providers.RagnarokOffboardService.class))
+                .thenReturn(svc);
+        // A real vendor-style Offboard:1 ModelRequest carrier WITHOUT a Policy (segment 9 empty) —
+        // the shape ragnarok returns. The fix decodes it, attaches M0, and re-encodes.
+        String spiCarrier = encodeOffboardCarrierNoPolicy();
+        when(svc.buildOffboardApprovalCarrier(eq(session), eq(realm))).thenReturn(spiCarrier);
+
+        String returned = attestor.buildMultiAdminApprovalModel(session, realm, cr);
+
+        // The returned carrier is the policy-ATTACHED carrier, not the policy-less SPI output.
+        assertEquals(returned, cr.getRequestModel(),
+                "the policy-attached carrier is persisted on the CR REQUEST_MODEL for the enclave");
+        byte[] seg9 = org.midgard.Serialization.Tools.GetValue(
+                java.util.Base64.getDecoder().decode(returned), 9);
+        org.junit.jupiter.api.Assertions.assertArrayEquals(m0PolicyRaw, seg9,
+                "the seeded OFFBOARD carrier must carry the M0 admin Policy at segment 9");
+        // The vendor Draft/expiry/creation-auth (the dokens sign over GetDataToAuthorize) are
+        // untouched by SetPolicy — proven by the data-to-authorize being identical pre/post.
+        org.midgard.models.ModelRequest before = org.midgard.models.ModelRequest.FromBytes(
+                java.util.Base64.getDecoder().decode(spiCarrier));
+        org.midgard.models.ModelRequest after = org.midgard.models.ModelRequest.FromBytes(
+                java.util.Base64.getDecoder().decode(returned));
+        assertEquals(before.GetDataToAuthorize(), after.GetDataToAuthorize(),
+                "SetPolicy must not change GetDataToAuthorize (Id+Draft+Expiry) — dokens stay valid");
+        verify(svc, times(1)).buildOffboardApprovalCarrier(eq(session), eq(realm));
+    }
+
+    /** A vendor-style Offboard:1 ModelRequest carrier with an EMPTY policy segment (seg 9). */
+    private static String encodeOffboardCarrierNoPolicy() {
+        long expiry = (System.currentTimeMillis() / 1000) + 7L * 24 * 60 * 60;
+        byte[] expiryBytes = new byte[8];
+        for (int i = 0; i < 8; i++) expiryBytes[i] = (byte) (expiry >>> (8 * i));
+        byte[] encoded = org.midgard.Serialization.Tools.CreateTideMemory(
+                "Offboard".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                "1".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                expiryBytes,
+                "offboard-draft".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                "Policy:1".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                new byte[0],
+                new byte[0],
+                "vendor-creation-auth".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                new byte[0],
+                new byte[0]);
+        return java.util.Base64.getEncoder().encodeToString(encoded);
+    }
+
+    @Test
+    void approvalModel_offboardCr_secondOpen_returnsAccumulatedCarrier_doesNotCallSpi() throws Exception {
+        // 2nd open: the SHARED accumulation short-circuit (≥1 approval + non-blank carrier) returns
+        // the accumulated carrier VERBATIM so the enclave appends the next doken — the OFFBOARD
+        // branch (and the SPI) is never reached. Confirms the existing accumulation path applies to
+        // OFFBOARD_REALM (it's carrier-based now).
+        IgaChangeRequestEntity cr = offboardCr("offboard-second");
+        String accumulated = "ACCUMULATED-OFFBOARD-CARRIER-WITH-DOKEN-1";
+        cr.setRequestModel(accumulated);
+        stubRecordedApprovals(1);
+        org.tidecloak.iga.providers.RagnarokOffboardService svc =
+                mock(org.tidecloak.iga.providers.RagnarokOffboardService.class);
+        when(session.getProvider(org.tidecloak.iga.providers.RagnarokOffboardService.class))
+                .thenReturn(svc);
+
+        String returned = attestor.buildMultiAdminApprovalModel(session, realm, cr);
+
+        assertEquals(accumulated, returned,
+                "2nd open of an OFFBOARD CR returns the ACCUMULATED carrier verbatim (dokens stack)");
+        verify(svc, never()).buildOffboardApprovalCarrier(any(), any());
+    }
+
+    @Test
+    void approvalModel_offboardCr_spiAbsent_failsClosed() {
+        // FIRST open but ragnarok not deployed (SPI null) → fail-closed: an offboard can't be
+        // approved with no Offboard:1 carrier to collect dokens into.
+        IgaChangeRequestEntity cr = offboardCr("offboard-no-spi");
+        stubRecordedApprovals(0);
+        when(session.getProvider(org.tidecloak.iga.providers.RagnarokOffboardService.class))
+                .thenReturn(null);
+
+        RuntimeException ex = org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class,
+                () -> attestor.buildMultiAdminApprovalModel(session, realm, cr));
+        assertTrue(ex.getMessage().contains("RagnarokOffboardService"),
+                "fail-closed message must name the missing SPI — was: " + ex.getMessage());
+    }
+
+    @Test
+    void offboardRealm_combineFinal_stubSigns_notProducer() {
+        // SEPARATION: the OFFBOARD CR's own attestation stays a STUB (it is not a producer-envelope
+        // action, so combineFinal → sign falls to the multiAdmin stub, NEVER
+        // signMultiAdminUnitsViaPolicy). The doken carrier (above) is a SEPARATE artifact handed to
+        // the SPI; it does not turn the CR attestation into a real producer sign.
+        org.junit.jupiter.api.Assertions.assertFalse(
+                TideAttestor.isProducerEnvelopeSignedAction(TideAttestor.ACTION_OFFBOARD_REALM),
+                "OFFBOARD_REALM must NOT be producer-envelope signed → combineFinal stub-signs the CR "
+                        + "attestation (carrier is doken-only, signed by the SPI's Midgard.Offboard)");
+    }
 }

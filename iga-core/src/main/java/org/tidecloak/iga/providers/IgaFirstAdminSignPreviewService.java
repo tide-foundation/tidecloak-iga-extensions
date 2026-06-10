@@ -462,8 +462,7 @@ public class IgaFirstAdminSignPreviewService {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", a.getId());
             m.put("authorizedBy", a.getAuthorizedBy());
-            // Source column/field renamed PARTIAL_SIG->APPROVAL; the response JSON
-            // key is renamed to match ("approval").
+            // Response JSON key "approval" matches the APPROVAL source column/field.
             m.put("approval", a.getApproval());
             m.put("createdAt", a.getCreatedAt());
             out.add(m);

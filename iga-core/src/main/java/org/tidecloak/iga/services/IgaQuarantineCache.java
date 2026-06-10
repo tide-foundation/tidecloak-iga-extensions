@@ -59,7 +59,7 @@ import java.util.Set;
  * {@code SELECT entity_id FROM IGA_UNSIGNED_ENTITY WHERE realm_id=:r AND
  * entity_type='ROLE' AND entity_id IN :ids} so we never do N per-role probes.
  * The result is memoised per (session, user) so a token issuance that hits the
- * isEnabled checkpoint at {@code TokenManager:193,267} only pays the batch
+ * isEnabled checkpoint in {@code TokenManager} only pays the batch
  * query once.
  *
  * <h2>Memoisation keys</h2>
@@ -125,7 +125,7 @@ public final class IgaQuarantineCache {
      * Returns {@code true} iff the user (or ANY role the user effectively
      * holds) is currently unsigned. Memoised per (session, user) so a token
      * issuance that hits multiple {@code user.isEnabled()} checkpoints (e.g.
-     * {@code TokenManager:193} then again at {@code :267}) only pays the
+     * {@code TokenManager} reaching the check more than once) only pays the
      * batched query once.
      *
      * <p>The {@code IGA_REPLAY_ACTIVE} gate fires first so that the replay

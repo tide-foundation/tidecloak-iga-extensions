@@ -119,6 +119,31 @@ public class TideAttestor implements IgaAttestor {
     private static final double THRESHOLD_PERCENTAGE = 0.7;
 
     /**
+     * Action type for a governed Ragnarok realm-offboard (mirrors
+     * {@code DISABLE_IGA}): non-producer (stub-signed CR, no ORK Policy:1 carrier
+     * round-trip), NOT auto-committable even for firstAdmin (irreversible), NOT an
+     * ADOPT action. The real teardown runs on commit via the
+     * {@link org.tidecloak.iga.providers.RagnarokOffboardService} SPI looked up by
+     * {@code IgaReplayDispatcher}.
+     */
+    public static final String ACTION_OFFBOARD_REALM = "OFFBOARD_REALM";
+
+    /**
+     * Realm attribute overriding the minimum distinct-admin approvals required to
+     * commit an {@code OFFBOARD_REALM} CR. Optional; absent/invalid →
+     * {@link #OFFBOARD_MIN_ADMINS_DEFAULT}.
+     */
+    public static final String ATTR_OFFBOARD_MIN_ADMINS = "iga.offboardMinAdmins";
+
+    /**
+     * Default minimum distinct-admin approvals to commit an irreversible
+     * {@code OFFBOARD_REALM} CR. An offboard requires
+     * {@code max(normalQuorumThreshold, OFFBOARD_MIN_ADMINS)} signatures, so even a
+     * small realm cannot tear itself down on a single (or sub-3) quorum.
+     */
+    public static final int OFFBOARD_MIN_ADMINS_DEFAULT = 3;
+
+    /**
      * The realm's VRK key-provider component. Its presence is
      * the VRK-availability precondition for the firstAdmin lazy seed: absent → no
      * VRK to sign with, so the seed is skipped and resolveMode's no-row branch
@@ -208,6 +233,26 @@ public class TideAttestor implements IgaAttestor {
      * ceremony round-trip). 3 minutes.
      */
     private static final long FIRSTADMIN_SIGN_EXPIRY_SECONDS = 180L;
+
+    /**
+     * Expiry (seconds-from-build) for the PERSISTED multiAdmin two-phase approval-model
+     * carriers ({@link #buildMultiAdminApprovalModel} / {@link #buildPolicyResignApprovalModel}).
+     *
+     * <p>Unlike the immediate single-ceremony signs (M0 policy / firstAdmin unit /
+     * regen-resign — which round-trip the ORK in seconds, so {@link #FIRSTADMIN_SIGN_EXPIRY_SECONDS}
+     * = 3 min is plenty), these carriers are built once at the FIRST admin's enclave open and
+     * then sit PENDING while each subsequent admin signs — admins may sign hours or days apart.
+     * The expiry is part of the signed {@code Draft} the dokens cover, so it is set ONCE at the
+     * first phase-1 build and preserved verbatim by the accumulation short-circuit; it must
+     * therefore be a generous OUTER bound on a realistic multi-admin approval window. The
+     * request is GATED by the collected dokens + the iga-core threshold (the expiry is just a
+     * stale-carrier backstop), so a long value is safe. 7 days.
+     *
+     * <p>This fixes the {@code "Expiry cannot be in the past"} {@link RuntimeException} thrown at
+     * commit by {@code ModelRequest.FromBytes} when a real multi-admin approval (admin1 signs,
+     * admin2 signs later, then commit) exceeded the old 3-minute carrier window.
+     */
+    private static final long MULTIADMIN_APPROVAL_EXPIRY_SECONDS = 7L * 24L * 60L * 60L; // 7 days
 
     /**
      * Defensive upper bound on the number of producer unit-envelopes packed into a SINGLE
@@ -312,6 +357,15 @@ public class TideAttestor implements IgaAttestor {
 
     @Override
     public int getThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr) {
+        // OFFBOARD_REALM is irreversible: it MUST require a minimum number of distinct
+        // admin approvals REGARDLESS of mode (even firstAdmin's single-signer 1-of-1 is
+        // not enough to tear a realm down). The gate is max(normal quorum, min-admins),
+        // so a larger multiAdmin quorum still wins, but the floor can never drop below
+        // the configured minimum (default 3). Computed FIRST, before the firstAdmin
+        // short-circuit, so firstAdmin offboards are NOT 1-of-1.
+        if (cr != null && ACTION_OFFBOARD_REALM.equals(cr.getActionType())) {
+            return Math.max(normalQuorumThreshold(session, realm, cr), resolveOffboardMinAdmins(realm));
+        }
         // firstAdmin is single-signer onboarding: ALWAYS 1, unconditionally — it
         // does not consult per-scope overrides, the realm attribute, or the admin
         // count. The constant-first equals() is null-safe for resolveMode's null return.
@@ -358,6 +412,79 @@ public class TideAttestor implements IgaAttestor {
         // No IGA_ROLE_POLICY row yet (or a row with no encoded threshold) — pre-bootstrap /
         // legacy. Fall back to the live floor so the gate is still sensibly populated.
         return Math.max(1, (int) (THRESHOLD_PERCENTAGE * countActiveTideRealmAdmins(realm, session)));
+    }
+
+    /**
+     * The realm-default quorum an {@code OFFBOARD_REALM} CR would gate at on its
+     * own, IGNORING the offboard minimum — i.e. the same realm-default value the
+     * multiAdmin branch of {@link #getThreshold} resolves to (encoded M0 policy
+     * threshold → live {@code floor(0.7 × N)} fallback). In firstAdmin / Tideless
+     * mode this is 1. {@link #getThreshold} takes {@code max(this, min-admins)}, so
+     * a realm whose normal quorum already EXCEEDS the offboard minimum still
+     * requires the larger quorum, while a small realm is floored at the minimum.
+     *
+     * <p>OFFBOARD_REALM is a realm-node action with no per-scope entity, so the
+     * per-scope override / ADOPT short-circuits never apply to it; this helper goes
+     * straight to the realm-default gate.
+     */
+    private int normalQuorumThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr) {
+        if (MODE_FIRST_ADMIN.equals(resolveMode(session, realm))) {
+            return 1;
+        }
+        IgaRolePolicyEntity policy = findTideRealmAdminPolicy(session, realm);
+        if (policy != null) {
+            Integer encoded = currentEncodedThreshold(policy);
+            if (encoded != null) {
+                return Math.max(1, encoded);
+            }
+        }
+        return Math.max(1, (int) (THRESHOLD_PERCENTAGE * countActiveTideRealmAdmins(realm, session)));
+    }
+
+    /**
+     * The configured minimum distinct-admin approvals for an
+     * {@code OFFBOARD_REALM} CR: realm attribute {@link #ATTR_OFFBOARD_MIN_ADMINS}
+     * if present and a valid integer ≥ 1, else {@link #OFFBOARD_MIN_ADMINS_DEFAULT}
+     * (3). A non-positive / non-numeric attribute is ignored (falls back to the
+     * default) so the offboard floor can never be silently weakened below 1.
+     */
+    private static int resolveOffboardMinAdmins(RealmModel realm) {
+        String raw = realm != null ? realm.getAttribute(ATTR_OFFBOARD_MIN_ADMINS) : null;
+        if (raw != null) {
+            try {
+                int v = Integer.parseInt(raw.trim());
+                if (v >= 1) {
+                    return v;
+                }
+            } catch (NumberFormatException ignored) {
+                // fall through to default
+            }
+        }
+        return OFFBOARD_MIN_ADMINS_DEFAULT;
+    }
+
+    /**
+     * Public pre-flight helper for the offboard CREATOR (ragnarok): the number of
+     * distinct admin approvals an {@code OFFBOARD_REALM} CR would require to commit
+     * in {@code realm} right now ({@code max(normalQuorumThreshold, min-admins)}).
+     * Ragnarok can compare this against the count of admins that CAN sign and
+     * pre-reject triggering an un-approvable offboard, rather than filing a CR that
+     * can never reach threshold.
+     */
+    public int offboardRealmThreshold(KeycloakSession session, RealmModel realm) {
+        return Math.max(normalQuorumThreshold(session, realm, null), resolveOffboardMinAdmins(realm));
+    }
+
+    /**
+     * Public pre-flight helper: the count of ACTIVE tide-realm-admins in
+     * {@code realm} (committed, enabled, Tide-identity grant). Exposed so the
+     * offboard creator (ragnarok) can check it against
+     * {@link #offboardRealmThreshold} before filing an {@code OFFBOARD_REALM} CR —
+     * if fewer admins exist than the threshold requires, the offboard could never
+     * be approved, so it should be refused at creation time.
+     */
+    public static int countActiveTideRealmAdminsForOffboard(KeycloakSession session, RealmModel realm) {
+        return countActiveTideRealmAdmins(realm, session);
     }
 
     // -------------------------------------------------------------------------
@@ -552,8 +679,7 @@ public class TideAttestor implements IgaAttestor {
         String mode = resolveMode(session, realm);   // "firstAdmin" (row or no-row tide) | "multiAdmin" | null
 
         // The tide-realm-admin POLICY bootstrap is the flip-triggering CR: a firstAdmin
-        // GRANT_ROLES of tide-realm-admin. It has TWO distinct signing obligations that
-        // were previously conflated:
+        // GRANT_ROLES of tide-realm-admin. It has TWO distinct signing obligations:
         //   (1) the granted user's producer `user_role_mapping_set` unit — the edge this
         //       CR actually mutates (it adds the direct tide-realm-admin role-mapping row);
         //       this is the attestation the dispatcher fans onto the role-mapping rows and
@@ -562,16 +688,13 @@ public class TideAttestor implements IgaAttestor {
         //       writeBackPolicySig (on a real-signing-capable realm writeBackPolicySig
         //       builds its OWN VVK policy sig and ignores the arg; only the non-capable
         //       dev/test path stamps the passed value as a stub POLICY_SIG).
-        // ★ BUG (pre-fix): the bootstrap path forced realCeremonyEligible=false and
-        // returned the POLICY-bytes stub as `sig`, so the granted user's
-        // user_role_mapping_set was stamped with a 32-byte stub. Then writeBackPolicySig
-        // signs the M0 policy and the flip BURNS the firstAdmin pack — leaving that stub
-        // un-re-signable forever, so the new admin's login fail-closes (replayOrFailClosed:
-        // "user_role_mapping_set ... has a stub / wrong-length sig (not 64 bytes)").
-        // ★ FIX: the bootstrap CR's producer unit is signed REAL with the still-alive
-        // firstAdmin pack BEFORE the M0 policy sign / pack-burn / flip. A GRANT_ROLES of
-        // tide-realm-admin is a producer-envelope-signed action exactly like any other
-        // firstAdmin GRANT_ROLES, so it is real-ceremony-eligible — the policy-bytes stub
+        // These must NOT be conflated: the bootstrap CR's producer unit is signed REAL with
+        // the still-alive firstAdmin pack BEFORE the M0 policy sign / pack-burn / flip. If the
+        // user_role_mapping_set were stamped with the POLICY-bytes stub instead, the pack-burn
+        // at flip would leave that stub un-re-signable forever and the new admin's login would
+        // fail-closed ("user_role_mapping_set ... has a stub / wrong-length sig (not 64 bytes)").
+        // A GRANT_ROLES of tide-realm-admin is a producer-envelope-signed action exactly like any
+        // other firstAdmin GRANT_ROLES, so it is real-ceremony-eligible — the policy-bytes stub
         // is computed SEPARATELY (policyStubSig) and passed to writeBackPolicySig.
         boolean isPolicyBootstrap = MODE_FIRST_ADMIN.equals(mode)
                 && isTideRealmAdminAssignment(realm, cr);
@@ -591,18 +714,16 @@ public class TideAttestor implements IgaAttestor {
         // THEN flip the realm's authorizer mode to multiAdmin — in the SAME JPA
         // transaction as the dispatcher's ATTESTATION write.
         //
-        // ★ FLIP IS NOW GATED ON A COMMITTED, SIGNED M0 POLICY. The flip burns
-        // the firstAdmin AuthorizerPack on the ORK side (ork PolicySignRequest.cs:102
-        // revokes it), and that pack is the ONLY pack carrying Policy:1 — i.e. the
-        // ONLY pack that can sign the M0 admin Policy. So the ordering is strict:
+        // FLIP IS GATED ON A COMMITTED, SIGNED M0 POLICY. The flip burns the firstAdmin
+        // AuthorizerPack on the ORK side, and that pack is the ONLY pack carrying Policy:1 —
+        // i.e. the ONLY pack that can sign the M0 admin Policy. So the ordering is strict:
         //   sign M0 policy (firstAdmin pack, ALIVE) -> commit/persist the policy row
         //   -> THEN flip (which burns the pack).
         // The pack must NEVER be burned before the policy is committed, and the realm
-        // must NEVER flip without a signed+committed M0 policy (that exact mis-order
-        // produced myrealm's broken state: flipped, no M0 policy, every subsequent
-        // multiAdmin approval-model build threw APPROVAL_MODEL_BUILD_FAILED, and the
-        // pack was gone so it could never be re-signed). writeBackPolicySig now
-        // RETURNS whether a signed M0 policy was actually committed: if it was not
+        // must NEVER flip without a signed+committed M0 policy: that mis-order leaves the
+        // realm flipped with no M0 policy, so every subsequent multiAdmin approval-model
+        // build throws APPROVAL_MODEL_BUILD_FAILED and the burned pack can never re-sign it.
+        // writeBackPolicySig RETURNS whether a signed M0 policy was actually committed: if it was not
         // (the non-capable role-unresolvable skip path), the realm STAYS firstAdmin
         // — the pack is preserved so a later attempt can still sign+commit+flip. A
         // capable-realm sign FAILURE throws out of writeBackPolicySig (fail-closed)
@@ -610,20 +731,19 @@ public class TideAttestor implements IgaAttestor {
         // the error surfaces. Idempotent: already-multiAdmin never reaches here
         // (gated on firstAdmin).
         if (isPolicyBootstrap) {
-            // ★ Pack-burn ordering (the heart of the fix). `sig` above is the granted
-            // user's REAL user_role_mapping_set VVK sig, produced by the firstAdmin pack
-            // while it is STILL ALIVE — combineFinal returns it and IgaReplayDispatcher
-            // fans it across every UserRoleMappingEntity row for the user (incl. the new
-            // tide-realm-admin row it inserts), so the login emits a 64B sig, not a stub.
-            // The user_role_mapping_set is the ONLY producer unit a GRANT_ROLES touches
-            // (enumerateLiveCrUnits returns just the edge-set unit at index 0 for
+            // Pack-burn ordering. `sig` above is the granted user's REAL user_role_mapping_set
+            // VVK sig, produced by the firstAdmin pack while it is STILL ALIVE — combineFinal
+            // returns it and IgaReplayDispatcher fans it across every UserRoleMappingEntity row
+            // for the user (incl. the new tide-realm-admin row it inserts), so the login emits a
+            // 64B sig, not a stub. The user_role_mapping_set is the ONLY producer unit a
+            // GRANT_ROLES touches (enumerateLiveCrUnits returns the edge-set unit at index 0 for
             // GRANT_ROLES; the 27 realm-management roles the admin gains are reached by
             // composite expansion at token time, NOT stored as direct mappings, and their
             // role metadata is convergence-signed membership-independently). So `sig`
             // fully covers the grant's producer-unit closure.
             //
-            // ONLY AFTER the producer unit is signed do we sign the M0 admin Policy and
-            // flip. writeBackPolicySig builds its OWN real VVK policy sig on a capable
+            // ONLY AFTER the producer unit is signed is the M0 admin Policy signed and the
+            // realm flipped. writeBackPolicySig builds its OWN real VVK policy sig on a capable
             // realm (the policyStubSig arg is used only by the non-capable dev/test path
             // as a stub POLICY_SIG); we sign the policy bytes here for that fallback so the
             // M0 row's stub still reflects the policy payload (not the role-mapping-set).
@@ -639,14 +759,14 @@ public class TideAttestor implements IgaAttestor {
                         realm.getName());
             }
         }
-        // ★ STEADY-STATE multiAdmin threshold re-sign is NOT emitted here. The
+        // STEADY-STATE multiAdmin threshold re-sign is NOT emitted here. The
         // REGEN_ADMIN_POLICY CR is created when the admin OPENS THE APPROVAL ENCLAVE — the
         // moment the PENDING change requests are listed/assembled for approval (see
         // ensureThresholdPolicyCrForEnclave, called from IgaAdminResource.listChangeRequests) —
         // so the policy CR surfaces alongside the assignment CRs in the SAME enclave, and is
         // robust to grants captured before the hook deployed OR coalesced into an existing
-        // pending CR (both of which the old capture-time hook missed). At commit the policy CR
-        // follows the unchanged Policy:1 quorum sign path (replayRegenAdminPolicy); it carries NO
+        // pending CR. At commit the policy CR
+        // follows the Policy:1 quorum sign path (replayRegenAdminPolicy); it carries NO
         // dependsOn on the assignments (its NEW threshold is pinned + the M0 quorum authorizes the
         // re-sign now), so it can be signed in the SAME enclave session as the assignments.
         // combineFinal therefore does NOTHING extra for the steady-state membership change beyond
@@ -785,9 +905,9 @@ public class TideAttestor implements IgaAttestor {
             // M0 FIX: the policy row MUST exist after the flip. On a real-signing-capable
             // realm the firstAdmin->multiAdmin transition is the moment the admin Policy is
             // generated + VVK-signed, so INSERT it if no row was pre-seeded via the separate
-            // POST /iga/role-policies path. Previously this returned early when the row was
-            // missing, flipping the realm to multiAdmin with NO signed M0 Policy — every
-            // subsequent multiAdmin approval-model build then threw APPROVAL_MODEL_BUILD_FAILED.
+            // POST /iga/role-policies path. A missing row must NOT flip the realm to multiAdmin
+            // with NO signed M0 Policy — that leaves every subsequent multiAdmin approval-model
+            // build throwing APPROVAL_MODEL_BUILD_FAILED.
             policy = upsertAdminPolicyRow(session, realm, policy,
                     artifact.policyBody, artifact.policySig, threshold);
             if (policy == null) {
@@ -1387,7 +1507,7 @@ public class TideAttestor implements IgaAttestor {
     private AdminPolicyArtifact buildSignedAdminPolicyArtifact(KeycloakSession session, RealmModel realm,
                                                                int threshold, String vvkId) {
         if (isRealSigningCapable(realm)) {
-            // ★ P4 (M3 fix): branch the policy SIGNER on the realm's authorizer mode.
+            // Branch the policy SIGNER on the realm's authorizer mode.
             //   firstAdmin (pre-flip)  → the firstAdmin AuthorizerPack VRK:1 ceremony
             //                            (signAdminPolicyWithVvk) — the pack is ALIVE.
             //   multiAdmin (post-flip) → the Policy:1 quorum re-sign bootstrapped by the
@@ -1400,8 +1520,7 @@ public class TideAttestor implements IgaAttestor {
             SignedPolicy signed = multiAdmin
                     ? signAdminPolicyViaPolicyFlow(session, realm, threshold, vvkId)
                     : signAdminPolicyWithVvk(session, realm, threshold, vvkId);
-            // Store the SIGNED Policy bytes Base64-encoded into the TEXT POLICY column,
-            // exactly as the gold reference persists it
+            // Store the SIGNED Policy bytes Base64-encoded into the TEXT POLICY column
             // (TideRoleRequests: Base64.encode(policy.ToBytes())).
             String body = java.util.Base64.getEncoder().encodeToString(signed.signedPolicyBytes);
             return new AdminPolicyArtifact(body, signed.vvkSignature, true);
@@ -1542,7 +1661,7 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * <b>★ P4 (M3 fix)</b> — the steady-state (multiAdmin) admin-policy re-sign, routed
+     * The steady-state (multiAdmin) admin-policy re-sign, routed
      * through the <b>Policy:1 quorum flow bootstrapped by the EXISTING M0 admin Policy</b>
      * instead of the firstAdmin AuthorizerPack.
      *
@@ -1610,10 +1729,9 @@ public class TideAttestor implements IgaAttestor {
             PolicySignRequest req = new PolicySignRequest(policy.ToBytes(), POLICY_AUTH_FLOW);
             req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
             req.SetPolicy(existingM0);
-            // NOTE: the collected admin dokens authorizing this re-sign are the interactive
-            // M3 step (see javadoc). On a provisioned realm WITHOUT them the ORK's
-            // PolicyAuthorizationFlow rejects — fail-closed (the catch below), which is
-            // CORRECT: we never stamp a fake re-signed admin policy.
+            // The collected admin dokens authorize this re-sign. On a provisioned realm
+            // WITHOUT them the ORK's PolicyAuthorizationFlow rejects — fail-closed (the catch
+            // below), so a fake re-signed admin policy is never stamped.
 
             SignatureResponse resp = Midgard.SignModel(settings, req);
             if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
@@ -1725,9 +1843,9 @@ public class TideAttestor implements IgaAttestor {
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
             em.flush();
 
-            // OLD-POLICY REVOCATION is NOT performed. Revocation was dropped entirely: the re-sign
-            // signs ONLY the new M0 and stores it (upsert above) + updates IGA_ROLE_POLICY.threshold.
-            // The old M0 is simply superseded by the newly-stored M0 — there is no burn/retire step.
+            // OLD-POLICY REVOCATION is NOT performed: the re-sign signs ONLY the new M0 and stores
+            // it (upsert above) + updates IGA_ROLE_POLICY.threshold. The old M0 is superseded by the
+            // newly-stored M0 — there is no burn/retire step.
 
             log.infof("IGA threshold-policy commit: realm %s tide-realm-admin admin Policy RE-SIGNED via "
                     + "Policy:1 quorum + installed at threshold %d (CR %s).",
@@ -1860,29 +1978,28 @@ public class TideAttestor implements IgaAttestor {
      */
     public String buildMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
                                                IgaChangeRequestEntity cr) {
-        // ★ ACCUMULATION SHORT-CIRCUIT (covers BOTH the producer-unit and REGEN_ADMIN_POLICY
-        // paths — this is the ONE place both flow through). The phase-1 build is invoked once
+        // ACCUMULATION SHORT-CIRCUIT (covers BOTH the producer-unit and REGEN_ADMIN_POLICY
+        // paths — this is the ONE place both flow through). The build is invoked once
         // per admin who opens the approval popup. The enclave APPENDS its doken onto whatever
-        // carrier we hand it (AddPolicyAuthorizationToSerializedRequest), so for the 2nd..Nth
-        // approver we MUST return the ALREADY-ACCUMULATED carrier (prior dokens + the original
+        // carrier it is handed (AddPolicyAuthorizationToSerializedRequest), so for the 2nd..Nth
+        // approver this MUST return the ALREADY-ACCUMULATED carrier (prior dokens + the original
         // VRK creation-auth) — NOT a freshly vendor-initialized 0-doken carrier. Rebuilding
-        // fresh on every open is the threshold-2+ bug: each admin received a zero-doken carrier
-        // and appended only their own, so the committed request carried just 1 doken and the ORK
-        // rejected with "Not enough approvals to meet threshold".
+        // fresh on every open gives each admin a zero-doken carrier onto which they append only
+        // their own, so the committed request carries 1 doken and the ORK rejects with
+        // "Not enough approvals to meet threshold".
         //
         // First open (0 recorded approvals): fall through and build fresh (vendor-initialized,
-        // 0 dokens) exactly as before.
+        // 0 dokens).
         //
-        // Interaction with the policy-CR fold (pendingPolicyCrIsUnchanged, commit f0b290b): when
-        // the policy content is UNCHANGED the fold PRESERVES request_model + authorizations, so a
-        // re-open here finds ≥1 approval + a non-blank carrier and ACCUMULATES (returns existing).
-        // When the policy genuinely changes (re-pin) the fold CLEARS request_model + clears the
-        // authorizations (0 approvals) → this short-circuit does NOT fire → we build fresh. Both
-        // paths are therefore consistent.
+        // Interaction with the policy-CR fold (pendingPolicyCrIsUnchanged): when the policy content
+        // is UNCHANGED the fold PRESERVES request_model + authorizations, so a re-open here finds
+        // ≥1 approval + a non-blank carrier and ACCUMULATES (returns existing). When the policy
+        // genuinely changes (re-pin) the fold CLEARS request_model + the authorizations (0
+        // approvals) → this short-circuit does NOT fire → build fresh.
         //
         // Expiry edge: if the existing carrier's creation-auth has lapsed, returning it verbatim
         // is still correct — the embedded dokens cover their own signed bytes; re-initializing
-        // would change those bytes and invalidate every prior doken. So we return it untouched.
+        // would change those bytes and invalidate every prior doken. So it is returned untouched.
         String existingCarrier = cr.getRequestModel();
         if (existingCarrier != null && !existingCarrier.isBlank()
                 && countRecordedApprovals(session, cr) >= 1) {
@@ -1891,6 +2008,79 @@ public class TideAttestor implements IgaAttestor {
                             + "verbatim (the enclave appends the next doken) instead of rebuilding fresh.",
                     cr.getId(), cr.getActionType(), countRecordedApprovals(session, cr));
             return existingCarrier;
+        }
+
+        // OFFBOARD_REALM is NON-producer (its own CR attestation stub-signs — no AttestationUnit
+        // envelope), but the destructive Midgard.Offboard ORK ceremony ragnarok runs at commit
+        // needs a quorum of admin DOKENS. iga-core doesn't know the Offboard:1 request shape —
+        // ragnarok does — so on the FIRST open (no recorded approvals; the accumulation
+        // short-circuit above did NOT fire) we ask the SPI to seed a vendor-initialized Offboard:1
+        // carrier and persist it as the CR's REQUEST_MODEL. The two-phase enclave approval then
+        // appends each admin's doken onto it (AddPolicyAuthorizationToSerializedRequest), and the
+        // accumulation short-circuit above returns it verbatim for the 2nd..Nth approver so the
+        // dokens stack. The accumulated carrier is handed to svc.offboardRealm(...,carrier) at
+        // commit (IgaReplayDispatcher.replayOffboardRealm). This is the doken-carrier ONLY — the
+        // CR's own ATTESTATION column still stub-signs in combineFinal (OFFBOARD_REALM is not a
+        // producer-envelope action, so it never routes through signMultiAdminUnitsViaPolicy).
+        // FAIL-CLOSED if the SPI is absent: an offboard can't be approved with no Offboard carrier.
+        if (ACTION_OFFBOARD_REALM.equals(cr.getActionType())) {
+            org.tidecloak.iga.providers.RagnarokOffboardService svc =
+                    session.getProvider(org.tidecloak.iga.providers.RagnarokOffboardService.class);
+            if (svc == null) {
+                throw new RuntimeException("IGA OFFBOARD_REALM approval: no RagnarokOffboardService "
+                        + "provider registered (ragnarok not deployed) — cannot build the Offboard:1 "
+                        + "doken carrier for CR " + cr.getId() + ". An offboard cannot be approved "
+                        + "without a real carrier to collect admin dokens into.");
+            }
+            String carrier;
+            try {
+                // Ragnarok builds the vendor-initialized Offboard:1 ModelRequest with a LONG expiry
+                // (it MUST — the carrier is persisted and re-read at commit, hours/days later; a
+                // short window would expire it mid-approval, "Expiry cannot be in the past"). The
+                // SPI contract requires at least the MULTIADMIN_APPROVAL_EXPIRY_SECONDS (7d) window.
+                carrier = svc.buildOffboardApprovalCarrier(session, realm);
+            } catch (org.tidecloak.iga.providers.RagnarokOffboardException e) {
+                throw new RuntimeException("IGA OFFBOARD_REALM approval: ragnarok failed to build the "
+                        + "Offboard:1 doken carrier for CR " + cr.getId() + ": " + e.getMessage(), e);
+            }
+            if (carrier == null || carrier.isBlank()) {
+                throw new RuntimeException("IGA OFFBOARD_REALM approval: ragnarok returned a null/blank "
+                        + "Offboard:1 doken carrier for CR " + cr.getId() + " — fail-closed.");
+            }
+            // Attach the M0 tide-realm-admin threshold Policy to the ragnarok-built Offboard:1
+            // carrier. The vendor-initialized carrier ragnarok returns has NO Policy segment, so
+            // at commit the ORK's PolicyAuthorizationFlow throws "Model does not have a policy
+            // passed with it" — it needs the carried Policy to validate the collected admin dokens
+            // against the tide-realm-admin threshold. The unit/regen paths both do
+            // req.SetPolicy(readM0AdminPolicyBytes(...)). Attach it iga-core-side rather than in
+            // ragnarok because the FromBytes→SetPolicy→Encode round-trip is fully segment-faithful (all 10
+            // TideMemory segments are preserved by ModelRequest.Encode) AND SetPolicy does NOT
+            // disturb the creation-auth or any doken: ModelRequest.GetDataToAuthorize() hashes ONLY
+            // [Id + SHA-512(Draft) + Expiry] — segment 9 (Policy) is NOT in that digest, and the
+            // seg-7 vendor creation-auth + every appended doken sign over GetDataToAuthorize, so
+            // attaching the Policy leaves them valid (the REGEN/unit paths do the same: SetPolicy
+            // is part of the authorize-data-independent envelope).
+            byte[] m0AdminPolicy = readM0AdminPolicyBytes(session, realm);
+            if (m0AdminPolicy == null) {
+                // Shouldn't happen post-flip (multiAdmin realms always have a committed M0), but
+                // fail-closed with a clear message rather than seed a carrier the ORK will reject.
+                throw new RuntimeException("IGA OFFBOARD_REALM approval: realm " + realm.getName()
+                        + " has no established tide-realm-admin admin Policy (M0) to embed in the "
+                        + "Offboard:1 carrier for CR " + cr.getId() + " — offboard requires an "
+                        + "established admin policy. Fail-closed.");
+            }
+            ModelRequest offboardReq = ModelRequest.FromBytes(java.util.Base64.getDecoder().decode(carrier));
+            offboardReq.SetPolicy(m0AdminPolicy);
+            carrier = java.util.Base64.getEncoder().encodeToString(offboardReq.Encode());
+
+            cr.setRequestModel(carrier);
+            session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
+            log.infof("IGA OFFBOARD_REALM approval (phase 1): seeded the ragnarok-built Offboard:1 doken "
+                    + "carrier for CR %s (realm %s) WITH the M0 admin Policy attached (%d-byte policy) — "
+                    + "the enclave appends admin dokens; the ORK PolicyAuthorizationFlow validates them "
+                    + "against the carried Policy; accumulated at commit by svc.offboardRealm(...,carrier).",
+                    cr.getId(), realm.getName(), m0AdminPolicy.length);
+            return carrier;
         }
 
         // The admin-policy threshold re-sign CR is NOT a producer-unit CR — its draft is the
@@ -1908,22 +2098,22 @@ public class TideAttestor implements IgaAttestor {
                     + "Policy:1 approval request for CR " + cr.getId());
         }
 
-        // ★ P4: the action's draft frames EVERY producer unit the CR touches, in the
+        // The action's draft frames EVERY producer unit the CR touches, in the
         // deterministic order buildAllCrUnitCbor enumerates (edge-set unit at index 0,
         // then the CREATE_* node unit from REP_JSON). One GetDataToAuthorize hash thus
         // covers ALL framed units — the admins approve them in one round, and the ORK
         // returns one VVK sig per Draft segment (AmountOfSignaturesRequested = unitCount).
         // The same buildAllCrUnitCbor is re-run at commit so the i-th sig lines up with
-        // the i-th unit's column (commit can't drift from phase-1). For a non-producer
+        // the i-th unit's column (commit can't drift from the framing here). For a non-producer
         // action (dev/non-real-signing carry-through — never exercised by the live
         // Policy:1 round-trip) frame the single regular canonical so the carrier wiring
         // still round-trips.
         byte[][] unitCbors = buildAllCrUnitCbor(session, realm, cr);
-        // P4: a producer CR (CREATE_USER / GRANT_ROLES / etc.) MUST frame ≥1 typed
+        // A producer CR (CREATE_USER / GRANT_ROLES / etc.) MUST frame ≥1 typed
         // AttestationUnit. unitCbors.length==0 means the scratch-replay enumeration found no
         // unit — the carrier would then fall back to canonicalForRegularCr (a NON-CBOR
         // canonical digest, NOT an AttestationUnit envelope), which the enclave cannot treat
-        // as a unit → it self-closes on an "uninitialized request". Log at INFO so a future
+        // as a unit → it self-closes on an "uninitialized request". Log at INFO so a
         // 0-unit regression on any producer actionType is immediately visible in the server
         // log next to the "built Policy:1 ModelRequest" line, instead of only surfacing as an
         // opaque enclave self-close on the client.
@@ -1947,10 +2137,14 @@ public class TideAttestor implements IgaAttestor {
         // VERBATIM CBOR via the byte[][] overload (NOT List<?>/Object — those re-CBOR-wrap
         // each element through Jackson, corrupting the envelope).
         req.SetUnits(unitCbors);
-        // Longer expiry than the 30s default — admin approval is a human round-trip. Set
-        // BEFORE materializing the draft / creation-auth (Expiry folds into both the
-        // data-to-authorize hash and InitializeTideRequestWithVrk's expireAtTime).
-        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
+        // LONG expiry — this carrier is PERSISTED and re-read (ModelRequest.FromBytes) at
+        // commit, possibly hours/days after this first phase-1 build (admins sign asynchronously).
+        // A 3-minute window expired the carrier before the quorum assembled ("Expiry cannot be
+        // in the past"). Set the generous outer bound ONCE here; the accumulation short-circuit
+        // returns this carrier verbatim for the 2nd..Nth admin, preserving this expiry (and the
+        // dokens that cover it). Set BEFORE materializing the draft / creation-auth (Expiry folds
+        // into both the data-to-authorize hash and InitializeTideRequestWithVrk's expireAtTime).
+        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + MULTIADMIN_APPROVAL_EXPIRY_SECONDS);
         // Embed the M0 admin Policy the enclave authorizes the request against.
         req.SetPolicy(adminPolicyBytes);
 
@@ -2087,7 +2281,12 @@ public class TideAttestor implements IgaAttestor {
         // policy. Mirrors signAdminPolicyViaPolicyFlow's request construction, but we persist
         // the carrier for the enclaves to approve rather than signing it here.
         PolicySignRequest req = new PolicySignRequest(newPolicyBytes, POLICY_AUTH_FLOW);
-        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
+        // LONG expiry — like buildMultiAdminApprovalModel, this carrier is PERSISTED and re-read
+        // (ModelRequest.FromBytes) at commit, hours/days after this first phase-1 build. The old
+        // 3-minute window expired the re-sign carrier before the quorum assembled ("Expiry cannot
+        // be in the past"). Set the generous outer bound ONCE here; the accumulation short-circuit
+        // preserves it verbatim for later approvers (and the dokens that cover it).
+        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + MULTIADMIN_APPROVAL_EXPIRY_SECONDS);
         req.SetPolicy(existingM0);
 
         // OLD-POLICY REVOCATION WAS DROPPED ENTIRELY. We deliberately do NOT call
@@ -2113,7 +2312,7 @@ public class TideAttestor implements IgaAttestor {
                     + "re-sign draft for CR " + cr.getId() + ": " + e.getMessage(), e);
         }
 
-        // ★ FIX (enclave validation): seg-7 VRK creation-authorization — the SAME init step the
+        // seg-7 VRK creation-authorization — the SAME init step the
         // producer-unit path takes (buildMultiAdminApprovalModel → initializeApprovalRequestWithVrk).
         // Without it the carrier has an EMPTY AuthorizerSignatureOfThisRequest, so the enclave's
         // "approved initially by the vendor" check reads a 0-length buffer and self-closes
@@ -2204,7 +2403,7 @@ public class TideAttestor implements IgaAttestor {
         }
 
         // (2) Persist the doken-embedded model back on the carrier. NO re-SetPolicy —
-        // that would invalidate the embedded doken (gold reference MultiAdmin.commit:441).
+        // that would invalidate the embedded doken (gold reference MultiAdmin.commit).
         cr.setRequestModel(dokenEmbeddedModelB64);
 
         // (3) Once-per-admin dedup, then record toward threshold.
@@ -2492,13 +2691,16 @@ public class TideAttestor implements IgaAttestor {
      *       stub. The tide-realm-admin POLICY bootstrap is NO LONGER non-eligible: its
      *       {@code user_role_mapping_set} now takes the real ceremony (the M0 policy bytes
      *       are signed separately in {@code combineFinal}).</li>
-     *   <li>{@code multiAdmin} — when the realm is REAL-SIGNING-CAPABLE the collected-doken
-     *       carrier ({@code cr.requestModel}) is reloaded and signed via the real
-     *       {@code Midgard.SignModel(Policy:1)} ceremony ({@link #signMultiAdminUnitViaPolicy}),
-     *       fail-closed; the stamped value is the real ORK signature, NOT the
-     *       {@link #DUMMY_SIG_PREFIX} digest. A NON-capable dev/test realm keeps the
-     *       {@link #DUMMY_SIG_PREFIX} stub (no carrier / no orks). Any non-firstAdmin,
-     *       non-multiAdmin mode also keeps the stub.</li>
+     *   <li>{@code multiAdmin} — when the CR is a PRODUCER-ENVELOPE-signed action AND the realm
+     *       is REAL-SIGNING-CAPABLE, the collected-doken carrier ({@code cr.requestModel}) is
+     *       reloaded and signed via the real {@code Midgard.SignModel(Policy:1)} ceremony
+     *       ({@link #signMultiAdminUnitViaPolicy}), fail-closed; the stamped value is the real
+     *       ORK signature, NOT the {@link #DUMMY_SIG_PREFIX} digest. A NON-producer-envelope CR
+     *       (DISABLE_IGA / SET_REALM_ATTRIBUTE / SET_REALM_CONFIG / …) keeps the stub here — it
+     *       has no producer carrier to Policy:1-sign, and any real per-unit column it owns is
+     *       signed POST-replay in {@link #distributeMultiAdminUnitSigs} from committed state.
+     *       A NON-capable dev/test realm also keeps the {@link #DUMMY_SIG_PREFIX} stub (no
+     *       carrier / no orks). Any non-firstAdmin, non-multiAdmin mode also keeps the stub.</li>
      * </ul>
      * The distinction between modes is NOT local-vs-network — both ceremonies go
      * Midgard → ORK in production; it is (a) admin quorum and (b) key /
@@ -2523,10 +2725,22 @@ public class TideAttestor implements IgaAttestor {
             }
             return stubSign(FIRSTADMIN_SIG_PREFIX, canonical);             // firstAdmin stub (not capable / non-producer-envelope CRs)
         }
-        if (MODE_MULTI_ADMIN.equals(mode) && isRealSigningCapable(realm)) {
+        // multiAdmin: ONLY producer-envelope-signed actions carry a real per-unit producer
+        // carrier worth Policy:1-signing here. A NON-producer-envelope action (DISABLE_IGA and
+        // the realm-config CRs SET_REALM_ATTRIBUTE / SET_REALM_CONFIG / REMOVE_REALM_ATTRIBUTE,
+        // etc.) has NO producer attestation unit — its combineFinal value is a stub marker the
+        // dispatcher fans onto the per-row attestation column (audit), while any real per-unit
+        // producer column it DOES touch (e.g. the realm_config node for SET_REALM_ATTRIBUTE) is
+        // signed POST-replay in distributeMultiAdminUnitSigs from committed live state, NOT here.
+        // Gating on realCeremonyEligible (mirroring the firstAdmin branch above) keeps these
+        // non-producer CRs OUT of signMultiAdminUnitsViaPolicy → ModelRequest.FromBytes, which
+        // (a) is correct (DISABLE_IGA was designed to commit as a stub — OFF must never be blocked
+        // by ORK reachability) and (b) avoids the "Expiry cannot be in the past" failure their
+        // canonical-fallback carrier would otherwise hit at commit.
+        if (MODE_MULTI_ADMIN.equals(mode) && realCeremonyEligible && isRealSigningCapable(realm)) {
             return signMultiAdminUnitViaPolicy(session, realm, cr);        // REAL Midgard.SignModel(Policy:1) over the collected-doken carrier (fail-closed)
         }
-        return stubSign(DUMMY_SIG_PREFIX, canonical);                     // multiAdmin (not capable) / non-firstAdmin stub
+        return stubSign(DUMMY_SIG_PREFIX, canonical);                     // multiAdmin (not capable / non-producer-envelope) / non-firstAdmin stub
     }
 
     /**
@@ -3385,7 +3599,7 @@ public class TideAttestor implements IgaAttestor {
                     + " carries no resolvable USER_ID for the user_role_mapping_set unit");
         }
 
-        // ★ D1b — EXCLUDE the realm default-role id, byte-IDENTICALLY to the producer's
+        // D1b — EXCLUDE the realm default-role id, byte-IDENTICALLY to the producer's
         // RealmAttestationExporter#userRoleMappingSet (same AND urm.roleId <> :defaultRoleId
         // clause). Default roles are realm-level + identical for every user; the
         // realm_default_roles_set (unit 18) authority + universal-inherit covers them, so the
@@ -3503,11 +3717,11 @@ public class TideAttestor implements IgaAttestor {
     }
 
     // -------------------------------------------------------------------------
-    // ★ P4: the full-CR unit enumerator (deterministic unit→column descriptor)
+    // The full-CR unit enumerator (deterministic unit→column descriptor)
     // -------------------------------------------------------------------------
 
     /**
-     * <b>★ P4.</b> The ORDERED list of EVERY producer {@link AttestationUnit} a CR
+     * The ORDERED list of EVERY producer {@link AttestationUnit} a CR
      * touches, built over its POST-change state — the single shared enumerator used by
      * BOTH phase-1 multi-unit carrier framing ({@code buildMultiAdminApprovalModel} →
      * {@code SetUnits}) and commit-time per-unit sig distribution
@@ -3532,7 +3746,7 @@ public class TideAttestor implements IgaAttestor {
      *       it is the already-applied live model.</li>
      * </ol>
      *
-     * <h2>★ Byte-identity (the critical invariant)</h2>
+     * <h2>Byte-identity (the critical invariant)</h2>
      * Every unit here is produced by the SAME {@link RealmAttestationExporter} builder the
      * post-replay stamper / login-read uses, over a POST-change model. The phase-1 post-change
      * model is produced by the IDENTICAL {@code IgaReplayDispatcher.replay} the commit runs
@@ -3541,11 +3755,11 @@ public class TideAttestor implements IgaAttestor {
      * construction for ALL actionTypes; the ORK signs the literal framed CBOR and the login
      * replay batch-verifies the same bytes against the realm VVK.
      *
-     * <h2>★ P4 coverage (generalized: ALL 18 unit types post-flip)</h2>
+     * <h2>Coverage (ALL 18 unit types post-flip)</h2>
      * The CREATE_* node units, the SET_* / UPDATE_* live-entity node units, the derived
      * owner-sets (mapper-set / allowlist-set / assignment-set), the realm-scoped units
      * (realm_config / realm_default_groups_set / org_domain_set), and the org node units are
-     * ALL now framed + Policy:1-signed post-flip via the scratch-replay-and-read — no per-type
+     * ALL framed + Policy:1-signed post-flip via the scratch-replay-and-read — no per-type
      * {@code pre±delta} hand-coding. The {@link #DUMMY_SIG_PREFIX} stub in
      * {@link #signProducerEnvelope} remains ONLY as the not-real-signing-capable dev/test
      * fallback (and for ADOPT CRs, which have no phase-1 carrier). The only residual is an
@@ -3560,7 +3774,7 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * <b>★ P4 (generalized).</b> The ordered POST-change unit list for a CR, used by BOTH
+     * The ordered POST-change unit list for a CR, used by BOTH
      * phase-1 carrier framing and commit-time distribution.
      *
      * <p>The two call sites differ ONLY in the state of the live model when they call:
@@ -3576,7 +3790,7 @@ public class TideAttestor implements IgaAttestor {
      *       over the live model (a second scratch replay here would double-apply the delta).</li>
      * </ul>
      *
-     * <h2>★ Byte-identity (framing == distribution, by construction)</h2>
+     * <h2>Byte-identity (framing == distribution, by construction)</h2>
      * BOTH paths funnel through the SAME enumerator {@link #enumerateLiveCrUnits} over a
      * POST-change model (scratch at phase-1, committed-live at commit). The scratch replay is
      * the IDENTICAL {@code IgaReplayDispatcher.replay} the commit ran, so the scratch
@@ -3600,7 +3814,7 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * <b>★ P4 — the single shared affected-units enumerator.</b> Given a model that is ALREADY
+     * The single shared affected-units enumerator. Given a model that is ALREADY
      * POST-change (the live committed model at commit, or the scratch model after a scratch
      * replay at phase-1), build EVERY producer {@link AttestationUnit} the CR's actionType
      * touches — node, derived owner-set, realm-scoped, and org units — from the live model via
@@ -3661,7 +3875,7 @@ public class TideAttestor implements IgaAttestor {
                 UserModel u = userId == null ? null : session.users().getUserById(realm, userId);
                 if (u != null) {
                     if ("CREATE_USER".equals(action)) {
-                        // ★ COMPLETE BY CONSTRUCTION: a freshly-created user's LOGIN replay
+                        // COMPLETE BY CONSTRUCTION: a freshly-created user's LOGIN replay
                         // reads its WHOLE per-user closure (user_identity + the RAW stored
                         // user_role_mapping_set + user_group_membership_set when the realm's
                         // default groups give it any). Rather than hand-listing those unit
@@ -3973,10 +4187,10 @@ public class TideAttestor implements IgaAttestor {
             return;
         }
 
-        // ★ P4 multiAdmin distribution. Post-flip the firstAdmin pack is burned, so the
+        // multiAdmin distribution. Post-flip the firstAdmin pack is burned, so the
         // node/derived/realm/org stampers below would only stub (signProducerEnvelope's
         // multiAdmin branch → DUMMY_SIG_PREFIX). Instead, on a real-signing-capable
-        // multiAdmin realm we sign the phase-1 collected-doken carrier ONCE via the
+        // multiAdmin realm sign the phase-1 collected-doken carrier ONCE via the
         // Policy:1 quorum and distribute the per-unit sigs to each framed unit's column.
         // The unit set + order is RE-DERIVED from the SAME enumerateLiveCrUnits the phase-1
         // carrier framed (over the now-post-change live model), so sigs[i] (carrier order)
@@ -3988,7 +4202,7 @@ public class TideAttestor implements IgaAttestor {
         // two-phase Policy:1 commit path. ADOPT CRs (the toggle-on closure) are committed via
         // bulk-authorize WITHOUT a phase-1 carrier, so they are NOT Policy:1-signable here —
         // they fall through to their dedicated ADOPT stampers below (whose signProducerEnvelope
-        // stub remains the not-yet-capable fallback for those, unchanged by P4).
+        // stub remains the not-yet-capable fallback for those).
         if (MODE_MULTI_ADMIN.equals(mode) && isRealSigningCapable(realm)
                 && cr.getRequestModel() != null && !cr.getRequestModel().isBlank()
                 && !action.startsWith("ADOPT_")) {
@@ -4080,7 +4294,7 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * <b>★ P4 commit-time distribution (multiAdmin, real-signing-capable).</b> Sign the
+     * Commit-time distribution (multiAdmin, real-signing-capable). Sign the
      * phase-1 collected-doken carrier ONCE via {@link #signMultiAdminUnitsViaPolicy}
      * (one Policy:1 {@code Midgard.SignModel} round-trip → N real 64B VVK sigs, in the
      * carrier's unit order), then distribute {@code sigs[i]} onto the column of the
@@ -4142,16 +4356,16 @@ public class TideAttestor implements IgaAttestor {
      * envelope-driven (no CR canonical), so the same byte-shape is produced for the
      * per-unit columns.
      *
-     * <p><b>★ P4 coverage (generalized).</b> Post-flip multiAdmin REAL signing is now wired
+     * <p>Post-flip multiAdmin REAL signing is wired
      * (via the phase-1 multi-unit carrier + {@code distributeMultiAdminUnitSigs}) for ALL
-     * producer actionTypes — the EDGE-SET actions, the CREATE_* node units, AND (newly) the
+     * producer actionTypes — the EDGE-SET actions, the CREATE_* node units, the
      * SET_* / UPDATE_* live-entity node units, the derived owner-sets, the realm-scoped units,
-     * and the org node units — because the phase-1 carrier now frames every CR's full
+     * and the org node units — because the phase-1 carrier frames every CR's full
      * post-change unit set via the scratch-replay-and-read ({@link IgaScratchUnitBuilder} +
      * {@link #enumerateLiveCrUnits}). For all those actions {@code stampProducerUnitColumns}
      * takes the multiAdmin distribution branch and NEVER reaches this method on a
-     * real-signing-capable two-phase commit. The firstAdmin (pre-flip) real path here is
-     * unchanged; this multiAdmin-stub branch stays ONLY as (a) the not-real-signing-capable
+     * real-signing-capable two-phase commit. The firstAdmin (pre-flip) real path here
+     * remains; this multiAdmin-stub branch stays ONLY as (a) the not-real-signing-capable
      * dev/test fallback and (b) the ADOPT CRs (no phase-1 carrier — committed via
      * bulk-authorize), which keep the stub here.
      */

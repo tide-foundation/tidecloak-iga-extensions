@@ -832,7 +832,7 @@ public class TideAdminCompatResource {
     private static void evictRealmUserCache(KeycloakSession session, RealmModel realm) {
         // Delegated to the shared util so the DISABLE_IGA commit-replay teardown
         // (IgaReplayDispatcher.replayDisableIga, a different package) runs the
-        // IDENTICAL eviction the toggle used to do inline.
+        // IDENTICAL eviction this toggle path runs.
         org.tidecloak.iga.services.IgaRealmCacheEviction.evictRealmUserCache(session, realm);
     }
 
@@ -894,8 +894,7 @@ public class TideAdminCompatResource {
     private static void evictRealmCache(KeycloakSession session, RealmModel realm) {
         // Delegated to the shared util so the DISABLE_IGA commit-replay teardown
         // (IgaReplayDispatcher.replayDisableIga, a different package) runs the
-        // IDENTICAL client/role/group/scope/org/idp eviction the toggle used to do
-        // inline.
+        // IDENTICAL client/role/group/scope/org/idp eviction this toggle path runs.
         org.tidecloak.iga.services.IgaRealmCacheEviction.evictRealmCache(session, realm);
     }
 

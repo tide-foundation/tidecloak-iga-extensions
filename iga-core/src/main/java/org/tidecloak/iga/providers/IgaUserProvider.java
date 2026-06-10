@@ -1,6 +1,7 @@
 package org.tidecloak.iga.providers;
 
 import org.jboss.logging.Logger;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -9,6 +10,9 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 
 import jakarta.persistence.EntityManager;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Extends {@link JpaUserProvider} to intercept user mutations through IGA when
@@ -39,7 +43,7 @@ import jakarta.persistence.EntityManager;
  *       governed (see {@code IgaUserAdapter} javadoc) — they pass straight
  *       through to the scratch user and die with the rollback.</li>
  *   <li>At the post-build terminal seam {@code IgaUserAdapter#getId}
- *       (UsersResource.createUser:175, gated on username-observed) the
+ *       (UsersResource.createUser, gated on username-observed) the
  *       accumulated rep is written as a {@code CREATE_USER} change request in a
  *       SEPARATE transaction, the request tx is marked rollback-only and
  *       {@link IgaPendingApprovalException} is thrown (→ HTTP 202 + Location).
@@ -82,8 +86,60 @@ public class IgaUserProvider extends JpaUserProvider {
     private boolean isIgaActive(RealmModel realm) {
         IgaChangeRequestService service = getService();
         if (!service.isIgaEnabled(realm)) return false;
+        // Scoped vendor/system provisioning bypass (see
+        // IgaChangeRequestService.IGA_VENDOR_PROVISIONING): apply directly, no capture.
+        if (service.isVendorProvisioning()) return false;
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
+    }
+
+    /**
+     * Persist the change request in a SEPARATE Keycloak session/transaction so it
+     * survives the rollback caused by the pending-approval exception, mark the
+     * REQUEST transaction rollback-only (so the in-flight delete is discarded —
+     * the entity survives while PENDING), then throw the pending-approval signal
+     * (mapped to HTTP 202 + Location). Identical mechanism to
+     * {@code IgaRealmProvider.recordAndThrow} / {@code IgaOrganizationProvider
+     * .recordAndThrow}; replicated here because {@link JpaUserProvider} has no
+     * shared base with those providers.
+     */
+    private void recordAndThrow(RealmModel realm, String entityType, String entityId,
+                                String actionType, List<Map<String, Object>> rows) {
+        String[] crIdHolder = new String[1];
+        KeycloakModelUtils.runJobInTransaction(igaSession.getKeycloakSessionFactory(), newSession -> {
+            RealmModel newRealm = newSession.realms().getRealm(realm.getId());
+            EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
+            IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
+            crIdHolder[0] = newService.create(newRealm, entityType, entityId, actionType, rows, null).getId();
+        });
+        igaSession.getTransactionManager().setRollbackOnly();
+        throw new IgaPendingApprovalException(crIdHolder[0], entityType, actionType);
+    }
+
+    // -------------------------------------------------------------------------
+    // DELETE USER — govern whole-entity user deletes (capture → approve →
+    // replay-delete-on-commit). Mirrors IgaOrganizationProvider.remove /
+    // IgaRealmProvider.removeRole. UsersResource#deleteUser (DELETE
+    // {realm}/users/{id}) calls session.users().removeUser(realm, user) — THIS
+    // seam — so an IGA-on realm captures a DELETE_USER CR (202) instead of
+    // deleting. The real delete happens at commit via
+    // IgaReplayDispatcher.replayDeleteUser (under IGA_REPLAY_ACTIVE → isIgaActive
+    // is false → this override passes straight through). System/default users are
+    // GOVERNED too (no hard block); the only pass-through is the
+    // vendor-provisioning bypass + IGA-off, both folded into isIgaActive.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public boolean removeUser(RealmModel realm, UserModel user) {
+        if (isIgaActive(realm) && user != null) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("USER_ID", user.getId());
+            row.put("REALM_ID", realm.getId());
+            row.put("USERNAME", user.getUsername());
+            recordAndThrow(realm, "USER", user.getId(), "DELETE_USER", List.of(row));
+            return false; // unreachable — recordAndThrow always throws
+        }
+        return super.removeUser(realm, user);
     }
 
     @Override
@@ -97,14 +153,14 @@ public class IgaUserProvider extends JpaUserProvider {
             // full model on it and the terminal IgaUserAdapter#getId seam emits
             // the CREATE_USER CR + rollback-only + throws (→ 202 + Location).
             //
-            // ★ accept-unattested SELF-ENROLLMENT default-role grant (PATH-ROBUST).
+            // accept-unattested SELF-ENROLLMENT default-role grant (PATH-ROBUST).
             // For genuine self-enrollment under RegOn — BOTH the registration form
             // (a RegistrationUserCreation frame) AND the Tide-enrolled IdP-broker /
             // link-tide-account import (which arrives here as UserCacheSession#addUser,
             // with NO RegistrationUserCreation frame) — pass addDefaultRoles=true to
             // the 5-arg local-storage super.addUser. KC's JpaUserProvider.addUser then
             // grants realm.getDefaultRole() + joins the default groups on the REAL
-            // JpaUser (a plain UserAdapter — line 124-131 of JpaUserProvider), BEFORE
+            // JpaUser (a plain UserAdapter — in JpaUserProvider), BEFORE
             // we wrap it in the capture adapter. That grant is therefore NOT routed
             // through the IGA capture path → no nested GRANT_ROLES CR — and it
             // PERSISTS on the live user.
@@ -122,7 +178,7 @@ public class IgaUserProvider extends JpaUserProvider {
             //
             // WHY: an accept-unattested self-reg user is admitted UNSIGNED at
             // login and its CREATE_USER CR never commits, so the D3 commit-replay
-            // default-role grant (IgaReplayDispatcher.replayCreateUser :559-566)
+            // default-role grant (IgaReplayDispatcher.replayCreateUser)
             // never runs. Without granting here the self-reg user is ROLELESS →
             // KC builds the token with empty resource_access → no `account`
             // audience → the ORK TVE rejects "attested claim 'aud' is suppressed
@@ -250,7 +306,7 @@ public class IgaUserProvider extends JpaUserProvider {
 
     /**
      * The KC 26.5.5 self-registration form-action class. {@code success(FormContext)}
-     * (services {@code RegistrationUserCreation.success:155}) calls
+     * (services {@code RegistrationUserCreation.success}) calls
      * {@code profile.create()} → {@code DefaultUserProfile.create} →
      * {@code DeclarativeUserProfileProvider}'s {@code createUserFactory().apply} →
      * {@code session.users().addUser(realm, username)} (the 1-arg seam above). So when
@@ -289,7 +345,7 @@ public class IgaUserProvider extends JpaUserProvider {
     /**
      * The stock KC broker first-login authenticator. Its presence in the live 1-arg
      * {@code addUser} stack marks the create as an IdP-broker first-login
-     * ({@code IdpCreateUserIfUniqueAuthenticator.authenticateImpl:90} →
+     * ({@code IdpCreateUserIfUniqueAuthenticator.authenticateImpl} →
      * {@code session.users().addUser(realm, username)}). This fires for EVERY brokered
      * IdP — Tide AND external (non-Tide) — so the frame ALONE does NOT distinguish a
      * genuine Tide self-enrollment from an external-IdP first-login. The allow-list gate
@@ -307,9 +363,9 @@ public class IgaUserProvider extends JpaUserProvider {
 
     /**
      * Live-stack + RegOn predicate driving the {@code addDefaultRoles=true} scoping in
-     * the 1-arg {@link #addUser(RealmModel, String)} capture branch (★ F2 ALLOW-LIST).
+     * the 1-arg {@link #addUser(RealmModel, String)} capture branch (ALLOW-LIST).
      * Walks the live stack once, resolves the genuine-self-enrollment signal (registration
-     * form OR Tide-broker first-login), and ANDs it with the ★ MF2 benign-composite guard
+     * form OR Tide-broker first-login), and ANDs it with the benign-composite guard
      * so a tainted {@code default-roles-<realm>} (a privileged composite child) refuses
      * self-reg eligibility (the user falls back to the normal fail-closed / CR path) rather
      * than conferring privilege to an unsigned self-registrant.
@@ -323,7 +379,7 @@ public class IgaUserProvider extends JpaUserProvider {
         if (!selfEnroll) {
             return false;
         }
-        // ★ MF2: never grant (and never mark eligible) a tainted default-role composite.
+        // MF2: never grant (and never mark eligible) a tainted default-role composite.
         if (!org.tidecloak.iga.services.DefaultRoleCompositeGuard
                 .isBenignDefaultRoleComposite(realm)) {
             log.warnf("IGA self-enroll REFUSED (MF2 guard): realm '%s' default-role "
@@ -364,7 +420,7 @@ public class IgaUserProvider extends JpaUserProvider {
     }
 
     /**
-     * Pure, unit-testable ★ F2 ALLOW-LIST self-enrollment classifier. Given the live
+     * Pure, unit-testable ALLOW-LIST self-enrollment classifier. Given the live
      * stack-frame signatures as {@code "<FQN>#<method>"} (any order), the realm's RegOn
      * flag, and whether the current auth session is a Tide-broker enrollment, return true
      * iff the just-created user should receive the LOCAL realm default-role at creation.
@@ -437,7 +493,7 @@ public class IgaUserProvider extends JpaUserProvider {
 
     // addFederatedIdentity is NOT overridden — federated identities are IdP
     // brokering, not token claims, and are NOT governed. KC's
-    // UsersResource.createUser:171 → RepresentationToModel.createFederatedIdentities
+    // UsersResource.createUser → RepresentationToModel.createFederatedIdentities
     // may call session.users().addFederatedIdentity on the capture-mode scratch
     // user; it passes straight through to the inherited JpaUserProvider and
     // dies with the request-tx rollback (never accumulated, never replayed;

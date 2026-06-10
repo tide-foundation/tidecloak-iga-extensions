@@ -236,6 +236,13 @@ public class IgaReplayDispatcher {
             // to run inline runs HERE on commit, in order, within the replay tx.
             case "DISABLE_IGA" -> replayDisableIga(session, realm, rows, em);
 
+            // ----- Governed Ragnarok realm offboard (OFFBOARD_REALM) -----
+            // Mirrors DISABLE_IGA: an irreversible, admin-approved (min-3) realm
+            // teardown captured as a CR. The REAL teardown lives in ragnarok and is
+            // looked up via the RagnarokOffboardService SPI here (iga-core does NOT
+            // depend on ragnarok). Fail-closed when the SPI is absent.
+            case "OFFBOARD_REALM" -> replayOffboardRealm(session, realm, cr, em);
+
             // ----- Admin-policy threshold re-sign (steady-state multiAdmin) -----
             // NOT a model mutation: it Policy:1-signs the NEW admin Policy (carried in
             // ROWS_JSON, approved via the two-phase ceremony) with the collected dokens and
@@ -274,6 +281,12 @@ public class IgaReplayDispatcher {
             case "REALM_DEFAULT_SCOPE_REMOVE" -> replayRemoveRealmDefaultScope(session, realm, rows, finalAttestation, em, setSigned);
             case "CREATE_CLIENT_SCOPE" -> replayCreateClientScope(session, realm, rows, finalAttestation, em, setSigned);
             case "DELETE_CLIENT_SCOPE" -> replayDeleteClientScope(session, realm, rows);
+
+            // ----- Whole-entity deletes (deferred delete on commit) -----
+            case "DELETE_USER" -> replayDeleteUser(session, realm, rows);
+            case "DELETE_ROLE" -> replayDeleteRole(session, realm, rows);
+            case "DELETE_GROUP" -> replayDeleteGroup(session, realm, rows);
+            case "DELETE_CLIENT" -> replayDeleteClient(session, realm, rows);
             case "UPDATE_PROTOCOL_MAPPER" -> replayUpdateProtocolMapper(session, realm, rows, finalAttestation, em);
             case "REMOVE_PROTOCOL_MAPPER" -> replayRemoveProtocolMapper(session, realm, rows);
 
@@ -305,11 +318,11 @@ public class IgaReplayDispatcher {
     // -------------------------------------------------------------------------
     // Reusable entity-rebuild helpers (CREATE_* from REP_JSON).
     //
-    // ★ BYTE-IDENTITY CONTRACT. Each helper rebuilds the live entity from the
-    // CR row EXACTLY as the per-action replay used to inline — pinning the
+    // BYTE-IDENTITY CONTRACT. Each helper rebuilds the live entity from the
+    // CR row EXACTLY as the per-action replay does — pinning the
     // captured id/name and applying the captured REP_JSON via the SAME
     // RepresentationToModel.* builder Keycloak's REST resource uses. The
-    // replayCreate* methods above now call THESE helpers, and so does the
+    // replayCreate* methods above call THESE helpers, and so does the
     // phase-1 multiAdmin from-REP_JSON node-unit builder
     // ({@code IgaCreateUnitBuilder}): it runs the helper into a SCRATCH entity
     // (nested runJobInTransaction, IGA_REPLAY_ACTIVE=true), reads the live
@@ -328,7 +341,7 @@ public class IgaReplayDispatcher {
         String username = str(row, "USERNAME");
         String repJson = str(row, "REP_JSON");
 
-        // ★ ENROLL-BEFORE-COMMIT: if a LIVE persisted user with this id already exists
+        // ENROLL-BEFORE-COMMIT: if a LIVE persisted user with this id already exists
         // (i.e. the pending CREATE_USER user was persisted pre-commit and ENROLLED via
         // LinkTideAccount while the CR was PENDING — adding vuid/tideUserKey under
         // IGA_REPLAY_ACTIVE with no re-sign), the REP_JSON snapshot captured at create
@@ -567,7 +580,7 @@ public class IgaReplayDispatcher {
         for (Map<String, Object> row : rows) {
             String userId = str(row, "ID");
             rebuildCreateUserFromRow(session, realm, row);
-            // ★ D3 — auto-assign the realm default-role + default groups at COMMIT-replay, so
+            // D3 — auto-assign the realm default-role + default groups at COMMIT-replay, so
             // the token the new user mints carries the default-role-derived claims. The capture
             // path (IgaUserProvider.addUser, addDefaultRoles=false) deliberately leaves the
             // PENDING user role-less; the default-roles land HERE at commit. This runs under
@@ -589,7 +602,7 @@ public class IgaReplayDispatcher {
                     .setParameter("id", userId)
                     .executeUpdate();
         }
-        // ★ FINALIZE the persisted-pending user (enroll-before-commit / Tideless
+        // FINALIZE the persisted-pending user (enroll-before-commit / Tideless
         // quarantine): clear any IGA_UNSIGNED_ENTITY sidecar row this CREATE_USER
         // CR registered when the pending user was PERSISTED quarantined (the
         // Tideless path in IgaUserAdapter.getId). Keyed on the CR id, so it is a
@@ -813,6 +826,81 @@ public class IgaReplayDispatcher {
                 continue;
             }
             orgs.remove(model);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Whole-entity delete replays. Each runs under IGA_REPLAY_ACTIVE=true (set by
+    // replay()), so the REAL remove passes through the IGA capture wrappers WITHOUT
+    // re-capture (isIgaActive() is false during replay). A vanished target (already
+    // gone) is a logged skip — mirrors replayDeleteOrganization above.
+    // -------------------------------------------------------------------------
+
+    private static void replayDeleteUser(KeycloakSession session, RealmModel realm,
+                                         List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String userId = str(row, "USER_ID");
+            if (userId == null) continue;
+            org.keycloak.models.UserModel user = session.users().getUserById(realm, userId);
+            if (user == null) {
+                log.warnf("DELETE_USER replay: user %s no longer exists in realm %s; skipping",
+                        userId, realm.getId());
+                continue;
+            }
+            boolean removed = session.users().removeUser(realm, user);
+            log.infof("DELETE_USER replay: user %s in realm %s removed=%s", userId, realm.getId(), removed);
+        }
+    }
+
+    private static void replayDeleteRole(KeycloakSession session, RealmModel realm,
+                                         List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String roleId = str(row, "ROLE_ID");
+            if (roleId == null) continue;
+            org.keycloak.models.RoleModel role = session.roles().getRoleById(realm, roleId);
+            if (role == null) {
+                log.warnf("DELETE_ROLE replay: role %s no longer exists in realm %s; skipping",
+                        roleId, realm.getId());
+                continue;
+            }
+            boolean removed = realm.removeRole(role);
+            log.infof("DELETE_ROLE replay: role %s (%s) in realm %s removed=%s",
+                    roleId, str(row, "ROLE_NAME"), realm.getId(), removed);
+        }
+    }
+
+    private static void replayDeleteGroup(KeycloakSession session, RealmModel realm,
+                                          List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String groupId = str(row, "GROUP_ID");
+            if (groupId == null) continue;
+            org.keycloak.models.GroupModel group = session.groups().getGroupById(realm, groupId);
+            if (group == null) {
+                log.warnf("DELETE_GROUP replay: group %s no longer exists in realm %s; skipping",
+                        groupId, realm.getId());
+                continue;
+            }
+            boolean removed = realm.removeGroup(group);
+            log.infof("DELETE_GROUP replay: group %s (%s) in realm %s removed=%s",
+                    groupId, str(row, "GROUP_NAME"), realm.getId(), removed);
+        }
+    }
+
+    private static void replayDeleteClient(KeycloakSession session, RealmModel realm,
+                                           List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String clientUuid = str(row, "CLIENT_UUID");
+            if (clientUuid == null) clientUuid = str(row, "ID");
+            if (clientUuid == null) continue;
+            ClientModel client = session.clients().getClientById(realm, clientUuid);
+            if (client == null) {
+                log.warnf("DELETE_CLIENT replay: client %s (%s) no longer exists in realm %s; skipping",
+                        clientUuid, str(row, "CLIENT_ID"), realm.getId());
+                continue;
+            }
+            boolean removed = session.clients().removeClient(realm, clientUuid);
+            log.infof("DELETE_CLIENT replay: client %s (%s) in realm %s removed=%s",
+                    clientUuid, str(row, "CLIENT_ID"), realm.getId(), removed);
         }
     }
 
@@ -2101,8 +2189,7 @@ public class IgaReplayDispatcher {
     // -------------------------------------------------------------------------
     // Governed IGA disable (DISABLE_IGA)
     //
-    // The teardown that TideAdminCompatResource.toggleIga used to run inline on
-    // ON→OFF now runs HERE, only after the DISABLE_IGA change request commits
+    // The ON→OFF teardown runs HERE, only after the DISABLE_IGA change request commits
     // (admin-approved at the realm-default quorum). It runs IN ORDER inside the
     // replay transaction (IGA_REPLAY_ACTIVE is already true, set by replay()):
     //
@@ -2116,7 +2203,7 @@ public class IgaReplayDispatcher {
     //      cache, so post-disable reads reflect the IGA-off state.
     //   4. RS256 revert — on a Tide realm (tide IdP + tide-vendor-key present) whose
     //      defaultSignatureAlgorithm is EdDSA, revert to RS256 (no Tide signing path
-    //      once IGA is off). Mirrors the OFF-toggle logic that used to live inline.
+    //      once IGA is off).
     //
     // Re-ON-safe / revokes NOTHING: this teardown does NOT burn any pack, flip any
     // MODE, or retire any VVK/VRK; IGA_ROLE_POLICY is left intact as audit. A later
@@ -2175,6 +2262,85 @@ public class IgaReplayDispatcher {
                 log.infof("IGA DISABLE_IGA replay: realm %s — default signature algorithm reverted to RS256.",
                         realm.getName());
             }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Governed Ragnarok realm offboard (OFFBOARD_REALM)
+    //
+    // Captured as an irreversible, admin-approved (min-3) CR (mirroring
+    // DISABLE_IGA). The REAL teardown lives in ragnarok; iga-core does NOT depend
+    // on ragnarok, so the teardown is reached via the RagnarokOffboardService SPI
+    // looked up by TYPE on the session. This runs INSIDE the replay tx
+    // (IGA_REPLAY_ACTIVE is already true) so any model writes the offboard performs
+    // pass straight through the IGA capture wrappers, and an exception rolls the
+    // whole replay tx back — nothing is torn down and the CR stays committable-retry.
+    //
+    // FAIL-CLOSED when the SPI is absent: if ragnarok is not deployed,
+    // session.getProvider(RagnarokOffboardService.class) returns null. We MUST NOT
+    // silently flip STATUS=APPROVED (that would "commit" an offboard that never ran)
+    // — instead we throw, rolling back the replay tx so the CR remains committable
+    // once ragnarok ships.
+    //
+    // STUB CR ATTESTATION + REAL DOKEN CARRIER (two separate things):
+    //  * OFFBOARD_REALM is NOT a producer-envelope-signed action
+    //    (TideAttestor.isProducerEnvelopeSignedAction returns false), so combineFinal
+    //    produced a STUB signature for the CR's own ATTESTATION column — no ORK/Policy:1
+    //    round-trip gates the CR attestation.
+    //  * BUT the destructive Midgard.Offboard ORK ceremony the SPI runs needs a quorum of
+    //    admin DOKENS. Those are collected on the CR's REQUEST_MODEL via a real Offboard:1
+    //    carrier that ragnarok seeds (svc.buildOffboardApprovalCarrier, on the first open)
+    //    and the two-phase enclave approval accumulates into. We hand that accumulated
+    //    carrier to svc.offboardRealm(...,carrierB64) here so the ceremony has its dokens.
+    // The dispatcher tail then sets STATUS=APPROVED.
+    // -------------------------------------------------------------------------
+
+    private static void replayOffboardRealm(KeycloakSession session, RealmModel realm,
+                                            IgaChangeRequestEntity cr, EntityManager em) {
+        if (realm == null) {
+            throw new IllegalStateException("OFFBOARD_REALM replay: realm not loadable");
+        }
+        // Bind the realm on the session context so the ragnarok teardown can rely on
+        // a realm-bound session (same contract as replayDisableIga).
+        session.getContext().setRealm(realm);
+
+        org.tidecloak.iga.providers.RagnarokOffboardService svc =
+                session.getProvider(org.tidecloak.iga.providers.RagnarokOffboardService.class);
+        if (svc == null) {
+            // Fail-closed: ragnarok not deployed → do NOT pretend the offboard ran.
+            throw new IllegalStateException(
+                    "OFFBOARD_REALM replay: no RagnarokOffboardService provider registered (ragnarok not "
+                            + "deployed). Refusing to commit an offboard that did not run — the replay tx rolls "
+                            + "back and CR " + realm.getName() + " stays committable-retry until ragnarok ships.");
+        }
+
+        // The accumulated Offboard:1 doken carrier the two-phase approval built up on the CR's
+        // REQUEST_MODEL (seeded by svc.buildOffboardApprovalCarrier on the first open, then each
+        // approving admin's enclave appended a doken). The destructive Midgard.Offboard ORK
+        // ceremony needs these dokens — fail-closed if the carrier is missing (an offboard can
+        // never run without its admin-quorum dokens).
+        String dokenCarrierB64 = cr == null ? null : cr.getRequestModel();
+        if (dokenCarrierB64 == null || dokenCarrierB64.isBlank()) {
+            throw new IllegalStateException(
+                    "OFFBOARD_REALM replay: CR has no accumulated Offboard:1 doken carrier "
+                            + "(REQUEST_MODEL is null/blank) for realm " + realm.getName()
+                            + " — refusing to run Midgard.Offboard without admin-quorum dokens. The replay tx "
+                            + "rolls back and the CR stays committable-retry.");
+        }
+
+        try {
+            org.tidecloak.iga.providers.RagnarokOffboardResult result =
+                    svc.offboardRealm(session, realm, em, dokenCarrierB64);
+            log.infof("IGA OFFBOARD_REALM replay: realm %s — ragnarok offboard complete (success=%s): %s",
+                    realm.getName(),
+                    result != null && result.success(),
+                    result != null ? result.summary() : "(no summary)");
+        } catch (org.tidecloak.iga.providers.RagnarokOffboardException e) {
+            // Surface as an unchecked exception so the replay tx rolls back (nothing
+            // torn down) and the commit fails with a clear message.
+            throw new RuntimeException(
+                    "OFFBOARD_REALM replay: ragnarok offboard failed for realm " + realm.getName()
+                            + " — replay tx rolled back, nothing torn down: " + e.getMessage(), e);
         }
     }
 

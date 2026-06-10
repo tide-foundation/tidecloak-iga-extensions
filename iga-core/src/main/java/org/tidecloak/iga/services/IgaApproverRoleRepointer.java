@@ -35,7 +35,7 @@ import org.tidecloak.iga.attestors.IgaScopeResolver;
  * the {@code iga.approverRole} attribute, harvested from these entity kinds:
  * <ul>
  *   <li><b>realm</b> attribute {@code iga.approverRole} (the realm default /
- *       admin-coverage surface; {@code TideAdminCompatResource:1220}),</li>
+ *       admin-coverage surface; {@code TideAdminCompatResource}),</li>
  *   <li><b>each realm role</b> ({@link IgaScopeResolver#collectRoleScope}),</li>
  *   <li><b>each client role</b> (same collector — client roles are scope-marked
  *       exactly like realm roles),</li>

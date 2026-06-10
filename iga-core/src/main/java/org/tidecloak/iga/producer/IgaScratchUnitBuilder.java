@@ -14,7 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * ★ P4 — the generalized scratch-replay unit enumerator.
+ * P4 — the generalized scratch-replay unit enumerator.
  *
  * <p>This is the generalization of {@link IgaCreateUnitBuilder} (the CREATE_*-only
  * from-REP_JSON node builder) to ALL actionTypes. Instead of hand-coding a per-type
@@ -26,7 +26,7 @@ import java.util.List;
  * model via the SAME {@link RealmAttestationExporter} builders the post-replay stampers
  * use, then ROLLS BACK so the scratch mutation never persists.
  *
- * <h2>★ Byte-identity (the load-bearing invariant)</h2>
+ * <h2>Byte-identity (the load-bearing invariant)</h2>
  * Because the scratch tx runs the IDENTICAL {@code IgaReplayDispatcher.replay} the real
  * commit runs, the post-change scratch model is bit-for-bit the same model the post-replay
  * stamper reads at commit time — so the unit envelopes the phase-1 carrier frames here equal
@@ -117,7 +117,7 @@ public final class IgaScratchUnitBuilder {
                 IgaChangeRequestEntity scratchCr = em.find(IgaChangeRequestEntity.class, cr.getId());
                 IgaChangeRequestEntity replayCr = scratchCr != null ? scratchCr : cr;
 
-                // ★ Run the SAME full replay the real commit runs — applies the rep/delta to
+                // Run the SAME full replay the real commit runs — applies the rep/delta to
                 // the live scratch model for ANY actionType (CREATE / SET / UPDATE / ASSIGN /
                 // SCOPE_MAPPING / PROTOCOL_MAPPER / REALM / ORG). The finalAttestation passed
                 // here is a throwaway probe marker; it is stamped onto scratch rows that are

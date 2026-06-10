@@ -446,7 +446,7 @@ public final class IgaUnsignedRowScanner {
             out.add(new EdgeRow(asStr(r, 0), asStr(r, 1), asStr(r, 2),
                     org.tidecloak.iga.replay.IgaReplayExtension.ENTITY_TYPE_CLIENT, null));
         }
-        // scope-owned (the previously-missed lane)
+        // scope-owned lane
         @SuppressWarnings("unchecked")
         List<Object[]> scopeOwned = (List<Object[]>) em.createQuery(
                 "SELECT pm.id, pm.clientScope.id, pm.clientScope.name " +

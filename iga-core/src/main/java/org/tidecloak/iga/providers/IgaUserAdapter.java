@@ -246,7 +246,7 @@ public class IgaUserAdapter extends UserAdapter {
      * presence as the immediate caller of {@code getId()} is the deterministic
      * terminal-emit signal. {@code UsersResource.createUser} is the ONLY method
      * that invokes {@code user.getId()} with NO intermediate non-adapter frame
-     * (lines :175 adminEvent resourcePath, :177 Response.created — both AFTER
+     * (adminEvent resourcePath, then Response.created — both AFTER
      * the full model is built by profile.create/updateUserFromRep/
      * createFederatedIdentities/createGroups/createCredentials). Every
      * mid-build {@code getId()} (UserAdapter.equals/hashCode, JPA persistence,
@@ -260,12 +260,12 @@ public class IgaUserAdapter extends UserAdapter {
     /**
      * The KC 26.5.5 self-registration form-action whose {@code success(FormContext)}
      * method is the REGISTRATION terminal boundary. {@code RegistrationUserCreation.success}
-     * calls {@code profile.create()} (services source line :155) — which routes through
+     * calls {@code profile.create()} (in services source) — which routes through
      * {@code DefaultUserProfile.create} → {@code DeclarativeUserProfileProvider}'s
      * {@code createUserFactory().apply} → {@code session.users().addUser(realm, username)}
      * (the SAME 1-arg seam admin-create uses, yielding a capture-mode adapter) — and THEN,
      * with the full model already built, calls {@code user.setEnabled(true)} DIRECTLY at
-     * services source line :159. That {@code setEnabled} call whose IMMEDIATE caller is
+     * in services source. That {@code setEnabled} call whose IMMEDIATE caller is
      * exactly {@code RegistrationUserCreation#success} is the deterministic registration
      * terminal-emit signal: it is post-build (profile.create has returned) and is NEVER
      * present on the admin-create path (admin enabled is applied by
@@ -368,6 +368,9 @@ public class IgaUserAdapter extends UserAdapter {
         if (captureMode) return false;
         IgaChangeRequestService service = getService();
         if (!service.isIgaEnabled(realm)) return false;
+        // Scoped vendor/system provisioning bypass (see
+        // IgaChangeRequestService.IGA_VENDOR_PROVISIONING): apply directly, no capture.
+        if (service.isVendorProvisioning()) return false;
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }
@@ -392,10 +395,10 @@ public class IgaUserAdapter extends UserAdapter {
     //   getId#4        immediate caller = UserCacheSession#addFederatedIdentity
     //   getId#5        immediate caller = UserStorageManager#addFederatedIdentity
     //   getId#6        immediate caller = JpaUserProvider#addFederatedIdentity
-    //   getId#7        immediate caller = UsersResource#createUser  (:175
-    //                  adminEvent.resourcePath — full model built)   ← TERMINAL
-    //   getId#8        immediate caller = UsersResource#createUser  (:177
-    //                  Response.created)                             ← fire-once
+    //   getId#7        immediate caller = UsersResource#createUser
+    //                  (adminEvent.resourcePath — full model built)  ← TERMINAL
+    //   getId#8        immediate caller = UsersResource#createUser
+    //                  (Response.created)                            ← fire-once
     // i.e. the ONLY getId() calls whose IMMEDIATE non-self caller is class
     // org.keycloak.services.resources.admin.UsersResource, method createUser are
     // the two resource-terminal calls (#7/#8). Every mid-build getId() (#1–#6)
@@ -423,8 +426,8 @@ public class IgaUserAdapter extends UserAdapter {
      * True iff {@code getId()}'s IMMEDIATE caller is
      * {@code org.keycloak.services.resources.admin.UsersResource#createUser}
      * (the resource terminal) — runtime-proven by the live capture-mode stack
-     * harvest: getId#7 (caller {@code UsersResource#createUser} at :175
-     * adminEvent.resourcePath) and getId#8 (:177 {@code Response.created}) are
+     * harvest: getId#7 (caller {@code UsersResource#createUser},
+     * adminEvent.resourcePath) and getId#8 ({@code Response.created}) are
      * the ONLY two whose immediate non-self caller is that exact class+method;
      * getId#1–#6 have {@code UserCacheSession#addUser/fullyInvalidateUser/
      * addFederatedIdentity}, {@code UserStorageManager#addFederatedIdentity} or
@@ -561,13 +564,13 @@ public class IgaUserAdapter extends UserAdapter {
         // Primary deterministic gate: the resource-boundary StackWalker
         // (immediate caller == UsersResource#createUser). Secondary defensive
         // gate: usernameObserved (KC's DefaultUserProfile.create always applies
-        // the username writable attribute strictly before createUser:175).
+        // the username writable attribute strictly before createUser).
         // Either gate failing → fall straight through to super.getId() WITHOUT
         // emitting. RUNTIME EVIDENCE: getId#3's immediate caller is
         // UserCacheSession#addUser (mid-build, inside DefaultUserProfile#create)
         // → predicate false → no emit; getId#7's immediate caller is
-        // UsersResource#createUser (:175, full model built) → predicate true →
-        // emit; getId#8 (:177) is latched out by the fire-once guard.
+        // UsersResource#createUser (full model built) → predicate true →
+        // emit; getId#8 is latched out by the fire-once guard.
         // Compute the genuine external immediate caller ONCE per getId() (only
         // in capture mode, pre-emit) so the SKIP/EMIT logs print the ACTUAL
         // frame, never a templated example — the run is self-evidencing.
@@ -601,7 +604,7 @@ public class IgaUserAdapter extends UserAdapter {
         }
         // Arm the fire-once guard BEFORE any further model/service call so the
         // emit path cannot re-enter this seam and the second getId() at
-        // UsersResource.createUser:177 (runtime getId#8) falls through.
+        // UsersResource.createUser (runtime getId#8) falls through.
         captureEmitted = true;
         trace("getId#EMIT(UsersResource#createUser)");
         emitPersistPendingCreateUserCr(ADMIN_TERMINAL_LABEL);
@@ -632,21 +635,20 @@ public class IgaUserAdapter extends UserAdapter {
         String requestedBy = getCurrentUserId();
 
         // ─────────────────────────────────────────────────────────────────────
-        // ★ PERSIST-PENDING (enroll-before-commit).
+        // PERSIST-PENDING (enroll-before-commit).
         //
-        // HISTORY: this seam used to setRollbackOnly() so the fully-built scratch
-        // user died with the request tx and ONLY the CR survived. That made a
-        // post-flip Tide user UN-ENROLLABLE while PENDING (no live row for
-        // LinkTideAccount to write vuid/tideUserKey onto), so user_identity was
-        // signed pre-enrollment and the login batch-verify failed.
+        // The pending user is PERSISTED (rollback-only is NOT set). Setting it would let the
+        // fully-built scratch user die with the request tx leaving ONLY the CR — which makes a
+        // post-flip Tide user UN-ENROLLABLE while PENDING (no live row for LinkTideAccount to
+        // write vuid/tideUserKey onto), so user_identity would be signed pre-enrollment and the
+        // login batch-verify would fail.
         //
-        // NEW: we PERSIST the pending user. DefaultKeycloakSession#close() COMMITS
-        // the request tx unless getRollbackOnly() is set (it inspects ONLY the
-        // rollback flag — a propagating exception does NOT auto-rollback), so by
-        // NOT setting rollback-only the live user (already fully built by KC —
-        // admin: UsersResource.createUser:175 (profile.create + updateUserFromRep
-        // + createGroups); registration: RegistrationUserCreation.success:155
-        // profile.create — then we fire here AFTER the build) survives. Its
+        // DefaultKeycloakSession#close() COMMITS the request tx unless getRollbackOnly() is set
+        // (it inspects ONLY the rollback flag — a propagating exception does NOT auto-rollback),
+        // so by NOT setting rollback-only the live user (already fully built by KC —
+        // admin: UsersResource.createUser (profile.create + updateUserFromRep
+        // + createGroups); registration: RegistrationUserCreation.success
+        // profile.create — this fires AFTER the build) survives. Its
         // UserEntity.attestation column is NULL (KC never stamps it) — that NULL is
         // the "pending/quarantined" marker.
         //
@@ -696,7 +698,7 @@ public class IgaUserAdapter extends UserAdapter {
         });
 
         // ─────────────────────────────────────────────────────────────────────
-        // ★ REGISTRATION default-role grant (accept-unattested self-reg aud fix).
+        // REGISTRATION default-role grant (accept-unattested self-reg aud fix).
         //
         // For the SELF-REGISTRATION terminal ONLY, grant the realm default-role +
         // join the realm default groups onto the just-persisted pending user, so a
@@ -704,7 +706,7 @@ public class IgaUserAdapter extends UserAdapter {
         // the CREATE_USER CR is filed PENDING and NEVER commits) still HOLDS the
         // default-roles. Without this the self-reg user is ROLELESS → KC builds the
         // token with empty resource_access → no `account` audience → the TVE
-        // bidirectional check (TokenValidationEngine:965) rejects with
+        // bidirectional check (TokenValidationEngine) rejects with
         // "attested claim 'aud' is suppressed in token" (the producer's metadata
         // closure attests aud=[account] from the default-role composite, and the ORK
         // universal-inherits the realm default-role, so the token MUST carry it).
@@ -712,11 +714,11 @@ public class IgaUserAdapter extends UserAdapter {
         // SUPPRESSION (no nested CR): we are still in captureMode here, so
         // grantRole/joinGroup short-circuit to super.* (plain pass-through, NO
         // GRANT_ROLES/JOIN_GROUPS CR is emitted). This mirrors exactly how
-        // IgaReplayDispatcher.replayCreateUser :559-566 grants default-roles at
+        // IgaReplayDispatcher.replayCreateUser grants default-roles at
         // commit under IGA_REPLAY_ACTIVE.
         //
         // CLOSURE INVARIANT (gate still admits): the realm default-role id is the
-        // D1b exclusion in RealmAttestationExporter.perUserUnits :418 — a user
+        // D1b exclusion in RealmAttestationExporter.perUserUnits — a user
         // holding ONLY default-roles → empty role_ids → NO user_role_mapping_set
         // unit. So the user HOLDS default-roles (KC token carries the account aud)
         // AND the producer closure has no role-mapping unit (the default-roles-only
@@ -795,9 +797,9 @@ public class IgaUserAdapter extends UserAdapter {
      * Grant the realm default-role + join the realm default groups onto {@code this}
      * just-persisted pending user, mirroring stock KC
      * {@code JpaUserProvider.addUser} and the commit-time D3 grant
-     * ({@code IgaReplayDispatcher.replayCreateUser:559-566}).
+     * ({@code IgaReplayDispatcher.replayCreateUser}).
      *
-     * <p>★ Suppression (no nested CR): we are in {@code captureMode} here, so the
+     * <p>Suppression (no nested CR): this runs in {@code captureMode}, so the
      * overridden {@link #grantRole}/{@link #joinGroup} short-circuit to {@code super.*}
      * (plain pass-through) and do NOT spawn a GRANT_ROLES/JOIN_GROUPS change request —
      * exactly as the replay grant runs under {@code IGA_REPLAY_ACTIVE}. The granted
@@ -811,7 +813,7 @@ public class IgaUserAdapter extends UserAdapter {
             // Defensive: only ever invoked from the capture-mode persist-pending emit.
             return;
         }
-        // ★ MF2 (HIGH) defense-in-depth: never grant a tainted default-role composite to a
+        // MF2 (HIGH) defense-in-depth: never grant a tainted default-role composite to a
         // self-registered user. If default-roles-<realm> expands to anything privileged, the
         // self-reg user would inherit it via composite expansion (invisible to the D1b
         // user_role_mapping_set unit). Skip the grant — the producer's selfRegEligible guard
@@ -870,7 +872,7 @@ public class IgaUserAdapter extends UserAdapter {
             log.debugf(re, "PERSIST-PENDING: credential strip skipped for user %s", super.getId());
         }
         try {
-            // Federated identities applied by createFederatedIdentities (:171).
+            // Federated identities applied by createFederatedIdentities.
             igaSession.users().getFederatedIdentitiesStream(realm, this)
                     .map(org.keycloak.models.FederatedIdentityModel::getIdentityProvider)
                     .filter(java.util.Objects::nonNull)
@@ -1025,7 +1027,7 @@ public class IgaUserAdapter extends UserAdapter {
     // credentials: the credentialManager() override and CaptureCredentialManager
     // delegate were REMOVED. credentialManager() is no longer overridden, so the
     // real (super) UserAdapter credential manager is used unchanged — KC's
-    // createUser flow (UsersResource.createUser:174 →
+    // createUser flow (UsersResource.createUser →
     // RepresentationToModel.createCredentials) is simply NOT intercepted; any
     // inbound password is applied (if at all) to the throw-away scratch user
     // and dies with the request-tx rollback. It is NEVER accumulated, and
@@ -1068,11 +1070,11 @@ public class IgaUserAdapter extends UserAdapter {
             capturedRep.setEnabled(enabled);
             trace("setEnabled:" + enabled);
 
-            // ★ REGISTRATION TERMINAL SEAM.
+            // REGISTRATION TERMINAL SEAM.
             // Self-registration never reaches the admin getId() terminal
             // (UsersResource#createUser): RegistrationUserCreation.success
-            // (:155 profile.create → the 1-arg addUser capture seam → full model
-            // build) then calls user.setEnabled(true) DIRECTLY at services :159,
+            // (profile.create → the 1-arg addUser capture seam → full model
+            // build) then calls user.setEnabled(true) DIRECTLY in services,
             // AFTER the model is fully built. So when THIS setEnabled's immediate
             // caller is exactly RegistrationUserCreation#success we are at the
             // registration terminal: fire the SAME persist-pending CREATE_USER CR
@@ -1092,7 +1094,7 @@ public class IgaUserAdapter extends UserAdapter {
                     && !IgaImportMode.inPartialImport()
                     && usernameObserved
                     && calledDirectlyFromRegistrationSuccess()) {
-                // ★ ACCEPT-UNATTESTED (RegOn) self-registration: do NOT file a
+                // ACCEPT-UNATTESTED (RegOn) self-registration: do NOT file a
                 // persist-pending CREATE_USER CR and do NOT throw.
                 //
                 // When the realm is registrationAllowed (RegOn / accept-unattested)
@@ -1187,7 +1189,7 @@ public class IgaUserAdapter extends UserAdapter {
 
     // addRequiredAction / removeRequiredAction are NOT overridden at all —
     // required actions are login-flow gating, not token content, and are not
-    // governed. KC's createUser flow (UserResource.updateUserFromRep:307-330)
+    // governed. KC's createUser flow (UserResource.updateUserFromRep)
     // may call them on the scratch user; they pass straight through to the
     // inherited UserAdapter (no capture interception, no inline CR — required
     // actions were never inline-governed) and die with the request-tx
@@ -1352,7 +1354,7 @@ public class IgaUserAdapter extends UserAdapter {
     // mirror that redirect here BEFORE delegating: root attrs go to the
     // capturedRep scalar fields (where DefaultExportImportManager.createUser
     // reads firstName/lastName/email/username), custom attrs go to
-    // rep.attributes (where createUser:989-996 reads them). super still applies
+    // rep.attributes (where createUser reads them). super still applies
     // them so the scratch model is complete (discarded by rollback).
     //
     // inline mode: the existing one-pending-CR-per-entity rule (unchanged;
@@ -1458,8 +1460,8 @@ public class IgaUserAdapter extends UserAdapter {
      * accumulator so the captured {@link UserRepresentation} matches what
      * {@code DefaultExportImportManager.createUser} reads: ROOT attrs
      * (USERNAME/FIRST_NAME/LAST_NAME/EMAIL) populate the rep's scalar fields
-     * (createUser:984-987 + username at 979); everything else is a custom
-     * attribute (createUser:989-996).
+     * (set by createUser, along with username); everything else is a custom
+     * attribute (set by createUser).
      */
     private void accumulateAttribute(String name, List<String> values) {
         String first = (values != null && !values.isEmpty()) ? values.get(0) : null;

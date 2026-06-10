@@ -1,5 +1,7 @@
 package org.tidecloak.iga.rest;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.inject.Vetoed;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -63,6 +65,9 @@ import java.util.stream.Collectors;
 public class IgaAdminResource {
 
     private static final Logger log = Logger.getLogger(IgaAdminResource.class);
+
+    /** Parses ROWS_JSON into a generic tree for the diagnostic dump (preserves exact shape). */
+    private static final ObjectMapper DIAG_MAPPER = new ObjectMapper();
 
     private final KeycloakSession session;
     private final RealmModel realm;
@@ -265,6 +270,126 @@ public class IgaAdminResource {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
         return Response.ok(toRepresentation(cr, getService())).build();
+    }
+
+    // -------------------------------------------------------------------------
+    // GET /iga/change-requests/{id}/diagnostic-bundle
+    // -------------------------------------------------------------------------
+
+    /**
+     * Diagnostics EXPORT — Schema 3 (CR dump only). Returns a READ-ONLY JSON
+     * diagnostic dump for a single change request so a dev can inspect it
+     * offline. This is NOT engine-replayed — it's a faithful snapshot of the
+     * {@link IgaChangeRequestEntity} + its {@link IgaAuthorizationEntity} rows,
+     * plus the effective threshold/approver-role the commit gate would apply.
+     *
+     * <p>The shape (discriminated by {@code "diag_kind":"iga_cr_bundle"} so the
+     * offline harness can tell it apart from the token-mint bundle):
+     * <pre>
+     * { "diag_kind":"iga_cr_bundle", "schema_version":1, "realm_id":"&lt;uuid&gt;",
+     *   "cr": { id, entity_type, entity_id, action_type, status, requested_by,
+     *           created_at, depends_on:[...], rows_json:&lt;parsed&gt;,
+     *           request_model:"&lt;base64 carrier|null&gt;" },
+     *   "authorizations": [ { authorized_by, approval, created_at }, ... ],
+     *   "threshold": &lt;int&gt;, "approver_role": "&lt;role|null&gt;" }
+     * </pre>
+     *
+     * <p><b>SENSITIVE:</b> contains NO private-key material. {@code request_model}
+     * is the public Base64 {@code Policy:1} carrier; {@code approval} dokens are
+     * public signatures/usernames. No VVK/VRK private keys, no eddsaPrivateKey.
+     */
+    @GET
+    @Path("change-requests/{id}/diagnostic-bundle")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response diagnosticBundle(@PathParam("id") String id) {
+        auth.realm().requireManageRealm();
+
+        EntityManager em = getEm();
+        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
+        if (cr == null || !realm.getId().equals(cr.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("diag_kind", "iga_cr_bundle");
+        out.put("schema_version", 1);
+        out.put("realm_id", cr.getRealmId());
+
+        // --- cr block ---
+        Map<String, Object> crMap = new LinkedHashMap<>();
+        crMap.put("id", cr.getId());
+        crMap.put("entity_type", cr.getEntityType());
+        crMap.put("entity_id", cr.getEntityId());
+        crMap.put("action_type", cr.getActionType());
+        crMap.put("status", cr.getStatus());
+        crMap.put("requested_by", cr.getRequestedBy());
+        crMap.put("created_at", cr.getCreatedAt());
+        crMap.put("depends_on", cr.getDependsOnList());
+        // rows_json: faithfully parsed tree (preserves the exact array/object shape).
+        JsonNode rows = null;
+        try {
+            String rj = cr.getRowsJson();
+            if (rj != null && !rj.isBlank()) {
+                rows = DIAG_MAPPER.readTree(rj);
+            }
+        } catch (Exception ex) {
+            log.warnf(ex, "diagnostic-bundle: failed to parse ROWS_JSON for CR %s (emitting null)", cr.getId());
+        }
+        crMap.put("rows_json", rows);
+        // request_model is ALREADY the Base64 of the Policy:1 carrier (public), or null.
+        crMap.put("request_model", cr.getRequestModel());
+        out.put("cr", crMap);
+
+        // --- authorizations (IgaAuthorizationEntity rows) ---
+        List<Map<String, Object>> authsOut = new ArrayList<>();
+        List<IgaAuthorizationEntity> auths = em.createNamedQuery(
+                        "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
+                .setParameter("changeRequestId", cr.getId())
+                .getResultList();
+        for (IgaAuthorizationEntity a : auths) {
+            Map<String, Object> am = new LinkedHashMap<>();
+            am.put("authorized_by", a.getAuthorizedBy());
+            am.put("approval", a.getApproval());
+            am.put("created_at", a.getCreatedAt());
+            authsOut.add(am);
+        }
+        out.put("authorizations", authsOut);
+
+        // --- threshold + approver_role: resolved the SAME way the commit gate does ---
+        // threshold via the attestor (delegates to IgaScopeResolver.resolveThreshold for
+        // simple; dynamic/ADOPT bypass for tide) — identical to the value commit enforces.
+        Integer threshold = null;
+        try {
+            IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
+            threshold = attestor.getThreshold(session, realm, cr);
+        } catch (Exception ex) {
+            log.warnf(ex, "diagnostic-bundle: threshold resolution failed for CR %s", cr.getId());
+        }
+        out.put("threshold", threshold);
+        out.put("approver_role", resolveApproverRoleForDump(cr));
+
+        return Response.ok(out).build();
+    }
+
+    /**
+     * Resolve the approver role the commit gate ({@code IgaScopeResolver.requireApprover})
+     * would enforce for this CR, collapsed to a single string for the dump.
+     * Resolution order mirrors enforcement: the per-scope required-approver-role set
+     * (from ROWS_JSON) wins; if empty, fall back to the realm-level {@code iga.approverRole}
+     * attribute; null if neither is set (any manage-realm admin may sign). When the scope
+     * yields multiple roles, they are comma-joined.
+     */
+    private String resolveApproverRoleForDump(IgaChangeRequestEntity cr) {
+        try {
+            IgaScopeResolver.ResolvedScope scope = IgaScopeResolver.resolve(session, realm, cr);
+            if (scope != null && !scope.requiredApproverRoles.isEmpty()) {
+                return String.join(",", scope.requiredApproverRoles);
+            }
+        } catch (Exception ex) {
+            log.warnf(ex, "diagnostic-bundle: approver-role scope resolution failed for CR %s", cr.getId());
+        }
+        String realmRole = realm.getAttribute(IgaScopeResolver.ATTR_APPROVER_ROLE);
+        return (realmRole != null && !realmRole.isBlank()) ? realmRole.trim() : null;
     }
 
     // -------------------------------------------------------------------------
@@ -530,12 +655,15 @@ public class IgaAdminResource {
         // Idempotent (only NULL/stub columns), firstAdmin+capable gated, fail-closed, admin-
         // triggered (fires here at approval, never at toggle). No-op while ADOPT CRs pend.
         //
-        // SKIP for DISABLE_IGA: the convergence does an ORK signing ceremony (on a
-        // firstAdmin real-signing realm once no ADOPTs pend — and replayDisableIga
-        // just cancelled every pending ADOPT). Turning IGA OFF must never be blocked
-        // by ORK reachability, and re-stamping producer columns on a realm being
-        // disabled is pointless — so the disable commit does not run convergence.
-        if (!"DISABLE_IGA".equals(cr.getActionType())) {
+        // SKIP for DISABLE_IGA and OFFBOARD_REALM: the convergence does an ORK signing
+        // ceremony (on a firstAdmin real-signing realm once no ADOPTs pend). Turning
+        // IGA OFF must never be blocked by ORK reachability, and re-stamping producer
+        // columns on a realm being disabled is pointless. OFFBOARD_REALM tears the
+        // realm down entirely (ragnarok teardown ran in the replay above), so
+        // re-stamping its producer columns is likewise pointless and must not block
+        // the offboard on ORK reachability — so neither commit runs convergence.
+        if (!"DISABLE_IGA".equals(cr.getActionType())
+                && !org.tidecloak.iga.attestors.TideAttestor.ACTION_OFFBOARD_REALM.equals(cr.getActionType())) {
             org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, realm);
         }
 
@@ -1026,7 +1154,7 @@ public class IgaAdminResource {
             // Reject a duplicate signature from the same admin — mirrors the
             // per-CR authorize endpoint's pre-check. In bulk this typically
             // means the operator already ran a previous bulk that partially
-            // signed but didn't commit; we then proceed straight to commit
+            // signed but didn't commit; proceed straight to commit
             // rather than fail (the existing signature counts toward
             // threshold).
             List<IgaAuthorizationEntity> existing = em.createNamedQuery(
@@ -1104,7 +1232,7 @@ public class IgaAdminResource {
             }
 
             // POST-replay per-unit-type column stamp (uniform Design B) — IDENTICAL to the
-            // single-CR commit path (commit():417-419). Without this, a bulk-approved CR
+            // single-CR commit path (commit()). Without this, a bulk-approved CR
             // (e.g. the toggle-on ADOPT closure) replays but never stamps the node/derived/
             // realm producer attestation-units into their DEDICATED per-unit columns. On a
             // firstAdmin real-signing-capable realm those stampers route through
@@ -2237,7 +2365,7 @@ public class IgaAdminResource {
         }
 
         // threshold + readyToCommit. Both MUST come from the SAME authoritative
-        // value the commit gate enforces (IgaAdminResource.commit:345 →
+        // value the commit gate enforces (IgaAdminResource.commit →
         // attestor.getThreshold), so the representation can never report a number
         // that disagrees with enforcement. Threshold resolution depends on
         // rows_json + realm state, so guard it.

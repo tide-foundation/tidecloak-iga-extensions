@@ -21,21 +21,20 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * <b>★ P4 note (superseded for framing).</b> As of the generalized scratch-replay
- * enumerator ({@link IgaScratchUnitBuilder} + {@code TideAttestor.enumerateLiveCrUnits}),
- * the phase-1 carrier no longer calls this CREATE_*-only builder — CREATE_* node units are
- * now framed uniformly with every other actionType by scratch-replaying the WHOLE CR and
- * reading the post-change node entity from the live model. This class is retained for its
- * {@link #isFromRepCreateAction} gate (and as the documented byte-identity precedent the
- * generalization is built on); its {@code nodeUnitFromRep} path is the historical CREATE_*
- * special case and is no longer on the framing hot path.
+ * NOT on the framing hot path. The generalized scratch-replay enumerator
+ * ({@link IgaScratchUnitBuilder} + {@code TideAttestor.enumerateLiveCrUnits}) frames the
+ * phase-1 carrier instead: CREATE_* node units are framed uniformly with every other
+ * actionType by scratch-replaying the WHOLE CR and reading the post-change node entity from
+ * the live model. This class is retained for its {@link #isFromRepCreateAction} gate (and as
+ * the documented byte-identity precedent); its {@code nodeUnitFromRep} path is the CREATE_*
+ * special case.
  *
  * <p>Builds the byte-identical PRODUCER node-unit envelope for a {@code CREATE_*}
  * change request whose target entity does NOT exist yet (it is created only at
  * replay). This is the phase-1 (multiAdmin approval-carrier framing) counterpart
  * of the post-replay node stampers in {@code TideAttestor.stampProducerUnitColumns}.
  *
- * <h2>★ Byte-identity (the load-bearing invariant)</h2>
+ * <h2>Byte-identity (the load-bearing invariant)</h2>
  * The ork {@code TokenValidationEngine} verifies the realm VVK signature over the
  * LITERAL unit-envelope CBOR the login read re-derives from the committed entity.
  * For a multiAdmin (post-flip) {@code CREATE_*}, the approval carrier is framed at

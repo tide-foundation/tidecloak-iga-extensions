@@ -15,7 +15,8 @@ import java.util.Map;
  * SELF-CONTAINED FULL ENVELOPE (the unit's own {@link AttestationUnit#toEnvelopeMap()}):
  *
  * <pre>
- * { "realm_id": "&lt;uuid&gt;", "schema_version": 1,
+ * { "diag_kind": "tve_bundle", "diag_tier": 1,
+ *   "realm_id": "&lt;uuid&gt;", "schema_version": 1,
  *   "request": { "t": "access|id", "c": "&lt;clientId&gt;", "s": "&lt;raw scope&gt;", "aud": null|["..."] },
  *   "token": "&lt;compact JWS&gt;",
  *   "units": [
@@ -104,6 +105,12 @@ public final class BundleWriter {
     public Map<String, Object> buildBundleMap(String realmId, ExportRequest req, String token,
                                               List<AttestationUnit> units) {
         Map<String, Object> bundle = new LinkedHashMap<>();
+        // Diagnostics-export discriminators. The offline ORK `tve-replay` harness keys
+        // on these top-level fields to route a downloaded blob to the token-mint TVE
+        // replay lane (vs the CR diagnostic dump, which carries "diag_kind":"iga_cr_bundle").
+        // Tier 1 = claims-only token-mint bundle.
+        bundle.put("diag_kind", "tve_bundle");
+        bundle.put("diag_tier", 1);
         bundle.put("realm_id", realmId);
         bundle.put("schema_version", AttestationUnit.SCHEMA_VERSION);
 

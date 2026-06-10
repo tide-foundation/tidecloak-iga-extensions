@@ -50,6 +50,17 @@ public class IgaRealmProvider extends JpaRealmProvider {
     private boolean isIgaActive(RealmModel realm) {
         IgaChangeRequestService service = getService();
         if (!service.isIgaEnabled(realm)) return false;
+        // Scoped vendor/system provisioning bypass (see
+        // IgaChangeRequestService.IGA_VENDOR_PROVISIONING). While VendorResource's
+        // license/keygen provisioning block is active on this session, provider-
+        // level captures pass straight through to super: this single chokepoint
+        // covers createGroup/addRealmRole/addClientRole/addClient/addClientScope
+        // (the CREATE_* accumulate-then-veto branches) AND the addClientScopes /
+        // removeClientScope ASSIGN_SCOPE/REMOVE_SCOPE seam — so provisionTideClaims
+        // Scope's tide-claims attach applies directly, MODE-INDEPENDENTLY (no longer
+        // limited to the firstAdmin tide-claims passthrough). Inert when the flag is
+        // absent — ongoing admin edits stay governed.
+        if (service.isVendorProvisioning()) return false;
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }
@@ -139,7 +150,6 @@ public class IgaRealmProvider extends JpaRealmProvider {
         // the scratch group is discarded atomically; one 202 + Location is
         // returned by IgaPendingApprovalExceptionMapper.
         //
-        // ROOT CAUSE NOTE:
         // A "still NPEs at GroupsPartialImport" symptom is NOT an IGA
         // capture-mode artifact. KC's getModelId is
         // `findGroupModel(...).getId()` where findGroupModel ==
@@ -148,22 +158,18 @@ public class IgaRealmProvider extends JpaRealmProvider {
         // guard (`if (path == null) return null;`) when the GroupRepresentation in
         // the partialImport payload omits `path`, so `.getId()` on the next
         // line NPEs UNCONDITIONALLY, regardless of whether the scratch group
-        // is persisted, regardless of IGA. Confirmed by running an
-        // IGA-DISABLED vanilla-KC realm with `{"groups":[{"name":"vp-group",
-        // "attributes":{...}}]}` (no path): identical HTTP 500 / identical
-        // GroupsPartialImport NPE / identical KC-SERVICES0037 stack.
-        // KC's own AbstractPartialImportTest.addGroups always sets BOTH
-        // setName AND setPath("/" + GROUP_PREFIX + i) — pathless group reps
+        // is persisted and regardless of IGA (an IGA-disabled vanilla-KC realm
+        // NPEs identically on a pathless group rep). Pathless group reps
         // are malformed per KC's partialImport contract, not an IGA defect.
         // Roles/users don't NPE because RealmRolesPartialImport.getModelId
         // uses `.orElse(null)` and
         // UsersPartialImport.getModelId uses a createdIds cache populated by
         // create().
         //
-        // The corresponding E2E payload now sets `path` on the group rep so
+        // The corresponding E2E payload sets `path` on the group rep so
         // KC's intra-import getModelId resolves the (real, persisted, super-
         // created) scratch group via findGroupByPath → getGroupByName
-        // (JpaRealmProvider.getGroupByName:516-539 — name+parent+type=REALM
+        // (JpaRealmProvider.getGroupByName — name+parent+type=REALM
         // criteria query that finds the scratch group flushed by super.
         // createGroup above).
         if (IgaImportMode.isImportMode(igaSession, realm)) {
@@ -200,7 +206,7 @@ public class IgaRealmProvider extends JpaRealmProvider {
             // IgaGroupAdapter is returned in capture mode: every per-setter
             // override falls through to the real adapter, and the LAST mutation
             // KC makes in that path — GroupModel.setDescription()
-            // (GroupResource.updateGroup line 300, KC 26.5.5) — is the terminal
+            // (GroupResource.updateGroup, KC 26.5.5) — is the terminal
             // seam where the now-complete model is snapshotted to a
             // GroupRepresentation, the CREATE_GROUP change request (with full
             // REP_JSON) is written in a separate transaction, the REQUEST
@@ -289,11 +295,11 @@ public class IgaRealmProvider extends JpaRealmProvider {
             // each composite child's identity (because
             // ModelToRepresentation.toRepresentation(RoleModel) does NOT
             // serialize composites — KC 26.5.5
-            // ModelToRepresentation:424-434), and the LAST unconditional model
+            // ModelToRepresentation), and the LAST unconditional model
             // call KC makes in createRole — role.getName() at
-            // RoleContainerResource.createRole line 225, AFTER setDescription
-            // (168), the setAttribute loop (170-175) and the conditional
-            // addCompositeRole loop (186-222) — is the terminal seam where the
+            // RoleContainerResource.createRole, AFTER setDescription,
+            // the setAttribute loop and the conditional
+            // addCompositeRole loop — is the terminal seam where the
             // now-complete model is snapshotted into a RoleRepresentation
             // (base via ModelToRepresentation.toRepresentation PLUS
             // setComposite(true)+setComposites(...) reconstructed from the
@@ -476,8 +482,8 @@ public class IgaRealmProvider extends JpaRealmProvider {
             // genuine ClientAdapter. The IgaClientAdapter is returned in
             // capture mode: every per-setter override falls through to the real
             // adapter, and the LAST mutation KC makes in that path —
-            // ClientModel.updateClient() (RepresentationToModel.createClient
-            // line 404, KC 26.5.5) — is the terminal seam where the now
+            // ClientModel.updateClient() (RepresentationToModel.createClient,
+            // KC 26.5.5) — is the terminal seam where the now
             // complete model is snapshotted to a ClientRepresentation, the
             // CREATE_CLIENT change request (with full REP_JSON) is written in a
             // separate transaction, the REQUEST transaction is marked
@@ -872,5 +878,95 @@ public class IgaRealmProvider extends JpaRealmProvider {
         ClientScopeEntity entity = em.find(ClientScopeEntity.class, id);
         if (entity == null) return base;
         return new IgaClientScopeAdapter(realm, em, igaSession, entity);
+    }
+
+    // -------------------------------------------------------------------------
+    // WHOLE-ENTITY DELETES — govern role/group/client/client-scope deletes
+    // (capture → approve → replay-delete-on-commit). Each mirrors
+    // IgaOrganizationProvider.remove exactly: gate on isIgaActive (IGA-on and NOT
+    // vendor-provisioning and NOT IGA_REPLAY_ACTIVE) → file a DELETE_* CR and
+    // throw IgaPendingApprovalException (→ 202; request tx rolled back so the
+    // entity survives while PENDING). The real delete runs at commit via the
+    // matching IgaReplayDispatcher.replayDelete* handler under IGA_REPLAY_ACTIVE
+    // (isIgaActive false → these overrides pass straight through to super).
+    // System/default entities are GOVERNED too (no hard block) — the only
+    // pass-through is the vendor-provisioning bypass + IGA-off, both folded into
+    // isIgaActive.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public boolean removeRole(RoleModel role) {
+        if (role != null) {
+            // removeRole takes no RealmModel arg; derive it from the role's
+            // container exactly as JpaRealmProvider.removeRole does, so the IGA
+            // gate sees the correct realm.
+            RealmModel realm = (role.getContainer() instanceof RealmModel rm)
+                    ? rm
+                    : (role.getContainer() instanceof ClientModel cm ? cm.getRealm() : null);
+            if (realm != null && isIgaActive(realm)) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("ROLE_ID", role.getId());
+                row.put("ROLE_NAME", role.getName());
+                row.put("CLIENT_ROLE", role.isClientRole());
+                row.put("CONTAINER_ID", role.getContainerId());
+                row.put("REALM_ID", realm.getId());
+                recordAndThrow(realm, "ROLE", role.getId(), "DELETE_ROLE", List.of(row));
+                return false; // unreachable
+            }
+        }
+        return super.removeRole(role);
+    }
+
+    @Override
+    public boolean removeGroup(RealmModel realm, GroupModel group) {
+        if (isIgaActive(realm) && group != null) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("GROUP_ID", group.getId());
+            row.put("GROUP_NAME", group.getName());
+            row.put("REALM_ID", realm.getId());
+            recordAndThrow(realm, "GROUP", group.getId(), "DELETE_GROUP", List.of(row));
+            return false; // unreachable
+        }
+        return super.removeGroup(realm, group);
+    }
+
+    @Override
+    public boolean removeClient(RealmModel realm, String id) {
+        if (isIgaActive(realm) && id != null) {
+            ClientModel client = getClientById(realm, id);
+            if (client != null) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("CLIENT_UUID", id);
+                row.put("CLIENT_ID", client.getClientId());
+                row.put("REALM_ID", realm.getId());
+                recordAndThrow(realm, "CLIENT", id, "DELETE_CLIENT", List.of(row));
+                return false; // unreachable
+            }
+        }
+        return super.removeClient(realm, id);
+    }
+
+    @Override
+    public boolean removeClientScope(RealmModel realm, String id) {
+        if (isIgaActive(realm) && id != null) {
+            // The 2-arg whole-entity client-scope delete (ClientScopeResource
+            // DELETE {realm}/client-scopes/{id}). NOTE: IgaSystemProvisioner files
+            // its OWN DELETE_CLIENT_SCOPE for tide-claims deprovision by calling
+            // service.create(...) DIRECTLY — it never routes through this seam — so
+            // there is no double-capture. The provisioner also runs under the
+            // vendor/system bypass (isVendorProvisioning) which makes isIgaActive
+            // false here, and its own pending-guard dedups by scope id.
+            ClientScopeModel scope = getClientScopeById(realm, id);
+            if (scope != null) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("CLIENT_SCOPE_ID", id);
+                row.put("ID", id); // replay reads ID then SCOPE_ID (see replayDeleteClientScope)
+                row.put("CLIENT_SCOPE_NAME", scope.getName());
+                row.put("REALM_ID", realm.getId());
+                recordAndThrow(realm, "CLIENT_SCOPE", id, "DELETE_CLIENT_SCOPE", List.of(row));
+                return false; // unreachable
+            }
+        }
+        return super.removeClientScope(realm, id);
     }
 }

@@ -93,23 +93,23 @@ import java.util.stream.Stream;
  *       persistence-context window, before any setter). So {@code nameObserved} cleanly partitions
  *       the early racy {@code getId()} calls (no setter seen yet → fall
  *       through to {@code super.getId()}) from the resource-level terminal
- *       {@code getId()} at ClientScopesResource.createClientScope:133 (every
+ *       {@code getId()} at ClientScopesResource.createClientScope (every
  *       setter the rep carries already applied → emit). Because the rep is
  *       rebuilt from the ACCUMULATOR (not a live snapshot), even a {@code
- *       getId()} that lands inside the 719→736 window still carries every
+ *       getId()} that lands inside the create window still carries every
  *       field observed up to that point, and the fire-once guard then latches
  *       the final emit; in practice the create path runs synchronously to
- *       completion (RepresentationToModel:739 {@code return clientScope}) and
- *       the next model touch is the resource's terminal {@code getId()} at
- *       :133 with the accumulator fully populated.
+ *       completion (RepresentationToModel {@code return clientScope}) and
+ *       the next model touch is the resource's terminal {@code getId()}
+ *       with the accumulator fully populated.
  *
  *       <h3>REP_JSON faithfulness vs. replay</h3>
  *       {@code IgaReplayDispatcher.replayCreateClientScope} (full-config path)
  *       deserializes {@code REP_JSON} into a {@code ClientScopeRepresentation},
  *       {@code rep.setId(id)}, {@code rep.setName(name)} then
  *       {@code RepresentationToModel.createClientScope(realm, rep)} — which
- *       reads exactly name(719)/description(720)/protocol(721)/protocolMappers
- *       +config(722-728)/attributes(732-734). The accumulated rep carries
+ *       reads exactly name/description/protocol/protocolMappers
+ *       +config/attributes. The accumulated rep carries
  *       precisely those fields (protocol mappers retain their full {@code
  *       config} map), so the round-trip is byte-faithful. Replay is UNCHANGED.
  *
@@ -151,7 +151,7 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
     /**
      * True once {@code setName} has been observed via the capture path — i.e.
      * {@code RepresentationToModel.createClientScope} has started applying the
-     * representation (line 719) and we are PAST the 718→719 persistence-context
+     * representation and we are PAST the persistence-context
      * window in which early equals/hashCode/toString {@code getId()} calls
      * fire. Until then {@code getId()} falls through to {@code super.getId()}.
      */
@@ -223,6 +223,9 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         if (captureMode) return false;
         IgaChangeRequestService service = getService();
         if (!service.isIgaEnabled(realm)) return false;
+        // Scoped vendor/system provisioning bypass (see
+        // IgaChangeRequestService.IGA_VENDOR_PROVISIONING): apply directly, no capture.
+        if (service.isVendorProvisioning()) return false;
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }
@@ -272,7 +275,7 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         }
         // Arm the fire-once guard BEFORE any further model/service call so the
         // emit path cannot re-enter this seam and the second getId() at
-        // ClientScopesResource.createClientScope:135 falls through.
+        // ClientScopesResource.createClientScope falls through.
         captureEmitted = true;
         trace("getId#emit");
 

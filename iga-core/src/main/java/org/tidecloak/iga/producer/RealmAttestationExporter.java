@@ -402,12 +402,12 @@ public final class RealmAttestationExporter {
         // direct role row. The set unit's sig lives ON the user_role_mapping rows (see
         // UnitColumnMapping: "user.id = :id; any row"), so a roleless user has NO row to
         // carry it — the commit-time stamp would write 0 rows and the login read would
-        // find a NULL column → replayOrFailClosed fail-closes the login (the bug this
-        // fixes; user 98bc3758 had 0 role rows yet the phase-1 carrier framed an empty
-        // unit the quorum signed but had nowhere to stamp). This mirrors the existing
+        // find a NULL column → replayOrFailClosed fail-closes the login. A roleless user with
+        // 0 role rows would otherwise have the phase-1 carrier frame an empty unit the quorum
+        // signs but has nowhere to stamp. This mirrors the existing
         // user_group_membership_set rule directly below ("an empty set is not emitted by
         // the login and would dangle a column-less unit") and the role_composite_children_set
-        // precedent (commit bd1cf4e: a leaf role with no composite_role row must not emit the
+        // precedent (a leaf role with no composite_role row must not emit the
         // set unit). Because perUserUnits is the SINGLE source for BOTH the login export and
         // the commit-time CREATE_USER carrier, gating here keeps them byte-identical: the
         // carrier frames (and the quorum signs) exactly the set the login replays.
@@ -1008,14 +1008,14 @@ public final class RealmAttestationExporter {
         // the sig over the literal emitted bytes, so emit it ordinal-sorted to keep the
         // sign-time stamp byte-identical to the login emit (and aligned with the ork canonical).
         //
-        // ★ WILDCARD RESOLUTION (allowed-origins value-verification). The ork TVE's
+        // WILDCARD RESOLUTION (allowed-origins value-verification). The ork TVE's
         // AllowedWebOriginsClaimMapper writes this client_config.web_origins set VERBATIM
         // into the `allowed-origins` claim (Mappers/AllowedWebOriginsClaimMapper.cs:43-49:
         // `var origins = ctx.Client.WebOrigins; ... PlaceClaim("allowed-origins", arr)`) and
         // does NOT itself resolve KC's `+`/`*` wildcards (its ClientConfigAttestationUnit has
         // no redirect_uris field). The REAL token's allowed-origins is
         // WebOriginsUtils.resolveValidWebOrigins(session, client) — KC's
-        // AllowedWebOriginsProtocolMapper.setWebOrigin(:138-145) resolves `+` to the origins
+        // AllowedWebOriginsProtocolMapper.setWebOrigin resolves `+` to the origins
         // of the client's redirect URIs. So for the attested-derived value to MATCH the
         // token, the producer must attest the RESOLVED origins here, not the raw `+`. We
         // call the exact KC util the mapper uses, keyed off the same session, so the
@@ -1360,7 +1360,7 @@ public final class RealmAttestationExporter {
      * {@code user_role_mapping_set} (the existing empty-skip); a user with an explicit grant
      * returns ONLY that grant.
      *
-     * <p>★ The EXCLUSION here MUST be byte-identical to the firstAdmin GRANT_ROLES signer's
+     * <p>The EXCLUSION here MUST be byte-identical to the firstAdmin GRANT_ROLES signer's
      * inline query ({@code TideAttestor.buildUserRoleMappingSetUnit}) — the two MUST produce
      * the same set or the VVK verify breaks. Both add
      * {@code AND urm.roleId <> :defaultRoleId} and end with {@code ORDER BY urm.roleId}.
