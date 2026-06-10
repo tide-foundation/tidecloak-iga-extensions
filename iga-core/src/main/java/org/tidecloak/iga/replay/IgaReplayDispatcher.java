@@ -281,6 +281,12 @@ public class IgaReplayDispatcher {
             case "REALM_DEFAULT_SCOPE_REMOVE" -> replayRemoveRealmDefaultScope(session, realm, rows, finalAttestation, em, setSigned);
             case "CREATE_CLIENT_SCOPE" -> replayCreateClientScope(session, realm, rows, finalAttestation, em, setSigned);
             case "DELETE_CLIENT_SCOPE" -> replayDeleteClientScope(session, realm, rows);
+
+            // ----- Whole-entity deletes (deferred delete on commit) -----
+            case "DELETE_USER" -> replayDeleteUser(session, realm, rows);
+            case "DELETE_ROLE" -> replayDeleteRole(session, realm, rows);
+            case "DELETE_GROUP" -> replayDeleteGroup(session, realm, rows);
+            case "DELETE_CLIENT" -> replayDeleteClient(session, realm, rows);
             case "UPDATE_PROTOCOL_MAPPER" -> replayUpdateProtocolMapper(session, realm, rows, finalAttestation, em);
             case "REMOVE_PROTOCOL_MAPPER" -> replayRemoveProtocolMapper(session, realm, rows);
 
@@ -820,6 +826,81 @@ public class IgaReplayDispatcher {
                 continue;
             }
             orgs.remove(model);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Whole-entity delete replays. Each runs under IGA_REPLAY_ACTIVE=true (set by
+    // replay()), so the REAL remove passes through the IGA capture wrappers WITHOUT
+    // re-capture (isIgaActive() is false during replay). A vanished target (already
+    // gone) is a logged skip — mirrors replayDeleteOrganization above.
+    // -------------------------------------------------------------------------
+
+    private static void replayDeleteUser(KeycloakSession session, RealmModel realm,
+                                         List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String userId = str(row, "USER_ID");
+            if (userId == null) continue;
+            org.keycloak.models.UserModel user = session.users().getUserById(realm, userId);
+            if (user == null) {
+                log.warnf("DELETE_USER replay: user %s no longer exists in realm %s; skipping",
+                        userId, realm.getId());
+                continue;
+            }
+            boolean removed = session.users().removeUser(realm, user);
+            log.infof("DELETE_USER replay: user %s in realm %s removed=%s", userId, realm.getId(), removed);
+        }
+    }
+
+    private static void replayDeleteRole(KeycloakSession session, RealmModel realm,
+                                         List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String roleId = str(row, "ROLE_ID");
+            if (roleId == null) continue;
+            org.keycloak.models.RoleModel role = session.roles().getRoleById(realm, roleId);
+            if (role == null) {
+                log.warnf("DELETE_ROLE replay: role %s no longer exists in realm %s; skipping",
+                        roleId, realm.getId());
+                continue;
+            }
+            boolean removed = realm.removeRole(role);
+            log.infof("DELETE_ROLE replay: role %s (%s) in realm %s removed=%s",
+                    roleId, str(row, "ROLE_NAME"), realm.getId(), removed);
+        }
+    }
+
+    private static void replayDeleteGroup(KeycloakSession session, RealmModel realm,
+                                          List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String groupId = str(row, "GROUP_ID");
+            if (groupId == null) continue;
+            org.keycloak.models.GroupModel group = session.groups().getGroupById(realm, groupId);
+            if (group == null) {
+                log.warnf("DELETE_GROUP replay: group %s no longer exists in realm %s; skipping",
+                        groupId, realm.getId());
+                continue;
+            }
+            boolean removed = realm.removeGroup(group);
+            log.infof("DELETE_GROUP replay: group %s (%s) in realm %s removed=%s",
+                    groupId, str(row, "GROUP_NAME"), realm.getId(), removed);
+        }
+    }
+
+    private static void replayDeleteClient(KeycloakSession session, RealmModel realm,
+                                           List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String clientUuid = str(row, "CLIENT_UUID");
+            if (clientUuid == null) clientUuid = str(row, "ID");
+            if (clientUuid == null) continue;
+            ClientModel client = session.clients().getClientById(realm, clientUuid);
+            if (client == null) {
+                log.warnf("DELETE_CLIENT replay: client %s (%s) no longer exists in realm %s; skipping",
+                        clientUuid, str(row, "CLIENT_ID"), realm.getId());
+                continue;
+            }
+            boolean removed = session.clients().removeClient(realm, clientUuid);
+            log.infof("DELETE_CLIENT replay: client %s (%s) in realm %s removed=%s",
+                    clientUuid, str(row, "CLIENT_ID"), realm.getId(), removed);
         }
     }
 

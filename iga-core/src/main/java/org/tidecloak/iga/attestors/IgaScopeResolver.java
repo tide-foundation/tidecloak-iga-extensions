@@ -132,6 +132,27 @@ public final class IgaScopeResolver {
             case "REMOVE_REALM_DEFAULT_GROUP":
             case "CREATE_CLIENT_SCOPE":
                 break;
+            // -----------------------------------------------------------------
+            // Whole-entity deletes. Per-target scope where the entity can carry
+            // its own iga.approverRole/iga.threshold:
+            //   DELETE_ROLE   → the target role's own scope (collectRoleScope)
+            //   DELETE_CLIENT → the target client's own scope (collectClientScope)
+            // DELETE_USER / DELETE_GROUP / DELETE_CLIENT_SCOPE resolve to the
+            // realm default (empty scope): users/groups carry no first-class
+            // delete-approver of their own here (user-rec: realm-default for
+            // user/group), and client scopes have no first-class iga.approverRole
+            // today (mirrors CREATE_CLIENT_SCOPE / *_CLIENT_SCOPE_ATTRIBUTE).
+            // -----------------------------------------------------------------
+            case "DELETE_ROLE":
+                resolveRoleScopesFromRows(session, realm, cr, scope, "ROLE_ID");
+                break;
+            case "DELETE_CLIENT":
+                resolveClientScopesFromRows(session, realm, cr, scope, "CLIENT_UUID");
+                break;
+            case "DELETE_USER":
+            case "DELETE_GROUP":
+            case "DELETE_CLIENT_SCOPE":
+                break;
             case "UPDATE_CLIENT_WEB_ORIGINS":
             case "UPDATE_CLIENT_REDIRECT_URIS":
                 resolveClientScopesFromRows(session, realm, cr, scope, "client_id");

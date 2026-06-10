@@ -879,4 +879,94 @@ public class IgaRealmProvider extends JpaRealmProvider {
         if (entity == null) return base;
         return new IgaClientScopeAdapter(realm, em, igaSession, entity);
     }
+
+    // -------------------------------------------------------------------------
+    // WHOLE-ENTITY DELETES — govern role/group/client/client-scope deletes
+    // (capture → approve → replay-delete-on-commit). Each mirrors
+    // IgaOrganizationProvider.remove exactly: gate on isIgaActive (IGA-on and NOT
+    // vendor-provisioning and NOT IGA_REPLAY_ACTIVE) → file a DELETE_* CR and
+    // throw IgaPendingApprovalException (→ 202; request tx rolled back so the
+    // entity survives while PENDING). The real delete runs at commit via the
+    // matching IgaReplayDispatcher.replayDelete* handler under IGA_REPLAY_ACTIVE
+    // (isIgaActive false → these overrides pass straight through to super).
+    // System/default entities are GOVERNED too (no hard block) — the only
+    // pass-through is the vendor-provisioning bypass + IGA-off, both folded into
+    // isIgaActive.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public boolean removeRole(RoleModel role) {
+        if (role != null) {
+            // removeRole takes no RealmModel arg; derive it from the role's
+            // container exactly as JpaRealmProvider.removeRole does, so the IGA
+            // gate sees the correct realm.
+            RealmModel realm = (role.getContainer() instanceof RealmModel rm)
+                    ? rm
+                    : (role.getContainer() instanceof ClientModel cm ? cm.getRealm() : null);
+            if (realm != null && isIgaActive(realm)) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("ROLE_ID", role.getId());
+                row.put("ROLE_NAME", role.getName());
+                row.put("CLIENT_ROLE", role.isClientRole());
+                row.put("CONTAINER_ID", role.getContainerId());
+                row.put("REALM_ID", realm.getId());
+                recordAndThrow(realm, "ROLE", role.getId(), "DELETE_ROLE", List.of(row));
+                return false; // unreachable
+            }
+        }
+        return super.removeRole(role);
+    }
+
+    @Override
+    public boolean removeGroup(RealmModel realm, GroupModel group) {
+        if (isIgaActive(realm) && group != null) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("GROUP_ID", group.getId());
+            row.put("GROUP_NAME", group.getName());
+            row.put("REALM_ID", realm.getId());
+            recordAndThrow(realm, "GROUP", group.getId(), "DELETE_GROUP", List.of(row));
+            return false; // unreachable
+        }
+        return super.removeGroup(realm, group);
+    }
+
+    @Override
+    public boolean removeClient(RealmModel realm, String id) {
+        if (isIgaActive(realm) && id != null) {
+            ClientModel client = getClientById(realm, id);
+            if (client != null) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("CLIENT_UUID", id);
+                row.put("CLIENT_ID", client.getClientId());
+                row.put("REALM_ID", realm.getId());
+                recordAndThrow(realm, "CLIENT", id, "DELETE_CLIENT", List.of(row));
+                return false; // unreachable
+            }
+        }
+        return super.removeClient(realm, id);
+    }
+
+    @Override
+    public boolean removeClientScope(RealmModel realm, String id) {
+        if (isIgaActive(realm) && id != null) {
+            // The 2-arg whole-entity client-scope delete (ClientScopeResource
+            // DELETE {realm}/client-scopes/{id}). NOTE: IgaSystemProvisioner files
+            // its OWN DELETE_CLIENT_SCOPE for tide-claims deprovision by calling
+            // service.create(...) DIRECTLY — it never routes through this seam — so
+            // there is no double-capture. The provisioner also runs under the
+            // vendor/system bypass (isVendorProvisioning) which makes isIgaActive
+            // false here, and its own pending-guard dedups by scope id.
+            ClientScopeModel scope = getClientScopeById(realm, id);
+            if (scope != null) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("CLIENT_SCOPE_ID", id);
+                row.put("ID", id); // replay reads ID then SCOPE_ID (see replayDeleteClientScope)
+                row.put("CLIENT_SCOPE_NAME", scope.getName());
+                row.put("REALM_ID", realm.getId());
+                recordAndThrow(realm, "CLIENT_SCOPE", id, "DELETE_CLIENT_SCOPE", List.of(row));
+                return false; // unreachable
+            }
+        }
+        return super.removeClientScope(realm, id);
+    }
 }

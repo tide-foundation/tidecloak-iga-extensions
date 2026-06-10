@@ -1,6 +1,7 @@
 package org.tidecloak.iga.providers;
 
 import org.jboss.logging.Logger;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -9,6 +10,9 @@ import org.keycloak.models.jpa.entities.UserEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 
 import jakarta.persistence.EntityManager;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Extends {@link JpaUserProvider} to intercept user mutations through IGA when
@@ -87,6 +91,55 @@ public class IgaUserProvider extends JpaUserProvider {
         if (service.isVendorProvisioning()) return false;
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
+    }
+
+    /**
+     * Persist the change request in a SEPARATE Keycloak session/transaction so it
+     * survives the rollback caused by the pending-approval exception, mark the
+     * REQUEST transaction rollback-only (so the in-flight delete is discarded —
+     * the entity survives while PENDING), then throw the pending-approval signal
+     * (mapped to HTTP 202 + Location). Identical mechanism to
+     * {@code IgaRealmProvider.recordAndThrow} / {@code IgaOrganizationProvider
+     * .recordAndThrow}; replicated here because {@link JpaUserProvider} has no
+     * shared base with those providers.
+     */
+    private void recordAndThrow(RealmModel realm, String entityType, String entityId,
+                                String actionType, List<Map<String, Object>> rows) {
+        String[] crIdHolder = new String[1];
+        KeycloakModelUtils.runJobInTransaction(igaSession.getKeycloakSessionFactory(), newSession -> {
+            RealmModel newRealm = newSession.realms().getRealm(realm.getId());
+            EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
+            IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
+            crIdHolder[0] = newService.create(newRealm, entityType, entityId, actionType, rows, null).getId();
+        });
+        igaSession.getTransactionManager().setRollbackOnly();
+        throw new IgaPendingApprovalException(crIdHolder[0], entityType, actionType);
+    }
+
+    // -------------------------------------------------------------------------
+    // DELETE USER — govern whole-entity user deletes (capture → approve →
+    // replay-delete-on-commit). Mirrors IgaOrganizationProvider.remove /
+    // IgaRealmProvider.removeRole. UsersResource#deleteUser (DELETE
+    // {realm}/users/{id}) calls session.users().removeUser(realm, user) — THIS
+    // seam — so an IGA-on realm captures a DELETE_USER CR (202) instead of
+    // deleting. The real delete happens at commit via
+    // IgaReplayDispatcher.replayDeleteUser (under IGA_REPLAY_ACTIVE → isIgaActive
+    // is false → this override passes straight through). System/default users are
+    // GOVERNED too (no hard block); the only pass-through is the
+    // vendor-provisioning bypass + IGA-off, both folded into isIgaActive.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public boolean removeUser(RealmModel realm, UserModel user) {
+        if (isIgaActive(realm) && user != null) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("USER_ID", user.getId());
+            row.put("REALM_ID", realm.getId());
+            row.put("USERNAME", user.getUsername());
+            recordAndThrow(realm, "USER", user.getId(), "DELETE_USER", List.of(row));
+            return false; // unreachable — recordAndThrow always throws
+        }
+        return super.removeUser(realm, user);
     }
 
     @Override
