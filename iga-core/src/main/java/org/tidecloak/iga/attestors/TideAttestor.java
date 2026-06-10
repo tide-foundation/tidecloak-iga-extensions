@@ -22,6 +22,7 @@ import org.midgard.models.Policy.Policy;
 import org.midgard.models.Policy.PolicyParameters;
 import org.midgard.models.RequestExtensions.AttestationUnitSignRequest;
 import org.midgard.models.RequestExtensions.PolicySignRequest;
+import org.midgard.models.RequestExtensions.UserIdentityAttestationUnitSignRequest;
 import org.midgard.models.SignRequestSettingsMidgard;
 import org.midgard.models.SignatureResponse;
 import org.tidecloak.iga.crypto.SecretKeys;
@@ -2700,6 +2701,416 @@ public class TideAttestor implements IgaAttestor {
             out[i] = java.util.Base64.getDecoder().decode(resp.Signatures[i]);
         }
         return out;
+    }
+
+    /**
+     * <b>Self-registration {@code user_identity} signer (gVRK, direct VRK:1).</b> The
+     * out-of-module entry point {@link org.tidecloak.iga.providers.IgaSystemProvisionerProvider#signAndStampUserIdentity}
+     * delegates to. It signs ONE self-registered user's unsigned {@code user_identity}
+     * attestation unit via the direct VRK:1 → Midgard → ORK ceremony, then persists the
+     * resulting bare 64-byte VVK signature onto the user's {@code UserEntity.attestation}
+     * column ({@link #FIRSTADMIN_SIG_PREFIX}+base64, the signer-agnostic replayable shape).
+     *
+     * <h3>Why gVRK, not the firstAdmin pack</h3>
+     * Unlike {@link #signFirstAdminUnitWithVvk} (firstAdmin AuthorizerPack — burned at the
+     * multiAdmin flip), self-registration runs in steady state, so it authorizes with the
+     * PERSISTENT gVRK authorizer triplet ({@link #CFG_GVRK} / {@link #CFG_GVRK_CERTIFICATE},
+     * AuthorizerPack-only — NO Policy / doken collection). The midgard
+     * {@link UserIdentityAttestationUnitSignRequest} carries the model id
+     * {@code UserIdentityAttestationUnit:1}, which the gVRK pack's ModelIds allow under the
+     * direct {@code VRK:1} flow.
+     *
+     * <h3>What is signed</h3>
+     * The bytes the ORK signs are the EXACT unsigned {@code user_identity} envelope CBOR the
+     * producer ({@link RealmAttestationExporter#userIdentity}) emits and the ork TVE
+     * re-derives — built here from the re-read user. The Tide blind-signature auth
+     * ({@code authRequest} + {@code blindSig}) and the gVVK-signed VendorSettings
+     * ({@code settingsSignedBlob} + {@code settingsSig}) are shipped verbatim as the request's
+     * extra draft slots so the ORK can bind the signature to the self-reg proof.
+     *
+     * <p>Fail-closed: a missing vendor-key / gVRK material or any signing failure throws — a
+     * self-reg user_identity must never be stamped with a fake signature.
+     *
+     * @param session            the Keycloak session (re-reads the user + persists the stamp)
+     * @param realm              the IGA-enabled Tide realm
+     * @param userId             the new user's id
+     * @param tideAuthDataJson   the {@code TideAuthData} JSON note ({@code AuthRequest} +
+     *                           base64 {@code BlindSig})
+     * @param settingsSignedBlob the verbatim gVVK-signed VendorSettings JSON blob
+     * @param settingsSigB64     base64 of the raw 64-byte settings signature
+     * @return the stored bare 64-byte VVK signature bytes
+     */
+    public static byte[] signUserIdentityWithGVrk(KeycloakSession session, RealmModel realm,
+                                                  String userId, String tideAuthDataJson,
+                                                  String settingsSignedBlob, String settingsSigB64) {
+        if (userId == null || userId.isBlank()) {
+            throw new RuntimeException("IGA user_identity sign: null/blank userId (realm "
+                    + realm.getName() + ")");
+        }
+        UserModel user = session.users().getUserById(realm, userId);
+        if (user == null) {
+            throw new RuntimeException("IGA user_identity sign: user " + userId
+                    + " not found in realm " + realm.getName());
+        }
+        // Build the UNSIGNED user_identity envelope — the exact producer CBOR the ork
+        // TVE re-derives (no trailing signature).
+        byte[] userIdentityEnvelope = RealmAttestationExporter.userIdentity(user, realm.getId()).serialize();
+
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException(
+                        "IGA user_identity sign: realm " + realm.getName()
+                                + " has no tide-vendor-key component (VRK not provisioned)"));
+        MultivaluedHashMap<String, String> config = vendorKey.getConfig();
+        if (config == null) {
+            throw new RuntimeException("IGA user_identity sign: tide-vendor-key component has no config (realm "
+                    + realm.getName() + ")");
+        }
+
+        try {
+            // Parse the TideAuthData note: AuthRequest (String) + BlindSig (base64 -> 64B).
+            org.midgard.models.TideAuthData authData = org.midgard.models.TideAuthData.From(tideAuthDataJson);
+            if (authData == null || authData.AuthRequest == null || authData.AuthRequest.isBlank()
+                    || authData.BlindSig == null || authData.BlindSig.isBlank()) {
+                throw new RuntimeException("IGA user_identity sign: tideAuthDataJson is missing AuthRequest "
+                        + "or BlindSig (realm " + realm.getName() + ")");
+            }
+            byte[] blindSig = java.util.Base64.getDecoder().decode(authData.BlindSig);
+            if (settingsSignedBlob == null || settingsSignedBlob.isBlank()
+                    || settingsSigB64 == null || settingsSigB64.isBlank()) {
+                throw new RuntimeException("IGA user_identity sign: missing signed VendorSettings "
+                        + "(settingsSignedBlob/settingsSig) for realm " + realm.getName());
+            }
+            byte[] settingsBlob = settingsSignedBlob.getBytes(StandardCharsets.UTF_8);
+            byte[] settingsSig = java.util.Base64.getDecoder().decode(settingsSigB64);
+
+            SignRequestSettingsMidgard settings = constructSignSettings(config);
+            byte[] sig = signUserIdentityUnitWithGVrk(userIdentityEnvelope,
+                    authData.AuthRequest, blindSig, settingsBlob, settingsSig,
+                    settings, config, realm.getName());
+
+            // Persist TIDE-FIRSTADMIN-v1:+base64(sig) onto UserEntity.attestation.
+            String stored = FIRSTADMIN_SIG_PREFIX + java.util.Base64.getEncoder().encodeToString(sig);
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            em.createQuery("UPDATE UserEntity e SET e.attestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", stored).setParameter("id", userId).executeUpdate();
+
+            log.infof("IGA self-reg user_identity signed via Midgard gVRK ceremony + stamped (realm %s, user %s).",
+                    realm.getName(), userId);
+            return sig;
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            // Fail-closed: a real-provisioned self-reg user_identity must not fall back to a stub.
+            throw new RuntimeException("IGA user_identity sign: Midgard gVRK ceremony failed for realm "
+                    + realm.getName() + " user " + userId + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * The gVRK ceremony core: build a {@link UserIdentityAttestationUnitSignRequest} over the
+     * verbatim unsigned {@code user_identity} envelope, authorize it with the PERSISTENT gVRK
+     * authorizer triplet ({@link #CFG_GVRK} / {@link #CFG_GVRK_CERTIFICATE}) under the direct
+     * {@code VRK:1} flow, {@code Midgard.SignModel} it, and return the bare 64-byte VVK
+     * signature over the envelope.
+     *
+     * <p>Mirrors {@link #signUnitsWithFirstAdminVvk}'s ordering — expiry override BEFORE
+     * {@code GetDataToAuthorize}, authorization computed LAST over {@code GetDataToAuthorize},
+     * then the authorizer pack + its cert — but (a) uses the user-identity request type with
+     * its contract setters, and (b) uses the gVRK pack rather than the firstAdmin pack.
+     *
+     * @return the bare (prefix-free, base64-decoded) 64-byte VVK signature over the envelope
+     */
+    private static byte[] signUserIdentityUnitWithGVrk(byte[] userIdentityEnvelope,
+                                                       String authRequest, byte[] blindSig,
+                                                       byte[] settingsSignedBlob, byte[] settingsSig,
+                                                       SignRequestSettingsMidgard settings,
+                                                       MultivaluedHashMap<String, String> config,
+                                                       String realmName) throws Exception {
+        // seg-6 authorizer + seg-8 authorizer-certificate: the PERSISTENT gVRK AuthorizerPack
+        // (UserIdentityAttestationUnit:1 in its allowed models) + its cert — AuthorizerPack-only,
+        // NO Policy / doken collection. Sourced exactly as the firstAdmin path
+        // (parseHex(authorizer) / Base64.decode(authorizerCertificate)).
+        String gVrk = config.getFirst(CFG_GVRK);
+        String gVrkCert = config.getFirst(CFG_GVRK_CERTIFICATE);
+        if (gVrk == null || gVrk.isBlank() || gVrkCert == null || gVrkCert.isBlank()) {
+            throw new RuntimeException("IGA user_identity sign: tide-vendor-key component is missing "
+                    + "gVRK authorizer material (gVRK/gVRKCertificate) for realm " + realmName);
+        }
+
+        UserIdentityAttestationUnitSignRequest req = new UserIdentityAttestationUnitSignRequest();
+        req.SetUserIdentityEnvelope(userIdentityEnvelope);
+        req.SetTideAuth(authRequest, blindSig);
+        req.SetSignedSettings(settingsSignedBlob, settingsSig);
+
+        // Override expiry BEFORE GetDataToAuthorize — the 30s Midgard default is too short for
+        // the ORK ceremony round-trip (+180s).
+        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
+
+        // Authorization computed LAST over GetDataToAuthorize, then the gVRK authorizer pack
+        // + its cert (the direct VRK:1 signing path).
+        req.SetAuthorization(
+                Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
+        req.SetAuthorizer(java.util.HexFormat.of().parseHex(gVrk));
+        req.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(gVrkCert));
+
+        SignatureResponse resp = Midgard.SignModel(settings, req);
+        if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
+                || resp.Signatures[0] == null) {
+            throw new RuntimeException("IGA user_identity sign: Midgard.SignModel returned no signature "
+                    + "for realm " + realmName);
+        }
+        // Signatures[0] is Base64 — decode to the bare 64-byte VVK sig.
+        return java.util.Base64.getDecoder().decode(resp.Signatures[0]);
+    }
+
+    /**
+     * Invite-mode counterpart of {@link #signUserIdentityWithGVrk}: stamp an
+     * EXISTING admin-approved invitable user's {@code user_identity} after it has just
+     * gained {@code vuid}/{@code tideUserKey} via {@code LinkTideAccount}.
+     *
+     * <p>Unlike self-reg (which signs a single fresh envelope), the invite ceremony
+     * ships the ORK TWO copies so it can prove the new unit is the admin-approved one
+     * plus exactly the authenticated linkage. Both copies are the plain UNFILTERED
+     * {@code userIdentity(user, realmId)} recompute — no attribute filtering, no sidecar
+     * table — captured at two points of a REORDER ceremony around the link write:
+     * <ul>
+     *   <li><b>Unit A</b> — the plain unfiltered recompute of the user_identity envelope
+     *       taken WHILE THE ROW IS STILL PRE-LINK (before {@code vuid}/{@code tideUserKey}
+     *       are written), so it byte-matches the bytes the stored {@code UserEntity.attestation}
+     *       signature was made over at the latest pre-link stamp. The stored signature is read
+     *       FIRST (read-first, before any write to the row) and concatenated as
+     *       {@code unitA ‖ storedSig} (the {@code UnlinkedSignedUserIdentityEnvelope} the ORK
+     *       VVK-verifies). Because Unit A is captured from the still-pre-link row, the recompute
+     *       reproduces the signed bytes exactly and the pairing verifies — no sidecar storage
+     *       and no filtering needed.</li>
+     *   <li><b>Unit B</b> — after Unit A is captured, this method WRITES the link attributes
+     *       ({@code vuid == userId}, {@code tideUserKey == userPublic}) onto the row using the
+     *       same attribute-write API/string forms {@code LinkTideAccount} used, then takes a
+     *       second plain unfiltered {@code userIdentity(user, realmId)} recompute — now the
+     *       CURRENT full state including {@code vuid}/{@code tideUserKey}. The ORK signs Unit B
+     *       and we OVERWRITE {@code UserEntity.attestation} with its signature so the token-time
+     *       exporter (which recomputes the FULL unit == Unit B) replays.</li>
+     * </ul>
+     *
+     * <p><b>tideUserKey wire encoding.</b> The ORK self-reg path keys the blind-sig on
+     * {@code TideKey.From(<tideUserKey STRING>)}, whose {@code Serialization.TryDecode}
+     * tries HEX first then base64. The invite path keys on {@code TideKey.From(<wire bytes>)},
+     * which does NO decode (raw component bytes). To produce the byte-identical key we DECODE
+     * the {@code userPublic} string with the same hex-then-base64 rule
+     * ({@link #decodeTideKeyMaterial}) and ship the decoded raw bytes — sourced directly from
+     * the {@code userPublic} param (no attribute read-back).
+     *
+     * <p>Fail-closed: any missing material, missing stored Unit A sig, parse failure or
+     * signing failure throws — an invitable user_identity must not be stamped with a
+     * fake/partial signature. Does NOT mutate {@link #signUserIdentityWithGVrk}.
+     *
+     * @return the stored bare 64-byte VVK signature over Unit B (the value base64-wrapped
+     *         into the persisted {@code TIDE-FIRSTADMIN-v1:} column)
+     */
+    public static byte[] signInvitableUserIdentityWithGVrk(KeycloakSession session, RealmModel realm,
+                                                           String userId, String userPublic,
+                                                           String tideAuthDataJson,
+                                                           String settingsSignedBlob, String settingsSigB64) {
+        if (userId == null || userId.isBlank()) {
+            throw new RuntimeException("IGA invitable user_identity sign: null/blank userId (realm "
+                    + realm.getName() + ")");
+        }
+        UserModel user = session.users().getUserById(realm, userId);
+        if (user == null) {
+            throw new RuntimeException("IGA invitable user_identity sign: user " + userId
+                    + " not found in realm " + realm.getName());
+        }
+
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException(
+                        "IGA invitable user_identity sign: realm " + realm.getName()
+                                + " has no tide-vendor-key component (VRK not provisioned)"));
+        MultivaluedHashMap<String, String> config = vendorKey.getConfig();
+        if (config == null) {
+            throw new RuntimeException("IGA invitable user_identity sign: tide-vendor-key component has no config (realm "
+                    + realm.getName() + ")");
+        }
+
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        try {
+            // (1) READ THE STORED UNIT A SIG FIRST — the VVK signature over the latest pre-link
+            //     stamped envelope — BEFORE we write the link attributes or overwrite the column
+            //     with Unit B's sig. The still-pre-link row recompute below (Unit A) byte-matches
+            //     the envelope this sig was made over. Shape is TIDE-FIRSTADMIN-v1:+base64(64-byte sig).
+            String storedAttestation = em.createQuery(
+                            "SELECT e.attestation FROM UserEntity e WHERE e.id = :id", String.class)
+                    .setParameter("id", userId)
+                    .getResultStream().findFirst().orElse(null);
+            if (storedAttestation == null || storedAttestation.isBlank()) {
+                throw new RuntimeException("IGA invitable user_identity sign: user " + userId
+                        + " has no stored CREATE_USER attestation to carry as Unit A (realm " + realm.getName() + ")");
+            }
+            if (!storedAttestation.startsWith(FIRSTADMIN_SIG_PREFIX)) {
+                throw new RuntimeException("IGA invitable user_identity sign: stored attestation for user " + userId
+                        + " is not a " + FIRSTADMIN_SIG_PREFIX + " signature (realm " + realm.getName() + ")");
+            }
+            byte[] storedUnitASig = java.util.Base64.getDecoder()
+                    .decode(storedAttestation.substring(FIRSTADMIN_SIG_PREFIX.length()));
+            if (storedUnitASig.length != 64) {
+                throw new RuntimeException("IGA invitable user_identity sign: stored Unit A signature for user " + userId
+                        + " is " + storedUnitASig.length + " bytes, expected 64 (realm " + realm.getName() + ")");
+            }
+
+            if (userPublic == null || userPublic.isBlank()) {
+                throw new RuntimeException("IGA invitable user_identity sign: null/blank userPublic "
+                        + "(tideUserKey) for user " + userId + " (realm " + realm.getName() + ")");
+            }
+
+            // (2) Capture Unit A = the plain UNFILTERED user_identity recompute WHILE THE ROW IS
+            //     STILL PRE-LINK (before vuid/tideUserKey are written). Because the row is still in
+            //     its latest-pre-link-stamp state, this recompute byte-matches the bytes the stored
+            //     `attestation` sig (read above) was made over, so unlinkedSignedUnitA = unitA ‖
+            //     storedSig passes the ORK's VVK verify — no sidecar table, no filtering.
+            byte[] unitA = RealmAttestationExporter.userIdentity(user, realm.getId()).serialize();
+            byte[] unlinkedSignedUnitA = new byte[unitA.length + storedUnitASig.length];
+            System.arraycopy(unitA, 0, unlinkedSignedUnitA, 0, unitA.length);
+            System.arraycopy(storedUnitASig, 0, unlinkedSignedUnitA, unitA.length, storedUnitASig.length);
+
+            // (3a) Parse the TideAuthData note: AuthRequest (String) + BlindSig (base64 -> 64B) —
+            //     identical to the self-reg path. Parsed BEFORE the vuid write because the invite
+            //     ceremony injects the AUTHENTICATED Tide vuid (AuthRequest.User), not the KC row id.
+            //     (KC getId() is a random UUID for an admin-invited user; the ORK's identity-binding
+            //     check requires Unit B's injected vuid to equal AuthRequest.User.)
+            org.midgard.models.TideAuthData authData = org.midgard.models.TideAuthData.From(tideAuthDataJson);
+            if (authData == null || authData.AuthRequest == null || authData.AuthRequest.isBlank()
+                    || authData.BlindSig == null || authData.BlindSig.isBlank()) {
+                throw new RuntimeException("IGA invitable user_identity sign: tideAuthDataJson is missing AuthRequest "
+                        + "or BlindSig (realm " + realm.getName() + ")");
+            }
+            byte[] blindSig = java.util.Base64.getDecoder().decode(authData.BlindSig);
+
+            // (3b) Derive the authenticated Tide vuid from the (serialized) AuthRequest. This is the
+            //     exact string the ORK parses as its authenticatedVuid from the SAME AuthRequest, so
+            //     injecting it verbatim (no re-encoding) makes the Ordinal string equality hold by
+            //     construction. Fail-closed if absent — never inject an empty/wrong vuid.
+            String authVuid = org.midgard.models.AuthRequest.From(authData.AuthRequest).User;
+            if (authVuid == null || authVuid.isBlank()) {
+                throw new RuntimeException("IGA invitable user_identity sign: AuthRequest.User (authenticated vuid) "
+                        + "is null/blank for user " + userId + " (realm " + realm.getName() + ")");
+            }
+
+            // (3) Write the link attributes onto the row, AFTER Unit A is captured. Use the SAME
+            //     attribute-write API LinkTideAccount used (setSingleAttribute, tideUserKey ==
+            //     userPublic). For the INVITE path the injected vuid is the authenticated Tide vuid
+            //     (AuthRequest.User), NOT the KC row id, so Unit B's vuid matches AuthRequest.User.
+            user.setSingleAttribute("vuid", authVuid);
+            user.setSingleAttribute("tideUserKey", userPublic);
+
+            // (4) Capture Unit B = the plain UNFILTERED user_identity recompute, now POST-LINK
+            //     (includes vuid/tideUserKey), bare (no sig).
+            byte[] unitB = RealmAttestationExporter.userIdentity(user, realm.getId()).serialize();
+
+            // (5) Resolve the user's tideUserKey as RAW key bytes (hex-then-base64 decode of the
+            //     userPublic string, matching the ORK self-reg TideKey.From(string) decode). Sourced
+            //     directly from the userPublic param to drop the attribute read-back dependency.
+            byte[] tideUserKeyBytes = decodeTideKeyMaterial(userPublic, realm.getName());
+            if (settingsSignedBlob == null || settingsSignedBlob.isBlank()
+                    || settingsSigB64 == null || settingsSigB64.isBlank()) {
+                throw new RuntimeException("IGA invitable user_identity sign: missing signed VendorSettings "
+                        + "(settingsSignedBlob/settingsSig) for realm " + realm.getName());
+            }
+            byte[] settingsBlob = settingsSignedBlob.getBytes(StandardCharsets.UTF_8);
+            byte[] settingsSig = java.util.Base64.getDecoder().decode(settingsSigB64);
+
+            SignRequestSettingsMidgard settings = constructSignSettings(config);
+            byte[] unitBSig = signInvitableUserIdentityUnitWithGVrk(unlinkedSignedUnitA, tideUserKeyBytes, unitB,
+                    authData.AuthRequest, blindSig, settingsBlob, settingsSig,
+                    settings, config, realm.getName());
+
+            // (7) OVERWRITE UserEntity.attestation with TIDE-FIRSTADMIN-v1:+base64(Unit B sig) so the
+            //     token-time exporter (which recomputes the FULL unit == Unit B) replays correctly.
+            String stored = FIRSTADMIN_SIG_PREFIX + java.util.Base64.getEncoder().encodeToString(unitBSig);
+            em.createQuery("UPDATE UserEntity e SET e.attestation = :sig WHERE e.id = :id")
+                    .setParameter("sig", stored).setParameter("id", userId).executeUpdate();
+
+            log.infof("IGA invite user_identity signed via Midgard gVRK ceremony (2-copy) + stamped (realm %s, user %s).",
+                    realm.getName(), userId);
+            return unitBSig;
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            // Fail-closed: a real-provisioned invite user_identity must not fall back to a stub.
+            throw new RuntimeException("IGA invitable user_identity sign: Midgard gVRK ceremony failed for realm "
+                    + realm.getName() + " user " + userId + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Decode a {@code tideUserKey} attribute STRING to the raw component bytes the ORK
+     * deserializes via {@code TideKey.From(ReadOnlyMemory<byte>)}. Mirrors the ORK's
+     * {@code Serialization.TryDecode} (Cryptide) used by the self-reg
+     * {@code TideKey.From(string)} path: try HEX first, then base64. Throwing if neither
+     * parses keeps the resolve fail-closed.
+     */
+    private static byte[] decodeTideKeyMaterial(String s, String realmName) {
+        try {
+            return java.util.HexFormat.of().parseHex(s);
+        } catch (IllegalArgumentException hexMiss) {
+            try {
+                return java.util.Base64.getDecoder().decode(s);
+            } catch (IllegalArgumentException b64Miss) {
+                throw new RuntimeException("IGA invitable user_identity sign: tideUserKey attribute is neither "
+                        + "hex nor base64 decodable (realm " + realmName + ")");
+            }
+        }
+    }
+
+    /**
+     * Invite-mode core: build a {@link UserIdentityAttestationUnitSignRequest} via
+     * {@code SetInviteData(unlinkedSignedUnitA, tideUserKey, unitB)} + the same
+     * {@code SetTideAuth}/{@code SetSignedSettings} draft slots and the SAME persistent
+     * gVRK authorization path as {@link #signUserIdentityUnitWithGVrk}, then
+     * {@code Midgard.SignModel} it. The ORK signs Unit B (slot-2), so the returned bare
+     * 64-byte VVK signature is over the FULL current envelope.
+     *
+     * @return the bare (prefix-free, base64-decoded) 64-byte VVK signature over Unit B
+     */
+    private static byte[] signInvitableUserIdentityUnitWithGVrk(byte[] unlinkedSignedUnitA, byte[] tideUserKey,
+                                                                byte[] unitB, String authRequest, byte[] blindSig,
+                                                                byte[] settingsSignedBlob, byte[] settingsSig,
+                                                                SignRequestSettingsMidgard settings,
+                                                                MultivaluedHashMap<String, String> config,
+                                                                String realmName) throws Exception {
+        // The PERSISTENT gVRK AuthorizerPack (AuthorizerPack-only, NO Policy / doken) + its cert —
+        // sourced exactly as the self-reg path (parseHex(gVRK) / Base64.decode(gVRKCertificate)).
+        String gVrk = config.getFirst(CFG_GVRK);
+        String gVrkCert = config.getFirst(CFG_GVRK_CERTIFICATE);
+        if (gVrk == null || gVrk.isBlank() || gVrkCert == null || gVrkCert.isBlank()) {
+            throw new RuntimeException("IGA invitable user_identity sign: tide-vendor-key component is missing "
+                    + "gVRK authorizer material (gVRK/gVRKCertificate) for realm " + realmName);
+        }
+
+        UserIdentityAttestationUnitSignRequest req = new UserIdentityAttestationUnitSignRequest();
+        req.SetInviteData(unlinkedSignedUnitA, tideUserKey, unitB);
+        req.SetTideAuth(authRequest, blindSig);
+        req.SetSignedSettings(settingsSignedBlob, settingsSig);
+
+        // Override expiry BEFORE GetDataToAuthorize (same +180s as the self-reg/firstAdmin paths).
+        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + FIRSTADMIN_SIGN_EXPIRY_SECONDS);
+
+        // Authorization computed LAST over GetDataToAuthorize, then the gVRK authorizer pack + cert.
+        req.SetAuthorization(
+                Midgard.SignWithVrk(req.GetDataToAuthorize(), settings.VendorRotatingPrivateKey));
+        req.SetAuthorizer(java.util.HexFormat.of().parseHex(gVrk));
+        req.SetAuthorizerCertificate(java.util.Base64.getDecoder().decode(gVrkCert));
+
+        SignatureResponse resp = Midgard.SignModel(settings, req);
+        if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
+                || resp.Signatures[0] == null) {
+            throw new RuntimeException("IGA invitable user_identity sign: Midgard.SignModel returned no signature "
+                    + "for realm " + realmName);
+        }
+        // Signatures[0] is Base64 — decode to the bare 64-byte VVK sig over Unit B.
+        return java.util.Base64.getDecoder().decode(resp.Signatures[0]);
     }
 
     /**
