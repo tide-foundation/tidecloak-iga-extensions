@@ -106,20 +106,34 @@ public class TideAdminResourcesResource {
         UserModel user = session.users().getUserById(realm, userId);
         auth.users().requireManage(user);
 
-        // Committed-only gate (IGA on): when IGA is enabled and this is a Tide
-        // link-account invite, the target user's identity must already be committed
-        // (attestation present) before a link can be issued. Non-IGA realms and
-        // already-committed users are unaffected and still get the link as today.
+        // Invite-eligibility gate (IGA on): when IGA is enabled and this is a Tide
+        // link-account invite, the target user must satisfy BOTH conditions before a
+        // link can be issued — this endpoint is the SINGLE point of enforcement:
+        //   1. the user carries attribute tideInvitable == "true" (admin has marked
+        //      the user as eligible to be invited; same attribute the idp-extensions
+        //      TideIdpAdminRealmResource guard reads), and
+        //   2. the user's Tide identity is already committed (attestation present).
+        // Each failure returns a distinct, user-facing reason so the UI can tell the
+        // admin exactly why the link was withheld. Non-IGA realms and users that
+        // satisfy both conditions are unaffected and still get the link as today.
         // Action alias mirrors org.tidecloak.idp...LinkTideAccount.PROVIDER_ID
         // ("link-tide-account-action"), which is not on iga-core's classpath.
         boolean isIgaEnabled = "true".equalsIgnoreCase(realm.getAttribute("isIGAEnabled"));
         boolean isTideLinkInvite = actions != null && actions.contains(LINK_TIDE_ACCOUNT_ACTION);
-        if (isIgaEnabled && isTideLinkInvite
-                && !session.getProvider(IgaSystemProvisionerProvider.class)
-                           .isUserIdentityCommitted(realm, userId)) {
-            throw ErrorResponse.error(
-                    "User must be approved and committed before an invite link can be generated.",
-                    Response.Status.BAD_REQUEST);
+        if (isIgaEnabled && isTideLinkInvite) {
+            boolean invitable = "true".equals(user.getFirstAttribute("tideInvitable"));
+            if (!invitable) {
+                throw ErrorResponse.error(
+                        "This user cannot be invited: the 'tideInvitable' attribute is not set to true.",
+                        Response.Status.BAD_REQUEST);
+            }
+            boolean committed = session.getProvider(IgaSystemProvisionerProvider.class)
+                    .isUserIdentityCommitted(realm, userId);
+            if (!committed) {
+                throw ErrorResponse.error(
+                        "This user must be approved and committed before a Tide invite link can be generated.",
+                        Response.Status.BAD_REQUEST);
+            }
         }
 
         int expiration = Time.currentTime() + lifespan;
@@ -141,9 +155,11 @@ public class TideAdminResourcesResource {
     // -------------------------------------------------------------------------
     // GET /tideAdminResources/users/{userId}/committed
     // Read-only: lets the admin UI proactively disable the invite-link action for
-    // users whose Tide identity is not yet committed. Mirrors the committed-only
-    // gate on get-required-action-link: IGA-off folds to committed=true so the UI
-    // never disables when IGA is off.
+    // users who are not yet eligible. Mirrors the get-required-action-link gate:
+    // IGA-off folds committed=true so the UI never disables on committed when IGA
+    // is off; tideInvitable always reflects the stored attribute regardless of IGA
+    // state so a future UI consumer (e.g. the Send Email path) can read both
+    // eligibility signals from one call without a new endpoint.
     // -------------------------------------------------------------------------
     @GET
     @Path("users/{userId}/committed")
@@ -158,7 +174,8 @@ public class TideAdminResourcesResource {
         boolean committed = !isIgaEnabled
                 || session.getProvider(IgaSystemProvisionerProvider.class)
                           .isUserIdentityCommitted(realm, userId);
-        return Response.ok(Map.of("committed", committed)).build();
+        boolean invitable = "true".equals(user.getFirstAttribute("tideInvitable"));
+        return Response.ok(Map.of("committed", committed, "tideInvitable", invitable)).build();
     }
 
     // -------------------------------------------------------------------------
