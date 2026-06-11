@@ -2,8 +2,11 @@ package org.tidecloak.iga.rest;
 
 import jakarta.enterprise.inject.Vetoed;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -18,8 +21,10 @@ import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.services.ErrorResponse;
 import org.keycloak.services.resources.LoginActionsService;
 import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
+import org.tidecloak.iga.providers.IgaSystemProvisionerProvider;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * JAX-RS resource served at {@code /admin/realms/{realm}/tideAdminResources/*}.
@@ -67,6 +72,14 @@ public class TideAdminResourcesResource {
 
     protected static final Logger logger = Logger.getLogger(TideAdminResourcesResource.class);
 
+    /**
+     * Required-action alias for the Tide link-account flow. Mirrors
+     * {@code org.tidecloak.idp...LinkTideAccount.PROVIDER_ID}, which lives in the
+     * idp-extensions module and is not on iga-core's classpath, so the literal is
+     * duplicated here intentionally.
+     */
+    private static final String LINK_TIDE_ACCOUNT_ACTION = "link-tide-account-action";
+
     private final KeycloakSession session;
     private final RealmModel realm;
     private final AdminPermissionEvaluator auth;
@@ -93,6 +106,22 @@ public class TideAdminResourcesResource {
         UserModel user = session.users().getUserById(realm, userId);
         auth.users().requireManage(user);
 
+        // Committed-only gate (IGA on): when IGA is enabled and this is a Tide
+        // link-account invite, the target user's identity must already be committed
+        // (attestation present) before a link can be issued. Non-IGA realms and
+        // already-committed users are unaffected and still get the link as today.
+        // Action alias mirrors org.tidecloak.idp...LinkTideAccount.PROVIDER_ID
+        // ("link-tide-account-action"), which is not on iga-core's classpath.
+        boolean isIgaEnabled = "true".equalsIgnoreCase(realm.getAttribute("isIGAEnabled"));
+        boolean isTideLinkInvite = actions != null && actions.contains(LINK_TIDE_ACCOUNT_ACTION);
+        if (isIgaEnabled && isTideLinkInvite
+                && !session.getProvider(IgaSystemProvisionerProvider.class)
+                           .isUserIdentityCommitted(realm, userId)) {
+            throw ErrorResponse.error(
+                    "User must be approved and committed before an invite link can be generated.",
+                    Response.Status.BAD_REQUEST);
+        }
+
         int expiration = Time.currentTime() + lifespan;
         ExecuteActionsActionToken token =
                 new ExecuteActionsActionToken(user.getId(), user.getEmail(), expiration, actions, redirectUri, clientId);
@@ -107,6 +136,29 @@ public class TideAdminResourcesResource {
             throw ErrorResponse.error("Failed to get link tide account URL " + e.getMessage(),
                     Response.Status.INTERNAL_SERVER_ERROR);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // GET /tideAdminResources/users/{userId}/committed
+    // Read-only: lets the admin UI proactively disable the invite-link action for
+    // users whose Tide identity is not yet committed. Mirrors the committed-only
+    // gate on get-required-action-link: IGA-off folds to committed=true so the UI
+    // never disables when IGA is off.
+    // -------------------------------------------------------------------------
+    @GET
+    @Path("users/{userId}/committed")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getUserCommitted(@PathParam("userId") String userId) {
+        UserModel user = session.users().getUserById(realm, userId);
+        // View-level read; mirrors the per-user authorization this resource uses
+        // for get-required-action-link (auth.users().requireManage(user)).
+        auth.users().requireView(user);
+
+        boolean isIgaEnabled = "true".equalsIgnoreCase(realm.getAttribute("isIGAEnabled"));
+        boolean committed = !isIgaEnabled
+                || session.getProvider(IgaSystemProvisionerProvider.class)
+                          .isUserIdentityCommitted(realm, userId);
+        return Response.ok(Map.of("committed", committed)).build();
     }
 
     // -------------------------------------------------------------------------
