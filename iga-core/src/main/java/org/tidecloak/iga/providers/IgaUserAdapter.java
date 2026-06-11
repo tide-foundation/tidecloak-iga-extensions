@@ -635,6 +635,33 @@ public class IgaUserAdapter extends UserAdapter {
         String requestedBy = getCurrentUserId();
 
         // ─────────────────────────────────────────────────────────────────────
+        // ADMIN-INITIATED CREATE = CAPTURE-THEN-VETO (no live user until commit).
+        //
+        // For the ADMIN terminal ONLY (the create that comes from
+        // UsersResource#createUser, identified by ADMIN_TERMINAL_LABEL) AND NOT a
+        // Tide-broker enrollment, the create is governed like the DELETE_* lane:
+        // we setRollbackOnly() on the request tx (below, before the throw) so the
+        // fully-built scratch user dies with the request — leaving ONLY the
+        // CREATE_USER CR. No user exists until an admin approves the CR; commit
+        // replay (IgaReplayDispatcher.replayCreateUser → rebuildCreateUserFromRow)
+        // recreates the user from REP_JSON.
+        //
+        // The persist-pending live-state side effects below — stripNonGovernedLiveState()
+        // and the Tideless quarantine sidecar — only make sense for a SURVIVING row.
+        // On the admin-rollback path there is no surviving row to strip or quarantine,
+        // so both are skipped.
+        //
+        // Tide-broker / self-registration / non-admin terminals are EXCLUDED: they keep
+        // the EXISTING persist-pending (live-quarantined) path unchanged — the broker /
+        // link-tide enrollment path needs a live user row to write vuid/tideUserKey and
+        // to sign user_identity over post-enrollment attrs (enroll-before-commit, the
+        // deliberate behavior from commit 423bed8). The SAFE default is persist-pending;
+        // only the clearly-admin terminal gets the rollback.
+        boolean adminTerminalCaptureThenVeto =
+                ADMIN_TERMINAL_LABEL.equals(terminalLabel)
+                        && !IgaUserProvider.isTideBrokerEnrollment(igaSession);
+
+        // ─────────────────────────────────────────────────────────────────────
         // PERSIST-PENDING (enroll-before-commit).
         //
         // The pending user is PERSISTED (rollback-only is NOT set). Setting it would let the
@@ -673,8 +700,13 @@ public class IgaUserAdapter extends UserAdapter {
         // discarded these; CREATE_USER governs ONLY the 8 token fields, REP_JSON
         // nulls them) is STRIPPED so the persisted live user matches the governed
         // representation. The user sets their own password / links Tide post-approval.
+        //
+        // SKIPPED on the admin capture-then-veto path: there is no surviving row to
+        // strip (the request tx is rolled back below).
         // ─────────────────────────────────────────────────────────────────────
-        stripNonGovernedLiveState();
+        if (!adminTerminalCaptureThenVeto) {
+            stripNonGovernedLiveState();
+        }
 
         boolean tideRealm = TideAttestor.ID.equals(realm.getAttribute("iga.attestor"));
 
@@ -690,7 +722,9 @@ public class IgaUserAdapter extends UserAdapter {
             // can clear it (IgaReplayDispatcher.replayCreateUser → clearByAdoptCr).
             // Tide realms intentionally skip this (replayOrFailClosed is the guard,
             // and the sidecar would block enrollment — see the block comment above).
-            if (!tideRealm) {
+            // The admin capture-then-veto path ALSO skips it: there is no surviving
+            // row to quarantine (the request tx is rolled back below).
+            if (!tideRealm && !adminTerminalCaptureThenVeto) {
                 IgaUnsignedEntityService.markUnsigned(newEm, newRealm.getId(),
                         IgaReplayExtension.ENTITY_TYPE_USER, userId, crIdHolder[0]);
                 newEm.flush();
@@ -731,18 +765,31 @@ public class IgaUserAdapter extends UserAdapter {
             grantDefaultRolesForRegistration();
         }
 
-        // NOTE: NO setRollbackOnly() — the request tx COMMITS so the pending user
-        // persists. The CR was written on a separate session above (so it is durable
-        // independently), and the 202 below is still returned via the exception mapper.
-        log.infof("IGA user-capture PERSIST-PENDING: terminal=%s user=%s uuid=%s realm=%s "
-                + "mode=%s — live user persisted, UserEntity.attestation NULL "
-                + "(pending), %s; CREATE_USER CR=%s. Enrollable while PENDING; "
-                + "real login fail-closed until commit finalizes (stamps user_identity).",
-                terminalLabel, username, userId, realm.getName(),
-                tideRealm ? "tide" : "tideless",
-                tideRealm ? "no quarantine sidecar (replayOrFailClosed guards login)"
-                          : "IGA_UNSIGNED_ENTITY sidecar set (isEnabled()=false guards login)",
-                crIdHolder[0]);
+        if (adminTerminalCaptureThenVeto) {
+            // CAPTURE-THEN-VETO: roll back the request tx so the fully-built scratch
+            // user is discarded (mirrors IgaUserProvider.recordAndThrow). The CR was
+            // written on a separate session above (so it is durable independently); the
+            // user is recreated from REP_JSON at commit (IgaReplayDispatcher.replayCreateUser).
+            igaSession.getTransactionManager().setRollbackOnly();
+            log.infof("IGA user-capture CAPTURE-THEN-VETO: terminal=%s user=%s uuid=%s "
+                    + "realm=%s — request tx rolled back, NO live user persists; "
+                    + "CREATE_USER CR=%s. The user is created only when the CR commits "
+                    + "(replay rebuilds it from REP_JSON).",
+                    terminalLabel, username, userId, realm.getName(), crIdHolder[0]);
+        } else {
+            // NOTE: NO setRollbackOnly() — the request tx COMMITS so the pending user
+            // persists. The CR was written on a separate session above (so it is durable
+            // independently), and the 202 below is still returned via the exception mapper.
+            log.infof("IGA user-capture PERSIST-PENDING: terminal=%s user=%s uuid=%s realm=%s "
+                    + "mode=%s — live user persisted, UserEntity.attestation NULL "
+                    + "(pending), %s; CREATE_USER CR=%s. Enrollable while PENDING; "
+                    + "real login fail-closed until commit finalizes (stamps user_identity).",
+                    terminalLabel, username, userId, realm.getName(),
+                    tideRealm ? "tide" : "tideless",
+                    tideRealm ? "no quarantine sidecar (replayOrFailClosed guards login)"
+                              : "IGA_UNSIGNED_ENTITY sidecar set (isEnabled()=false guards login)",
+                    crIdHolder[0]);
+        }
 
         throw new IgaPendingApprovalException(crIdHolder[0], "USER", "CREATE_USER");
     }

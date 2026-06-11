@@ -402,6 +402,18 @@ public class IgaUserProvider extends JpaUserProvider {
      * non-Tide IdP. Defensive: any failure to resolve the context → false (no grant).
      */
     private boolean isTideBrokerEnrollment() {
+        return isTideBrokerEnrollment(igaSession);
+    }
+
+    /**
+     * Static, session-parameterised variant of {@link #isTideBrokerEnrollment()} so the
+     * capture adapter ({@link IgaUserAdapter}) can reuse the exact same Tide-broker
+     * enrollment seam when deciding whether the admin-terminal capture-then-veto rollback
+     * applies. Same contract: true iff the current auth session carries a brokered-identity
+     * context whose IdP id is the Tide provider ({@value #TIDE_IDP_PROVIDER_ID}); any failure
+     * to resolve the context → false.
+     */
+    static boolean isTideBrokerEnrollment(KeycloakSession igaSession) {
         try {
             org.keycloak.sessions.AuthenticationSessionModel authSession =
                     igaSession.getContext() == null ? null
