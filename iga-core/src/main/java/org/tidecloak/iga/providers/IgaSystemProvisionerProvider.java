@@ -149,4 +149,22 @@ public interface IgaSystemProvisionerProvider extends Provider {
     byte[] signAndStampInvitableUserIdentity(org.keycloak.models.RealmModel realm, String userId,
                                              String userPublic, String tideAuthDataJson,
                                              String settingsSignedBlob, String settingsSigB64);
+
+    /**
+     * Pure read: returns {@code true} iff the user's stored {@code user_identity}
+     * attestation is present (the {@code UserEntity.attestation} column is non-null
+     * and non-blank), i.e. the user's CREATE_USER change request has been
+     * committed/replayed and stamped with the {@code TIDE-FIRSTADMIN-v1:}+base64
+     * attestor signature.
+     *
+     * <p>This method does NOT consider whether IGA is enabled for the realm — the
+     * caller gates that. Unlike the {@code signAndStamp*} methods, it is intentionally
+     * not IGA-gated and never throws on an IGA-off realm; it is a side-effect-free
+     * read used to gate invite-link generation on "committed" user state.
+     *
+     * @param realm  the realm the user belongs to
+     * @param userId the user's id
+     * @return {@code true} iff {@code UserEntity.attestation} is non-null and non-blank
+     */
+    boolean isUserIdentityCommitted(RealmModel realm, String userId);
 }

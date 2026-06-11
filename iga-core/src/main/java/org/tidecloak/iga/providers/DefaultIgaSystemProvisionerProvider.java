@@ -11,6 +11,8 @@ import org.tidecloak.iga.services.IgaSystemProvisioner.TideUhoRemovalResult;
 
 import jakarta.persistence.EntityManager;
 
+import java.util.List;
+
 /**
  * Default {@link IgaSystemProvisionerProvider} — a thin per-session wrapper that
  * delegates to {@link IgaSystemProvisioner}, sourcing the request-scoped
@@ -64,6 +66,18 @@ public class DefaultIgaSystemProvisionerProvider implements IgaSystemProvisioner
         }
         return TideAttestor.signInvitableUserIdentityWithGVrk(
                 session, realm, userId, userPublic, tideAuthDataJson, settingsSignedBlob, settingsSigB64);
+    }
+
+    @Override
+    public boolean isUserIdentityCommitted(RealmModel realm, String userId) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<String> r = em.createQuery(
+                "SELECT e.attestation FROM UserEntity e WHERE e.id = :id", String.class)
+            .setParameter("id", userId)
+            .setMaxResults(1)
+            .getResultList();
+        String att = r.isEmpty() ? null : r.get(0);
+        return att != null && !att.isBlank();
     }
 
     @Override
