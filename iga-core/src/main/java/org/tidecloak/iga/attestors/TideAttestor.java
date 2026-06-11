@@ -2740,6 +2740,41 @@ public class TideAttestor implements IgaAttestor {
         if (MODE_MULTI_ADMIN.equals(mode) && realCeremonyEligible && isRealSigningCapable(realm)) {
             return signMultiAdminUnitViaPolicy(session, realm, cr);        // REAL Midgard.SignModel(Policy:1) over the collected-doken carrier (fail-closed)
         }
+        // SECONDARY DEFENSE (fail-closed): a tide-multiAdmin CR that reaches the stub
+        // fallback (a non-producer action such as DISABLE_IGA / SET_REALM_ATTRIBUTE /
+        // REGEN_ADMIN_POLICY / OFFBOARD_REALM, or a not-yet-capable realm) is only
+        // legitimate when the approval enclave actually ran: the two-phase /approve
+        // ceremony ALWAYS persists the Policy:1 / Offboard:1 doken carrier onto
+        // cr.getRequestModel() (buildMultiAdminApprovalModel / buildPolicyResignApprovalModel
+        // / the ragnarok Offboard:1 seed). The LEGACY simple authorize/commit lane records
+        // NO carrier, so a blank requestModel here means a single admin tried to stub-sign
+        // a multiAdmin CR without the enclave quorum - refuse it. The REST authorize/commit
+        // guard (refuseLegacyLaneForMultiAdmin) already blocks that lane at the endpoint;
+        // this is the catch-all so even a direct/internal commit (e.g. bulkAuthorize) cannot
+        // stub-bypass the quorum. EXEMPT the internal flows that drive CRs straight through:
+        // replay (IGA_REPLAY_ACTIVE), vendor/system provisioning (IGA_VENDOR_PROVISIONING),
+        // and ADOPT_* (toggle-on attestation, threshold-1, no producer quorum).
+        // Scoped to NON-producer CRs (!realCeremonyEligible): a producer CR that falls through
+        // here is a not-yet-capable dev/test realm, which legitimately stubs (the producer column
+        // is real-signed once capable). A non-producer multiAdmin CR, by contrast, is ALWAYS
+        // enclave-driven in production (it has no producer envelope, only the doken carrier the
+        // enclave persists), so a missing carrier on one is the bypass signal.
+        if (MODE_MULTI_ADMIN.equals(mode)
+                && !realCeremonyEligible
+                && !IgaReplayExtension.isAdoptAction(cr.getActionType())
+                && !"true".equals(session.getAttribute("IGA_REPLAY_ACTIVE"))
+                && !Boolean.TRUE.equals(session.getAttribute(IgaChangeRequestService.IGA_VENDOR_PROVISIONING))
+                && !"true".equals(session.getAttribute(IgaChangeRequestService.IGA_VENDOR_PROVISIONING))) {
+            String carrier = cr.getRequestModel();
+            if (carrier == null || carrier.isBlank()) {
+                throw new RuntimeException("IGA multiAdmin sign refused: CR " + cr.getId()
+                        + " (action=" + cr.getActionType() + ", realm=" + realm.getName() + ") has no "
+                        + "collected approval-enclave doken carrier - a multiAdmin change request cannot "
+                        + "be stub-signed via the simple authorize/commit path. It must be approved through "
+                        + "the approval enclave (POST /iga/change-requests/{id}/approve), which collects the "
+                        + "admin doken quorum. Fail-closed.");
+            }
+        }
         return stubSign(DUMMY_SIG_PREFIX, canonical);                     // multiAdmin (not capable / non-producer-envelope) / non-firstAdmin stub
     }
 

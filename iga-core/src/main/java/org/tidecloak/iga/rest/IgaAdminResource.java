@@ -157,6 +157,66 @@ public class IgaAdminResource {
         return IgaReplayExtension.isAdoptAction(actionType);
     }
 
+    /**
+     * Security guard for the LEGACY simple authorize+commit lane: a tide-MULTIADMIN
+     * change request MUST be driven through the approval enclave
+     * ({@code POST /iga/change-requests/{id}/approve}), which collects an admin
+     * doken quorum and Policy:1-signs the carrier. The simple authorize/commit path
+     * cannot collect a doken and would otherwise stub-sign a non-producer multiAdmin
+     * CR (CREATE_*, DELETE_*, SET_REALM_ATTRIBUTE, REGEN_ADMIN_POLICY, DISABLE_IGA,
+     * OFFBOARD_REALM), letting a SINGLE manage-realm admin bypass the enclave quorum
+     * entirely. Returns a 409 CONFLICT {@link Response} when the lane must be refused,
+     * or {@code null} when the call is allowed to proceed.
+     *
+     * <p>SCOPED to tide-MULTIADMIN ONLY. firstAdmin (single-signer bootstrap, whose
+     * wizard {@code drainPendingCRs} legitimately uses authorize+commit) and Tideless
+     * ({@link org.tidecloak.iga.attestors.SimpleNameAttestor}) are NEVER refused.
+     *
+     * <p>EXEMPTIONS (these legitimately need the simple lane even in multiAdmin):
+     * <ul>
+     *   <li><b>ADOPT_*</b> CRs - toggle-on attestation of pre-existing state; they
+     *       short-circuit to threshold 1 and carry no producer quorum obligation.</li>
+     *   <li><b>vendor / system provisioning</b> ({@code IGA_VENDOR_PROVISIONING}) and
+     *       <b>replay</b> ({@code IGA_REPLAY_ACTIVE}) sessions - these internal flows
+     *       drive CRs straight through without the interactive enclave ceremony.</li>
+     * </ul>
+     */
+    private Response refuseLegacyLaneForMultiAdmin(IgaChangeRequestEntity cr) {
+        // ADOPT_* is exempt - resumable, threshold-1, no producer quorum.
+        if (isAdoptAction(cr.getActionType())) {
+            return null;
+        }
+        // The actual gate, computed CHEAPLY (authorizer-row / iga.attestor read only - no
+        // attestor-provider lookup): a tide realm whose authorizer mode is multiAdmin. A
+        // non-tide / firstAdmin realm short-circuits here, so this guard never resolves an
+        // attestor or touches getService() for them (keeps the legacy lane fully unaffected
+        // for firstAdmin/Tideless and avoids perturbing the early dependency/ordering gates).
+        if (!TideAttestor.isMultiAdminMode(session, realm)) {
+            return null;
+        }
+        // Internal provisioning / replay sessions bypass the interactive enclave.
+        if ("true".equals(session.getAttribute("IGA_REPLAY_ACTIVE"))) {
+            return null;
+        }
+        IgaChangeRequestService svc = getService();
+        if (svc != null && svc.isVendorProvisioning()) {
+            return null;
+        }
+        log.warnf("IGA legacy-lane refusal: CR %s (action=%s) on multiAdmin realm %s rejected - "
+                        + "the simple authorize/commit path cannot sign a multiAdmin change request; "
+                        + "use the approval enclave (POST .../approve).",
+                cr.getId(), cr.getActionType(), realm.getName());
+        return Response.status(Response.Status.CONFLICT)
+                .entity(Map.of(
+                        "error", "MULTIADMIN_REQUIRES_APPROVAL_ENCLAVE",
+                        "message", "multiAdmin change requests must be approved via the approval "
+                                + "enclave (POST /iga/change-requests/{id}/approve); the simple "
+                                + "authorize/commit path cannot sign a multiAdmin change request.",
+                        "changeRequestId", cr.getId(),
+                        "actionType", cr.getActionType()))
+                .build();
+    }
+
     // -------------------------------------------------------------------------
     // GET /iga/change-requests
     // -------------------------------------------------------------------------
@@ -467,6 +527,12 @@ public class IgaAdminResource {
             }
         }
 
+        // Refuse the legacy simple-attestor lane for a tide-multiAdmin CR: it cannot
+        // collect the enclave doken quorum and must go through POST .../approve.
+        Response refusal = refuseLegacyLaneForMultiAdmin(cr);
+        if (refusal != null) {
+            return refusal;
+        }
         IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
         // record() also enforces IgaScopeResolver.requireApprover() internally.
         attestor.record(session, cr, admin, approval);
@@ -512,6 +578,19 @@ public class IgaAdminResource {
                     .entity(Map.of("error",
                             "Change request is not in PENDING state (current=" + cr.getStatus() + ")"))
                     .build();
+        }
+
+        // Refuse the legacy simple commit lane for a tide-multiAdmin CR - it must be
+        // committed through the approval enclave (POST .../approve), which collects the
+        // admin doken quorum. This guard lives in the commit() ENDPOINT (not in the shared
+        // commitResolved pipeline) so the /approve flow - which also calls commitResolved
+        // AFTER the doken-quorum ceremony - is unaffected. The guard's multiAdmin check is
+        // cheap (no attestor-provider resolution), so a non-tide / firstAdmin realm passes
+        // straight through to commitResolved and its early dependency/ordering gates exactly
+        // as before.
+        Response refusal = refuseLegacyLaneForMultiAdmin(cr);
+        if (refusal != null) {
+            return refusal;
         }
 
         return commitResolved(cr, em, id);

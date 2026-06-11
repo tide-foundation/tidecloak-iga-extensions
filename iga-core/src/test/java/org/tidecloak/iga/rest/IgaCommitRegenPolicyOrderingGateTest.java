@@ -154,6 +154,30 @@ class IgaCommitRegenPolicyOrderingGateTest {
 
     // ---------------------------------------------------------------------
 
+    /**
+     * Drive the shared {@code commitResolved(cr, em, id)} pipeline directly. The REGEN
+     * ordering gate (and the dependency gate) live in {@code commitResolved}, which is run
+     * by BOTH the legacy {@code commit()} endpoint AND the multiAdmin {@code /approve}
+     * endpoint. Because this is a multiAdmin realm, the legacy {@code commit()} endpoint now
+     * REFUSES the lane up-front (refuseLegacyLaneForMultiAdmin -> 409); the gate under test is
+     * reached in production only via {@code /approve} -> {@code commitResolved}. We invoke
+     * {@code commitResolved} directly so this test exercises the gate on its real path,
+     * unobscured by the endpoint-level multiAdmin refusal.
+     */
+    private Response commitResolved(String id, IgaChangeRequestEntity cr) {
+        try {
+            java.lang.reflect.Method m = IgaAdminResource.class.getDeclaredMethod(
+                    "commitResolved", IgaChangeRequestEntity.class, EntityManager.class, String.class);
+            m.setAccessible(true);
+            return (Response) m.invoke(resource, cr, em, id);
+        } catch (java.lang.reflect.InvocationTargetException ite) {
+            if (ite.getCause() instanceof RuntimeException re) throw re;
+            throw new RuntimeException(ite.getCause());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void blockedWhenTideRealmAdminGrantStillPending() {
@@ -162,7 +186,7 @@ class IgaCommitRegenPolicyOrderingGateTest {
         stubFindPendingPolicy(policy);
         stubPendingAssignments(List.of(grantCr("grant-cr", "GRANT_ROLES")), List.of());
 
-        Response resp = resource.commit(POLICY_CR_ID);
+        Response resp = commitResolved(POLICY_CR_ID, policy);
 
         assertEquals(412, resp.getStatus());
         Map<String, Object> body = (Map<String, Object>) resp.getEntity();
@@ -181,7 +205,7 @@ class IgaCommitRegenPolicyOrderingGateTest {
         stubPendingAssignments(List.of(), List.of());
         when(auth.adminAuth()).thenReturn(null);
 
-        Response resp = resource.commit(POLICY_CR_ID);
+        Response resp = commitResolved(POLICY_CR_ID, policy);
 
         if (resp.getStatus() == 412 && resp.getEntity() instanceof Map<?, ?> m) {
             assertNotEquals("PENDING_ADMIN_GRANTS", m.get("error"),
@@ -199,7 +223,7 @@ class IgaCommitRegenPolicyOrderingGateTest {
         when(em.find(IgaChangeRequestEntity.class, "grant-cr")).thenReturn(grant);
         when(auth.adminAuth()).thenReturn(null);
 
-        Response resp = resource.commit("grant-cr");
+        Response resp = commitResolved("grant-cr", grant);
 
         if (resp.getStatus() == 412 && resp.getEntity() instanceof Map<?, ?> m) {
             assertNotEquals("PENDING_ADMIN_GRANTS", m.get("error"),
@@ -219,7 +243,7 @@ class IgaCommitRegenPolicyOrderingGateTest {
         when(em.find(IgaChangeRequestEntity.class, "scope-cr")).thenReturn(cr);
         when(auth.adminAuth()).thenReturn(null);
 
-        Response resp = resource.commit("scope-cr");
+        Response resp = commitResolved("scope-cr", cr);
 
         if (resp.getStatus() == 412 && resp.getEntity() instanceof Map<?, ?> m) {
             assertNotEquals("PENDING_ADMIN_GRANTS", m.get("error"));
