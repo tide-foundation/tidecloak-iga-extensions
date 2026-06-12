@@ -403,13 +403,28 @@ public class IgaFirstAdminSignPreviewService {
         return out;
     }
 
+    /** True if {@code roleId} is the realm-management tide-realm-admin role. */
+    private boolean isTideRealmAdminRole(String roleId) {
+        if (roleId == null) return false;
+        ClientModel rm = realm.getClientByClientId("realm-management");
+        if (rm == null) return false;
+        RoleModel tideRole = rm.getRole("tide-realm-admin");
+        return tideRole != null && roleId.equals(tideRole.getId());
+    }
+
     private Map<String, Object> rolePolicyForRole(String roleId) {
-        IgaRolePolicyEntity policy = rolePolicyService.findByRealmAndRole(realm.getId(), roleId);
+        // Policies are now realm-level named records, decoupled from roles. The only
+        // role with an associated realm-level policy is tide-realm-admin (the M0
+        // admin-quorum policy, stored under the reserved name). Surface it in the
+        // preview when the CR row references that role; other roles have no policy.
+        if (!isTideRealmAdminRole(roleId)) return null;
+        IgaRolePolicyEntity policy = rolePolicyService.findByRealmAndName(
+                realm.getId(), org.tidecloak.iga.attestors.TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY);
         if (policy == null) return null;
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", policy.getId());
         m.put("realmId", policy.getRealmId());
-        m.put("roleId", policy.getRoleId());
+        m.put("name", policy.getName());
         m.put("policy", policy.getPolicy());
         m.put("policySig", policy.getPolicySig());
         m.put("contractId", policy.getContractId());

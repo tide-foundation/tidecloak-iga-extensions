@@ -9,8 +9,10 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Service for managing per-role policy records (Midgard policy bytes/signature
- * combined with Forseti contract binding).
+ * Service for managing realm-level named policy records (Midgard policy bytes /
+ * signature combined with Forseti contract binding). Each record is keyed by
+ * (realmId, name) — policies are realm-level named records decoupled from any
+ * specific role.
  */
 public class IgaRolePolicyService {
 
@@ -21,15 +23,15 @@ public class IgaRolePolicyService {
     }
 
     /**
-     * Insert or update a role policy. Lookup is by (realmId, roleId).
+     * Insert or update a realm-level policy. Lookup is by (realmId, name).
      * If an existing record is found, all fields are overwritten and updatedAt is set.
      * Otherwise a new row is inserted with a generated UUID id and createdAt set.
      */
-    public IgaRolePolicyEntity upsert(String realmId, String roleId, String policy,
+    public IgaRolePolicyEntity upsert(String realmId, String name, String policy,
                                       String policySig, String contractId,
                                       String approvalType, String executionType,
                                       Integer threshold, String policyData) {
-        IgaRolePolicyEntity existing = findByRealmAndRole(realmId, roleId);
+        IgaRolePolicyEntity existing = findByRealmAndName(realmId, name);
         long now = System.currentTimeMillis();
         if (existing != null) {
             existing.setPolicy(policy);
@@ -48,7 +50,7 @@ public class IgaRolePolicyService {
         IgaRolePolicyEntity entity = new IgaRolePolicyEntity();
         entity.setId(UUID.randomUUID().toString());
         entity.setRealmId(realmId);
-        entity.setRoleId(roleId);
+        entity.setName(name);
         entity.setPolicy(policy);
         entity.setPolicySig(policySig);
         entity.setContractId(contractId);
@@ -63,13 +65,13 @@ public class IgaRolePolicyService {
     }
 
     /**
-     * Find a policy by (realmId, roleId). Returns null if not found.
+     * Find a policy by (realmId, name). Returns null if not found.
      */
-    public IgaRolePolicyEntity findByRealmAndRole(String realmId, String roleId) {
+    public IgaRolePolicyEntity findByRealmAndName(String realmId, String name) {
         TypedQuery<IgaRolePolicyEntity> query = em.createNamedQuery(
-                "IgaRolePolicy.findByRealmAndRole", IgaRolePolicyEntity.class);
+                "IgaRolePolicy.findByRealmAndName", IgaRolePolicyEntity.class);
         query.setParameter("realmId", realmId);
-        query.setParameter("roleId", roleId);
+        query.setParameter("name", name);
         try {
             return query.getSingleResult();
         } catch (NoResultException e) {
@@ -95,10 +97,10 @@ public class IgaRolePolicyService {
     }
 
     /**
-     * Delete a policy by (realmId, roleId). No-op if it doesn't exist.
+     * Delete a policy by (realmId, name). No-op if it doesn't exist.
      */
-    public void deleteByRealmAndRole(String realmId, String roleId) {
-        IgaRolePolicyEntity existing = findByRealmAndRole(realmId, roleId);
+    public void deleteByRealmAndName(String realmId, String name) {
+        IgaRolePolicyEntity existing = findByRealmAndName(realmId, name);
         if (existing == null) {
             return;
         }

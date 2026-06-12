@@ -88,9 +88,9 @@ class TideAttestorFlipGateTest {
         attestor = new TideAttestor(session);
     }
 
-    /** Stub the IgaRolePolicy.findByRealmAndRole named query to return {@code result}. */
+    /** Stub the IgaRolePolicy.findByRealmAndName named query to return {@code result}. */
     private void stubPolicyLookup(IgaRolePolicyEntity result) {
-        when(em.createNamedQuery(eq("IgaRolePolicy.findByRealmAndRole"), eq(IgaRolePolicyEntity.class)))
+        when(em.createNamedQuery(eq("IgaRolePolicy.findByRealmAndName"), eq(IgaRolePolicyEntity.class)))
                 .thenReturn(policyQuery);
         when(policyQuery.setParameter(anyString(), any())).thenReturn(policyQuery);
         // Fresh stream per call — findTideRealmAdminPolicy may be invoked more than once
@@ -116,7 +116,7 @@ class TideAttestorFlipGateTest {
         IgaRolePolicyEntity existing = new IgaRolePolicyEntity();
         existing.setId("pre-seeded-id");
         existing.setRealmId(REALM_ID);
-        existing.setRoleId(TIDE_ROLE_ID);
+        existing.setName(org.tidecloak.iga.attestors.TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY);
         existing.setPolicy("stub-body");
         existing.setPolicySig("OLD");
         stubPolicyLookup(existing);
@@ -225,7 +225,7 @@ class TideAttestorFlipGateTest {
         IgaRolePolicyEntity policyRow = new IgaRolePolicyEntity();
         policyRow.setId("p1");
         policyRow.setRealmId(REALM_ID);
-        policyRow.setRoleId(TIDE_ROLE_ID);
+        policyRow.setName(org.tidecloak.iga.attestors.TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY);
         policyRow.setPolicy("THE-M0-POLICY-BYTES");
         policyRow.setPolicySig("OLD");
         stubPolicyLookup(policyRow);
@@ -259,7 +259,7 @@ class TideAttestorFlipGateTest {
         IgaRolePolicyEntity policyRow = new IgaRolePolicyEntity();
         policyRow.setId("p1");
         policyRow.setRealmId(REALM_ID);
-        policyRow.setRoleId(TIDE_ROLE_ID);
+        policyRow.setName(org.tidecloak.iga.attestors.TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY);
         policyRow.setPolicy("THE-M0-POLICY-BYTES");
         policyRow.setPolicySig("OLD");
         stubPolicyLookup(policyRow);

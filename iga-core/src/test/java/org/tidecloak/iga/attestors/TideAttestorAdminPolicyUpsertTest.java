@@ -78,7 +78,8 @@ class TideAttestorAdminPolicyUpsertTest {
         IgaRolePolicyEntity persisted = captor.getValue();
         assertNotNull(persisted.getId(), "inserted row needs a generated id");
         assertEquals(REALM_ID, persisted.getRealmId());
-        assertEquals(TIDE_ROLE_ID, persisted.getRoleId(), "row must be keyed to tide-realm-admin");
+        assertEquals(TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY, persisted.getName(),
+                "row must be keyed by the reserved tide-realm-admin policy name");
         assertEquals("policy-body-bytes", persisted.getPolicy());
         assertEquals("VVK-SIG", persisted.getPolicySig());
         assertEquals(Integer.valueOf(3), persisted.getThreshold());
@@ -94,7 +95,7 @@ class TideAttestorAdminPolicyUpsertTest {
         IgaRolePolicyEntity existing = new IgaRolePolicyEntity();
         existing.setId("pre-existing-id");
         existing.setRealmId(REALM_ID);
-        existing.setRoleId(TIDE_ROLE_ID);
+        existing.setName(TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY);
         existing.setPolicy("old-body");
         existing.setPolicySig("OLD-SIG");
         existing.setThreshold(2);

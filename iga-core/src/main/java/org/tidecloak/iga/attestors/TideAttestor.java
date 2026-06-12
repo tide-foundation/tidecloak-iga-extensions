@@ -115,6 +115,16 @@ public class TideAttestor implements IgaAttestor {
     private static final String REALM_MANAGEMENT_CLIENT_ID = "realm-management";
     private static final String TIDE_REALM_ADMIN_ROLE = "tide-realm-admin";
 
+    /**
+     * Reserved, IMMUTABLE realm-level policy name for the M0 admin-quorum policy.
+     * The {@link IgaRolePolicyEntity} row keyed by (realm, this name) holds the
+     * tide-realm-admin admin threshold Policy bytes / signature. This is the ONLY
+     * name the M0 writer ({@link #upsertAdminPolicyRow}) may write; operators may
+     * not CREATE or RENAME a realm-level policy to this name via the REST surface,
+     * and a policy bearing this name may not be renamed at all.
+     */
+    public static final String TIDE_REALM_ADMIN_POLICY_KEY = "tide-realm-admin";
+
     /** Multiplier for the dynamic multiAdmin threshold floor. */
     private static final double THRESHOLD_PERCENTAGE = 0.7;
 
@@ -845,14 +855,16 @@ public class TideAttestor implements IgaAttestor {
         return canonicalForRegularCr(session, cr);
     }
 
-    /** Look up the tide-realm-admin {@link IgaRolePolicyEntity} (realm + role id), or null. */
+    /**
+     * Look up the tide-realm-admin M0 admin-quorum {@link IgaRolePolicyEntity},
+     * keyed by (realm, {@link #TIDE_REALM_ADMIN_POLICY_KEY}) — a realm-level named
+     * record, decoupled from the role id. Returns null if no such row exists.
+     */
     private static IgaRolePolicyEntity findTideRealmAdminPolicy(KeycloakSession session, RealmModel realm) {
-        String tideRoleId = tideRealmAdminRoleId(realm);
-        if (tideRoleId == null) return null;
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        return em.createNamedQuery("IgaRolePolicy.findByRealmAndRole", IgaRolePolicyEntity.class)
+        return em.createNamedQuery("IgaRolePolicy.findByRealmAndName", IgaRolePolicyEntity.class)
                 .setParameter("realmId", realm.getId())
-                .setParameter("roleId", tideRoleId)
+                .setParameter("name", TIDE_REALM_ADMIN_POLICY_KEY)
                 .getResultStream().findFirst().orElse(null);
     }
 
@@ -972,6 +984,11 @@ public class TideAttestor implements IgaAttestor {
             existing.setUpdatedAt(now);
             return existing;
         }
+        // The policy STORAGE is realm-level (keyed by the reserved name), but the
+        // tide-realm-admin ROLE still defines WHO approves. Preserve the flip-gate
+        // safety: a realm with no tide-realm-admin role is not a valid M0 quorum
+        // realm, so refuse to seed the policy row (caller stays firstAdmin / throws
+        // on a capable realm) exactly as before.
         String tideRoleId = tideRealmAdminRoleId(realm);
         if (tideRoleId == null) {
             return null;
@@ -979,7 +996,7 @@ public class TideAttestor implements IgaAttestor {
         IgaRolePolicyEntity row = new IgaRolePolicyEntity();
         row.setId(java.util.UUID.randomUUID().toString());
         row.setRealmId(realm.getId());
-        row.setRoleId(tideRoleId);
+        row.setName(TIDE_REALM_ADMIN_POLICY_KEY);
         row.setPolicy(policyBody);
         row.setPolicySig(policySig);
         row.setThreshold(threshold);

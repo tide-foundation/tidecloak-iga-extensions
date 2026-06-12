@@ -118,10 +118,10 @@ class TideAttestorOffboardCarrierPolicyTest {
         m0.setPolicy(policyBody);
         @SuppressWarnings("unchecked")
         TypedQuery<IgaRolePolicyEntity> q = mock(TypedQuery.class);
-        when(em.createNamedQuery("IgaRolePolicy.findByRealmAndRole", IgaRolePolicyEntity.class)).thenReturn(q);
+        when(em.createNamedQuery("IgaRolePolicy.findByRealmAndName", IgaRolePolicyEntity.class)).thenReturn(q);
         lenient().when(q.setParameter(org.mockito.ArgumentMatchers.eq("realmId"),
                 org.mockito.ArgumentMatchers.any())).thenReturn(q);
-        lenient().when(q.setParameter(org.mockito.ArgumentMatchers.eq("roleId"),
+        lenient().when(q.setParameter(org.mockito.ArgumentMatchers.eq("name"),
                 org.mockito.ArgumentMatchers.any())).thenReturn(q);
         when(q.getResultStream()).thenAnswer(inv -> Stream.of(m0));
     }
@@ -130,7 +130,7 @@ class TideAttestorOffboardCarrierPolicyTest {
     private void seedNoM0AdminPolicy() {
         @SuppressWarnings("unchecked")
         TypedQuery<IgaRolePolicyEntity> q = mock(TypedQuery.class);
-        when(em.createNamedQuery("IgaRolePolicy.findByRealmAndRole", IgaRolePolicyEntity.class)).thenReturn(q);
+        when(em.createNamedQuery("IgaRolePolicy.findByRealmAndName", IgaRolePolicyEntity.class)).thenReturn(q);
         lenient().when(q.setParameter(org.mockito.ArgumentMatchers.anyString(),
                 org.mockito.ArgumentMatchers.any())).thenReturn(q);
         when(q.getResultStream()).thenAnswer(inv -> Stream.empty());

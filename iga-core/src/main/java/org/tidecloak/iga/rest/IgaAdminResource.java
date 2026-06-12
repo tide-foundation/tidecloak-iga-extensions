@@ -1945,12 +1945,20 @@ public class IgaAdminResource {
     // Role Policies
     // -------------------------------------------------------------------------
 
+    // Realm-level named policy records (keyed by realm + name). The
+    // tide-realm-admin M0 admin-quorum policy uses the reserved IMMUTABLE name
+    // {@link TideAttestor#TIDE_REALM_ADMIN_POLICY_KEY}; operators may not create,
+    // rename to, or delete that name via this surface — the M0 writer owns it.
+    //
+    // LIST/FIND/READ require only authentication (reaching this admin resource
+    // already requires a valid realm-admin token); they do NOT require
+    // manage-realm. The write endpoints (POST upsert / DELETE) stay role-gated.
+
     @GET
     @Path("role-policies")
     @Produces(MediaType.APPLICATION_JSON)
     public List<IgaRolePolicyRepresentation> listRolePolicies() {
-        auth.realm().requireManageRealm();
-
+        // Read: authenticated-only (no requireManageRealm).
         return getRolePolicyService().listByRealm(realm.getId()).stream()
                 .map(this::toRolePolicyRepresentation)
                 .collect(Collectors.toList());
@@ -1960,8 +1968,7 @@ public class IgaAdminResource {
     @Path("role-policies/{id}")
     @Produces(MediaType.APPLICATION_JSON)
     public Response getRolePolicy(@PathParam("id") String id) {
-        auth.realm().requireManageRealm();
-
+        // Read: authenticated-only (no requireManageRealm).
         IgaRolePolicyEntity entity = getRolePolicyService().findById(id);
         if (entity == null || !realm.getId().equals(entity.getRealmId())) {
             return Response.status(Response.Status.NOT_FOUND).build();
@@ -1970,13 +1977,12 @@ public class IgaAdminResource {
     }
 
     @GET
-    @Path("role-policies/role/{roleId}")
+    @Path("role-policies/name/{name}")
     @Produces(MediaType.APPLICATION_JSON)
-    public Response getRolePolicyByRole(@PathParam("roleId") String roleId) {
-        auth.realm().requireManageRealm();
-
+    public Response getRolePolicyByName(@PathParam("name") String name) {
+        // Read: authenticated-only (no requireManageRealm).
         IgaRolePolicyEntity entity = getRolePolicyService()
-                .findByRealmAndRole(realm.getId(), roleId);
+                .findByRealmAndName(realm.getId(), name);
         if (entity == null) {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
@@ -1995,9 +2001,18 @@ public class IgaAdminResource {
                     .entity(Map.of("error", "Missing request body"))
                     .build();
         }
-        if (rep.getRoleId() == null || rep.getRoleId().isBlank()) {
+        if (rep.getName() == null || rep.getName().isBlank()) {
             return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "roleId is required"))
+                    .entity(Map.of("error", "name is required"))
+                    .build();
+        }
+        // The reserved M0 key is owned by the M0 writer; operators may not
+        // create or upsert a policy bearing it via this endpoint.
+        if (TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY.equals(rep.getName())) {
+            return Response.status(Response.Status.FORBIDDEN)
+                    .entity(Map.of("error", "policy name '"
+                            + TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY
+                            + "' is reserved and may not be created or modified via this endpoint"))
                     .build();
         }
         if (rep.getPolicy() == null || rep.getPolicy().isBlank()) {
@@ -2018,7 +2033,7 @@ public class IgaAdminResource {
 
         IgaRolePolicyEntity upserted = getRolePolicyService().upsert(
                 realm.getId(),
-                rep.getRoleId(),
+                rep.getName(),
                 rep.getPolicy(),
                 rep.getPolicySig(),
                 rep.getContractId(),
@@ -2030,16 +2045,24 @@ public class IgaAdminResource {
     }
 
     @DELETE
-    @Path("role-policies/role/{roleId}")
-    public Response deleteRolePolicyByRole(@PathParam("roleId") String roleId) {
+    @Path("role-policies/name/{name}")
+    public Response deleteRolePolicyByName(@PathParam("name") String name) {
         auth.realm().requireManageRealm();
 
+        // The reserved M0 key may not be deleted via this surface.
+        if (TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY.equals(name)) {
+            return Response.status(Response.Status.FORBIDDEN)
+                    .entity(Map.of("error", "policy name '"
+                            + TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY
+                            + "' is reserved and may not be deleted via this endpoint"))
+                    .build();
+        }
         IgaRolePolicyService service = getRolePolicyService();
-        IgaRolePolicyEntity existing = service.findByRealmAndRole(realm.getId(), roleId);
+        IgaRolePolicyEntity existing = service.findByRealmAndName(realm.getId(), name);
         if (existing == null) {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
-        service.deleteByRealmAndRole(realm.getId(), roleId);
+        service.deleteByRealmAndName(realm.getId(), name);
         return Response.noContent().build();
     }
 
@@ -2052,6 +2075,14 @@ public class IgaAdminResource {
         IgaRolePolicyEntity existing = service.findById(id);
         if (existing == null || !realm.getId().equals(existing.getRealmId())) {
             return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        // The reserved M0 key may not be deleted via this surface.
+        if (TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY.equals(existing.getName())) {
+            return Response.status(Response.Status.FORBIDDEN)
+                    .entity(Map.of("error", "policy name '"
+                            + TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY
+                            + "' is reserved and may not be deleted via this endpoint"))
+                    .build();
         }
         service.deleteById(id);
         return Response.noContent().build();
@@ -2554,7 +2585,7 @@ public class IgaAdminResource {
         IgaRolePolicyRepresentation rep = new IgaRolePolicyRepresentation();
         rep.setId(entity.getId());
         rep.setRealmId(entity.getRealmId());
-        rep.setRoleId(entity.getRoleId());
+        rep.setName(entity.getName());
         rep.setPolicy(entity.getPolicy());
         rep.setPolicySig(entity.getPolicySig());
         rep.setContractId(entity.getContractId());
