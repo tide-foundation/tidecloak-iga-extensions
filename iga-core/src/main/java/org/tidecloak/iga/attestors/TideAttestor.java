@@ -3957,8 +3957,20 @@ public class TideAttestor implements IgaAttestor {
                     }
                 }
             }
-            case "CREATE_ORGANIZATION", "UPDATE_ORGANIZATION" ->
-                    addIfPresent(units, buildOrganizationNodeUnit(session, realm, em, cr));
+            case "CREATE_ORGANIZATION", "UPDATE_ORGANIZATION" -> {
+                AttestationUnit orgNode = buildOrganizationNodeUnit(session, realm, em, cr);
+                addIfPresent(units, orgNode);
+                // F10: the org node OWNS its backing group's units. Frame them with the node
+                // so the carrier signs (and the distribution stamps) the SAME closure the
+                // login's emitOrganizationClosure emits — post-flip these CRs are the ONLY
+                // signer (no convergence backstop), so omitting them here leaves
+                // GroupEntity.attestation NULL and fail-closes every member's login.
+                // organization_definition.target_id == org id, so resolve the backing group
+                // from the framed node's target.
+                if (orgNode != null) {
+                    units.addAll(orgBackingGroupUnits(realm, em, orgNode.targetId()));
+                }
+            }
 
             // ---- DERIVED owner-sets ----
             case "ASSIGN_SCOPE", "REMOVE_SCOPE" -> {
@@ -4027,6 +4039,41 @@ public class TideAttestor implements IgaAttestor {
         if (org == null) return null;
         String groupId = RealmAttestationExporter.organizationBackingGroupId(em, org.getId());
         return RealmAttestationExporter.organizationDefinition(org, groupId, realm.getId());
+    }
+
+    /**
+     * The backing group's OWN producer units for an organization CR: {@code group_definition}
+     * (unit 5) ALWAYS + {@code group_role_mapping_set} (unit 9) LEAF-GATED (only when the
+     * group has a role-mapping row to carry the per-set sig) — EXACTLY the units the login's
+     * org closure ({@code RealmAttestationExporter.emitOrganizationClosure}) emits for the
+     * backing group of every org the user is a member of.
+     *
+     * <p>The org CR family is the ONLY stamp owner for these columns (gap analysis F10): the
+     * backing group is created internally by {@code JpaOrganizationProvider}, hidden from the
+     * admin group API (no CREATE_GROUP / SET_GROUP_ATTRIBUTE CR ever targets it), and
+     * deliberately excluded from the ADOPT group scanner ({@code IgaUnsignedRowScanner.groups},
+     * {@code g.type = 0} routes it to the ORGANIZATION path). Before this fix the org stampers
+     * signed only units 16+17, so the backing group's {@code GroupEntity.attestation} stayed
+     * NULL and every org member's login fail-closed on the uniform replay.
+     */
+    private static List<AttestationUnit> orgBackingGroupUnits(RealmModel realm, EntityManager em,
+                                                              String orgId) {
+        List<AttestationUnit> units = new ArrayList<>();
+        String groupId = RealmAttestationExporter.organizationBackingGroupId(em, orgId);
+        if (groupId == null) {
+            return units;
+        }
+        org.keycloak.models.GroupModel backing = realm.getGroupById(groupId);
+        if (backing == null) {
+            return units;
+        }
+        units.add(RealmAttestationExporter.groupDefinition(backing, realm.getId()));
+        GroupRoleMappingSetUnit roles =
+                RealmAttestationExporter.groupRoleMappingSet(em, groupId, realm.getId());
+        if (!roles.roleIds().isEmpty()) {
+            units.add(roles);
+        }
+        return units;
     }
 
     /** Resolve + build the {@code organization_domain_set} unit for an ORG_INVITE/RESEND CR. */
@@ -4603,6 +4650,15 @@ public class TideAttestor implements IgaAttestor {
             String sig = signProducerEnvelope(session, realm, mode, env);
             em.createQuery("UPDATE OrganizationEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig).setParameter("id", org.getId()).executeUpdate();
+            // F10: the org node owns its backing group's units — sign + stamp them with the
+            // SAME real per-commit signing as the node (this live lane must not rely on the
+            // convergence backstop; see the ADOPT_REALM comment in stampProducerUnitColumns).
+            // group_definition always; group_role_mapping_set leaf-gated — exactly the login's
+            // org-closure emission.
+            for (AttestationUnit unit : orgBackingGroupUnits(realm, em, org.getId())) {
+                String unitSig = signProducerEnvelope(session, realm, mode, unit.serialize());
+                UnitColumnMapping.stamp(em, unit, unitSig);
+            }
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
 
@@ -4839,12 +4895,20 @@ public class TideAttestor implements IgaAttestor {
             if (orgs == null) return;
             OrganizationModel org = orgs.getById(orgId);
             if (org == null) return;
-            // organization_definition (16), organization_domain_set (17).
+            // organization_definition (16), organization_domain_set (17), and the backing
+            // group's own units (F10: group_definition always, group_role_mapping_set
+            // leaf-gated). The org node is the ONLY stamp owner for the backing group —
+            // the ADOPT group scanner routes type=ORGANIZATION groups here by design, so
+            // ADOPT_GROUP never covers them. Stub now (like the node units); the toggle-on
+            // convergence upgrades member-surfaced units to the real 64B sig.
             String groupId = RealmAttestationExporter.organizationBackingGroupId(em, org.getId());
             signAndStampUnit(session, realm, mode, em,
                     RealmAttestationExporter.organizationDefinition(org, groupId, realm.getId()));
             signAndStampUnit(session, realm, mode, em,
                     RealmAttestationExporter.organizationDomainSet(org, realm.getId()));
+            for (AttestationUnit unit : orgBackingGroupUnits(realm, em, org.getId())) {
+                signAndStampUnit(session, realm, mode, em, unit);
+            }
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
 
