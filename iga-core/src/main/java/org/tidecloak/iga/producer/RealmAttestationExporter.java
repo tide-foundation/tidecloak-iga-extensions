@@ -238,6 +238,22 @@ public final class RealmAttestationExporter {
         //    emitOrganizationClosure) so the per-user closure is complete in one place.
         out.addAll(perUserUnits(em, user, realmId));
 
+        // Emit the group→role BINDING edge for the user's plain (non-organization) realm groups.
+        // perUserUnits (above) emits the membership edge "user ∈ admins"; this emits "admins → realm-admin".
+        // Without it the ORK has the membership and the role composition but never binds the role to the
+        // user, collapsing `aud`. Ancestor-inclusive (a parent group's roles reach child members); deduped;
+        // leaf-gated so a role-less group never dangles a column-less unit that fail-closes the login.
+        // Org-backing groups are handled by emitOrganizationClosure — skip them here so the split is explicit.
+        Set<String> emittedGroupRoleMapGroupIds = new LinkedHashSet<>();
+        user.getGroupsStream().forEach(g -> {
+            for (GroupModel grp = g; grp != null; grp = grp.getParent()) {
+                if (grp.getType() == GroupModel.Type.ORGANIZATION) continue;
+                if (!emittedGroupRoleMapGroupIds.add(grp.getId())) continue;
+                GroupRoleMappingSetUnit unit = groupRoleMappingSet(em, grp.getId(), realmId);
+                if (!unit.roleIds().isEmpty()) out.add(unit);
+            }
+        });
+
         // The metadata seed needs the RAW stored USER_ROLE_MAPPING child set (JPQL,
         // not the effective set). Recompute it here for the role-closure seed; this is
         // the SAME query perUserUnits used for the emitted unit (byte-identical).
