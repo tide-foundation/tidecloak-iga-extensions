@@ -168,10 +168,17 @@ public final class IgaScopeResolver {
                 break;
             case "SET_CLIENT_ATTRIBUTE":
             case "REMOVE_CLIENT_ATTRIBUTE":
+            // UPDATE_CLIENT_PROPERTY (full_scope_allowed / service_accounts_enabled
+            // / protocol / client_id, gap analysis F18) is governed exactly like a
+            // client attribute write — the client's own iga.approverRole/threshold.
+            case "UPDATE_CLIENT_PROPERTY":
                 resolveClientScopesFromRows(session, realm, cr, scope, "CLIENT_ID");
                 break;
             case "SET_CLIENT_SCOPE_ATTRIBUTE":
             case "REMOVE_CLIENT_SCOPE_ATTRIBUTE":
+            // UPDATE_CLIENT_SCOPE_PROPERTY (name / protocol, gap analysis F18)
+            // mirrors the scope-attribute writes above.
+            case "UPDATE_CLIENT_SCOPE_PROPERTY":
                 // Client scopes have no first-class iga.approverRole today;
                 // fall through to the realm default.
                 break;

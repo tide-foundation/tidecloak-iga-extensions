@@ -3903,11 +3903,12 @@ public class TideAttestor implements IgaAttestor {
         switch (action) {
             // ---- NODE units (entity exists in the POST-change model) ----
             case "CREATE_CLIENT", "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
-                 "UPDATE_CLIENT_REDIRECT_URIS" -> {
+                 "UPDATE_CLIENT_REDIRECT_URIS", "UPDATE_CLIENT_PROPERTY" -> {
                 ClientModel c = resolveClientForStamp(realm, cr);
                 if (c != null) units.add(RealmAttestationExporter.clientConfig(session, c, realmId));
             }
-            case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE" -> {
+            case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE",
+                 "UPDATE_CLIENT_SCOPE_PROPERTY" -> {
                 String scopeId = firstRowKeyOr(cr, "SCOPE_ID", "ID");
                 ClientScopeModel s = scopeId == null ? null : realm.getClientScopeById(scopeId);
                 if (s != null) units.add(RealmAttestationExporter.clientScopeConfig(s, realmId));
@@ -4313,9 +4314,10 @@ public class TideAttestor implements IgaAttestor {
             switch (action) {
                 // ---- NODE units: re-stamp the owner's node column with the real envelope ----
                 case "CREATE_CLIENT", "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
-                     "UPDATE_CLIENT_REDIRECT_URIS" ->
+                     "UPDATE_CLIENT_REDIRECT_URIS", "UPDATE_CLIENT_PROPERTY" ->
                         stampClientConfig(session, realm, mode, em, cr);
-                case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE" ->
+                case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE",
+                     "UPDATE_CLIENT_SCOPE_PROPERTY" ->
                         stampClientScopeConfig(session, realm, mode, em, cr);
                 case "CREATE_ROLE", "SET_ROLE_ATTRIBUTE" ->
                         stampRoleDefinition(session, realm, mode, em, cr);

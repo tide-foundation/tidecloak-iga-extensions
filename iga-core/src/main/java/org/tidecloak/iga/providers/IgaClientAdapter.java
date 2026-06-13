@@ -641,6 +641,85 @@ public class IgaClientAdapter extends ClientAdapter {
     }
 
     // -------------------------------------------------------------------------
+    // Token-shaping client-config columns: full_scope_allowed,
+    // service_accounts_enabled, protocol, client_id. These are NOT attributes —
+    // they live on the CLIENT row itself — and each is part of the attested
+    // client_config unit payload (RealmAttestationExporter.clientConfig):
+    // full_scope_allowed flips the role-intersection that shapes
+    // realm_access/resource_access/aud, service_accounts_enabled auto-attaches
+    // the service_account scope, protocol gates the whole OIDC mapper set, and
+    // client_id is azp / the resource_access map key. Left ungoverned (the prior
+    // state — these setters were never overridden) they (a) bypass the
+    // capture-then-veto pipeline entirely and (b) diverge the attested
+    // client_config bytes from the live model with no CR to re-stamp the column,
+    // fail-closing every login via the client until an unrelated config CR
+    // happens to re-frame it. Capture each as an UPDATE_CLIENT_PROPERTY CR
+    // (mirrors SET_CLIENT_ATTRIBUTE: same CLIENT entity, same clientConfig
+    // framing/stamping, replay applies the property) and suppress the direct
+    // write. (gap analysis F18.)
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void setFullScopeAllowed(boolean value) {
+        if (!isIgaActive()) {
+            super.setFullScopeAllowed(value);
+            return;
+        }
+        captureClientProperty("fullScopeAllowed", String.valueOf(value));
+    }
+
+    @Override
+    public void setServiceAccountsEnabled(boolean value) {
+        if (!isIgaActive()) {
+            super.setServiceAccountsEnabled(value);
+            return;
+        }
+        captureClientProperty("serviceAccountsEnabled", String.valueOf(value));
+    }
+
+    @Override
+    public void setProtocol(String protocol) {
+        if (!isIgaActive()) {
+            super.setProtocol(protocol);
+            return;
+        }
+        captureClientProperty("protocol", protocol);
+    }
+
+    @Override
+    public void setClientId(String clientId) {
+        if (!isIgaActive()) {
+            super.setClientId(clientId);
+            return;
+        }
+        // getClientId() here is the OLD human id (display only); the stable
+        // CLIENT_UUID is the replay/stamp resolution key, so a rename still
+        // resolves the same client row.
+        captureClientProperty("clientId", clientId);
+    }
+
+    /**
+     * Capture a single token-shaping client-config property change as an
+     * {@code UPDATE_CLIENT_PROPERTY} change request (PROPERTY = the field name,
+     * VALUE = its new value as a string) and defer the write to commit/replay.
+     * The rowsJson contract matches
+     * {@code IgaReplayDispatcher.replayUpdateClientProperty}: CLIENT_UUID
+     * (resolution key, stable across a clientId rename), CLIENT_ID (human id for
+     * display), PROPERTY, VALUE.
+     */
+    private void captureClientProperty(String property, String value) {
+        IgaChangeRequestService service = getService();
+        String clientUuid = getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        row.put("PROPERTY", property);
+        row.put("VALUE", value);
+        service.create(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_PROPERTY",
+                List.of(row), null);
+    }
+
+    // -------------------------------------------------------------------------
     // Client quarantine hook (HARD refuse).
     //
     // KC checkpoints surfaced by client.isEnabled():

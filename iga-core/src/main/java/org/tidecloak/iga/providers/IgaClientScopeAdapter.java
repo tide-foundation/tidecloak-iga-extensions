@@ -432,15 +432,23 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
 
     @Override
     public void setName(String name) {
-        super.setName(name);
-        if (captureMode) {
-            // entity.getName() reflects KeycloakModelUtils.convertClientScopeName
-            // — capture the canonical persisted name so REP_JSON matches what
-            // a committed scope (and replay's createClientScope) would carry.
-            capturedRep.setName(super.getName());
-            nameObserved = true;
-            trace("setName");
+        if (!isIgaActive()) {
+            super.setName(name);
+            if (captureMode) {
+                // entity.getName() reflects KeycloakModelUtils.convertClientScopeName
+                // — capture the canonical persisted name so REP_JSON matches what
+                // a committed scope (and replay's createClientScope) would carry.
+                capturedRep.setName(super.getName());
+                nameObserved = true;
+                trace("setName");
+            }
+            return;
         }
+        // Inline IGA: a rename changes the client_scope_config payload (the scope
+        // `name` joined into the `scope` claim), so govern it as a CR and suppress
+        // the direct write rather than letting it mutate ungoverned + diverge the
+        // attested bytes. (gap analysis F18.)
+        captureScopeProperty("name", name);
     }
 
     @Override
@@ -454,11 +462,37 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
 
     @Override
     public void setProtocol(String protocol) {
-        super.setProtocol(protocol);
-        if (captureMode) {
-            capturedRep.setProtocol(protocol);
-            trace("setProtocol");
+        if (!isIgaActive()) {
+            super.setProtocol(protocol);
+            if (captureMode) {
+                capturedRep.setProtocol(protocol);
+                trace("setProtocol");
+            }
+            return;
         }
+        // Inline IGA: protocol gates the whole mapper set (a non-OIDC scope
+        // contributes zero mappers to an OIDC token), so govern it as a CR and
+        // suppress the direct write. (gap analysis F18.)
+        captureScopeProperty("protocol", protocol);
+    }
+
+    /**
+     * Capture a single token-shaping client-scope-config property change
+     * (name / protocol) as an {@code UPDATE_CLIENT_SCOPE_PROPERTY} change request
+     * and defer the write to commit/replay. rowsJson contract matches
+     * {@code IgaReplayDispatcher.replayUpdateClientScopeProperty}: SCOPE_ID
+     * (resolution key), PROPERTY, VALUE. Description is intentionally NOT
+     * captured here — it is not part of the attested client_scope_config payload.
+     */
+    private void captureScopeProperty(String property, String value) {
+        IgaChangeRequestService service = getService();
+        String scopeId = getId();
+        Map<String, Object> row = new HashMap<>();
+        row.put("SCOPE_ID", scopeId);
+        row.put("PROPERTY", property);
+        row.put("VALUE", value);
+        service.create(realm, "CLIENT_SCOPE", scopeId, "UPDATE_CLIENT_SCOPE_PROPERTY",
+                List.of(row), null);
     }
 
     @Override
