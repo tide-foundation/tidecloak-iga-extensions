@@ -236,6 +236,7 @@ public class IgaClientAdapter extends ClientAdapter {
         // setRollbackOnly (the BatchEmit prepare-tx still owns the veto).
         // The single-entity admin-create branch below is byte-unchanged.
         if (importDeferred) {
+            applyProtocolClientDefaults();
             cachedImportRow = buildCapturedClientRow();
             log.infof("IGA multi-entity HARVEST: REP_JSON built at "
                     + "register-time for CREATE_CLIENT (size=%d chars) — "
@@ -245,6 +246,7 @@ public class IgaClientAdapter extends ClientAdapter {
             return;
         }
 
+        applyProtocolClientDefaults();
         Map<String, Object> row = buildCapturedClientRow();
         String clientUuid = (String) row.get("ID");
 
@@ -361,6 +363,64 @@ public class IgaClientAdapter extends ClientAdapter {
         row.put("REALM_ID", realm.getId());
         row.put("REP_JSON", repJson);
         return row;
+    }
+
+    /**
+     * Apply the login-protocol factory's {@code setupClientDefaults} to the live
+     * (pass-through) scratch model at the capture terminal seam, mirroring what
+     * {@code ClientManager.createClient} does immediately AFTER
+     * {@code RepresentationToModel.createClient} returns on a non-IGA create.
+     *
+     * <p>Why this is needed (defect: governed client-create left regenerating,
+     * un-committable default CRs). {@code RepresentationToModel.createClient}'s
+     * final mutation is {@code client.updateClient()} — the very seam we hijack to
+     * throw the 202. So in capture mode the throw fires BEFORE
+     * {@code ClientManager.createClient} reaches its {@code setupClientDefaults}
+     * line. The captured {@code CREATE_CLIENT} rep was therefore missing the OIDC
+     * defaults (default redirect-uri from rootUrl, web-origins, public/secret,
+     * flow flags, back-channel-logout attributes) that a real create would carry.
+     * A committed client built from that incomplete rep then diverges from a
+     * normal client, and the next admin write/UI step re-derives those defaults
+     * and captures them as separate UPDATE_CLIENT_* / SET_CLIENT_ATTRIBUTE CRs
+     * that never auto-commit and regenerate on commit.
+     *
+     * <p>By running {@code setupClientDefaults} here BEFORE the snapshot, the
+     * single {@code CREATE_CLIENT} CR carries a complete, defaults-applied
+     * representation — byte-identical to what a non-IGA create commits — so
+     * nothing is left to re-derive and no stranded default-field CRs exist.
+     *
+     * <p>Safe in capture mode: every setter {@code setupClientDefaults} touches
+     * ({@code setWebOrigins}, {@code setAttribute}, the flow/secret/public setters)
+     * sees {@code isIgaActive()==false} (capture mode) and passes straight through
+     * to the real {@code ClientAdapter} — zero CRs are filed here. Idempotent:
+     * {@code setupClientDefaults} only fills fields that are still null/empty, so
+     * a client that already supplied redirectUris/flows is untouched.
+     */
+    private void applyProtocolClientDefaults() {
+        try {
+            String protocol = super.getProtocol();
+            if (protocol == null) {
+                return;
+            }
+            org.keycloak.protocol.LoginProtocolFactory factory =
+                    (org.keycloak.protocol.LoginProtocolFactory) igaSession.getKeycloakSessionFactory()
+                            .getProviderFactory(org.keycloak.protocol.LoginProtocol.class, protocol);
+            if (factory == null) {
+                return;
+            }
+            // setupClientDefaults reads the incoming rep for "was this field
+            // explicitly supplied?" decisions. The live scratch model IS that rep
+            // (every admin-supplied field has been applied by
+            // RepresentationToModel.createClient before this seam), so a
+            // model-derived representation is the faithful input.
+            ClientRepresentation rep = ModelToRepresentation.toRepresentation(this, igaSession);
+            factory.setupClientDefaults(rep, this);
+        } catch (RuntimeException e) {
+            // Never let defaulting break the capture/202; a client missing a
+            // derived default is recoverable, a 500 on create is not.
+            log.warnf(e, "IGA capture CREATE_CLIENT: setupClientDefaults pass failed "
+                    + "for clientId=%s — capturing rep without protocol defaults", super.getClientId());
+        }
     }
 
     /**

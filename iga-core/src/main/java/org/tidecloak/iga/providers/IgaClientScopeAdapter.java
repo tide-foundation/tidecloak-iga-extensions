@@ -491,8 +491,17 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         row.put("SCOPE_ID", scopeId);
         row.put("PROPERTY", property);
         row.put("VALUE", value);
-        service.create(realm, "CLIENT_SCOPE", scopeId, "UPDATE_CLIENT_SCOPE_PROPERTY",
-                List.of(row), null);
+        // coalesceOrCreate (was a bare create): a single PUT /client-scopes/{id}
+        // runs RepresentationToModel.updateClientScope which calls setName THEN
+        // setProtocol THEN setAttribute on the SAME scope. With a bare create each
+        // property setter filed its own CLIENT_SCOPE CR, then the attribute
+        // setter's checkNoPendingCr saw the now-multiple pending CRs and the
+        // request blew up (un-coalesced same-entity writes). Coalescing folds
+        // name+protocol into one UPDATE_CLIENT_SCOPE_PROPERTY CR keyed on PROPERTY,
+        // so one PUT yields one clean CR instead of crashing. A foreign pending CR
+        // on the scope still 409s.
+        service.coalesceOrCreate(realm, "CLIENT_SCOPE", scopeId, "UPDATE_CLIENT_SCOPE_PROPERTY",
+                List.of(row), null, java.util.Set.of(property));
     }
 
     @Override
@@ -503,9 +512,18 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         }
         IgaChangeRequestService service = getService();
         String scopeId = getId();
-        service.create(realm, "CLIENT", scopeId, "SCOPE_ADD_ROLE",
-                List.of(Map.of("SCOPE_ID", scopeId, "ROLE_ID", role.getId())),
-                null);
+        // entityType MUST be "CLIENT_SCOPE" (not "CLIENT"): the inbox formatter
+        // labels the CR off entityType ("App" vs "Client scope") and the id
+        // lookup hook resolves the display name by entityType. With "CLIENT"
+        // the scope id was looked up as a client -> "App (unnamed)". Row carries
+        // SCOPE_ID/ROLE_ID for replay (scopeAddRoleDirect reads SCOPE_ID) plus a
+        // denormalised CLIENT_SCOPE_NAME so the summary resolves with no lookup.
+        Map<String, Object> row = new HashMap<>();
+        row.put("SCOPE_ID", scopeId);
+        row.put("ROLE_ID", role.getId());
+        row.put("CLIENT_SCOPE_NAME", super.getName());
+        service.create(realm, "CLIENT_SCOPE", scopeId, "SCOPE_ADD_ROLE",
+                List.of(row), null);
     }
 
     @Override
@@ -516,9 +534,15 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         }
         IgaChangeRequestService service = getService();
         String scopeId = getId();
-        service.create(realm, "CLIENT", scopeId, "SCOPE_REMOVE_ROLE",
-                List.of(Map.of("SCOPE_ID", scopeId, "ROLE_ID", role.getId())),
-                null);
+        // entityType "CLIENT_SCOPE" + denormalised name, same rationale as
+        // addScopeMapping above. SCOPE_ID/ROLE_ID kept for replay
+        // (scopeRemoveRoleDirect reads SCOPE_ID).
+        Map<String, Object> row = new HashMap<>();
+        row.put("SCOPE_ID", scopeId);
+        row.put("ROLE_ID", role.getId());
+        row.put("CLIENT_SCOPE_NAME", super.getName());
+        service.create(realm, "CLIENT_SCOPE", scopeId, "SCOPE_REMOVE_ROLE",
+                List.of(row), null);
     }
 
     // -------------------------------------------------------------------------
@@ -549,13 +573,17 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         }
         IgaChangeRequestService service = getService();
         String scopeId = getId();
-        checkNoPendingCr(service, scopeId);
         Map<String, Object> row = new HashMap<>();
         row.put("SCOPE_ID", scopeId);
         row.put("NAME", name);
         row.put("VALUE", value);
-        service.create(realm, "CLIENT_SCOPE", scopeId, "SET_CLIENT_SCOPE_ATTRIBUTE",
-                List.of(row), null);
+        // coalesceOrCreate (was checkNoPendingCr+create): a PUT /client-scopes/{id}
+        // can set a property (name/protocol) AND attributes in one request; with
+        // the old guard the attribute write 409'd/crashed against the same
+        // request's property CR. Coalescing folds the scope's writes into one
+        // PENDING CR per request (foreign pending CR still 409s).
+        service.coalesceOrCreate(realm, "CLIENT_SCOPE", scopeId, "SET_CLIENT_SCOPE_ATTRIBUTE",
+                List.of(row), null, java.util.Set.of(name));
     }
 
     @Override
@@ -572,12 +600,12 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         }
         IgaChangeRequestService service = getService();
         String scopeId = getId();
-        checkNoPendingCr(service, scopeId);
         Map<String, Object> row = new HashMap<>();
         row.put("SCOPE_ID", scopeId);
         row.put("NAME", name);
-        service.create(realm, "CLIENT_SCOPE", scopeId, "REMOVE_CLIENT_SCOPE_ATTRIBUTE",
-                List.of(row), null);
+        // coalesceOrCreate, same rationale as setAttribute above.
+        service.coalesceOrCreate(realm, "CLIENT_SCOPE", scopeId, "REMOVE_CLIENT_SCOPE_ATTRIBUTE",
+                List.of(row), null, java.util.Set.of(name));
     }
 
     private void checkNoPendingCr(IgaChangeRequestService service, String scopeId) {

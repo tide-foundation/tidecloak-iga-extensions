@@ -103,6 +103,24 @@ public class IgaRealmAdapter extends RealmAdapter {
             super.removeAttribute(name);
             return;
         }
+        // Defect: realm-root PUT over-captured a destructive 14-row
+        // REMOVE_REALM_ATTRIBUTE batch. Root cause is KC's
+        // DefaultExportImportManager.updateRealm, which diffs the incoming rep's
+        // attribute set against the live realm and fires removeAttribute for
+        // EVERY existing attribute absent from the (often partial) PUT body:
+        //   Set<String> attrsToRemove = strip(realm.getAttributes()).keySet();
+        //   attrsToRemove.removeAll(rep.getAttributes().keySet());
+        //   for (attr : attrsToRemove) realm.removeAttribute(attr);
+        // A partial body therefore "removes" attributes the admin never touched.
+        // The KC admin console always sends the FULL attribute set (attrsToRemove
+        // empty → no removals), so suppressing the diff-loop removals only changes
+        // the partial-body API path: we keep the omitted attributes (non-
+        // destructive / fail-safe) and govern just the explicit SET changes. An
+        // explicit, intentional realm-attribute removal still flows through any
+        // other caller (e.g. a dedicated remove endpoint) and is captured.
+        if (isOnRealmUpdateDiffRemoval()) {
+            return;
+        }
         IgaChangeRequestService service = getService();
         String realmId = getId();
         Map<String, Object> row = new HashMap<>();
@@ -110,6 +128,21 @@ public class IgaRealmAdapter extends RealmAdapter {
         row.put("NAME", name);
         service.coalesceOrCreate(this, "REALM", realmId, "REMOVE_REALM_ATTRIBUTE",
                 List.of(row), null, java.util.Set.of(name));
+    }
+
+    /**
+     * Is this {@code removeAttribute} call the destructive attribute-diff removal
+     * inside {@code DefaultExportImportManager.updateRealm} (the realm-root
+     * {@code PUT /admin/realms/{realm}} handler)? Matched by the presence of that
+     * exact frame on the call stack. Same StackWalker idiom as
+     * {@link #isOnRealmBootstrapPath()}.
+     */
+    private boolean isOnRealmUpdateDiffRemoval() {
+        return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
+                .walk(frames -> frames.anyMatch(f ->
+                        "org.keycloak.storage.datastore.DefaultExportImportManager".equals(
+                                f.getDeclaringClass().getName())
+                                && "updateRealm".equals(f.getMethodName())));
     }
 
     private void checkNoPendingCr(IgaChangeRequestService service, String realmId) {
@@ -313,27 +346,32 @@ public class IgaRealmAdapter extends RealmAdapter {
     @Override
     public void addDefaultGroup(GroupModel group) {
         if (!isIgaActive()) { super.addDefaultGroup(group); return; }
-        IgaChangeRequestService service = getService();
         String realmId = getId();
-        checkNoPendingCr(service, realmId);
-        service.create(this, "REALM", realmId, "ADD_REALM_DEFAULT_GROUP",
-                List.of(Map.of(
-                        "REALM_ID", realmId,
-                        "GROUP_ID", group.getId()
-                )), null);
+        // coalesceOrCreate (not checkNoPendingCr+create): a realm-settings save
+        // can touch several default-group/default-scope rows in one request and
+        // each carries the SAME (REALM, realmId) entity key, so the second write
+        // would otherwise self-409 against the first. Coalescing folds them into
+        // one REALM-keyed CR. GROUP_NAME is a NAME_KEYS-resolvable label so the
+        // inbox summary reads "Add realm default group <name>" instead of
+        // "Realm (unnamed)" (the REALM entity has no useEntityName lookup).
+        Map<String, Object> row = new HashMap<>();
+        row.put("REALM_ID", realmId);
+        row.put("GROUP_ID", group.getId());
+        row.put("GROUP_NAME", group.getName());
+        getService().coalesceOrCreate(this, "REALM", realmId, "ADD_REALM_DEFAULT_GROUP",
+                List.of(row), null, java.util.Set.of(group.getId()));
     }
 
     @Override
     public void removeDefaultGroup(GroupModel group) {
         if (!isIgaActive()) { super.removeDefaultGroup(group); return; }
-        IgaChangeRequestService service = getService();
         String realmId = getId();
-        checkNoPendingCr(service, realmId);
-        service.create(this, "REALM", realmId, "REMOVE_REALM_DEFAULT_GROUP",
-                List.of(Map.of(
-                        "REALM_ID", realmId,
-                        "GROUP_ID", group.getId()
-                )), null);
+        Map<String, Object> row = new HashMap<>();
+        row.put("REALM_ID", realmId);
+        row.put("GROUP_ID", group.getId());
+        row.put("GROUP_NAME", group.getName());
+        getService().coalesceOrCreate(this, "REALM", realmId, "REMOVE_REALM_DEFAULT_GROUP",
+                List.of(row), null, java.util.Set.of(group.getId()));
     }
 
     // -------------------------------------------------------------------------
@@ -380,15 +418,19 @@ public class IgaRealmAdapter extends RealmAdapter {
             super.addDefaultClientScope(clientScope, defaultScope);
             return;
         }
-        IgaChangeRequestService service = getService();
         String realmId = getId();
-        checkNoPendingCr(service, realmId);
+        // coalesceOrCreate + CLIENT_SCOPE_NAME label — same rationale as
+        // addDefaultGroup: back-to-back realm-default writes share the (REALM,
+        // realmId) key and must coalesce instead of self-409, and the row needs a
+        // NAME_KEYS-resolvable label so the summary reads the scope name not
+        // "Realm (unnamed)".
         Map<String, Object> row = new HashMap<>();
         row.put("REALM_ID", realmId);
         row.put("SCOPE_ID", clientScope.getId());
         row.put("DEFAULT_SCOPE", defaultScope);
-        service.create(this, "REALM", realmId, "REALM_DEFAULT_SCOPE_ADD",
-                List.of(row), null);
+        row.put("CLIENT_SCOPE_NAME", clientScope.getName());
+        getService().coalesceOrCreate(this, "REALM", realmId, "REALM_DEFAULT_SCOPE_ADD",
+                List.of(row), null, java.util.Set.of(clientScope.getId()));
     }
 
     @Override
@@ -397,14 +439,13 @@ public class IgaRealmAdapter extends RealmAdapter {
             super.removeDefaultClientScope(clientScope);
             return;
         }
-        IgaChangeRequestService service = getService();
         String realmId = getId();
-        checkNoPendingCr(service, realmId);
         Map<String, Object> row = new HashMap<>();
         row.put("REALM_ID", realmId);
         row.put("SCOPE_ID", clientScope.getId());
-        service.create(this, "REALM", realmId, "REALM_DEFAULT_SCOPE_REMOVE",
-                List.of(row), null);
+        row.put("CLIENT_SCOPE_NAME", clientScope.getName());
+        getService().coalesceOrCreate(this, "REALM", realmId, "REALM_DEFAULT_SCOPE_REMOVE",
+                List.of(row), null, java.util.Set.of(clientScope.getId()));
     }
 
     /**
