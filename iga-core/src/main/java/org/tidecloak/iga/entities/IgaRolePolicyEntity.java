@@ -8,27 +8,43 @@ import jakarta.persistence.NamedQuery;
 import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
 
+/**
+ * Realm-level IGA policy record. Each row is a named policy in a realm
+ * (Midgard policy bytes / signature combined with Forseti contract binding).
+ *
+ * <p>Historically this was keyed by (REALM_ID, ROLE_ID) — a per-role record. It
+ * is now keyed by (REALM_ID, NAME): policies are realm-level named records that
+ * are decoupled from any specific role. The M0 admin-quorum policy uses the
+ * reserved immutable name {@code tide-realm-admin}
+ * ({@link org.tidecloak.iga.attestors.TideAttestor#TIDE_REALM_ADMIN_POLICY_KEY});
+ * the tide-realm-admin ROLE still defines WHO approves, but the policy STORAGE
+ * no longer hangs off the role id.</p>
+ *
+ * <p>The table is still physically named {@code IGA_ROLE_POLICY} (the ROLE_ID
+ * column was dropped and a NAME column added in a migration); the FK from
+ * CONTRACT_ID to IGA_FORSETI_CONTRACT is preserved.</p>
+ */
 @Entity
 @Table(name = "IGA_ROLE_POLICY",
         uniqueConstraints = @UniqueConstraint(
-                name = "UQ_IGA_ROLE_POLICY_REALM_ROLE",
-                columnNames = {"REALM_ID", "ROLE_ID"}))
+                name = "UQ_IGA_REALM_POLICY_REALM_NAME",
+                columnNames = {"REALM_ID", "NAME"}))
 @NamedQueries({
     @NamedQuery(
         name = "IgaRolePolicy.findByRealm",
         query = "SELECT p FROM IgaRolePolicyEntity p WHERE p.realmId = :realmId ORDER BY p.createdAt DESC"
     ),
     @NamedQuery(
-        name = "IgaRolePolicy.findByRealmAndRole",
-        query = "SELECT p FROM IgaRolePolicyEntity p WHERE p.realmId = :realmId AND p.roleId = :roleId"
+        name = "IgaRolePolicy.findByRealmAndName",
+        query = "SELECT p FROM IgaRolePolicyEntity p WHERE p.realmId = :realmId AND p.name = :name"
     ),
     @NamedQuery(
         name = "IgaRolePolicy.findById",
         query = "SELECT p FROM IgaRolePolicyEntity p WHERE p.id = :id"
     ),
     @NamedQuery(
-        name = "IgaRolePolicy.deleteByRealmAndRole",
-        query = "DELETE FROM IgaRolePolicyEntity p WHERE p.realmId = :realmId AND p.roleId = :roleId"
+        name = "IgaRolePolicy.deleteByRealmAndName",
+        query = "DELETE FROM IgaRolePolicyEntity p WHERE p.realmId = :realmId AND p.name = :name"
     ),
     @NamedQuery(
         name = "IgaRolePolicy.deleteByRealm",
@@ -44,8 +60,8 @@ public class IgaRolePolicyEntity {
     @Column(name = "REALM_ID", length = 36, nullable = false)
     private String realmId;
 
-    @Column(name = "ROLE_ID", length = 36, nullable = false)
-    private String roleId;
+    @Column(name = "NAME", length = 255, nullable = false)
+    private String name;
 
     @Column(name = "POLICY", columnDefinition = "TEXT", nullable = false)
     private String policy;
@@ -80,8 +96,8 @@ public class IgaRolePolicyEntity {
     public String getRealmId() { return realmId; }
     public void setRealmId(String realmId) { this.realmId = realmId; }
 
-    public String getRoleId() { return roleId; }
-    public void setRoleId(String roleId) { this.roleId = roleId; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
 
     public String getPolicy() { return policy; }
     public void setPolicy(String policy) { this.policy = policy; }

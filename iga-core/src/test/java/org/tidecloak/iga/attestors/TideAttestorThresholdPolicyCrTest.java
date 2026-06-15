@@ -118,17 +118,17 @@ class TideAttestorThresholdPolicyCrTest {
         IgaRolePolicyEntity p = new IgaRolePolicyEntity();
         p.setId("policy-row-id");
         p.setRealmId(REALM_ID);
-        p.setRoleId(TIDE_ROLE_ID);
+        p.setName(org.tidecloak.iga.attestors.TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY);
         p.setPolicy("M0-BODY");
         p.setThreshold(threshold);
         return p;
     }
 
-    /** Stub IgaRolePolicy.findByRealmAndRole to return {@code policy} (or none). */
+    /** Stub IgaRolePolicy.findByRealmAndName to return {@code policy} (or none). */
     @SuppressWarnings("unchecked")
     private void stubPolicyLookup(IgaRolePolicyEntity policy) {
         TypedQuery<IgaRolePolicyEntity> q = mock(TypedQuery.class);
-        when(em.createNamedQuery(eq("IgaRolePolicy.findByRealmAndRole"), eq(IgaRolePolicyEntity.class)))
+        when(em.createNamedQuery(eq("IgaRolePolicy.findByRealmAndName"), eq(IgaRolePolicyEntity.class)))
                 .thenReturn(q);
         when(q.setParameter(anyString(), any())).thenReturn(q);
         when(q.getResultStream()).thenAnswer(inv -> policy == null ? Stream.empty() : Stream.of(policy));

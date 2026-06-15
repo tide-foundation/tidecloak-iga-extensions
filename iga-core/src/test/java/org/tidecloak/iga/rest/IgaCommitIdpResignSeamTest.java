@@ -73,6 +73,19 @@ class IgaCommitIdpResignSeamTest {
         when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
         when(jpa.getEntityManager()).thenReturn(em);
         resource = new IgaAdminResource(session, realm, auth);
+
+        // commit()'s legacy-lane multiAdmin guard consults TideAttestor.isMultiAdminMode ->
+        // resolveMode -> IgaAuthorizer.findByRealm. This is a non-tide / non-multiAdmin realm
+        // (no authorizer row), so stub the query to return no rows -> resolveMode falls to the
+        // (null) iga.attestor discriminator -> not multiAdmin -> the guard passes straight
+        // through to the commit tail under test.
+        @SuppressWarnings("unchecked")
+        TypedQuery<org.tidecloak.iga.entities.IgaAuthorizerEntity> authQ = mock(TypedQuery.class);
+        org.mockito.Mockito.lenient().when(em.createNamedQuery(eq("IgaAuthorizer.findByRealm"),
+                eq(org.tidecloak.iga.entities.IgaAuthorizerEntity.class))).thenReturn(authQ);
+        org.mockito.Mockito.lenient().when(authQ.setParameter(anyString(), any())).thenReturn(authQ);
+        org.mockito.Mockito.lenient().when(authQ.getResultStream())
+                .thenReturn(java.util.stream.Stream.empty());
     }
 
     private IgaChangeRequestEntity cr(String id, String actionType, String rowsJson) {

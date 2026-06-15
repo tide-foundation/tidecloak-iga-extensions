@@ -275,6 +275,8 @@ public class IgaReplayDispatcher {
             case "SET_REALM_CONFIG" -> replaySetRealmConfig(session, realm, rows);
             case "UPDATE_CLIENT_WEB_ORIGINS" -> replayUpdateClientWebOrigins(session, realm, rows);
             case "UPDATE_CLIENT_REDIRECT_URIS" -> replayUpdateClientRedirectUris(session, realm, rows);
+            case "UPDATE_CLIENT_PROPERTY" -> replayUpdateClientProperty(session, realm, rows);
+            case "UPDATE_CLIENT_SCOPE_PROPERTY" -> replayUpdateClientScopeProperty(session, realm, rows);
             case "ADD_REALM_DEFAULT_GROUP" -> replayAddRealmDefaultGroup(session, realm, rows);
             case "REMOVE_REALM_DEFAULT_GROUP" -> replayRemoveRealmDefaultGroup(session, realm, rows);
             case "REALM_DEFAULT_SCOPE_ADD" -> replayAddRealmDefaultScope(session, realm, rows, finalAttestation, em, setSigned);
@@ -1914,6 +1916,58 @@ public class IgaReplayDispatcher {
             ClientModel client = resolveClient(session, realm, row);
             if (client == null) continue;
             client.setRedirectUris(new java.util.LinkedHashSet<>(strList(row.get("values"))));
+        }
+    }
+
+    /**
+     * Apply a deferred token-shaping client-config property change (gap analysis
+     * F18). The client is resolved by its stable UUID (so a clientId rename still
+     * finds it). PROPERTY selects the field; VALUE is its new value as a string.
+     * Unknown PROPERTY values are logged + ignored (forward-compatible with any
+     * future captured field). The client_config attestation column is re-stamped
+     * by the commit-time stampClientConfig / multiAdmin distribution, not here.
+     */
+    private static void replayUpdateClientProperty(KeycloakSession session, RealmModel realm,
+                                                    List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            ClientModel client = resolveClient(session, realm, row);
+            if (client == null) continue;
+            String property = str(row, "PROPERTY");
+            String value = str(row, "VALUE");
+            if (property == null) continue;
+            switch (property) {
+                case "fullScopeAllowed" -> client.setFullScopeAllowed(Boolean.parseBoolean(value));
+                case "serviceAccountsEnabled" -> client.setServiceAccountsEnabled(Boolean.parseBoolean(value));
+                case "protocol" -> client.setProtocol(value);
+                case "clientId" -> { if (value != null) client.setClientId(value); }
+                default -> log.warnf("IGA replay UPDATE_CLIENT_PROPERTY: unknown property '%s' "
+                        + "for client %s — ignoring", property, client.getId());
+            }
+        }
+    }
+
+    /**
+     * Apply a deferred token-shaping client-scope-config property change (gap
+     * analysis F18): name or protocol. The client_scope_config attestation column
+     * is re-stamped by the commit-time stampClientScopeConfig / multiAdmin
+     * distribution, not here.
+     */
+    private static void replayUpdateClientScopeProperty(KeycloakSession session, RealmModel realm,
+                                                         List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String scopeId = str(row, "SCOPE_ID");
+            ClientScopeModel scope = scopeId == null ? null
+                    : session.clientScopes().getClientScopeById(realm, scopeId);
+            if (scope == null) continue;
+            String property = str(row, "PROPERTY");
+            String value = str(row, "VALUE");
+            if (property == null) continue;
+            switch (property) {
+                case "name" -> scope.setName(value);
+                case "protocol" -> scope.setProtocol(value);
+                default -> log.warnf("IGA replay UPDATE_CLIENT_SCOPE_PROPERTY: unknown property "
+                        + "'%s' for scope %s — ignoring", property, scopeId);
+            }
         }
     }
 

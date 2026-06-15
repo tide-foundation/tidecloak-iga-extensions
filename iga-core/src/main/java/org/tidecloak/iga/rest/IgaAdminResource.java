@@ -157,6 +157,66 @@ public class IgaAdminResource {
         return IgaReplayExtension.isAdoptAction(actionType);
     }
 
+    /**
+     * Security guard for the LEGACY simple authorize+commit lane: a tide-MULTIADMIN
+     * change request MUST be driven through the approval enclave
+     * ({@code POST /iga/change-requests/{id}/approve}), which collects an admin
+     * doken quorum and Policy:1-signs the carrier. The simple authorize/commit path
+     * cannot collect a doken and would otherwise stub-sign a non-producer multiAdmin
+     * CR (CREATE_*, DELETE_*, SET_REALM_ATTRIBUTE, REGEN_ADMIN_POLICY, DISABLE_IGA,
+     * OFFBOARD_REALM), letting a SINGLE manage-realm admin bypass the enclave quorum
+     * entirely. Returns a 409 CONFLICT {@link Response} when the lane must be refused,
+     * or {@code null} when the call is allowed to proceed.
+     *
+     * <p>SCOPED to tide-MULTIADMIN ONLY. firstAdmin (single-signer bootstrap, whose
+     * wizard {@code drainPendingCRs} legitimately uses authorize+commit) and Tideless
+     * ({@link org.tidecloak.iga.attestors.SimpleNameAttestor}) are NEVER refused.
+     *
+     * <p>EXEMPTIONS (these legitimately need the simple lane even in multiAdmin):
+     * <ul>
+     *   <li><b>ADOPT_*</b> CRs - toggle-on attestation of pre-existing state; they
+     *       short-circuit to threshold 1 and carry no producer quorum obligation.</li>
+     *   <li><b>vendor / system provisioning</b> ({@code IGA_VENDOR_PROVISIONING}) and
+     *       <b>replay</b> ({@code IGA_REPLAY_ACTIVE}) sessions - these internal flows
+     *       drive CRs straight through without the interactive enclave ceremony.</li>
+     * </ul>
+     */
+    private Response refuseLegacyLaneForMultiAdmin(IgaChangeRequestEntity cr) {
+        // ADOPT_* is exempt - resumable, threshold-1, no producer quorum.
+        if (isAdoptAction(cr.getActionType())) {
+            return null;
+        }
+        // The actual gate, computed CHEAPLY (authorizer-row / iga.attestor read only - no
+        // attestor-provider lookup): a tide realm whose authorizer mode is multiAdmin. A
+        // non-tide / firstAdmin realm short-circuits here, so this guard never resolves an
+        // attestor or touches getService() for them (keeps the legacy lane fully unaffected
+        // for firstAdmin/Tideless and avoids perturbing the early dependency/ordering gates).
+        if (!TideAttestor.isMultiAdminMode(session, realm)) {
+            return null;
+        }
+        // Internal provisioning / replay sessions bypass the interactive enclave.
+        if ("true".equals(session.getAttribute("IGA_REPLAY_ACTIVE"))) {
+            return null;
+        }
+        IgaChangeRequestService svc = getService();
+        if (svc != null && svc.isVendorProvisioning()) {
+            return null;
+        }
+        log.warnf("IGA legacy-lane refusal: CR %s (action=%s) on multiAdmin realm %s rejected - "
+                        + "the simple authorize/commit path cannot sign a multiAdmin change request; "
+                        + "use the approval enclave (POST .../approve).",
+                cr.getId(), cr.getActionType(), realm.getName());
+        return Response.status(Response.Status.CONFLICT)
+                .entity(Map.of(
+                        "error", "MULTIADMIN_REQUIRES_APPROVAL_ENCLAVE",
+                        "message", "multiAdmin change requests must be approved via the approval "
+                                + "enclave (POST /iga/change-requests/{id}/approve); the simple "
+                                + "authorize/commit path cannot sign a multiAdmin change request.",
+                        "changeRequestId", cr.getId(),
+                        "actionType", cr.getActionType()))
+                .build();
+    }
+
     // -------------------------------------------------------------------------
     // GET /iga/change-requests
     // -------------------------------------------------------------------------
@@ -467,6 +527,12 @@ public class IgaAdminResource {
             }
         }
 
+        // Refuse the legacy simple-attestor lane for a tide-multiAdmin CR: it cannot
+        // collect the enclave doken quorum and must go through POST .../approve.
+        Response refusal = refuseLegacyLaneForMultiAdmin(cr);
+        if (refusal != null) {
+            return refusal;
+        }
         IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
         // record() also enforces IgaScopeResolver.requireApprover() internally.
         attestor.record(session, cr, admin, approval);
@@ -514,6 +580,32 @@ public class IgaAdminResource {
                     .build();
         }
 
+        // Refuse the legacy simple commit lane for a tide-multiAdmin CR - it must be
+        // committed through the approval enclave (POST .../approve), which collects the
+        // admin doken quorum. This guard lives in the commit() ENDPOINT (not in the shared
+        // commitResolved pipeline) so the /approve flow - which also calls commitResolved
+        // AFTER the doken-quorum ceremony - is unaffected. The guard's multiAdmin check is
+        // cheap (no attestor-provider resolution), so a non-tide / firstAdmin realm passes
+        // straight through to commitResolved and its early dependency/ordering gates exactly
+        // as before.
+        Response refusal = refuseLegacyLaneForMultiAdmin(cr);
+        if (refusal != null) {
+            return refusal;
+        }
+
+        return commitResolved(cr, em, id);
+    }
+
+    /**
+     * The full commit pipeline for a CR that has already been fetched, ownership-checked,
+     * adopt-resumed, and PENDING-validated by the caller. Extracted so BOTH the standalone
+     * {@code POST .../commit} endpoint and the unified {@code POST .../approve} endpoint run
+     * the IDENTICAL dependency / REGEN-ordering / approver-role / threshold gates, the same
+     * replay + producer-column stamp + convergence + idp-settings re-sign tail. Returns the
+     * REST {@link Response} (200 with the updated representation on success, or the relevant
+     * 4xx error response from one of the gates).
+     */
+    private Response commitResolved(IgaChangeRequestEntity cr, EntityManager em, String id) {
         // Fail-closed dependency gate: refuse to commit a CR whose dependsOn
         // set contains any CR not yet APPROVED. This makes the silent-no-op of
         // a dependent replay (REALM_DEFAULT_SCOPE_ADD / ASSIGN_SCOPE applied
@@ -842,6 +934,207 @@ public class IgaAdminResource {
         resp.put("threshold", threshold);
         resp.put("readyForCommit", all.size() >= threshold);
         return Response.ok(resp).build();
+    }
+
+    // -------------------------------------------------------------------------
+    // POST /iga/change-requests/{id}/approve  — UNIFIED approval endpoint
+    //
+    // ONE endpoint the admin-UI Approvals inbox calls. The server decides which
+    // ceremony applies (it knows the attestor + firstAdmin/multiAdmin mode); the
+    // client no longer probes approval-model then 409-falls-back to authorize.
+    //
+    // Branching (server-side):
+    //   1. SimpleNameAttestor (Tideless) OR TideAttestor firstAdmin
+    //      → record the caller's authorization INLINE (same dedup + approver-role
+    //        gate as POST .../authorize), then if authCount >= threshold run the
+    //        FULL commit pipeline (commitResolved — identical to POST .../commit).
+    //        Single round-trip, no enclave, no carrier.
+    //        Response: {mode:"recorded", committed:bool, authCount, threshold,
+    //                   changeRequestId, crStatus}.
+    //
+    //   2. TideAttestor multiAdmin — inherently two-phase (the operator must sign
+    //      the Policy:1 carrier in the browser enclave). SAME endpoint, called twice:
+    //      a. NO signed doken in the body (phase 1) → build + persist the per-CR
+    //         Policy:1 carrier and return it for the enclave (what GET approval-model
+    //         did). Response: {mode:"needs-approval", requestModel:<base64>,
+    //                          authCount, threshold, changeRequestId, actionType}.
+    //      b. signed doken in the body (phase 2, body.requestModel set) → record it
+    //         toward threshold (what POST approval-model did), then if authCount >=
+    //         threshold run commitResolved. Response: {mode:"recorded", committed,
+    //         authCount, threshold, changeRequestId, crStatus}.
+    //
+    // Security semantics are IDENTICAL to the endpoints this subsumes: the
+    // multiAdmin doken verification (acceptMultiAdminApprovalModel), the Policy:1
+    // carrier (buildMultiAdminApprovalModel), the per-admin dedup, the threshold
+    // accumulation, the approver-role gate, and the full commit replay. The lower-
+    // level authorize / commit / approval-model handlers are PRESERVED (the firstAdmin
+    // wizard's drainPendingCRs + bulkAuthorize still use authorize+commit).
+    // -------------------------------------------------------------------------
+
+    @POST
+    @Path("change-requests/{id}/approve")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response approve(@PathParam("id") String id, Map<String, Object> body) {
+        auth.realm().requireManageRealm();
+
+        EntityManager em = getEm();
+        IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
+        if (cr == null || !realm.getId().equals(cr.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        // ADOPT_* CRs are resumable from CANCELLED — mirror authorize()/commit().
+        boolean isAdoptResume = isAdoptAction(cr.getActionType())
+                && "CANCELLED".equals(cr.getStatus());
+        if (isAdoptResume) {
+            cr.setStatus("PENDING");
+            cr.setResolvedAt(null);
+            log.infof("IGA approve: resuming CANCELLED ADOPT CR %s (action=%s) — flipping back to PENDING",
+                    cr.getId(), cr.getActionType());
+        }
+        if (!"PENDING".equals(cr.getStatus())) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of("error", "Change request is not in PENDING state",
+                            "crStatus", cr.getStatus()))
+                    .build();
+        }
+
+        UserModel admin = currentUser();
+        if (admin == null) {
+            return Response.status(Response.Status.UNAUTHORIZED)
+                    .entity(Map.of("error", "No authenticated admin user"))
+                    .build();
+        }
+
+        IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
+        boolean multiAdmin = (attestor instanceof TideAttestor)
+                && TideAttestor.isMultiAdminMode(session, realm);
+
+        // ---------------------------------------------------------------------
+        // multiAdmin lane — two-phase enclave ceremony over the SAME endpoint.
+        // ---------------------------------------------------------------------
+        if (multiAdmin) {
+            TideAttestor tide = (TideAttestor) attestor;
+            String requestModel = body != null ? (String) body.get("requestModel") : null;
+
+            if (requestModel == null || requestModel.isBlank()) {
+                // Phase 1: build + persist the Policy:1 carrier for the enclave.
+                try {
+                    String serializedModel = tide.buildMultiAdminApprovalModel(session, realm, cr);
+                    int threshold = tide.getThreshold(session, realm, cr);
+                    Map<String, Object> resp = new LinkedHashMap<>();
+                    resp.put("mode", "needs-approval");
+                    resp.put("changeRequestId", cr.getId());
+                    resp.put("actionType", cr.getActionType());
+                    resp.put("requestModel", serializedModel);
+                    resp.put("authCount", authCount(em, cr));
+                    resp.put("threshold", threshold);
+                    return Response.ok(resp).build();
+                } catch (RuntimeException rex) {
+                    log.warnf(rex, "IGA approve (multiAdmin phase 1): failed to build approval model for CR %s", id);
+                    return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                            .entity(Map.of("error", "APPROVAL_MODEL_BUILD_FAILED",
+                                    "message", String.valueOf(rex.getMessage())))
+                            .build();
+                }
+            }
+
+            // Phase 2: record the signed doken toward threshold.
+            try {
+                tide.acceptMultiAdminApprovalModel(session, realm, cr, requestModel, admin);
+            } catch (ForbiddenException fe) {
+                return Response.status(Response.Status.FORBIDDEN)
+                        .entity(Map.of("error", "FORBIDDEN_APPROVER_ROLE",
+                                "message", String.valueOf(fe.getMessage())))
+                        .build();
+            } catch (RuntimeException rex) {
+                log.warnf(rex, "IGA approve (multiAdmin phase 2): failed to accept approval model for CR %s", id);
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error", "APPROVAL_MODEL_INVALID",
+                                "message", String.valueOf(rex.getMessage())))
+                        .build();
+            }
+            return commitIfReady(cr, em, id, attestor);
+        }
+
+        // ---------------------------------------------------------------------
+        // firstAdmin / Tideless / simple lane — inline record, then commit if ready.
+        // Mirrors POST .../authorize (dedup + record via attestor, which enforces
+        // the approver-role gate internally).
+        // ---------------------------------------------------------------------
+        for (IgaAuthorizationEntity a : authorizationsOf(em, cr)) {
+            if (admin.getUsername() != null && admin.getUsername().equals(a.getApproval())) {
+                return Response.status(Response.Status.CONFLICT)
+                        .entity(Map.of("error", "Caller has already signed this change request"))
+                        .build();
+            }
+            if (admin.getId() != null && admin.getId().equals(a.getAuthorizedBy())) {
+                return Response.status(Response.Status.CONFLICT)
+                        .entity(Map.of("error", "Caller has already signed this change request"))
+                        .build();
+            }
+        }
+        String approval = body != null ? (String) body.get("approval") : null;
+        try {
+            // record() enforces IgaScopeResolver.requireApprover() internally.
+            attestor.record(session, cr, admin, approval);
+        } catch (ForbiddenException fe) {
+            return Response.status(Response.Status.FORBIDDEN)
+                    .entity(Map.of("error", "FORBIDDEN_APPROVER_ROLE",
+                            "message", String.valueOf(fe.getMessage())))
+                    .build();
+        }
+        return commitIfReady(cr, em, id, attestor);
+    }
+
+    /**
+     * After an authorization has been recorded toward {@code cr}, commit it IF the
+     * threshold is now met (running the full {@link #commitResolved} pipeline) and
+     * report the outcome in the unified {@code /approve} response shape. When the
+     * threshold is not yet met, return {@code committed:false} so the caller knows
+     * the approval was recorded but the change is still queued. Shared by both the
+     * firstAdmin and multiAdmin phase-2 lanes of {@link #approve}.
+     */
+    private Response commitIfReady(IgaChangeRequestEntity cr, EntityManager em, String id, IgaAttestor attestor) {
+        int authCount = authCount(em, cr);
+        int threshold = attestor.getThreshold(session, realm, cr);
+
+        boolean committed = false;
+        String crStatus = cr.getStatus();
+        if (authCount >= threshold) {
+            Response commitResp = commitResolved(cr, em, id);
+            if (commitResp.getStatus() != Response.Status.OK.getStatusCode()) {
+                // A commit gate refused (dependency / REGEN-ordering / approver-role /
+                // threshold / ENTITY_VANISHED). Surface that error verbatim: the
+                // authorization was recorded, but the change is not yet applied.
+                return commitResp;
+            }
+            committed = true;
+            IgaChangeRequestEntity post = em.find(IgaChangeRequestEntity.class, id);
+            crStatus = post != null ? post.getStatus() : "APPROVED";
+            // authCount is unchanged by commit; threshold likewise.
+        }
+
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("mode", "recorded");
+        resp.put("changeRequestId", id);
+        resp.put("committed", committed);
+        resp.put("authCount", authCount);
+        resp.put("threshold", threshold);
+        resp.put("crStatus", crStatus);
+        return Response.ok(resp).build();
+    }
+
+    /** All authorization rows currently recorded against a CR. */
+    private List<IgaAuthorizationEntity> authorizationsOf(EntityManager em, IgaChangeRequestEntity cr) {
+        return em.createNamedQuery("IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
+                .setParameter("changeRequestId", cr.getId())
+                .getResultList();
+    }
+
+    /** Count of authorizations currently recorded against a CR. */
+    private int authCount(EntityManager em, IgaChangeRequestEntity cr) {
+        return authorizationsOf(em, cr).size();
     }
 
     // -------------------------------------------------------------------------
@@ -1652,12 +1945,20 @@ public class IgaAdminResource {
     // Role Policies
     // -------------------------------------------------------------------------
 
+    // Realm-level named policy records (keyed by realm + name). The
+    // tide-realm-admin M0 admin-quorum policy uses the reserved IMMUTABLE name
+    // {@link TideAttestor#TIDE_REALM_ADMIN_POLICY_KEY}; operators may not create,
+    // rename to, or delete that name via this surface — the M0 writer owns it.
+    //
+    // LIST/FIND/READ require only authentication (reaching this admin resource
+    // already requires a valid realm-admin token); they do NOT require
+    // manage-realm. The write endpoints (POST upsert / DELETE) stay role-gated.
+
     @GET
     @Path("role-policies")
     @Produces(MediaType.APPLICATION_JSON)
     public List<IgaRolePolicyRepresentation> listRolePolicies() {
-        auth.realm().requireManageRealm();
-
+        // Read: authenticated-only (no requireManageRealm).
         return getRolePolicyService().listByRealm(realm.getId()).stream()
                 .map(this::toRolePolicyRepresentation)
                 .collect(Collectors.toList());
@@ -1667,8 +1968,7 @@ public class IgaAdminResource {
     @Path("role-policies/{id}")
     @Produces(MediaType.APPLICATION_JSON)
     public Response getRolePolicy(@PathParam("id") String id) {
-        auth.realm().requireManageRealm();
-
+        // Read: authenticated-only (no requireManageRealm).
         IgaRolePolicyEntity entity = getRolePolicyService().findById(id);
         if (entity == null || !realm.getId().equals(entity.getRealmId())) {
             return Response.status(Response.Status.NOT_FOUND).build();
@@ -1677,13 +1977,12 @@ public class IgaAdminResource {
     }
 
     @GET
-    @Path("role-policies/role/{roleId}")
+    @Path("role-policies/name/{name}")
     @Produces(MediaType.APPLICATION_JSON)
-    public Response getRolePolicyByRole(@PathParam("roleId") String roleId) {
-        auth.realm().requireManageRealm();
-
+    public Response getRolePolicyByName(@PathParam("name") String name) {
+        // Read: authenticated-only (no requireManageRealm).
         IgaRolePolicyEntity entity = getRolePolicyService()
-                .findByRealmAndRole(realm.getId(), roleId);
+                .findByRealmAndName(realm.getId(), name);
         if (entity == null) {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
@@ -1702,9 +2001,18 @@ public class IgaAdminResource {
                     .entity(Map.of("error", "Missing request body"))
                     .build();
         }
-        if (rep.getRoleId() == null || rep.getRoleId().isBlank()) {
+        if (rep.getName() == null || rep.getName().isBlank()) {
             return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "roleId is required"))
+                    .entity(Map.of("error", "name is required"))
+                    .build();
+        }
+        // The reserved M0 key is owned by the M0 writer; operators may not
+        // create or upsert a policy bearing it via this endpoint.
+        if (TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY.equals(rep.getName())) {
+            return Response.status(Response.Status.FORBIDDEN)
+                    .entity(Map.of("error", "policy name '"
+                            + TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY
+                            + "' is reserved and may not be created or modified via this endpoint"))
                     .build();
         }
         if (rep.getPolicy() == null || rep.getPolicy().isBlank()) {
@@ -1725,7 +2033,7 @@ public class IgaAdminResource {
 
         IgaRolePolicyEntity upserted = getRolePolicyService().upsert(
                 realm.getId(),
-                rep.getRoleId(),
+                rep.getName(),
                 rep.getPolicy(),
                 rep.getPolicySig(),
                 rep.getContractId(),
@@ -1737,16 +2045,24 @@ public class IgaAdminResource {
     }
 
     @DELETE
-    @Path("role-policies/role/{roleId}")
-    public Response deleteRolePolicyByRole(@PathParam("roleId") String roleId) {
+    @Path("role-policies/name/{name}")
+    public Response deleteRolePolicyByName(@PathParam("name") String name) {
         auth.realm().requireManageRealm();
 
+        // The reserved M0 key may not be deleted via this surface.
+        if (TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY.equals(name)) {
+            return Response.status(Response.Status.FORBIDDEN)
+                    .entity(Map.of("error", "policy name '"
+                            + TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY
+                            + "' is reserved and may not be deleted via this endpoint"))
+                    .build();
+        }
         IgaRolePolicyService service = getRolePolicyService();
-        IgaRolePolicyEntity existing = service.findByRealmAndRole(realm.getId(), roleId);
+        IgaRolePolicyEntity existing = service.findByRealmAndName(realm.getId(), name);
         if (existing == null) {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
-        service.deleteByRealmAndRole(realm.getId(), roleId);
+        service.deleteByRealmAndName(realm.getId(), name);
         return Response.noContent().build();
     }
 
@@ -1759,6 +2075,14 @@ public class IgaAdminResource {
         IgaRolePolicyEntity existing = service.findById(id);
         if (existing == null || !realm.getId().equals(existing.getRealmId())) {
             return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        // The reserved M0 key may not be deleted via this surface.
+        if (TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY.equals(existing.getName())) {
+            return Response.status(Response.Status.FORBIDDEN)
+                    .entity(Map.of("error", "policy name '"
+                            + TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY
+                            + "' is reserved and may not be deleted via this endpoint"))
+                    .build();
         }
         service.deleteById(id);
         return Response.noContent().build();
@@ -2261,7 +2585,7 @@ public class IgaAdminResource {
         IgaRolePolicyRepresentation rep = new IgaRolePolicyRepresentation();
         rep.setId(entity.getId());
         rep.setRealmId(entity.getRealmId());
-        rep.setRoleId(entity.getRoleId());
+        rep.setName(entity.getName());
         rep.setPolicy(entity.getPolicy());
         rep.setPolicySig(entity.getPolicySig());
         rep.setContractId(entity.getContractId());

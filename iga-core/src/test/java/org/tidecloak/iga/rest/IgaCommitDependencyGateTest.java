@@ -70,6 +70,18 @@ class IgaCommitDependencyGateTest {
         when(jpa.getEntityManager()).thenReturn(em);
         // requireManageRealm() is a void no-op on the mock (permission granted).
         resource = new IgaAdminResource(session, realm, auth);
+
+        // commit()'s legacy-lane multiAdmin guard (refuseLegacyLaneForMultiAdmin) consults
+        // TideAttestor.isMultiAdminMode -> resolveMode -> IgaAuthorizer.findByRealm. This is a
+        // NON-tide / NON-multiAdmin realm (no authorizer row), so stub the query to return
+        // no rows: resolveMode falls to the (null) iga.attestor discriminator -> not multiAdmin
+        // -> the guard passes straight through to the dependency gate under test.
+        @SuppressWarnings("unchecked")
+        TypedQuery<org.tidecloak.iga.entities.IgaAuthorizerEntity> authQ = mock(TypedQuery.class);
+        when(em.createNamedQuery(eq("IgaAuthorizer.findByRealm"),
+                eq(org.tidecloak.iga.entities.IgaAuthorizerEntity.class))).thenReturn(authQ);
+        when(authQ.setParameter(anyString(), any())).thenReturn(authQ);
+        when(authQ.getResultStream()).thenReturn(java.util.stream.Stream.empty());
     }
 
     private IgaChangeRequestEntity cr(String id, String status, List<String> dependsOn) {

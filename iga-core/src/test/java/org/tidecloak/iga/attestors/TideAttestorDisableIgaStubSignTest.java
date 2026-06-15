@@ -107,7 +107,11 @@ class TideAttestorDisableIgaStubSignTest {
     void multiAdmin_disableIga_returnsStub_andNeverProbesCapability() throws Exception {
         IgaChangeRequestEntity cr = mock(IgaChangeRequestEntity.class);
         when(cr.getId()).thenReturn("cr-disable");
-        // A carrier that would THROW if ever parsed (not valid Base64 ModelRequest bytes).
+        lenient().when(cr.getActionType()).thenReturn("DISABLE_IGA");
+        // A PRESENT carrier (a non-producer multiAdmin CR is enclave-driven; the enclave
+        // persists this doken carrier). The fail-closed sign guard reads it (presence is the
+        // legitimacy signal) but never PARSES it for a non-producer action, so a non-Base64
+        // value is fine here — it proves the carrier is never handed to ModelRequest.FromBytes.
         lenient().when(cr.getRequestModel()).thenReturn("!!!not-a-valid-carrier!!!");
 
         byte[] canonical = "disable-iga-canonical".getBytes();
@@ -115,11 +119,10 @@ class TideAttestorDisableIgaStubSignTest {
                 cr, canonical);
 
         assertTrue(sig.startsWith(TideAttestor.DUMMY_SIG_PREFIX),
-                "a non-producer-envelope multiAdmin commit (DISABLE_IGA) must return the DUMMY "
-                        + "stub, not a real Policy:1 carrier sig — was: " + sig);
+                "a non-producer-envelope multiAdmin commit (DISABLE_IGA) with a present enclave "
+                        + "carrier must return the DUMMY stub, not a real Policy:1 carrier sig — was: " + sig);
         // Never reached the capability probe → never reached the carrier sign / FromBytes.
         verify(realm, never()).getComponentsStream();
-        verify(cr, never()).getRequestModel();
     }
 
     /**
@@ -131,6 +134,7 @@ class TideAttestorDisableIgaStubSignTest {
     void multiAdmin_setRealmAttribute_returnsStub_andNeverProbesCapability() throws Exception {
         IgaChangeRequestEntity cr = mock(IgaChangeRequestEntity.class);
         when(cr.getId()).thenReturn("cr-set-realm-attr");
+        lenient().when(cr.getActionType()).thenReturn("SET_REALM_ATTRIBUTE");
         lenient().when(cr.getRequestModel()).thenReturn("!!!not-a-valid-carrier!!!");
 
         String sig = invokeSign(TideAttestor.MODE_MULTI_ADMIN, /*realCeremonyEligible*/ false,
@@ -140,7 +144,6 @@ class TideAttestorDisableIgaStubSignTest {
                 "SET_REALM_ATTRIBUTE (the reference realm-config path) must also stub at "
                         + "combineFinal time, not hit the carrier sign — was: " + sig);
         verify(realm, never()).getComponentsStream();
-        verify(cr, never()).getRequestModel();
     }
 
     /**

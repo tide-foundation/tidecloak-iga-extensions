@@ -238,6 +238,46 @@ public final class RealmAttestationExporter {
         //    emitOrganizationClosure) so the per-user closure is complete in one place.
         out.addAll(perUserUnits(em, user, realmId));
 
+        // Emit the per-group CLOSURE for the user's plain (non-organization) realm groups and
+        // every ancestor on their parent chain: the group_definition NODE (unit 6) AND the
+        // group→role BINDING edge (unit 10, group_role_mapping_set).
+        //
+        // perUserUnits (above) emits the membership edge "user ∈ admins" (unit 9 — the user's
+        // DIRECT memberships only). For each directly-joined plain group AND every ancestor this
+        // emits:
+        //   • group_definition (unit 6) — the NODE carrying parent_group_id, so the ORK can
+        //     ascend the ancestor chain (MapperContext.GrantedRoles → GroupAndAncestors walks
+        //     parent_group_id) to bind a PARENT group's roles to a child member, and so a groups
+        //     mapper has an attested source for the group name/path. Emitted UNCONDITIONALLY —
+        //     its sig lives on the always-present GroupEntity.attestation column
+        //     (UnitColumnMapping GROUP_DEFINITION), which the toggle-on convergence /
+        //     ADOPT_GROUP / CREATE_GROUP stampers populate for EVERY group — so there is no
+        //     empty-set/leaf gating (unlike the binding edge below). WITHOUT it the ancestor
+        //     group_role_mapping_set units below are ORPHANED: the ORK has the edges but no path
+        //     from the user up to them (user_group_membership_set carries only the direct group,
+        //     and there is no parent_group_id to walk), so inherited roles collapse `aud` — the
+        //     SAME bug the binding edge fixes, one level up the parent chain.
+        //   • group_role_mapping_set (unit 10) — "admins → realm-admin". Without it the ORK has
+        //     the membership and the role composition but never binds the role to the user,
+        //     collapsing `aud`. Leaf-gated: a role-less group has no GROUP_ROLE_MAPPING row to
+        //     carry the per-set sig, so emitting it empty would dangle a column-less unit that
+        //     fail-closes the login.
+        // Ancestor-inclusive (a parent group's roles reach child members); deduped across paths.
+        // Org-backing groups are handled by emitOrganizationClosure — skip them here so the
+        // split is explicit (their group_definition + group_role_mapping_set come from there).
+        Set<String> walkedPlainGroupIds = new LinkedHashSet<>();
+        user.getGroupsStream().forEach(g -> {
+            for (GroupModel grp = g; grp != null; grp = grp.getParent()) {
+                if (grp.getType() == GroupModel.Type.ORGANIZATION) continue;
+                if (!walkedPlainGroupIds.add(grp.getId())) continue;
+                // group_definition (unit 6) — NODE; always emitted (its column always exists).
+                out.add(groupDefinition(grp, realmId));
+                // group_role_mapping_set (unit 10) — binding edge; leaf-gated (see above).
+                GroupRoleMappingSetUnit unit = groupRoleMappingSet(em, grp.getId(), realmId);
+                if (!unit.roleIds().isEmpty()) out.add(unit);
+            }
+        });
+
         // The metadata seed needs the RAW stored USER_ROLE_MAPPING child set (JPQL,
         // not the effective set). Recompute it here for the role-closure seed; this is
         // the SAME query perUserUnits used for the emitted unit (byte-identical).
@@ -645,8 +685,15 @@ public final class RealmAttestationExporter {
      *       backing group the user is in. {@code type=ORGANIZATION} gates the org
      *       membership in the engine's WALK.group_to_org.</li>
      *   <li>{@code group_role_mapping_set} (unit 10) — the RAW stored
-     *       GROUP_ROLE_MAPPING child set for each visited backing group, so any
-     *       role inherited through the org group has an attested source.</li>
+     *       GROUP_ROLE_MAPPING child set for each visited backing group, LEAF-GATED
+     *       (emitted only when non-empty; the per-set sig lives on the
+     *       GroupRoleMappingEntity rows, and an org backing group normally has NONE —
+     *       emitting it empty would fail-close every member's login). NOTE: real KC
+     *       never folds org-group roles into the user's effective set
+     *       (getGroupsStream filters type=ORGANIZATION upstream of
+     *       RoleUtils.getDeepUserRoleMappings), so a non-empty set here is attested
+     *       state with no token-claim effect — kept for closure completeness pending
+     *       the ORK-contract decision (gap analysis F11).</li>
      *   <li>{@code organization_definition} (unit 17) — one unit per org the user
      *       is a MEMBER of, target = org id ({@code org_id, alias, enabled,
      *       group_id}).</li>
@@ -719,8 +766,20 @@ public final class RealmAttestationExporter {
                 }
                 out.add(groupDefinition(backing, realmId));
                 added++;
-                out.add(groupRoleMappingSet(em, groupId, realmId));
-                added++;
+                // group_role_mapping_set (unit 10) — LEAF-GATED, same rule as the plain-group
+                // walk in export() and the role_composite_children_set precedent: the per-set
+                // sig lives ON the GroupRoleMappingEntity rows ("any row"), so a backing group
+                // with zero role mappings — the NORMAL state for an org group, which is a pure
+                // membership construct hidden from the admin group APIs — has no row to carry
+                // it. Emitting it empty dangles a column-less unit: UnitColumnMapping.readStored
+                // finds no row → null → replayOrFailClosed throws → EVERY member of the org
+                // fail-closes at login. (The unconditional emission here predated the leaf-gate
+                // doctrine; see the gap analysis F9.)
+                GroupRoleMappingSetUnit orgGroupRoles = groupRoleMappingSet(em, groupId, realmId);
+                if (!orgGroupRoles.roleIds().isEmpty()) {
+                    out.add(orgGroupRoles);
+                    added++;
+                }
             }
         }
         return added;

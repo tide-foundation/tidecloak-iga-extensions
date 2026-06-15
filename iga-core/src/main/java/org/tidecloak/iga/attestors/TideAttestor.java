@@ -115,6 +115,16 @@ public class TideAttestor implements IgaAttestor {
     private static final String REALM_MANAGEMENT_CLIENT_ID = "realm-management";
     private static final String TIDE_REALM_ADMIN_ROLE = "tide-realm-admin";
 
+    /**
+     * Reserved, IMMUTABLE realm-level policy name for the M0 admin-quorum policy.
+     * The {@link IgaRolePolicyEntity} row keyed by (realm, this name) holds the
+     * tide-realm-admin admin threshold Policy bytes / signature. This is the ONLY
+     * name the M0 writer ({@link #upsertAdminPolicyRow}) may write; operators may
+     * not CREATE or RENAME a realm-level policy to this name via the REST surface,
+     * and a policy bearing this name may not be renamed at all.
+     */
+    public static final String TIDE_REALM_ADMIN_POLICY_KEY = "tide-realm-admin";
+
     /** Multiplier for the dynamic multiAdmin threshold floor. */
     private static final double THRESHOLD_PERCENTAGE = 0.7;
 
@@ -845,14 +855,16 @@ public class TideAttestor implements IgaAttestor {
         return canonicalForRegularCr(session, cr);
     }
 
-    /** Look up the tide-realm-admin {@link IgaRolePolicyEntity} (realm + role id), or null. */
+    /**
+     * Look up the tide-realm-admin M0 admin-quorum {@link IgaRolePolicyEntity},
+     * keyed by (realm, {@link #TIDE_REALM_ADMIN_POLICY_KEY}) — a realm-level named
+     * record, decoupled from the role id. Returns null if no such row exists.
+     */
     private static IgaRolePolicyEntity findTideRealmAdminPolicy(KeycloakSession session, RealmModel realm) {
-        String tideRoleId = tideRealmAdminRoleId(realm);
-        if (tideRoleId == null) return null;
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-        return em.createNamedQuery("IgaRolePolicy.findByRealmAndRole", IgaRolePolicyEntity.class)
+        return em.createNamedQuery("IgaRolePolicy.findByRealmAndName", IgaRolePolicyEntity.class)
                 .setParameter("realmId", realm.getId())
-                .setParameter("roleId", tideRoleId)
+                .setParameter("name", TIDE_REALM_ADMIN_POLICY_KEY)
                 .getResultStream().findFirst().orElse(null);
     }
 
@@ -972,6 +984,11 @@ public class TideAttestor implements IgaAttestor {
             existing.setUpdatedAt(now);
             return existing;
         }
+        // The policy STORAGE is realm-level (keyed by the reserved name), but the
+        // tide-realm-admin ROLE still defines WHO approves. Preserve the flip-gate
+        // safety: a realm with no tide-realm-admin role is not a valid M0 quorum
+        // realm, so refuse to seed the policy row (caller stays firstAdmin / throws
+        // on a capable realm) exactly as before.
         String tideRoleId = tideRealmAdminRoleId(realm);
         if (tideRoleId == null) {
             return null;
@@ -979,7 +996,7 @@ public class TideAttestor implements IgaAttestor {
         IgaRolePolicyEntity row = new IgaRolePolicyEntity();
         row.setId(java.util.UUID.randomUUID().toString());
         row.setRealmId(realm.getId());
-        row.setRoleId(tideRoleId);
+        row.setName(TIDE_REALM_ADMIN_POLICY_KEY);
         row.setPolicy(policyBody);
         row.setPolicySig(policySig);
         row.setThreshold(threshold);
@@ -2740,6 +2757,41 @@ public class TideAttestor implements IgaAttestor {
         if (MODE_MULTI_ADMIN.equals(mode) && realCeremonyEligible && isRealSigningCapable(realm)) {
             return signMultiAdminUnitViaPolicy(session, realm, cr);        // REAL Midgard.SignModel(Policy:1) over the collected-doken carrier (fail-closed)
         }
+        // SECONDARY DEFENSE (fail-closed): a tide-multiAdmin CR that reaches the stub
+        // fallback (a non-producer action such as DISABLE_IGA / SET_REALM_ATTRIBUTE /
+        // REGEN_ADMIN_POLICY / OFFBOARD_REALM, or a not-yet-capable realm) is only
+        // legitimate when the approval enclave actually ran: the two-phase /approve
+        // ceremony ALWAYS persists the Policy:1 / Offboard:1 doken carrier onto
+        // cr.getRequestModel() (buildMultiAdminApprovalModel / buildPolicyResignApprovalModel
+        // / the ragnarok Offboard:1 seed). The LEGACY simple authorize/commit lane records
+        // NO carrier, so a blank requestModel here means a single admin tried to stub-sign
+        // a multiAdmin CR without the enclave quorum - refuse it. The REST authorize/commit
+        // guard (refuseLegacyLaneForMultiAdmin) already blocks that lane at the endpoint;
+        // this is the catch-all so even a direct/internal commit (e.g. bulkAuthorize) cannot
+        // stub-bypass the quorum. EXEMPT the internal flows that drive CRs straight through:
+        // replay (IGA_REPLAY_ACTIVE), vendor/system provisioning (IGA_VENDOR_PROVISIONING),
+        // and ADOPT_* (toggle-on attestation, threshold-1, no producer quorum).
+        // Scoped to NON-producer CRs (!realCeremonyEligible): a producer CR that falls through
+        // here is a not-yet-capable dev/test realm, which legitimately stubs (the producer column
+        // is real-signed once capable). A non-producer multiAdmin CR, by contrast, is ALWAYS
+        // enclave-driven in production (it has no producer envelope, only the doken carrier the
+        // enclave persists), so a missing carrier on one is the bypass signal.
+        if (MODE_MULTI_ADMIN.equals(mode)
+                && !realCeremonyEligible
+                && !IgaReplayExtension.isAdoptAction(cr.getActionType())
+                && !"true".equals(session.getAttribute("IGA_REPLAY_ACTIVE"))
+                && !Boolean.TRUE.equals(session.getAttribute(IgaChangeRequestService.IGA_VENDOR_PROVISIONING))
+                && !"true".equals(session.getAttribute(IgaChangeRequestService.IGA_VENDOR_PROVISIONING))) {
+            String carrier = cr.getRequestModel();
+            if (carrier == null || carrier.isBlank()) {
+                throw new RuntimeException("IGA multiAdmin sign refused: CR " + cr.getId()
+                        + " (action=" + cr.getActionType() + ", realm=" + realm.getName() + ") has no "
+                        + "collected approval-enclave doken carrier - a multiAdmin change request cannot "
+                        + "be stub-signed via the simple authorize/commit path. It must be approved through "
+                        + "the approval enclave (POST /iga/change-requests/{id}/approve), which collects the "
+                        + "admin doken quorum. Fail-closed.");
+            }
+        }
         return stubSign(DUMMY_SIG_PREFIX, canonical);                     // multiAdmin (not capable / non-producer-envelope) / non-firstAdmin stub
     }
 
@@ -3851,11 +3903,12 @@ public class TideAttestor implements IgaAttestor {
         switch (action) {
             // ---- NODE units (entity exists in the POST-change model) ----
             case "CREATE_CLIENT", "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
-                 "UPDATE_CLIENT_REDIRECT_URIS" -> {
+                 "UPDATE_CLIENT_REDIRECT_URIS", "UPDATE_CLIENT_PROPERTY" -> {
                 ClientModel c = resolveClientForStamp(realm, cr);
                 if (c != null) units.add(RealmAttestationExporter.clientConfig(session, c, realmId));
             }
-            case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE" -> {
+            case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE",
+                 "UPDATE_CLIENT_SCOPE_PROPERTY" -> {
                 String scopeId = firstRowKeyOr(cr, "SCOPE_ID", "ID");
                 ClientScopeModel s = scopeId == null ? null : realm.getClientScopeById(scopeId);
                 if (s != null) units.add(RealmAttestationExporter.clientScopeConfig(s, realmId));
@@ -3905,8 +3958,20 @@ public class TideAttestor implements IgaAttestor {
                     }
                 }
             }
-            case "CREATE_ORGANIZATION", "UPDATE_ORGANIZATION" ->
-                    addIfPresent(units, buildOrganizationNodeUnit(session, realm, em, cr));
+            case "CREATE_ORGANIZATION", "UPDATE_ORGANIZATION" -> {
+                AttestationUnit orgNode = buildOrganizationNodeUnit(session, realm, em, cr);
+                addIfPresent(units, orgNode);
+                // F10: the org node OWNS its backing group's units. Frame them with the node
+                // so the carrier signs (and the distribution stamps) the SAME closure the
+                // login's emitOrganizationClosure emits — post-flip these CRs are the ONLY
+                // signer (no convergence backstop), so omitting them here leaves
+                // GroupEntity.attestation NULL and fail-closes every member's login.
+                // organization_definition.target_id == org id, so resolve the backing group
+                // from the framed node's target.
+                if (orgNode != null) {
+                    units.addAll(orgBackingGroupUnits(realm, em, orgNode.targetId()));
+                }
+            }
 
             // ---- DERIVED owner-sets ----
             case "ASSIGN_SCOPE", "REMOVE_SCOPE" -> {
@@ -3975,6 +4040,41 @@ public class TideAttestor implements IgaAttestor {
         if (org == null) return null;
         String groupId = RealmAttestationExporter.organizationBackingGroupId(em, org.getId());
         return RealmAttestationExporter.organizationDefinition(org, groupId, realm.getId());
+    }
+
+    /**
+     * The backing group's OWN producer units for an organization CR: {@code group_definition}
+     * (unit 5) ALWAYS + {@code group_role_mapping_set} (unit 9) LEAF-GATED (only when the
+     * group has a role-mapping row to carry the per-set sig) — EXACTLY the units the login's
+     * org closure ({@code RealmAttestationExporter.emitOrganizationClosure}) emits for the
+     * backing group of every org the user is a member of.
+     *
+     * <p>The org CR family is the ONLY stamp owner for these columns (gap analysis F10): the
+     * backing group is created internally by {@code JpaOrganizationProvider}, hidden from the
+     * admin group API (no CREATE_GROUP / SET_GROUP_ATTRIBUTE CR ever targets it), and
+     * deliberately excluded from the ADOPT group scanner ({@code IgaUnsignedRowScanner.groups},
+     * {@code g.type = 0} routes it to the ORGANIZATION path). Before this fix the org stampers
+     * signed only units 16+17, so the backing group's {@code GroupEntity.attestation} stayed
+     * NULL and every org member's login fail-closed on the uniform replay.
+     */
+    private static List<AttestationUnit> orgBackingGroupUnits(RealmModel realm, EntityManager em,
+                                                              String orgId) {
+        List<AttestationUnit> units = new ArrayList<>();
+        String groupId = RealmAttestationExporter.organizationBackingGroupId(em, orgId);
+        if (groupId == null) {
+            return units;
+        }
+        org.keycloak.models.GroupModel backing = realm.getGroupById(groupId);
+        if (backing == null) {
+            return units;
+        }
+        units.add(RealmAttestationExporter.groupDefinition(backing, realm.getId()));
+        GroupRoleMappingSetUnit roles =
+                RealmAttestationExporter.groupRoleMappingSet(em, groupId, realm.getId());
+        if (!roles.roleIds().isEmpty()) {
+            units.add(roles);
+        }
+        return units;
     }
 
     /** Resolve + build the {@code organization_domain_set} unit for an ORG_INVITE/RESEND CR. */
@@ -4214,9 +4314,10 @@ public class TideAttestor implements IgaAttestor {
             switch (action) {
                 // ---- NODE units: re-stamp the owner's node column with the real envelope ----
                 case "CREATE_CLIENT", "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
-                     "UPDATE_CLIENT_REDIRECT_URIS" ->
+                     "UPDATE_CLIENT_REDIRECT_URIS", "UPDATE_CLIENT_PROPERTY" ->
                         stampClientConfig(session, realm, mode, em, cr);
-                case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE" ->
+                case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE",
+                     "UPDATE_CLIENT_SCOPE_PROPERTY" ->
                         stampClientScopeConfig(session, realm, mode, em, cr);
                 case "CREATE_ROLE", "SET_ROLE_ATTRIBUTE" ->
                         stampRoleDefinition(session, realm, mode, em, cr);
@@ -4551,6 +4652,15 @@ public class TideAttestor implements IgaAttestor {
             String sig = signProducerEnvelope(session, realm, mode, env);
             em.createQuery("UPDATE OrganizationEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig).setParameter("id", org.getId()).executeUpdate();
+            // F10: the org node owns its backing group's units — sign + stamp them with the
+            // SAME real per-commit signing as the node (this live lane must not rely on the
+            // convergence backstop; see the ADOPT_REALM comment in stampProducerUnitColumns).
+            // group_definition always; group_role_mapping_set leaf-gated — exactly the login's
+            // org-closure emission.
+            for (AttestationUnit unit : orgBackingGroupUnits(realm, em, org.getId())) {
+                String unitSig = signProducerEnvelope(session, realm, mode, unit.serialize());
+                UnitColumnMapping.stamp(em, unit, unitSig);
+            }
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
 
@@ -4787,12 +4897,20 @@ public class TideAttestor implements IgaAttestor {
             if (orgs == null) return;
             OrganizationModel org = orgs.getById(orgId);
             if (org == null) return;
-            // organization_definition (16), organization_domain_set (17).
+            // organization_definition (16), organization_domain_set (17), and the backing
+            // group's own units (F10: group_definition always, group_role_mapping_set
+            // leaf-gated). The org node is the ONLY stamp owner for the backing group —
+            // the ADOPT group scanner routes type=ORGANIZATION groups here by design, so
+            // ADOPT_GROUP never covers them. Stub now (like the node units); the toggle-on
+            // convergence upgrades member-surfaced units to the real 64B sig.
             String groupId = RealmAttestationExporter.organizationBackingGroupId(em, org.getId());
             signAndStampUnit(session, realm, mode, em,
                     RealmAttestationExporter.organizationDefinition(org, groupId, realm.getId()));
             signAndStampUnit(session, realm, mode, em,
                     RealmAttestationExporter.organizationDomainSet(org, realm.getId()));
+            for (AttestationUnit unit : orgBackingGroupUnits(realm, em, org.getId())) {
+                signAndStampUnit(session, realm, mode, em, unit);
+            }
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
 

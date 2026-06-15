@@ -1,14 +1,14 @@
 package org.tidecloak.iga.rest;
 
 /**
- * JSON representation of an IGA role policy (per-role Midgard policy bytes /
- * signature combined with Forseti contract binding).
+ * JSON representation of an IGA realm-level named policy (Midgard policy bytes /
+ * signature combined with Forseti contract binding). Keyed by (realmId, name).
  */
 public class IgaRolePolicyRepresentation {
 
     private String id;
     private String realmId;
-    private String roleId;
+    private String name;
     private String policy;
     private String policySig;
     private String contractId;
@@ -25,8 +25,8 @@ public class IgaRolePolicyRepresentation {
     public String getRealmId() { return realmId; }
     public void setRealmId(String realmId) { this.realmId = realmId; }
 
-    public String getRoleId() { return roleId; }
-    public void setRoleId(String roleId) { this.roleId = roleId; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
 
     public String getPolicy() { return policy; }
     public void setPolicy(String policy) { this.policy = policy; }
