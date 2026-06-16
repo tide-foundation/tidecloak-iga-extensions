@@ -1237,12 +1237,16 @@ public class IgaReplayDispatcher {
             if (clientUuid != null || clientId != null) {
                 ClientModel client = resolveClient(session, realm, row);
                 if (client != null) {
+                    assertNoEqualPriorityClaimConflict(session, client, model,
+                            "client '" + client.getClientId() + "'");
                     client.addProtocolMapper(model);
                     added = true;
                 }
             } else if (scopeId != null) {
                 ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
                 if (scope != null) {
+                    assertNoEqualPriorityClaimConflict(session, scope, model,
+                            "client scope '" + scope.getName() + "'");
                     scope.addProtocolMapper(model);
                     added = true;
                 }
@@ -1264,6 +1268,58 @@ public class IgaReplayDispatcher {
                         .executeUpdate();
             }
         }
+    }
+
+    /**
+     * Layer-C config-time guard for the equal-priority duplicate-claim collision. Refuses to
+     * commit a protocol-mapper ADD/UPDATE that would leave {@code container} with TWO active
+     * access-token mappers writing the SAME {@code claim.name} at EQUAL priority. Keycloak orders
+     * mappers by provider priority only ({@code ProtocolMapperUtils.compare ->
+     * ProtocolMapper.getPriority}) over a HashSet, so such a pair is non-deterministic and the
+     * Tide ORK rejects the sign at PreSign. Throwing here (BEFORE the model write, so nothing
+     * persists and the CR stays PENDING) lets {@code IgaAdminResource.commitResolved} return a
+     * clean 409 the admin can fix before the next login, instead of an opaque token-endpoint 500.
+     *
+     * <p>Conservative by design: only the configurable-claim family is gated (a {@code claim.name}
+     * on the access-token surface). Fixed-claim mappers and other surfaces are left to the ORK as
+     * today (no behaviour change, never a false positive on a token KC would sign).</p>
+     */
+    private static void assertNoEqualPriorityClaimConflict(
+            KeycloakSession session, org.keycloak.models.ProtocolMapperContainerModel container,
+            org.keycloak.models.ProtocolMapperModel candidate, String ownerLabel) {
+        String claim = accessTokenClaimName(candidate);
+        if (claim == null) {
+            return;
+        }
+        int priority = mapperPriority(session, candidate);
+        container.getProtocolMappersStream()
+                .filter(m -> !java.util.Objects.equals(m.getId(), candidate.getId()))
+                .filter(m -> claim.equals(accessTokenClaimName(m)) && mapperPriority(session, m) == priority)
+                .findFirst()
+                .ifPresent(other -> {
+                    throw new IgaMapperConflictException(ownerLabel, claim, priority,
+                            other.getName(), candidate.getName());
+                });
+    }
+
+    /** The access-token claim name a mapper writes, or {@code null} if it is not a {@code claim.name} access-token writer. */
+    private static String accessTokenClaimName(org.keycloak.models.ProtocolMapperModel m) {
+        java.util.Map<String, String> cfg = m.getConfig();
+        if (cfg == null || !"true".equalsIgnoreCase(cfg.get("access.token.claim"))) {
+            return null;
+        }
+        String claim = cfg.get("claim.name");
+        return (claim == null || claim.isBlank()) ? null : claim;
+    }
+
+    /** Mapper ordering priority — provider-level, identical to the key {@code ProtocolMapperUtils.compare} sorts by. */
+    private static int mapperPriority(KeycloakSession session, org.keycloak.models.ProtocolMapperModel m) {
+        if (m.getProtocolMapper() == null) {
+            return 0;
+        }
+        org.keycloak.provider.ProviderFactory<?> pf = session.getKeycloakSessionFactory()
+                .getProviderFactory(org.keycloak.protocol.ProtocolMapper.class, m.getProtocolMapper());
+        return (pf instanceof org.keycloak.protocol.ProtocolMapper pm) ? pm.getPriority() : 0;
     }
 
     // -------------------------------------------------------------------------
@@ -2191,10 +2247,18 @@ public class IgaReplayDispatcher {
             }
             if (clientUuid != null || clientId != null) {
                 ClientModel client = resolveClient(session, realm, row);
-                if (client != null) client.updateProtocolMapper(mapper);
+                if (client != null) {
+                    assertNoEqualPriorityClaimConflict(session, client, mapper,
+                            "client '" + client.getClientId() + "'");
+                    client.updateProtocolMapper(mapper);
+                }
             } else if (scopeId != null) {
                 ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
-                if (scope != null) scope.updateProtocolMapper(mapper);
+                if (scope != null) {
+                    assertNoEqualPriorityClaimConflict(session, scope, mapper,
+                            "client scope '" + scope.getName() + "'");
+                    scope.updateProtocolMapper(mapper);
+                }
             }
             if (sig != null && !sig.isEmpty()) {
                 em.createQuery("UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.id = :id")

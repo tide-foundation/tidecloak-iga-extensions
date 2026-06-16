@@ -346,6 +346,26 @@ public final class RealmAttestationExporter {
             out.add(clientConfig(session, owner, realmId));
         }
 
+        // 9b) client_config for every client named as an EXPLICIT audience by an
+        //     oidc-audience-mapper on the request client or an active scope. The ORK's
+        //     AudienceClaimMapper resolves included.client.audience against the ClientConfig
+        //     units shipped with the sign request; if the target's client_config is ABSENT it
+        //     DROPS the audience, leaving the token's aud entry with no attested source →
+        //     "token claim 'aud' does not match attested value". The client-role owner fan-out
+        //     above (and the metadata-seed account/audience-resolve fix) cover role-driven aud;
+        //     this covers the explicit audience-mapper path, which otherwise never contributes
+        //     its target's client_config. Skip the request client and any already-emitted owner.
+        for (String targetUuid : audienceMapperTargetClientUuids(client, assigned, realm)) {
+            if (targetUuid.equals(client.getId()) || ownerClientUuids.contains(targetUuid)) {
+                continue;
+            }
+            ClientModel audTarget = realm.getClientById(targetUuid);
+            if (audTarget == null) {
+                continue; // unresolvable → the ORK drops the audience; nothing to attest
+            }
+            out.add(clientConfig(session, audTarget, realmId));
+        }
+
         // 10) scope_role_allowlist_set — the client's scope→role allowlist
         //     (parent_type=client, from SCOPE_MAPPING). Emitted explicitly even when
         //     empty (the ork distinguishes "no entries" from "missing"); only the
@@ -1315,6 +1335,51 @@ public final class RealmAttestationExporter {
         });
         ids.sort(java.util.Comparator.naturalOrder());
         return ids;
+    }
+
+    /** Factory id of the explicit audience mapper ({@code oidc-audience-mapper}). */
+    private static final String AUDIENCE_MAPPER_FACTORY = "oidc-audience-mapper";
+    /** Config key whose value is the clientId added as an {@code aud} entry. */
+    private static final String AUDIENCE_MAPPER_CLIENT_KEY = "included.client.audience";
+
+    /**
+     * Client UUIDs named as an EXPLICIT audience by an {@code oidc-audience-mapper} on the
+     * request client or any active scope. The ORK's {@code AudienceClaimMapper} resolves the
+     * mapper's {@code included.client.audience} against the {@code ClientConfig} units shipped
+     * with the sign request; if the target's {@code client_config} is absent the audience is
+     * dropped and the token's {@code aud} entry has no attested source. Resolve the configured
+     * clientId to its UUID so {@link #export} can emit that client's {@code client_config}
+     * alongside the client-role owner fan-out. A mapper using {@code included.custom.audience}
+     * (a literal string, no client) has no {@code client_config} and is skipped here. Collected
+     * from the same surfaces {@link #emitAllActiveMappers} emits over so the login closure and
+     * the attested set stay in agreement.
+     */
+    private static Set<String> audienceMapperTargetClientUuids(
+            ClientModel client, Map<String, ClientScopeModel> assigned, RealmModel realm) {
+        Set<String> targets = new LinkedHashSet<>();
+        collectAudienceTargets(client.getProtocolMappersStream(), realm, targets);
+        for (ClientScopeModel scope : assigned.values()) {
+            collectAudienceTargets(scope.getProtocolMappersStream(), realm, targets);
+        }
+        return targets;
+    }
+
+    private static void collectAudienceTargets(Stream<ProtocolMapperModel> mappers,
+                                               RealmModel realm, Set<String> targets) {
+        mappers.forEach(pm -> {
+            if (!AUDIENCE_MAPPER_FACTORY.equals(pm.getProtocolMapper())) {
+                return;
+            }
+            Map<String, String> cfg = pm.getConfig();
+            String audClientId = cfg == null ? null : cfg.get(AUDIENCE_MAPPER_CLIENT_KEY);
+            if (audClientId == null || audClientId.isBlank()) {
+                return;
+            }
+            ClientModel target = realm.getClientByClientId(audClientId);
+            if (target != null) {
+                targets.add(target.getId());
+            }
+        });
     }
 
     /** Build a {@code client_mapper_set} (unit 12) for a client, deterministic + shared. */

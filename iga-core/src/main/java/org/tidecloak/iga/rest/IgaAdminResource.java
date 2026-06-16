@@ -42,6 +42,7 @@ import org.tidecloak.iga.providers.IgaLicensingDraftService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
 import org.tidecloak.iga.replay.EntityVanishedException;
+import org.tidecloak.iga.replay.IgaMapperConflictException;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
 import org.tidecloak.iga.replay.IgaReplayExtension;
 import org.tidecloak.iga.attestors.IgaAttestor;
@@ -723,6 +724,24 @@ public class IgaAdminResource {
                             "entityType", ev.getEntityType(),
                             "entityId", ev.getEntityId(),
                             "realmId", ev.getRealmId()))
+                    .build();
+        } catch (IgaMapperConflictException mc) {
+            // Layer-C guard (IgaReplayDispatcher): a governed ADD/UPDATE_PROTOCOL_MAPPER would
+            // leave the client/scope with two active access-token mappers writing the same claim
+            // at equal priority — a non-deterministic collision the Tide ORK rejects at PreSign
+            // (today an opaque token-endpoint 500, after the bad config already committed). The
+            // guard fired BEFORE the model write, so nothing persisted and the CR stays PENDING;
+            // surface a clean 409 the admin can fix (distinct priority, or drop the duplicate)
+            // before the next login.
+            log.infof("IGA commit refused (mapper conflict, CR %s): %s", cr.getId(), mc.getMessage());
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of(
+                            "error", "MAPPER_CLAIM_CONFLICT",
+                            "owner", mc.getOwner(),
+                            "claim", mc.getClaim(),
+                            "priority", mc.getPriority(),
+                            "mappers", List.of(mc.getMapperA(), mc.getMapperB()),
+                            "message", mc.getMessage()))
                     .build();
         }
 
