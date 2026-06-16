@@ -10,6 +10,8 @@ import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
+import org.keycloak.services.managers.ClientManager;
+import org.keycloak.services.managers.RealmManager;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 
 import jakarta.persistence.EntityManager;
@@ -528,6 +530,18 @@ public class IgaReplayDispatcher {
                 rep.setId(id);
                 if (clientId != null) rep.setClientId(clientId);
                 org.keycloak.models.utils.RepresentationToModel.createClient(session, realm, rep);
+                // Materialize the service-account-<clientId> user when the replayed client has
+                // serviceAccountsEnabled. RepresentationToModel.createClient sets the flag but does
+                // NOT create the SA user, so without this a governed cc client's client_credentials
+                // grant fails (401 user_not_found). enableServiceAccount is on the
+                // isOnClientCreationPath() StackWalker suppression list, so no spurious CREATE_USER
+                // CR is raised under IGA_REPLAY_ACTIVE; the getServiceAccount == null guard makes it
+                // idempotent on replay re-runs.
+                ClientModel created = realm.getClientById(id);
+                if (created != null && created.isServiceAccountsEnabled()
+                        && session.users().getServiceAccount(created) == null) {
+                    new ClientManager(new RealmManager(session)).enableServiceAccount(created);
+                }
             } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
                 throw new RuntimeException(
                         "Failed to deserialize REP_JSON for CREATE_CLIENT replay (CR row id=" + id + ")", e);
@@ -1993,7 +2007,18 @@ public class IgaReplayDispatcher {
             if (property == null) continue;
             switch (property) {
                 case "fullScopeAllowed" -> client.setFullScopeAllowed(Boolean.parseBoolean(value));
-                case "serviceAccountsEnabled" -> client.setServiceAccountsEnabled(Boolean.parseBoolean(value));
+                case "serviceAccountsEnabled" -> {
+                    boolean enabled = Boolean.parseBoolean(value);
+                    client.setServiceAccountsEnabled(enabled);
+                    // On a true-flip, materialize the SA user (same guarded block as the
+                    // CREATE_CLIENT replay path) so a governed cc grant has a backing user.
+                    // setServiceAccountsEnabled(true) flips the flag but does not create the user.
+                    // On a false-flip, mirror stock Keycloak: leave the existing SA user and its
+                    // attestation in place (no teardown).
+                    if (enabled && session.users().getServiceAccount(client) == null) {
+                        new ClientManager(new RealmManager(session)).enableServiceAccount(client);
+                    }
+                }
                 case "protocol" -> client.setProtocol(value);
                 case "clientId" -> { if (value != null) client.setClientId(value); }
                 default -> log.warnf("IGA replay UPDATE_CLIENT_PROPERTY: unknown property '%s' "
