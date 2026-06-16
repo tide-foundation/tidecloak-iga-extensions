@@ -1549,7 +1549,27 @@ public class IgaReplayDispatcher {
         String roleId = str(row, "ROLE_ID");
         org.keycloak.models.UserModel user = session.users().getUserById(realm, userId);
         RoleModel role = session.roles().getRoleById(realm, roleId);
-        if (user != null && role != null) user.grantRole(role);
+        if (user != null && role != null) {
+            // LOCKOUT SAFEGUARD (commit/replay re-check — defense-in-depth, HIGH).
+            // This runs under IGA_REPLAY_ACTIVE, which makes IgaUserAdapter.isIgaActive()
+            // return false and short-circuit user.grantRole(role) straight to super BEFORE
+            // the capture-time guard. So a GRANT_ROLES change request that bypassed the
+            // capture-time guard (e.g. filed PENDING before that guard shipped) would, at
+            // commit, replay a tide-realm-admin grant onto an ineligible (uncommitted /
+            // non-Tide-linked) user with no validation — re-opening the permanent admin
+            // lockout. Re-validate the SAME committed+Tide-linked predicate here (shared
+            // TideRealmAdminGuard — identical rule, no drift). On failure assertEligible
+            // throws ErrorResponse.error(..., 400) BEFORE user.grantRole, so nothing is
+            // applied; the exception propagates out of replay() → commitResolved, rolls
+            // back the commit tx (the CR stays PENDING) and is mapped to a 400. A legit
+            // grant (target already committed+linked) passes and commits normally. Scope:
+            // ONLY a direct tide-realm-admin grant — every other GRANT_ROLES row is a no-op
+            // here (isTideRealmAdminRole == false) and applies unchanged.
+            if (org.tidecloak.iga.services.TideRealmAdminGuard.isTideRealmAdminRole(realm, role)) {
+                org.tidecloak.iga.services.TideRealmAdminGuard.assertEligible(session, realm, user);
+            }
+            user.grantRole(role);
+        }
     }
 
     private static void revokeRoleDirect(KeycloakSession session, RealmModel realm, Map<String, Object> row) {
