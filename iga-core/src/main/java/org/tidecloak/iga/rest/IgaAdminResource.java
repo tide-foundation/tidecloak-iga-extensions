@@ -985,9 +985,18 @@ public class IgaAdminResource {
     // Security semantics are IDENTICAL to the endpoints this subsumes: the
     // multiAdmin doken verification (acceptMultiAdminApprovalModel), the Policy:1
     // carrier (buildMultiAdminApprovalModel), the per-admin dedup, the threshold
-    // accumulation, the approver-role gate, and the full commit replay. The lower-
-    // level authorize / commit / approval-model handlers are PRESERVED (the firstAdmin
-    // wizard's drainPendingCRs + bulkAuthorize still use authorize+commit).
+    // accumulation, the approver-role gate, and the full commit replay.
+    //
+    // This is now the SOLE admin-UI lane for authorizing AND committing a CR: both
+    // admin UIs (the tide-console SPA and the keycloak-IGA console) drive every CR
+    // authorize/commit through POST .../approve. The lower-level POST .../authorize,
+    // POST .../commit and the approval-model handlers are PRESERVED only as
+    // deprecated / internally-guarded endpoints (server-side reuse such as
+    // bulkAuthorize's per-CR commit gate, plus back-compat) — no admin-UI caller
+    // hits them any more. Because /approve is the sole lane, the firstAdmin/simple
+    // case where THIS admin already signed an at-quorum-but-blocked-then-unblocked
+    // CR must still be able to drive the commit gate from /approve (it has no
+    // legacy /commit fall-back to lean on): see the alreadySigned fall-through below.
     // -------------------------------------------------------------------------
 
     @POST
@@ -1080,28 +1089,41 @@ public class IgaAdminResource {
         // firstAdmin / Tideless / simple lane — inline record, then commit if ready.
         // Mirrors POST .../authorize (dedup + record via attestor, which enforces
         // the approver-role gate internally).
+        //
+        // Dedup, but NOT a hard 409: if THIS admin has already signed the CR there
+        // is nothing new to record, yet the CR may be at-quorum-but-not-yet-applied
+        // (e.g. it met threshold while BLOCKED by a dependency and is now unblocked).
+        // In that case the caller needs the commit gate RE-RUN, not a 409. So when
+        // the caller already signed we SKIP the re-record and fall straight through
+        // to commitIfReady, which idempotently re-checks threshold + the dependency /
+        // REGEN-ordering / approver-role gates and applies the change if it is now
+        // committable (and is a clean no-op — committed:false — if it is not). This
+        // is what lets the SPA's "Commit" affordance drive a once-blocked firstAdmin
+        // CR to apply through /approve alone, so it never has to fall back to the
+        // legacy POST .../commit lane.
         // ---------------------------------------------------------------------
+        boolean alreadySigned = false;
         for (IgaAuthorizationEntity a : authorizationsOf(em, cr)) {
             if (admin.getUsername() != null && admin.getUsername().equals(a.getApproval())) {
-                return Response.status(Response.Status.CONFLICT)
-                        .entity(Map.of("error", "Caller has already signed this change request"))
-                        .build();
+                alreadySigned = true;
+                break;
             }
             if (admin.getId() != null && admin.getId().equals(a.getAuthorizedBy())) {
-                return Response.status(Response.Status.CONFLICT)
-                        .entity(Map.of("error", "Caller has already signed this change request"))
-                        .build();
+                alreadySigned = true;
+                break;
             }
         }
-        String approval = body != null ? (String) body.get("approval") : null;
-        try {
-            // record() enforces IgaScopeResolver.requireApprover() internally.
-            attestor.record(session, cr, admin, approval);
-        } catch (ForbiddenException fe) {
-            return Response.status(Response.Status.FORBIDDEN)
-                    .entity(Map.of("error", "FORBIDDEN_APPROVER_ROLE",
-                            "message", String.valueOf(fe.getMessage())))
-                    .build();
+        if (!alreadySigned) {
+            String approval = body != null ? (String) body.get("approval") : null;
+            try {
+                // record() enforces IgaScopeResolver.requireApprover() internally.
+                attestor.record(session, cr, admin, approval);
+            } catch (ForbiddenException fe) {
+                return Response.status(Response.Status.FORBIDDEN)
+                        .entity(Map.of("error", "FORBIDDEN_APPROVER_ROLE",
+                                "message", String.valueOf(fe.getMessage())))
+                        .build();
+            }
         }
         return commitIfReady(cr, em, id, attestor);
     }
