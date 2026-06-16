@@ -696,8 +696,14 @@ public class IgaChangeRequestService {
 
         // 1. Drop every existing row whose identity key is being replaced
         //    wholesale (multi-value / removal writes pass the full new set).
+        //    rowIdentityKey(r) can be null for a row that carries no identity
+        //    key; a null is never "being replaced" AND `Set.of(...).contains(null)`
+        //    throws NPE on an immutable set, so guard the null before the lookup.
         if (namesToReplace != null && !namesToReplace.isEmpty()) {
-            merged.removeIf(r -> namesToReplace.contains(rowIdentityKey(r)));
+            merged.removeIf(r -> {
+                String rk = rowIdentityKey(r);
+                return rk != null && namesToReplace.contains(rk);
+            });
         }
 
         // 2. Merge each new row: replace a single existing row with the same
@@ -731,15 +737,25 @@ public class IgaChangeRequestService {
 
     /**
      * Identity key for coalescing: a CR row keys on {@code NAME} (attribute
-     * rows) or {@code key} (realm-config rows). Returns {@code null} when the
-     * row carries neither, in which case the row is treated as un-mergeable
-     * (always appended).
+     * rows), {@code key} (realm-config rows) or {@code PROPERTY}
+     * (property-keyed rows, e.g. {@code UPDATE_CLIENT_SCOPE_PROPERTY} /
+     * {@code UPDATE_CLIENT_PROPERTY} whose identity is the property name, not a
+     * NAME column). Returns {@code null} when the row carries none of these, in
+     * which case the row is treated as un-mergeable (always appended).
+     *
+     * <p>The {@code PROPERTY} branch is what makes a property-keyed coalesce
+     * (e.g. {@code captureScopeProperty} passing {@code Set.of(property)} as
+     * {@code namesToReplace}) merge/replace by property name instead of
+     * (a) NPEing on {@code Set.of(...).contains(null)} and (b) appending a
+     * duplicate row for the same property on a same-request follow-up write.</p>
      */
     private static String rowIdentityKey(Map<String, Object> row) {
         Object name = row.get("NAME");
         if (name != null) return name.toString();
         Object key = row.get("key");
         if (key != null) return key.toString();
+        Object property = row.get("PROPERTY");
+        if (property != null) return property.toString();
         return null;
     }
 

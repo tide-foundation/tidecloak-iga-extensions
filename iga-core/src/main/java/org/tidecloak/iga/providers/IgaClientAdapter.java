@@ -504,6 +504,13 @@ public class IgaClientAdapter extends ClientAdapter {
             super.setAttribute(name, value);
             return;
         }
+        // No-op guard (see setWebOrigins): KC's updateClientProperties re-applies
+        // every attribute in the PUT body unconditionally. An attribute already at
+        // this value must NOT spawn a phantom SET_CLIENT_ATTRIBUTE CR. Suppress
+        // when the value is unchanged.
+        if (java.util.Objects.equals(value, super.getAttribute(name))) {
+            return;
+        }
         IgaChangeRequestService service = getService();
         String clientUuid = getId();
         checkNoPendingCr(service, clientUuid);
@@ -520,6 +527,11 @@ public class IgaClientAdapter extends ClientAdapter {
     public void removeAttribute(String name) {
         if (!isIgaActive()) {
             super.removeAttribute(name);
+            return;
+        }
+        // No-op guard: removing an attribute that is already absent is not a
+        // change; suppress the phantom REMOVE_CLIENT_ATTRIBUTE CR.
+        if (super.getAttribute(name) == null) {
             return;
         }
         IgaChangeRequestService service = getService();
@@ -674,6 +686,16 @@ public class IgaClientAdapter extends ClientAdapter {
             super.setWebOrigins(webOrigins);
             return;
         }
+        // No-op guard: KC's RepresentationToModel.updateClient calls every setter
+        // unconditionally on EVERY PUT (updateProperty never diffs) with the
+        // first-non-null of (rep value, current model value). An attributes-only
+        // PUT therefore re-applies the CURRENT web-origins, which must NOT spawn a
+        // phantom UPDATE_CLIENT_WEB_ORIGINS CR (that is the governed-create regen
+        // 409 — un-committable standing CRs that never converge). Suppress when
+        // the incoming set equals the persisted set.
+        if (sameStringSet(webOrigins, super.getWebOrigins())) {
+            return;
+        }
         IgaChangeRequestService service = getService();
         String clientUuid = getId();
         Map<String, Object> row = new LinkedHashMap<>();
@@ -690,6 +712,12 @@ public class IgaClientAdapter extends ClientAdapter {
             super.setRedirectUris(redirectUris);
             return;
         }
+        // No-op guard (see setWebOrigins): an attributes-only PUT re-applies the
+        // current redirect-uris; suppress the phantom UPDATE_CLIENT_REDIRECT_URIS
+        // CR when unchanged.
+        if (sameStringSet(redirectUris, super.getRedirectUris())) {
+            return;
+        }
         IgaChangeRequestService service = getService();
         String clientUuid = getId();
         Map<String, Object> row = new LinkedHashMap<>();
@@ -698,6 +726,19 @@ public class IgaClientAdapter extends ClientAdapter {
         row.put("values", redirectUris == null ? new ArrayList<String>() : new ArrayList<>(redirectUris));
         service.create(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_REDIRECT_URIS",
                 List.of(row), null);
+    }
+
+    /**
+     * Null-tolerant set equality used by the no-op guards: a null set and an
+     * empty set are treated as equal (KC's {@code CollectionUtil.collectionToSet}
+     * normalises a null collection to an empty set before the setter, and the
+     * model's getters return an empty set rather than null), so re-applying the
+     * current value never looks like a change.
+     */
+    private static boolean sameStringSet(Set<String> a, Set<String> b) {
+        java.util.Set<String> sa = a == null ? java.util.Collections.emptySet() : a;
+        java.util.Set<String> sb = b == null ? java.util.Collections.emptySet() : b;
+        return sa.equals(sb);
     }
 
     // -------------------------------------------------------------------------
@@ -725,6 +766,11 @@ public class IgaClientAdapter extends ClientAdapter {
             super.setFullScopeAllowed(value);
             return;
         }
+        // No-op guard (see setWebOrigins): KC re-applies the current value on
+        // every PUT; suppress the phantom UPDATE_CLIENT_PROPERTY CR when unchanged.
+        if (value == super.isFullScopeAllowed()) {
+            return;
+        }
         captureClientProperty("fullScopeAllowed", String.valueOf(value));
     }
 
@@ -732,6 +778,9 @@ public class IgaClientAdapter extends ClientAdapter {
     public void setServiceAccountsEnabled(boolean value) {
         if (!isIgaActive()) {
             super.setServiceAccountsEnabled(value);
+            return;
+        }
+        if (value == super.isServiceAccountsEnabled()) {
             return;
         }
         captureClientProperty("serviceAccountsEnabled", String.valueOf(value));
@@ -743,6 +792,9 @@ public class IgaClientAdapter extends ClientAdapter {
             super.setProtocol(protocol);
             return;
         }
+        if (java.util.Objects.equals(protocol, super.getProtocol())) {
+            return;
+        }
         captureClientProperty("protocol", protocol);
     }
 
@@ -750,6 +802,9 @@ public class IgaClientAdapter extends ClientAdapter {
     public void setClientId(String clientId) {
         if (!isIgaActive()) {
             super.setClientId(clientId);
+            return;
+        }
+        if (java.util.Objects.equals(clientId, super.getClientId())) {
             return;
         }
         // getClientId() here is the OLD human id (display only); the stable
