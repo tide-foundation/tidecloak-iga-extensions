@@ -218,6 +218,75 @@ public class IgaAdminResource {
                 .build();
     }
 
+    /**
+     * Quorum gate for the DECOUPLED {@code POST /iga/change-requests/{id}/commit}
+     * endpoint on a tide-MULTIADMIN realm. Approve (sign) and commit (apply) are now
+     * two separate explicit actions: the per-admin dokens are collected via prior
+     * {@code POST .../approve} calls (each persists an {@link IgaAuthorizationEntity}
+     * on the CR), and {@code .../commit} applies the CR.
+     *
+     * <p>Unlike {@link #refuseLegacyLaneForMultiAdmin} (which the deprecated
+     * {@code .../authorize} path still uses to refuse multiAdmin OUTRIGHT), this guard
+     * ALLOWS the apply when the quorum has genuinely been collected
+     * ({@code authCount >= threshold}) and refuses with {@code 412 QUORUM_NOT_MET}
+     * ONLY when it has not. This preserves the original security property — a single
+     * manage-realm admin can never stub-commit PAST the quorum — because the apply is
+     * gated on a real quorum of recorded approver dokens (and {@link #commitResolved}
+     * re-verifies the same threshold internally, defense in depth). It NEVER records a
+     * new signature, so {@code .../commit} cannot self-approve.
+     *
+     * <p>Same cheap multiAdmin short-circuit + same exemptions as
+     * {@link #refuseLegacyLaneForMultiAdmin}: ADOPT_* (threshold-1, resumable),
+     * {@code IGA_REPLAY_ACTIVE} and vendor-provisioning sessions pass through, and a
+     * non-tide / firstAdmin / Tideless realm returns {@code null} immediately (its
+     * commitResolved threshold gate is the floor). Returns a {@link Response} when the
+     * commit must be refused, or {@code null} when it may proceed.
+     */
+    private Response refuseSubQuorumCommitForMultiAdmin(IgaChangeRequestEntity cr, EntityManager em) {
+        // ADOPT_* is exempt — resumable, threshold-1, no producer quorum.
+        if (isAdoptAction(cr.getActionType())) {
+            return null;
+        }
+        // Only tide-multiAdmin CRs are quorum-gated here; firstAdmin / Tideless /
+        // non-tide fall through to commitResolved's own threshold gate unchanged.
+        if (!TideAttestor.isMultiAdminMode(session, realm)) {
+            return null;
+        }
+        // Internal provisioning / replay sessions bypass the interactive enclave.
+        if ("true".equals(session.getAttribute("IGA_REPLAY_ACTIVE"))) {
+            return null;
+        }
+        IgaChangeRequestService svc = getService();
+        if (svc != null && svc.isVendorProvisioning()) {
+            return null;
+        }
+        // The real gate: refuse to APPLY a multiAdmin CR that has not yet reached its
+        // doken quorum. commitResolved re-checks this same threshold internally, but
+        // we surface a clear, action-specific 412 here so the operator knows to drive
+        // more approvals through POST .../approve before committing.
+        IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
+        int threshold = attestor.getThreshold(session, realm, cr);
+        int authCount = authCount(em, cr);
+        if (authCount < threshold) {
+            int needed = threshold - authCount;
+            log.infof("IGA commit refused (QUORUM_NOT_MET): CR %s (action=%s) on multiAdmin realm %s "
+                            + "has %d/%d approvals — approve to quorum before committing.",
+                    cr.getId(), cr.getActionType(), realm.getName(), authCount, threshold);
+            return Response.status(Response.Status.PRECONDITION_FAILED)
+                    .entity(Map.of(
+                            "error", "QUORUM_NOT_MET",
+                            "message", "Approve to quorum before committing — need " + needed
+                                    + " more approval" + (needed == 1 ? "" : "s")
+                                    + " (POST /iga/change-requests/{id}/approve).",
+                            "threshold", threshold,
+                            "authCount", authCount,
+                            "changeRequestId", cr.getId(),
+                            "actionType", cr.getActionType()))
+                    .build();
+        }
+        return null;
+    }
+
     // -------------------------------------------------------------------------
     // GET /iga/change-requests
     // -------------------------------------------------------------------------
@@ -581,20 +650,42 @@ public class IgaAdminResource {
                     .build();
         }
 
-        // Refuse the legacy simple commit lane for a tide-multiAdmin CR - it must be
-        // committed through the approval enclave (POST .../approve), which collects the
-        // admin doken quorum. This guard lives in the commit() ENDPOINT (not in the shared
-        // commitResolved pipeline) so the /approve flow - which also calls commitResolved
-        // AFTER the doken-quorum ceremony - is unaffected. The guard's multiAdmin check is
-        // cheap (no attestor-provider resolution), so a non-tide / firstAdmin realm passes
-        // straight through to commitResolved and its early dependency/ordering gates exactly
-        // as before.
-        Response refusal = refuseLegacyLaneForMultiAdmin(cr);
+        // Quorum gate for a tide-multiAdmin CR. Approve and commit are now TWO
+        // SEPARATE explicit actions: the dokens are collected via prior POST
+        // .../approve calls (each persists an IgaAuthorization row on this CR), and
+        // .../commit APPLIES the already-quorum-approved CR. We therefore no longer
+        // refuse multiAdmin outright — instead we refuse ONLY when the quorum has
+        // NOT yet been collected (412 QUORUM_NOT_MET). When quorum IS met, the apply
+        // is allowed: commitResolved re-verifies threshold (defense in depth) and
+        // drives the per-unit-doken -> VVK signing from the persisted approvals, so
+        // .../commit cannot bypass or self-approve the quorum. ADOPT_*, replay and
+        // vendor-provisioning sessions are exempt (handled inside the guard, threshold
+        // 1 / internal flows). A non-tide / firstAdmin realm passes straight through
+        // to commitResolved exactly as before (the guard's multiAdmin check is cheap).
+        Response refusal = refuseSubQuorumCommitForMultiAdmin(cr, em);
         if (refusal != null) {
             return refusal;
         }
 
-        return commitResolved(cr, em, id);
+        // Apply-only: commitResolved re-verifies the dependency / REGEN-ordering /
+        // approver-role / threshold gates (defense in depth) and replays the CR.
+        // On success it returns 200 with the CR representation; surface a top-level
+        // {committed:true, status:"APPROVED", ...} envelope per the decoupled contract
+        // (the representation is retained under "changeRequest" for back-compat).
+        Response commitResp = commitResolved(cr, em, id);
+        if (commitResp.getStatus() != Response.Status.OK.getStatusCode()) {
+            // A gate refused (DEPENDENCY_NOT_MET / PENDING_ADMIN_GRANTS / threshold /
+            // FORBIDDEN_APPROVER_ROLE / ENTITY_VANISHED / MAPPER_CLAIM_CONFLICT) —
+            // surface verbatim. Nothing was applied; the CR stays PENDING.
+            return commitResp;
+        }
+        IgaChangeRequestEntity applied = em.find(IgaChangeRequestEntity.class, id);
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("committed", true);
+        resp.put("changeRequestId", id);
+        resp.put("status", applied != null ? applied.getStatus() : "APPROVED");
+        resp.put("changeRequest", commitResp.getEntity());
+        return Response.ok(resp).build();
     }
 
     /**
@@ -1067,7 +1158,12 @@ public class IgaAdminResource {
                 }
             }
 
-            // Phase 2: record the signed doken toward threshold.
+            // Phase 2: record the signed doken toward threshold. SIGN ONLY — the
+            // doken is persisted on the CR's authorization entities; the actual
+            // VVK-signed apply (commitResolved) is now a SEPARATE explicit step
+            // via POST .../commit once the quorum is collected. An already-signed
+            // caller is a NO-OP (acceptMultiAdminApprovalModel dedups once-per-admin
+            // and returns false) — we just report current status, not a 409.
             try {
                 tide.acceptMultiAdminApprovalModel(session, realm, cr, requestModel, admin);
             } catch (ForbiddenException fe) {
@@ -1082,25 +1178,26 @@ public class IgaAdminResource {
                                 "message", String.valueOf(rex.getMessage())))
                         .build();
             }
-            return commitIfReady(cr, em, id, attestor);
+            return signOnlyStatus(cr, em, id, attestor);
         }
 
         // ---------------------------------------------------------------------
-        // firstAdmin / Tideless / simple lane — inline record, then commit if ready.
-        // Mirrors POST .../authorize (dedup + record via attestor, which enforces
-        // the approver-role gate internally).
+        // firstAdmin / Tideless / simple lane — SIGN ONLY (record the caller's
+        // approval; do NOT apply). Mirrors POST .../authorize (dedup + record via
+        // attestor, which enforces the approver-role gate internally).
+        //
+        // Approve is now PURELY the signing step: it records the caller's VRK /
+        // approver-role authorization toward threshold and returns status. The
+        // actual apply (commitResolved) is a SEPARATE explicit step the operator
+        // drives via POST .../commit once the quorum is collected ("the commit
+        // button should only do commit"). REMOVED: the commitIfReady auto-commit
+        // tail AND the e141cb2 already-signed-fall-through-to-commit — commit is no
+        // longer approve's job.
         //
         // Dedup, but NOT a hard 409: if THIS admin has already signed the CR there
-        // is nothing new to record, yet the CR may be at-quorum-but-not-yet-applied
-        // (e.g. it met threshold while BLOCKED by a dependency and is now unblocked).
-        // In that case the caller needs the commit gate RE-RUN, not a 409. So when
-        // the caller already signed we SKIP the re-record and fall straight through
-        // to commitIfReady, which idempotently re-checks threshold + the dependency /
-        // REGEN-ordering / approver-role gates and applies the change if it is now
-        // committable (and is a clean no-op — committed:false — if it is not). This
-        // is what lets the SPA's "Commit" affordance drive a once-blocked firstAdmin
-        // CR to apply through /approve alone, so it never has to fall back to the
-        // legacy POST .../commit lane.
+        // is nothing new to record. We make it a clean NO-OP and just return the
+        // current status (still PENDING + readyToCommit) rather than a 409, so a
+        // re-approve is idempotent. The operator commits via POST .../commit.
         // ---------------------------------------------------------------------
         boolean alreadySigned = false;
         for (IgaAuthorizationEntity a : authorizationsOf(em, cr)) {
@@ -1125,44 +1222,38 @@ public class IgaAdminResource {
                         .build();
             }
         }
-        return commitIfReady(cr, em, id, attestor);
+        return signOnlyStatus(cr, em, id, attestor);
     }
 
     /**
-     * After an authorization has been recorded toward {@code cr}, commit it IF the
-     * threshold is now met (running the full {@link #commitResolved} pipeline) and
-     * report the outcome in the unified {@code /approve} response shape. When the
-     * threshold is not yet met, return {@code committed:false} so the caller knows
-     * the approval was recorded but the change is still queued. Shared by both the
-     * firstAdmin and multiAdmin phase-2 lanes of {@link #approve}.
+     * After an authorization has been recorded toward {@code cr} (or recognised as
+     * already recorded — a no-op re-approve), report the SIGN-ONLY status in the
+     * unified {@code /approve} response shape. {@code /approve} NEVER applies the CR:
+     * the apply is a SEPARATE explicit step via {@code POST .../commit}. Shared by
+     * both the firstAdmin/simple and multiAdmin phase-2 lanes of {@link #approve}.
+     *
+     * <p>Response: {@code {mode:"recorded", changeRequestId, authCount, threshold,
+     * readyToCommit:(authCount>=threshold), status:<CR status, still PENDING>}}.
+     * {@code readyToCommit} tells the UI the quorum is met and the operator may now
+     * press Commit; the CR remains PENDING until {@code POST .../commit} applies it.
      */
-    private Response commitIfReady(IgaChangeRequestEntity cr, EntityManager em, String id, IgaAttestor attestor) {
+    private Response signOnlyStatus(IgaChangeRequestEntity cr, EntityManager em, String id, IgaAttestor attestor) {
         int authCount = authCount(em, cr);
         int threshold = attestor.getThreshold(session, realm, cr);
 
-        boolean committed = false;
-        String crStatus = cr.getStatus();
-        if (authCount >= threshold) {
-            Response commitResp = commitResolved(cr, em, id);
-            if (commitResp.getStatus() != Response.Status.OK.getStatusCode()) {
-                // A commit gate refused (dependency / REGEN-ordering / approver-role /
-                // threshold / ENTITY_VANISHED). Surface that error verbatim: the
-                // authorization was recorded, but the change is not yet applied.
-                return commitResp;
-            }
-            committed = true;
-            IgaChangeRequestEntity post = em.find(IgaChangeRequestEntity.class, id);
-            crStatus = post != null ? post.getStatus() : "APPROVED";
-            // authCount is unchanged by commit; threshold likewise.
-        }
+        // Re-read the CR so the reported status reflects any adopt-resume PENDING flip
+        // performed earlier in approve(); the apply itself is deferred to /commit, so
+        // this is still PENDING here.
+        IgaChangeRequestEntity post = em.find(IgaChangeRequestEntity.class, id);
+        String crStatus = post != null ? post.getStatus() : cr.getStatus();
 
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("mode", "recorded");
         resp.put("changeRequestId", id);
-        resp.put("committed", committed);
         resp.put("authCount", authCount);
         resp.put("threshold", threshold);
-        resp.put("crStatus", crStatus);
+        resp.put("readyToCommit", authCount >= threshold);
+        resp.put("status", crStatus);
         return Response.ok(resp).build();
     }
 
