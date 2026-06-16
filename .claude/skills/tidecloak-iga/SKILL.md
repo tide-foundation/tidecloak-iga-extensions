@@ -279,9 +279,14 @@ hinges on it.)
 - **Tide seam** = set realm `iga.attestor=tide` → the dummy `TideAttestor` (set-signing with
   a SHA-256 placeholder). Capture / CR model / authorize-commit gates are identical.
 - **`IGA_ROLE_POLICY` table + `/iga/role-policies`** (`entities/IgaRolePolicyEntity.java`:
-  `POLICY`, `POLICY_SIG`, `CONTRACT_ID`, `THRESHOLD`, …) are stored but **NOT enforced** — the
+  `NAME`, `POLICY`, `POLICY_SIG`, `CONTRACT_ID`, `THRESHOLD`, …) are stored but **NOT enforced** — the
   Tide-mode scaffold, not a second threshold source. Do NOT wire `IGA_ROLE_POLICY.THRESHOLD`
-  into the Tideless gate.
+  into the Tideless gate. These are **realm-level named policies** keyed by `(REALM_ID, NAME)`,
+  NOT per-role (the `ROLE_ID` column was dropped in `iga-changelog-2.11.0.xml`). The reserved
+  immutable name `tide-realm-admin` (`TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY`) is the M0 admin
+  policy. REST: list / get-by-id / get-by-name (`/iga/role-policies/name/{name}`) are
+  authenticated-only; the `POST` upsert and the deletes are `manage-realm`-gated and refuse the
+  reserved `tide-realm-admin` name with `403`. See `docs/qea-iga-api.md` section 8.
 - **`first-admin-sign-preview`** (`POST /iga/change-requests/{id}/first-admin-sign-preview`,
   `IgaFirstAdminSignPreviewService`) resolves a CR to its full signing payload and **logs** it
   — a non-cryptographic preview. This is the documented integration point where a future Tide

@@ -509,7 +509,7 @@ approver role.
 
 ---
 
-## 8. Role policies and the admin (M0) policy
+## 8. Realm-level policies and the admin (M0) policy
 
 The change-request lifecycle above is the primary surface of this API. There is a
 secondary, smaller side register, the **role-policies** store, that the earlier sections
@@ -517,14 +517,26 @@ deliberately left out. This section documents it and, in particular, how an exte
 application now fetches the realm's admin (M0) policy after the old unauthenticated
 endpoint was removed.
 
-### 8.1 What role policies are
+> Naming note: the REST path is historically `role-policies` and the table is still
+> physically named `IGA_ROLE_POLICY`, but these records are **no longer tied to a role**.
+> They are **realm-level named policies** keyed by `(REALM_ID, NAME)`. The old per-role
+> keying (`REALM_ID, ROLE_ID`) and the `roleId` field were dropped (see the
+> `iga-changelog-2.11.0.xml` migration: add `NAME`, backfill existing rows to
+> `tide-realm-admin`, drop the `ROLE_ID` column and its old unique constraint, add the
+> `UNIQUE (REALM_ID, NAME)` constraint `UQ_IGA_REALM_POLICY_REALM_NAME`). Wherever older
+> notes mention a `role/{roleId}` lookup or a `roleId` field, they are stale.
 
-Role policies live in the **`IGA_ROLE_POLICY`** table (entity `IgaRolePolicyEntity`).
-Each row binds a realm role id to a serialized policy blob plus its signature and some
-metadata. The row that matters in practice is the one keyed to the **`tide-realm-admin`**
-role: that is the realm's **admin (M0) policy**, a `GenericResourceAccessThresholdRole:1`
-threshold policy that the multiAdmin (Tide) signing path uses when producing the real
-signed approval over an admin change.
+### 8.1 What realm-level policies are
+
+Policies live in the **`IGA_ROLE_POLICY`** table (entity `IgaRolePolicyEntity`). Each row
+is a **realm-level named policy** (a serialized policy blob plus its signature and some
+metadata) identified by a `NAME` that is unique within the realm. The name that matters
+in practice is the **reserved immutable** name **`tide-realm-admin`** (the constant
+`TideAttestor.TIDE_REALM_ADMIN_POLICY_KEY = "tide-realm-admin"`): that row is the realm's
+**admin (M0) policy**, a `GenericResourceAccessThresholdRole:1` threshold policy that the
+multiAdmin (Tide) signing path uses when producing the real signed approval over an admin
+change. The `tide-realm-admin` ROLE still defines WHO approves, but the policy STORAGE no
+longer hangs off any role id.
 
 Be precise about its role:
 
@@ -536,86 +548,103 @@ Be precise about its role:
 - In **multiAdmin (Tide)** mode the `tide-realm-admin` row is the live M0 admin policy
   the signing path consumes. Internally the attestor reads it via
   `TideAttestor.readM0AdminPolicyBytes(session, realm)`, which looks up the
-  `tide-realm-admin` row through the `IgaRolePolicy.findByRealmAndRole` named query and
+  `tide-realm-admin` row through the `IgaRolePolicy.findByRealmAndName` named query and
   Base64-decodes the `POLICY` column back to the raw `Policy` bytes. That is the
-  canonical in-process accessor for the M0 policy.
+  canonical in-process accessor for the M0 policy. The M0 writer creates / stores this
+  row on the realm at enclave-open / commit time; operators do not create it through the
+  add endpoint below.
 
-### 8.2 The role-policies GET endpoints
+### 8.2 Auth model: authenticated-only reads, manage-realm writes
 
-Three read endpoints expose the store. All three require an **admin access token with
-`manage-realm`** (each calls `auth.realm().requireManageRealm()` first).
+The policy endpoints split into two auth tiers (all paths are under
+`/admin/realms/{realm}/iga/`):
 
-| Method and path | What it does |
-|---|---|
-| `GET /iga/role-policies` | List every role policy in the realm. Returns a JSON array of role-policy representations. |
-| `GET /iga/role-policies/{id}` | Fetch one role policy by its policy row id. `404` if unknown or in another realm. |
-| `GET /iga/role-policies/role/{roleId}` | Fetch the role policy bound to a given role id. `404` if none. This is the one you use for the admin policy: pass the `tide-realm-admin` role id. |
+- **Reads (list / get-by-id / get-by-name)** require only **authentication**. They do
+  **not** call `requireManageRealm()`; simply reaching this admin resource already
+  requires a valid realm-admin token. There is no role requirement.
+- **Writes (add/upsert and the deletes)** are **role-gated to `manage-realm`**: each
+  calls `auth.realm().requireManageRealm()` first.
+
+There is **no separate commit endpoint** for policies, and **no endpoint gated on the
+`tide-realm-admin` role itself**. The `tide-realm-admin` NAME is enforced as
+**immutability** (see 8.4), not as an auth tier.
+
+### 8.3 The policy read endpoints (authenticated-only)
+
+| Method and path | Auth | What it does |
+|---|---|---|
+| `GET /iga/role-policies` | authenticated-only | List every realm-level policy in the realm. Returns a JSON array of policy representations. |
+| `GET /iga/role-policies/{id}` | authenticated-only | Fetch one policy by its row id. `404` if unknown or in another realm. |
+| `GET /iga/role-policies/name/{name}` | authenticated-only | Fetch the policy with the given `NAME`. `404` if none. This is the one you use for the admin policy: pass the reserved name `tide-realm-admin`. |
 
 Each returns an `IgaRolePolicyRepresentation` (built by
 `IgaAdminResource.toRolePolicyRepresentation`) with these fields:
 
 | Field | Meaning |
 |---|---|
-| `id` | role-policy row id |
+| `id` | policy row id |
 | `realmId` | owning realm id |
-| `roleId` | the role this policy is bound to (for the admin policy, the `tide-realm-admin` role id) |
+| `name` | the policy's realm-unique name (for the admin policy, `tide-realm-admin`) |
 | `policy` | Base64 of the serialized `Policy` bytes |
-| `policySig` | signature over the policy |
-| `contractId` | policy contract tag; for the admin policy this is `GenericResourceAccessThresholdRole:1` |
+| `policySig` | signature over the policy (max 512 chars) |
+| `contractId` | policy contract / Forseti-contract binding; for the admin policy this is `GenericResourceAccessThresholdRole:1` |
 | `approvalType` | approval contract type |
 | `executionType` | execution contract type |
 | `threshold` | the policy's own threshold value (scaffolding; not the Tideless commit gate) |
 | `policyData` | optional auxiliary policy data |
 | `createdAt`, `updatedAt` | provenance |
 
-### 8.3 Fetching the admin (M0) policy from an external application
+### 8.4 The policy write endpoints (manage-realm)
+
+A policy is normally created / stored on the realm by the M0 writer when it is
+created or committed. The **add (upsert) endpoint** exists for the case where creation
+happens elsewhere (an external caller that already holds the signed policy bytes). The
+write endpoints are role-gated to `manage-realm`.
+
+| Method and path | Auth | What it does |
+|---|---|---|
+| `POST /iga/role-policies` | manage-realm | Add or upsert a realm-level policy by `name` (upsert keyed on `(realmId, name)`). Body is an `IgaRolePolicyRepresentation`; `name`, `policy`, and `policySig` are required (`policySig` max 512 chars). Returns the stored representation. |
+| `DELETE /iga/role-policies/{id}` | manage-realm | Delete a policy by row id. `404` if unknown or in another realm. `204` on success. |
+| `DELETE /iga/role-policies/name/{name}` | manage-realm | Delete a policy by `NAME`. `404` if none. `204` on success. |
+
+**Reserved-name immutability.** The reserved `tide-realm-admin` name is owned by the M0
+writer. Attempting to add/upsert OR delete a policy bearing that name through any of the
+three write endpoints returns **`403 Forbidden`** with an error explaining the name is
+reserved. The reads in 8.3 may still fetch the `tide-realm-admin` policy normally; only
+the writes refuse it.
+
+### 8.5 Fetching the admin (M0) policy from an external application
 
 There used to be an unauthenticated, non-admin endpoint for the admin policy:
 `GET /realms/{realm}/tide-policy-resources/admin-policy` (the `PolicyResourceProvider`,
 which now exists only in `tidecloak-iga-extensions-old`). **That endpoint is removed.**
-It required no token; the replacement does. An external application now reads the admin
-policy through the admin-authenticated `role-policies/role/{roleId}` endpoint, which
-means it needs a `manage-realm` admin token and has to resolve the `tide-realm-admin`
-role id first.
+It required no token; the replacement requires a valid (authenticated) realm-admin token
+but does **not** require `manage-realm`, because the policy reads are authenticated-only.
+An external application now reads the admin policy through the by-name read endpoint,
+passing the reserved name `tide-realm-admin` directly (no role-id resolution is needed any
+more, since policies are no longer keyed by role):
 
-`tide-realm-admin` is a **client role on the `realm-management` client**, so resolving
-its id is a two-step lookup. The flow:
-
-1. Get a `manage-realm` admin token (a normal client-credentials or password grant
-   against the realm that holds your admin user, as in section 2).
-2. Resolve the `realm-management` client's UUID:
-   `GET /admin/realms/{realm}/clients?clientId=realm-management` and read the `id` of the
-   single returned client.
-3. Resolve the `tide-realm-admin` client role:
-   `GET /admin/realms/{realm}/clients/{uuid}/roles/tide-realm-admin` and read its `id`.
-4. Fetch the policy:
-   `GET /admin/realms/{realm}/iga/role-policies/role/{roleId}` with that role id.
-5. The `policy` field of the response is Base64 of the `Policy` bytes. Deserialize it the
+1. Get an admin token (a normal client-credentials or password grant against the realm
+   that holds your admin user, as in section 2). Any authenticated realm-admin token
+   works for the read; `manage-realm` is not required.
+2. Fetch the policy by its reserved name:
+   `GET /admin/realms/{realm}/iga/role-policies/name/tide-realm-admin`.
+3. The `policy` field of the response is Base64 of the `Policy` bytes. Deserialize it the
    same way the old client code did: `Policy.from(base64ToBytes(policy))`.
 
 ```bash
-# 1. $TOKEN is a manage-realm admin bearer token; $KC and $REALM as in section 2.
+# 1. $TOKEN is an authenticated realm-admin bearer token; $KC and $REALM as in section 2.
 
-# 2. realm-management client UUID
-RM_UUID=$(curl -s -H "Authorization: Bearer $TOKEN" \
-  "$KC/admin/realms/$REALM/clients?clientId=realm-management" \
-  | jq -r '.[0].id')
-
-# 3. tide-realm-admin client-role id
-ADMIN_ROLE_ID=$(curl -s -H "Authorization: Bearer $TOKEN" \
-  "$KC/admin/realms/$REALM/clients/$RM_UUID/roles/tide-realm-admin" \
-  | jq -r '.id')
-
-# 4. the admin (M0) role policy
+# 2. the admin (M0) policy, fetched directly by its reserved name
 curl -s -H "Authorization: Bearer $TOKEN" \
-  "$KC/admin/realms/$REALM/iga/role-policies/role/$ADMIN_ROLE_ID"
-# -> { "roleId":"<tide-realm-admin id>",
+  "$KC/admin/realms/$REALM/iga/role-policies/name/tide-realm-admin"
+# -> { "name":"tide-realm-admin",
 #      "contractId":"GenericResourceAccessThresholdRole:1",
 #      "policy":"<base64 Policy bytes>", "policySig":"...", ... }
 ```
 
 ```java
-// 5. deserialize the policy field, exactly as the old client did:
+// 3. deserialize the policy field, exactly as the old client did:
 String policyB64 = rolePolicy.getPolicy();      // from the JSON response
 Policy adminPolicy = Policy.from(base64ToBytes(policyB64));
 ```
@@ -623,12 +652,12 @@ Policy adminPolicy = Policy.from(base64ToBytes(policyB64));
 The M0 admin policy is also reachable through a different surface already documented in
 this guide: it is embedded as a segment of the multiAdmin approval-model carrier returned
 by `GET /iga/change-requests/{id}/approval-model`. See section 3.5 for that flow rather
-than re-deriving it here; use the `role-policies/role/{roleId}` endpoint above when you
-want the policy on its own, outside an in-flight approval ceremony.
+than re-deriving it here; use the `role-policies/name/tide-realm-admin` endpoint above when
+you want the policy on its own, outside an in-flight approval ceremony.
 
-### 8.4 No unauthenticated public endpoint
+### 8.6 No unauthenticated public endpoint
 
 There is currently **no** unauthenticated public endpoint for the admin policy. The old
 `tide-policy-resources/admin-policy` route is gone, and every replacement path described
-above requires a `manage-realm` admin token. An external application that needs the admin
-policy must hold admin credentials for the target realm.
+above requires at least an authenticated realm-admin token. An external application that
+needs the admin policy must hold admin credentials for the target realm.
