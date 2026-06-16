@@ -3905,7 +3905,21 @@ public class TideAttestor implements IgaAttestor {
             case "CREATE_CLIENT", "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
                  "UPDATE_CLIENT_REDIRECT_URIS", "UPDATE_CLIENT_PROPERTY" -> {
                 ClientModel c = resolveClientForStamp(realm, cr);
-                if (c != null) units.add(RealmAttestationExporter.clientConfig(session, c, realmId));
+                if (c != null) {
+                    units.add(RealmAttestationExporter.clientConfig(session, c, realmId));
+                    // Part C: post-flip the multiAdmin carrier is the ONLY signer of the SA user's
+                    // user_identity, so frame its per-user units alongside the clientConfig node.
+                    // Mirrors the CREATE_ORGANIZATION backing-group precedent below. perUserUnits
+                    // self-gates the role/group set units (empty-set skip), so a roleless SA user
+                    // frames just its user_identity — byte-identical to the Part-A-materialized SA
+                    // user the scratch-replay framing pass and the live distribution pass both see.
+                    if (c.isServiceAccountsEnabled()) {
+                        UserModel sa = session.users().getServiceAccount(c);
+                        if (sa != null) {
+                            units.addAll(new RealmAttestationExporter().perUserUnits(em, sa, realmId));
+                        }
+                    }
+                }
             }
             case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE",
                  "UPDATE_CLIENT_SCOPE_PROPERTY" -> {
@@ -4314,8 +4328,13 @@ public class TideAttestor implements IgaAttestor {
             switch (action) {
                 // ---- NODE units: re-stamp the owner's node column with the real envelope ----
                 case "CREATE_CLIENT", "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
-                     "UPDATE_CLIENT_REDIRECT_URIS", "UPDATE_CLIENT_PROPERTY" ->
+                     "UPDATE_CLIENT_REDIRECT_URIS", "UPDATE_CLIENT_PROPERTY" -> {
                         stampClientConfig(session, realm, mode, em, cr);
+                        // Part B3: also stamp the SA user's user_identity when the client has
+                        // serviceAccountsEnabled. Self-gates (no-op for non-SA clients / SA-less
+                        // UPDATE rows), so safe to call unconditionally for every client CR.
+                        stampServiceAccountUserIfPresent(session, realm, mode, em, cr);
+                }
                 case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE",
                      "UPDATE_CLIENT_SCOPE_PROPERTY" ->
                         stampClientScopeConfig(session, realm, mode, em, cr);
@@ -4618,9 +4637,21 @@ public class TideAttestor implements IgaAttestor {
 
     private void stampUserIdentity(KeycloakSession session, RealmModel realm, String mode,
                                    EntityManager em, IgaChangeRequestEntity cr) {
+        // CREATE_USER keys on ID; SET_USER_ATTRIBUTE keys on USER_ID.
+        String userId = firstRowKeyOr(cr, "USER_ID", "ID");
+        stampUserIdentityFor(session, realm, mode, em, userId);
+    }
+
+    /**
+     * Stamp the {@code user_identity} attestation column for an arbitrary user id. This is the
+     * extracted, reusable body of {@link #stampUserIdentity} — the CR-driven path delegates here
+     * after resolving the user id, and the service-account path (Part B2) calls it with the SA
+     * user's id. Zero duplicated signing/stamping logic. Same fail-closed wrapping as the other
+     * stampers (rethrowIfFailClosed) so a non-fail-closed runtime is swallowed identically.
+     */
+    void stampUserIdentityFor(KeycloakSession session, RealmModel realm, String mode,
+                              EntityManager em, String userId) {
         try {
-            // CREATE_USER keys on ID; SET_USER_ATTRIBUTE keys on USER_ID.
-            String userId = firstRowKeyOr(cr, "USER_ID", "ID");
             if (userId == null) return;
             UserModel user = session.users().getUserById(realm, userId);
             if (user == null) return;
@@ -4629,6 +4660,22 @@ public class TideAttestor implements IgaAttestor {
             em.createQuery("UPDATE UserEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig).setParameter("id", userId).executeUpdate();
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    /**
+     * Part B2: when the CR's target client has serviceAccountsEnabled, stamp the
+     * {@code service-account-<clientId>} user's {@code user_identity} column too. Self-gates on
+     * the SA flag and on getServiceAccount != null, so it is a no-op for non-SA clients and for
+     * UPDATE rows that did not touch the SA. Resolves the client via the SAME resolver
+     * stampClientConfig uses.
+     */
+    void stampServiceAccountUserIfPresent(KeycloakSession session, RealmModel realm, String mode,
+                                          EntityManager em, IgaChangeRequestEntity cr) {
+        ClientModel c = resolveClientForStamp(realm, cr);
+        if (c != null && c.isServiceAccountsEnabled()) {
+            UserModel sa = session.users().getServiceAccount(c);
+            if (sa != null) stampUserIdentityFor(session, realm, mode, em, sa.getId());
+        }
     }
 
     private void stampOrganizationNode(KeycloakSession session, RealmModel realm, String mode,

@@ -10,6 +10,8 @@ import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
+import org.keycloak.services.managers.ClientManager;
+import org.keycloak.services.managers.RealmManager;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 
 import jakarta.persistence.EntityManager;
@@ -528,6 +530,18 @@ public class IgaReplayDispatcher {
                 rep.setId(id);
                 if (clientId != null) rep.setClientId(clientId);
                 org.keycloak.models.utils.RepresentationToModel.createClient(session, realm, rep);
+                // Materialize the service-account-<clientId> user when the replayed client has
+                // serviceAccountsEnabled. RepresentationToModel.createClient sets the flag but does
+                // NOT create the SA user, so without this a governed cc client's client_credentials
+                // grant fails (401 user_not_found). enableServiceAccount is on the
+                // isOnClientCreationPath() StackWalker suppression list, so no spurious CREATE_USER
+                // CR is raised under IGA_REPLAY_ACTIVE; the getServiceAccount == null guard makes it
+                // idempotent on replay re-runs.
+                ClientModel created = realm.getClientById(id);
+                if (created != null && created.isServiceAccountsEnabled()
+                        && session.users().getServiceAccount(created) == null) {
+                    new ClientManager(new RealmManager(session)).enableServiceAccount(created);
+                }
             } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
                 throw new RuntimeException(
                         "Failed to deserialize REP_JSON for CREATE_CLIENT replay (CR row id=" + id + ")", e);
@@ -1237,12 +1251,16 @@ public class IgaReplayDispatcher {
             if (clientUuid != null || clientId != null) {
                 ClientModel client = resolveClient(session, realm, row);
                 if (client != null) {
+                    assertNoEqualPriorityClaimConflict(session, client, model,
+                            "client '" + client.getClientId() + "'");
                     client.addProtocolMapper(model);
                     added = true;
                 }
             } else if (scopeId != null) {
                 ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
                 if (scope != null) {
+                    assertNoEqualPriorityClaimConflict(session, scope, model,
+                            "client scope '" + scope.getName() + "'");
                     scope.addProtocolMapper(model);
                     added = true;
                 }
@@ -1264,6 +1282,58 @@ public class IgaReplayDispatcher {
                         .executeUpdate();
             }
         }
+    }
+
+    /**
+     * Layer-C config-time guard for the equal-priority duplicate-claim collision. Refuses to
+     * commit a protocol-mapper ADD/UPDATE that would leave {@code container} with TWO active
+     * access-token mappers writing the SAME {@code claim.name} at EQUAL priority. Keycloak orders
+     * mappers by provider priority only ({@code ProtocolMapperUtils.compare ->
+     * ProtocolMapper.getPriority}) over a HashSet, so such a pair is non-deterministic and the
+     * Tide ORK rejects the sign at PreSign. Throwing here (BEFORE the model write, so nothing
+     * persists and the CR stays PENDING) lets {@code IgaAdminResource.commitResolved} return a
+     * clean 409 the admin can fix before the next login, instead of an opaque token-endpoint 500.
+     *
+     * <p>Conservative by design: only the configurable-claim family is gated (a {@code claim.name}
+     * on the access-token surface). Fixed-claim mappers and other surfaces are left to the ORK as
+     * today (no behaviour change, never a false positive on a token KC would sign).</p>
+     */
+    private static void assertNoEqualPriorityClaimConflict(
+            KeycloakSession session, org.keycloak.models.ProtocolMapperContainerModel container,
+            org.keycloak.models.ProtocolMapperModel candidate, String ownerLabel) {
+        String claim = accessTokenClaimName(candidate);
+        if (claim == null) {
+            return;
+        }
+        int priority = mapperPriority(session, candidate);
+        container.getProtocolMappersStream()
+                .filter(m -> !java.util.Objects.equals(m.getId(), candidate.getId()))
+                .filter(m -> claim.equals(accessTokenClaimName(m)) && mapperPriority(session, m) == priority)
+                .findFirst()
+                .ifPresent(other -> {
+                    throw new IgaMapperConflictException(ownerLabel, claim, priority,
+                            other.getName(), candidate.getName());
+                });
+    }
+
+    /** The access-token claim name a mapper writes, or {@code null} if it is not a {@code claim.name} access-token writer. */
+    private static String accessTokenClaimName(org.keycloak.models.ProtocolMapperModel m) {
+        java.util.Map<String, String> cfg = m.getConfig();
+        if (cfg == null || !"true".equalsIgnoreCase(cfg.get("access.token.claim"))) {
+            return null;
+        }
+        String claim = cfg.get("claim.name");
+        return (claim == null || claim.isBlank()) ? null : claim;
+    }
+
+    /** Mapper ordering priority — provider-level, identical to the key {@code ProtocolMapperUtils.compare} sorts by. */
+    private static int mapperPriority(KeycloakSession session, org.keycloak.models.ProtocolMapperModel m) {
+        if (m.getProtocolMapper() == null) {
+            return 0;
+        }
+        org.keycloak.provider.ProviderFactory<?> pf = session.getKeycloakSessionFactory()
+                .getProviderFactory(org.keycloak.protocol.ProtocolMapper.class, m.getProtocolMapper());
+        return (pf instanceof org.keycloak.protocol.ProtocolMapper pm) ? pm.getPriority() : 0;
     }
 
     // -------------------------------------------------------------------------
@@ -1479,7 +1549,27 @@ public class IgaReplayDispatcher {
         String roleId = str(row, "ROLE_ID");
         org.keycloak.models.UserModel user = session.users().getUserById(realm, userId);
         RoleModel role = session.roles().getRoleById(realm, roleId);
-        if (user != null && role != null) user.grantRole(role);
+        if (user != null && role != null) {
+            // LOCKOUT SAFEGUARD (commit/replay re-check — defense-in-depth, HIGH).
+            // This runs under IGA_REPLAY_ACTIVE, which makes IgaUserAdapter.isIgaActive()
+            // return false and short-circuit user.grantRole(role) straight to super BEFORE
+            // the capture-time guard. So a GRANT_ROLES change request that bypassed the
+            // capture-time guard (e.g. filed PENDING before that guard shipped) would, at
+            // commit, replay a tide-realm-admin grant onto an ineligible (uncommitted /
+            // non-Tide-linked) user with no validation — re-opening the permanent admin
+            // lockout. Re-validate the SAME committed+Tide-linked predicate here (shared
+            // TideRealmAdminGuard — identical rule, no drift). On failure assertEligible
+            // throws ErrorResponse.error(..., 400) BEFORE user.grantRole, so nothing is
+            // applied; the exception propagates out of replay() → commitResolved, rolls
+            // back the commit tx (the CR stays PENDING) and is mapped to a 400. A legit
+            // grant (target already committed+linked) passes and commits normally. Scope:
+            // ONLY a direct tide-realm-admin grant — every other GRANT_ROLES row is a no-op
+            // here (isTideRealmAdminRole == false) and applies unchanged.
+            if (org.tidecloak.iga.services.TideRealmAdminGuard.isTideRealmAdminRole(realm, role)) {
+                org.tidecloak.iga.services.TideRealmAdminGuard.assertEligible(session, realm, user);
+            }
+            user.grantRole(role);
+        }
     }
 
     private static void revokeRoleDirect(KeycloakSession session, RealmModel realm, Map<String, Object> row) {
@@ -1937,7 +2027,18 @@ public class IgaReplayDispatcher {
             if (property == null) continue;
             switch (property) {
                 case "fullScopeAllowed" -> client.setFullScopeAllowed(Boolean.parseBoolean(value));
-                case "serviceAccountsEnabled" -> client.setServiceAccountsEnabled(Boolean.parseBoolean(value));
+                case "serviceAccountsEnabled" -> {
+                    boolean enabled = Boolean.parseBoolean(value);
+                    client.setServiceAccountsEnabled(enabled);
+                    // On a true-flip, materialize the SA user (same guarded block as the
+                    // CREATE_CLIENT replay path) so a governed cc grant has a backing user.
+                    // setServiceAccountsEnabled(true) flips the flag but does not create the user.
+                    // On a false-flip, mirror stock Keycloak: leave the existing SA user and its
+                    // attestation in place (no teardown).
+                    if (enabled && session.users().getServiceAccount(client) == null) {
+                        new ClientManager(new RealmManager(session)).enableServiceAccount(client);
+                    }
+                }
                 case "protocol" -> client.setProtocol(value);
                 case "clientId" -> { if (value != null) client.setClientId(value); }
                 default -> log.warnf("IGA replay UPDATE_CLIENT_PROPERTY: unknown property '%s' "
@@ -2191,10 +2292,18 @@ public class IgaReplayDispatcher {
             }
             if (clientUuid != null || clientId != null) {
                 ClientModel client = resolveClient(session, realm, row);
-                if (client != null) client.updateProtocolMapper(mapper);
+                if (client != null) {
+                    assertNoEqualPriorityClaimConflict(session, client, mapper,
+                            "client '" + client.getClientId() + "'");
+                    client.updateProtocolMapper(mapper);
+                }
             } else if (scopeId != null) {
                 ClientScopeModel scope = session.clientScopes().getClientScopeById(realm, scopeId);
-                if (scope != null) scope.updateProtocolMapper(mapper);
+                if (scope != null) {
+                    assertNoEqualPriorityClaimConflict(session, scope, mapper,
+                            "client scope '" + scope.getName() + "'");
+                    scope.updateProtocolMapper(mapper);
+                }
             }
             if (sig != null && !sig.isEmpty()) {
                 em.createQuery("UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.id = :id")

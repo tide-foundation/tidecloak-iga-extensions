@@ -14,6 +14,7 @@ import org.tidecloak.iga.attestors.TideAttestor;
 import org.tidecloak.iga.replay.IgaReplayExtension;
 import org.tidecloak.iga.services.IgaQuarantineCache;
 import org.tidecloak.iga.services.IgaUnsignedEntityService;
+import org.tidecloak.iga.services.TideRealmAdminGuard;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -1283,6 +1284,22 @@ public class IgaUserAdapter extends UserAdapter {
         }
         IgaChangeRequestService service = getService();
         String userId = getId();
+        // LOCKOUT SAFEGUARD: a DIRECT grant of realm-management's `tide-realm-admin`
+        // client role must be rejected unless the target user is BOTH committed AND
+        // linked to the Tide IdP. tide-realm-admin holders are the approvers of IGA
+        // change requests; if a non-Tide-linked (or uncommitted) user holds it and the
+        // VRK is later revoked, no eligible approver can ever sign again — a permanent,
+        // unrecoverable admin lockout. We reject BEFORE any pending CR is filed so the
+        // ineligible grant never enters the approval pipeline. This applies to the FIRST
+        // grant too (the legitimate first admin is already committed+linked, so passes).
+        //
+        // The SAME predicate is re-applied on the commit/replay path
+        // (IgaReplayDispatcher.grantRoleDirect) via TideRealmAdminGuard so a GRANT_ROLES
+        // CR that bypasses this capture-time interception (IGA_REPLAY_ACTIVE) cannot
+        // re-open the lockout at commit. Both call TideRealmAdminGuard so the rule can't drift.
+        if (TideRealmAdminGuard.isTideRealmAdminRole(realm, role)) {
+            TideRealmAdminGuard.assertEligible(igaSession, realm, this);
+        }
         List<Map<String, Object>> rows = List.of(Map.of("USER_ID", userId, "ROLE_ID", role.getId()));
         guardOrAlreadyPending(service, userId, "GRANT_ROLES", rows);
         String requestedBy = getCurrentUserId();
@@ -1293,6 +1310,10 @@ public class IgaUserAdapter extends UserAdapter {
         // is robust to grants captured before this hook existed AND grants that coalesce into an
         // existing pending CR (which never reach this line).
     }
+
+    // The tide-realm-admin role predicate + eligibility assertion now live in the shared
+    // TideRealmAdminGuard (services pkg) so the capture-time guard above and the
+    // commit/replay re-check (IgaReplayDispatcher.grantRoleDirect) apply the identical rule.
 
     @Override
     public void deleteRoleMapping(RoleModel role) {
