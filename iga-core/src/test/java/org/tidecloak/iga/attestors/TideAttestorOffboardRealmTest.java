@@ -152,4 +152,72 @@ class TideAttestorOffboardRealmTest {
         assertEquals(viaGate, viaHelper,
                 "offboardRealmThreshold (ragnarok pre-flight) must equal the getThreshold gate");
     }
+
+    // -----------------------------------------------------------------------
+    // Post-offboard Tideless cutover (IgaReplayDispatcher.replayOffboardRealm).
+    //
+    // After OFFBOARD_REALM commit the dispatcher flips iga.attestor -> "simple"
+    // AND removes the realm's iga_authorizer mode row(s). These two tests pin the
+    // exact seam the dispatcher controls: that BOTH steps are needed for the realm
+    // to read as Tideless (the attribute flip alone is NOT decisive because
+    // resolveMode reads the authorizer row first).
+    // -----------------------------------------------------------------------
+
+    /**
+     * THE GOTCHA the dispatcher fix guards against: a multiAdmin ceremony realm
+     * has a materialized IGA_AUTHORIZER row with MODE='multiAdmin'. Because
+     * {@link TideAttestor#resolveMode} reads that row BEFORE the iga.attestor
+     * attribute, merely flipping iga.attestor to "simple" does NOT make the realm
+     * Tideless — resolveMode still returns multiAdmin, so the REST layer would keep
+     * rejecting ordinary authorize/commit with MULTIADMIN_REQUIRES_APPROVAL_ENCLAVE.
+     * This documents WHY replayOffboardRealm must also delete the authorizer row.
+     */
+    @Test
+    void attributeFlipAlone_isNotDecisive_authorizerRowKeepsRealmMultiAdmin() {
+        @SuppressWarnings("unchecked")
+        TypedQuery<IgaAuthorizerEntity> q = mock(TypedQuery.class);
+        lenient().when(em.createNamedQuery("IgaAuthorizer.findByRealm", IgaAuthorizerEntity.class))
+                .thenReturn(q);
+        lenient().when(q.setParameter(org.mockito.ArgumentMatchers.eq("realmId"),
+                        org.mockito.ArgumentMatchers.any()))
+                .thenReturn(q);
+        // A materialized multiAdmin authorizer row still exists...
+        IgaAuthorizerEntity row = new IgaAuthorizerEntity();
+        row.setMode(TideAttestor.MODE_MULTI_ADMIN);
+        lenient().when(q.getResultStream()).thenAnswer(inv -> Stream.of(row));
+        // ...even though iga.attestor was already flipped to "simple".
+        lenient().when(realm.getAttribute("iga.attestor")).thenReturn(SimpleNameAttestor.ID);
+
+        assertEquals(TideAttestor.MODE_MULTI_ADMIN, TideAttestor.resolveMode(session, realm),
+                "a left-behind authorizer row keeps resolveMode returning multiAdmin despite "
+                        + "iga.attestor=simple — so the row MUST be cleared at offboard");
+    }
+
+    /**
+     * The post-fix state: after replayOffboardRealm has flipped iga.attestor to
+     * "simple" AND removed the authorizer row(s), resolveMode falls to its no-row
+     * branch, reads iga.attestor (="simple", not "tide"), and returns null = Tideless.
+     * isMultiAdminMode is then false, so the legacy authorize/commit lane is open and
+     * the simple (attribute-based) attestor governs every subsequent CR.
+     */
+    @Test
+    void afterFlipAndRowRemoval_realmResolvesTideless() {
+        @SuppressWarnings("unchecked")
+        TypedQuery<IgaAuthorizerEntity> q = mock(TypedQuery.class);
+        lenient().when(em.createNamedQuery("IgaAuthorizer.findByRealm", IgaAuthorizerEntity.class))
+                .thenReturn(q);
+        lenient().when(q.setParameter(org.mockito.ArgumentMatchers.eq("realmId"),
+                        org.mockito.ArgumentMatchers.any()))
+                .thenReturn(q);
+        // No authorizer row left (the dispatcher removed it)...
+        lenient().when(q.getResultStream()).thenAnswer(inv -> Stream.empty());
+        // ...and iga.attestor is "simple".
+        lenient().when(realm.getAttribute("iga.attestor")).thenReturn(SimpleNameAttestor.ID);
+
+        org.junit.jupiter.api.Assertions.assertNull(TideAttestor.resolveMode(session, realm),
+                "with no authorizer row and iga.attestor=simple, resolveMode must return null (Tideless)");
+        assertFalse(TideAttestor.isMultiAdminMode(session, realm),
+                "a Tideless realm post-offboard must NOT report multiAdmin — the legacy "
+                        + "authorize/commit lane stays open for SimpleNameAttestor governance");
+    }
 }

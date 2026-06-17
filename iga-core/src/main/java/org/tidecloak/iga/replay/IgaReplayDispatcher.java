@@ -2505,6 +2505,58 @@ public class IgaReplayDispatcher {
                     "OFFBOARD_REALM replay: ragnarok offboard failed for realm " + realm.getName()
                             + " — replay tx rolled back, nothing torn down: " + e.getMessage(), e);
         }
+
+        // -----------------------------------------------------------------
+        // Tideless cutover: the OFFBOARD_REALM CR is the LAST thing Tide
+        // signs. The ragnarok teardown above removed the Tide IdP, so the
+        // TideAttestor can no longer sign/commit CRs (Midgard.SignModel against
+        // ORKs that no longer custody the VVK — fail-closed). IGA must STAY ON
+        // (isIGAEnabled is left untouched = still true) but switch to the
+        // self-sufficient, attribute-based SimpleNameAttestor so subsequent
+        // governance keeps working on the now-Tideless realm.
+        //
+        // This runs AFTER svc.offboardRealm (the Tide ceremony is complete) and
+        // INSIDE the replay tx (IGA_REPLAY_ACTIVE is already true — set by
+        // replay()), so IgaRealmAdapter.setAttribute short-circuits to super:
+        // these are DIRECT writes, NOT re-captured CRs. An exception anywhere in
+        // this method rolls the whole replay tx back, so the flip is atomic with
+        // the teardown.
+        //
+        // (1) Flip the attestor discriminator. IgaAttestors.resolveAttestor reads
+        //     this attribute directly, so SimpleNameAttestor is selected for every
+        //     subsequent record/combineFinal. isIGAEnabled stays "true".
+        realm.setAttribute("iga.attestor", org.tidecloak.iga.attestors.SimpleNameAttestor.ID);
+
+        // (2) Neutralize the iga_authorizer mode row. The attribute flip alone is
+        //     NOT decisive: TideAttestor.resolveMode reads a materialized
+        //     IGA_AUTHORIZER row BEFORE iga.attestor and, if the row pins a
+        //     non-null MODE (a multiAdmin ceremony realm has MODE='multiAdmin'),
+        //     it returns that mode regardless of iga.attestor. The REST layer's
+        //     refuseLegacyLaneForMultiAdmin (and the two-phase /approve,
+        //     /approval-model endpoints) branch on isMultiAdminMode -> resolveMode,
+        //     so a left-behind row would keep rejecting ordinary authorize/commit
+        //     with MULTIADMIN_REQUIRES_APPROVAL_ENCLAVE (409) and force CRs into
+        //     the Tide approval enclave that no longer works post-offboard.
+        //     Deleting the realm's authorizer row(s) makes resolveMode fall to its
+        //     no-row branch, which reads iga.attestor (now "simple") and returns
+        //     null = Tideless. Done in this same fail-closed replay tx.
+        int removedAuthorizerRows = 0;
+        for (org.tidecloak.iga.entities.IgaAuthorizerEntity authorizerRow : em.createNamedQuery(
+                        "IgaAuthorizer.findByRealm", org.tidecloak.iga.entities.IgaAuthorizerEntity.class)
+                .setParameter("realmId", realm.getId())
+                .getResultList()) {
+            em.remove(authorizerRow);
+            removedAuthorizerRows++;
+        }
+        if (removedAuthorizerRows > 0) {
+            em.flush();
+        }
+
+        log.infof("IGA OFFBOARD_REALM replay: realm %s — flipped iga.attestor to '%s' (Tideless), "
+                        + "isIGAEnabled left true, removed %d iga_authorizer mode row(s). "
+                        + "Default signature algorithm left intact (offboard reconstructs the VVK as a "
+                        + "local eddsaPrivateKey, so EdDSA token signing stays viable without ORKs).",
+                realm.getName(), org.tidecloak.iga.attestors.SimpleNameAttestor.ID, removedAuthorizerRows);
     }
 
     // -------------------------------------------------------------------------
