@@ -174,7 +174,7 @@ public class TideAttestor implements IgaAttestor {
      * <p>Unlike {@link #CFG_GVRK} (the 7-model MAIN VRK pack: RotateVRK, UpdateSettings,
      * UserToken, EnableOffboard, RequestInitialization, DelegationToken, ServerCert —
      * <b>NO {@code AttestationUnit:1}</b>), the firstAdmin pack's ModelIds are
-     * {@code [UserContext:1, EnableOffboard:1, Policy:1, AttestationUnit:1]} — so the
+     * { so the
      * ORK's VRKAuthorizationFlow finds {@code AttestationUnit:1} among the authorizer's
      * allowed models and accepts the sign. {@code authorizer} is hex; its cert base64.
      */
