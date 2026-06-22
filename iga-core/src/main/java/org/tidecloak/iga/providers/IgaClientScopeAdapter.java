@@ -444,6 +444,18 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
             }
             return;
         }
+        // No-op guard (see IgaClientAdapter.setAttribute): KC's
+        // RepresentationToModel.updateClientScope calls setName unconditionally on
+        // every PUT, so re-applying the current name must NOT spawn a phantom
+        // UPDATE_CLIENT_SCOPE_PROPERTY CR. ClientScopeAdapter.setName stores
+        // KeycloakModelUtils.convertClientScopeName(name) (space -> underscore) and
+        // getName() returns that normalised form, so compare against the same
+        // normalisation (null-tolerant: convertClientScopeName NPEs on null).
+        String normalizedName = name == null ? null
+                : KeycloakModelUtils.convertClientScopeName(name);
+        if (java.util.Objects.equals(normalizedName, super.getName())) {
+            return;
+        }
         // Inline IGA: a rename changes the client_scope_config payload (the scope
         // `name` joined into the `scope` claim), so govern it as a CR and suppress
         // the direct write rather than letting it mutate ungoverned + diverge the
@@ -468,6 +480,12 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
                 capturedRep.setProtocol(protocol);
                 trace("setProtocol");
             }
+            return;
+        }
+        // No-op guard (see IgaClientAdapter.setProtocol): KC re-applies the current
+        // protocol on every PUT; suppress the phantom UPDATE_CLIENT_SCOPE_PROPERTY
+        // CR when unchanged.
+        if (java.util.Objects.equals(protocol, super.getProtocol())) {
             return;
         }
         // Inline IGA: protocol gates the whole mapper set (a non-OIDC scope
@@ -571,6 +589,12 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
             super.setAttribute(name, value);
             return;
         }
+        // No-op guard (see IgaClientAdapter.setAttribute): a PUT re-applies every
+        // attribute unconditionally; suppress the phantom SET_CLIENT_SCOPE_ATTRIBUTE
+        // CR when the value is unchanged.
+        if (java.util.Objects.equals(value, super.getAttribute(name))) {
+            return;
+        }
         IgaChangeRequestService service = getService();
         String scopeId = getId();
         Map<String, Object> row = new HashMap<>();
@@ -596,6 +620,11 @@ public class IgaClientScopeAdapter extends ClientScopeAdapter {
         }
         if (!isIgaActive()) {
             super.removeAttribute(name);
+            return;
+        }
+        // No-op guard: removing an attribute that is already absent is not a
+        // change; suppress the phantom REMOVE_CLIENT_SCOPE_ATTRIBUTE CR.
+        if (super.getAttribute(name) == null) {
             return;
         }
         IgaChangeRequestService service = getService();

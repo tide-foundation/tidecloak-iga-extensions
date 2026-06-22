@@ -1441,6 +1441,13 @@ public class IgaUserAdapter extends UserAdapter {
             super.setSingleAttribute(name, value);
             return;
         }
+        // No-op guard (see IgaClientAdapter.setAttribute): KC's DefaultUserProfile
+        // re-applies every writable attribute on a PUT; suppress the phantom
+        // SET_USER_ATTRIBUTE CR when the single value is unchanged. Runs BEFORE the
+        // coalesce below so a no-op write neither creates nor extends a CR.
+        if (java.util.Objects.equals(value, super.getFirstAttribute(name))) {
+            return;
+        }
         IgaChangeRequestService service = getService();
         String userId = getId();
         Map<String, Object> row = new HashMap<>();
@@ -1463,6 +1470,12 @@ public class IgaUserAdapter extends UserAdapter {
         }
         if (!isIgaActive()) {
             super.setAttribute(name, values);
+            return;
+        }
+        // No-op guard: suppress the phantom SET_USER_ATTRIBUTE CR when the incoming
+        // value list equals the current stored list (null-tolerant, order-insensitive).
+        // Runs BEFORE the coalesce below.
+        if (sameAttrValues(values, super.getAttributeStream(name))) {
             return;
         }
         IgaChangeRequestService service = getService();
@@ -1514,6 +1527,12 @@ public class IgaUserAdapter extends UserAdapter {
             super.removeAttribute(name);
             return;
         }
+        // No-op guard: removing an attribute that is already absent is not a
+        // change; suppress the phantom REMOVE_USER_ATTRIBUTE CR. Runs BEFORE the
+        // coalesce below.
+        if (super.getFirstAttribute(name) == null) {
+            return;
+        }
         IgaChangeRequestService service = getService();
         String userId = getId();
         Map<String, Object> row = new HashMap<>();
@@ -1521,6 +1540,21 @@ public class IgaUserAdapter extends UserAdapter {
         row.put("NAME", name);
         service.coalesceOrCreate(realm, "USER", userId, "REMOVE_USER_ATTRIBUTE",
                 List.of(row), getCurrentUserId(), java.util.Set.of(name));
+    }
+
+    /**
+     * Null-tolerant, order-insensitive equality between an incoming attribute
+     * value list and the current stored values (as a stream). Mirrors
+     * {@code IgaClientAdapter.sameStringSet}: a null/empty incoming list equals an
+     * absent/empty stored value, so re-applying the current values never looks
+     * like a change.
+     */
+    private static boolean sameAttrValues(List<String> incoming, java.util.stream.Stream<String> current) {
+        java.util.Set<String> a = incoming == null ? java.util.Collections.emptySet()
+                : new java.util.HashSet<>(incoming);
+        java.util.Set<String> b = current == null ? java.util.Collections.emptySet()
+                : current.collect(java.util.stream.Collectors.toSet());
+        return a.equals(b);
     }
 
     /**

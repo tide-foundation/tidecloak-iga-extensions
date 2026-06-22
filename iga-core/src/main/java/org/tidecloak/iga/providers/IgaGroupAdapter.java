@@ -333,6 +333,13 @@ public class IgaGroupAdapter extends GroupAdapter {
             super.setSingleAttribute(name, value);
             return;
         }
+        // No-op guard (see IgaClientAdapter.setAttribute): KC re-applies attributes
+        // unconditionally on every PUT; suppress the phantom SET_GROUP_ATTRIBUTE CR
+        // when the single value is unchanged. getFirstAttribute reflects the current
+        // stored single value.
+        if (java.util.Objects.equals(value, super.getFirstAttribute(name))) {
+            return;
+        }
         IgaChangeRequestService service = getService();
         String groupId = getId();
         checkNoPendingCr(service, groupId);
@@ -348,6 +355,12 @@ public class IgaGroupAdapter extends GroupAdapter {
     public void setAttribute(String name, List<String> values) {
         if (!isIgaActive(realm)) {
             super.setAttribute(name, values);
+            return;
+        }
+        // No-op guard: KC re-applies attributes unconditionally on every PUT;
+        // suppress the phantom SET_GROUP_ATTRIBUTE CR when the incoming value list
+        // equals the current stored list (null-tolerant, order-insensitive).
+        if (sameAttrValues(values, super.getAttributeStream(name))) {
             return;
         }
         IgaChangeRequestService service = getService();
@@ -379,6 +392,11 @@ public class IgaGroupAdapter extends GroupAdapter {
             super.removeAttribute(name);
             return;
         }
+        // No-op guard: removing an attribute that is already absent is not a
+        // change; suppress the phantom REMOVE_GROUP_ATTRIBUTE CR.
+        if (super.getFirstAttribute(name) == null) {
+            return;
+        }
         IgaChangeRequestService service = getService();
         String groupId = getId();
         checkNoPendingCr(service, groupId);
@@ -387,6 +405,21 @@ public class IgaGroupAdapter extends GroupAdapter {
         row.put("NAME", name);
         service.create(realm, "GROUP", groupId, "REMOVE_GROUP_ATTRIBUTE",
                 List.of(row), null);
+    }
+
+    /**
+     * Null-tolerant, order-insensitive equality between an incoming attribute
+     * value list and the current stored values (as a stream). Mirrors
+     * {@code IgaClientAdapter.sameStringSet}: a null/empty incoming list equals an
+     * absent/empty stored value, so re-applying the current values never looks
+     * like a change.
+     */
+    private static boolean sameAttrValues(List<String> incoming, java.util.stream.Stream<String> current) {
+        java.util.Set<String> a = incoming == null ? java.util.Collections.emptySet()
+                : new java.util.HashSet<>(incoming);
+        java.util.Set<String> b = current == null ? java.util.Collections.emptySet()
+                : current.collect(java.util.stream.Collectors.toSet());
+        return a.equals(b);
     }
 
     private void checkNoPendingCr(IgaChangeRequestService service, String groupId) {
