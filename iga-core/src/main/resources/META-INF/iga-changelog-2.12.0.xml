@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!-- Server-identity VVK signing port: carry the enclave-approved ServerCert:1 CA
+         and public-key sub-models on the sidecar so commit can reuse the doken-bound
+         requests (source-branch parity: the "<csId>-ca" / "<csId>-pk" sibling carriers,
+         re-homed onto the IGA_SERVER_CERT_DRAFT sidecar since the consolidated iga-core
+         has no ChangesetRequestEntity). The main ServerCert:1 leaf model rides the parent
+         CR's REQUEST_MODEL column. -->
+    <changeSet id="iga-2.12.0-1" author="tidecloak-iga">
+        <addColumn tableName="IGA_SERVER_CERT_DRAFT">
+            <column name="CA_REQUEST_MODEL" type="clob"/>
+        </addColumn>
+        <addColumn tableName="IGA_SERVER_CERT_DRAFT">
+            <column name="PK_REQUEST_MODEL" type="clob"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>

@@ -13,6 +13,7 @@ import org.keycloak.models.RoleModel;
 import org.keycloak.services.managers.ClientManager;
 import org.keycloak.services.managers.RealmManager;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 
 import jakarta.persistence.EntityManager;
 import java.util.List;
@@ -229,7 +230,7 @@ public class IgaReplayDispatcher {
                     r -> scopeMappingAddDirect(session, realm, r), setSigned, "SCOPE_MAPPING_ADD");
             case "SCOPE_MAPPING_REMOVE" -> replayRevoke(session, realm, rows, finalAttestation, em,
                     r -> scopeMappingRemoveDirect(session, realm, r), setSigned, "SCOPE_MAPPING_REMOVE");
-            case "REQUEST_SERVER_CERT" -> replayRequestServerCert(cr);
+            case "REQUEST_SERVER_CERT" -> replayRequestServerCert(session, realm, cr, em);
             case "INSTALL_LICENSE", "ROTATE_LICENSE" -> replayLicenseAction(cr);
 
             // ----- Governed IGA disable -----
@@ -1341,15 +1342,63 @@ public class IgaReplayDispatcher {
     // -------------------------------------------------------------------------
 
     /**
-     * REQUEST_SERVER_CERT approval grants the workload the right to receive a
-     * cert. The sidecar IGA_SERVER_CERT_DRAFT is NOT touched here — issuance
-     * is decoupled and happens via POST /iga/server-certs/{draftId}/issue once
-     * the signing infrastructure produces the cert + trust bundle. The
-     * surrounding doReplay() will mark the parent change request APPROVED.
+     * REQUEST_SERVER_CERT commit: sign the workload's leaf SVID + the realm VVK-CA + the
+     * raw public key via the ORK network, assemble the X.509 certs, and store them on the
+     * IGA_SERVER_CERT_DRAFT sidecar (status ACTIVE). Ported from the source branch's
+     * {@code TideIGACommitter.commitServerCert}, retargeted onto the consolidated CR model:
+     * the leaf carrier rides {@code cr.getRequestModel()}, the CA + PK carriers ride the
+     * sidecar columns ({@code caRequestModel}/{@code pkRequestModel}).
+     *
+     * <p>Ordering: {@code combineFinal} (which, for multiAdmin, is where the enclave dokens
+     * were collected onto the carriers) has already run by the time replay reaches here, so
+     * {@link org.tidecloak.iga.crypto.ServerCertSigner#issue} reuses the doken-bound,
+     * enclave-approved carriers. firstAdmin / dev realms with no carriers rebuild the leaf and
+     * fall back to a local VRK CA signature.
+     *
+     * <p>Capability-gated: a non-real-signing-capable realm (no VVK material) leaves the cert
+     * UN-issued (the workload status endpoint keeps reporting DRAFT) rather than hard-failing
+     * the commit, mirroring the firstAdmin-stub posture of the rest of the attestor.
      */
-    private static void replayRequestServerCert(IgaChangeRequestEntity cr) {
-        log.infof("REQUEST_SERVER_CERT approved for change request %s — awaiting cert issuance via /iga/server-certs/{draftId}/issue",
-                cr.getId());
+    private static void replayRequestServerCert(KeycloakSession session, RealmModel realm,
+                                                IgaChangeRequestEntity cr, EntityManager em) {
+        List<IgaServerCertDraftEntity> drafts = em.createNamedQuery(
+                        "IgaServerCertDraft.findByChangeRequestId", IgaServerCertDraftEntity.class)
+                .setParameter("crId", cr.getId())
+                .getResultList();
+        if (drafts.isEmpty()) {
+            log.warnf("REQUEST_SERVER_CERT commit: CR %s has no IGA_SERVER_CERT_DRAFT sidecar — "
+                    + "nothing to issue.", cr.getId());
+            return;
+        }
+        IgaServerCertDraftEntity draft = drafts.get(0);
+
+        if (!org.tidecloak.iga.attestors.TideAttestor.isRealSigningCapableRealm(realm)) {
+            log.infof("REQUEST_SERVER_CERT approved for CR %s but realm %s is not real-signing-capable "
+                    + "(no VVK material) — leaving the cert un-issued (status DRAFT).",
+                    cr.getId(), realm.getName());
+            return;
+        }
+
+        org.tidecloak.iga.crypto.ServerCertSigner.IssuedCert issued =
+                org.tidecloak.iga.crypto.ServerCertSigner.issue(realm, draft);
+
+        long now = System.currentTimeMillis();
+        draft.setCertificate(issued.certificatePem);
+        draft.setTrustBundle(issued.trustBundlePem);
+        if (issued.signedPublicKey != null) {
+            // signedPolicy reuses its column to carry the ORK-signed workload public key.
+            draft.setSignedPolicy(issued.signedPublicKey);
+        }
+        // The enclave-approved sub-model carriers are consumed; clear them (source deletes the
+        // -ca / -pk sibling entities at commit).
+        draft.setCaRequestModel(null);
+        draft.setPkRequestModel(null);
+        draft.setUpdatedAt(now);
+        em.merge(draft);
+        em.flush();
+
+        log.infof("REQUEST_SERVER_CERT issued for CR %s (instance %s, realm %s) — SVID + trust bundle stored, status ACTIVE.",
+                cr.getId(), draft.getInstanceId(), realm.getName());
     }
 
     // -------------------------------------------------------------------------

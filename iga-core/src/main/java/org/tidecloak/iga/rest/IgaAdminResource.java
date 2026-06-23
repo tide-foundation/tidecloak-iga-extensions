@@ -2563,6 +2563,20 @@ public class IgaAdminResource {
         return Response.ok(toServerCertDraftRepresentation(updated)).build();
     }
 
+    /**
+     * Revoke ALL server-cert rows for an instanceId (source-branch parity with
+     * {@code server-cert/revoke}). Every non-revoked draft for the (realm, instance)
+     * pair is marked revoked and surfaces on the public CRL endpoint.
+     */
+    @POST
+    @Path("server-certs/instance/{instanceId}/revoke")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response revokeServerCertsByInstance(@PathParam("instanceId") String instanceId) {
+        auth.realm().requireManageRealm();
+        int revoked = getServerCertDraftService().revokeByInstance(realm.getId(), instanceId);
+        return Response.ok(Map.of("instanceId", instanceId, "revoked", revoked)).build();
+    }
+
     @DELETE
     @Path("server-certs/{id}")
     public Response deleteServerCert(@PathParam("id") String id) {
