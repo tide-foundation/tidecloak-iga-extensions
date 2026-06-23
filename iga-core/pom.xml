@@ -1,0 +1,241 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.tidecloak</groupId>
+        <artifactId>tidecloak-iga-extensions</artifactId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>iga-core</artifactId>
+    <packaging>jar</packaging>
+
+    <name>iga-core</name>
+    <description>IGA core approval workflow Keycloak extension.</description>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <keycloak.version>26.5.5</keycloak.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-server-spi</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-server-spi-private</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-model-jpa</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-model-infinispan</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-services</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-core</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <!--
+              Direct dependency on keycloak-common (carries
+              org.keycloak.common.util.MultivaluedHashMap, the return type of
+              ComponentModel.getConfig()). Previously only present transitively
+              via keycloak-model-jpa. The Eclipse compiler (ECJ) used by the
+              from-scratch tidecloak/Keycloak build path resolves the module path
+              more strictly than javac and reported MultivaluedHashMap as a
+              "missing type" the moment TideAttestor.maybeSeedFirstAdminAuthorizer
+              first called getConfig(), baking an "Unresolved compilation problems"
+              deferred error into the .class (a runtime java.lang.Error, while
+              mvn/javac stayed green). Declaring keycloak-common directly puts the
+              type on every compiler's classpath and removes the ECJ false-green.
+            -->
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-common</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>jakarta.ws.rs</groupId>
+            <artifactId>jakarta.ws.rs-api</artifactId>
+            <version>3.1.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>jakarta.persistence</groupId>
+            <artifactId>jakarta.persistence-api</artifactId>
+            <version>3.1.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.17.2</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <!--
+              Provided by Keycloak 26.5.5 runtime
+              (com.fasterxml.jackson.dataformat.jackson-dataformat-cbor-2.19.2.jar
+              is on /opt/keycloak/lib/lib/main/). Keep at provided scope to avoid
+              classloader conflicts and a duplicate class on the runtime path.
+              The 2.17.2 vs 2.19.2 mismatch is API-safe: we only use the public
+              CBORFactory no-arg constructor.
+            -->
+            <groupId>com.fasterxml.jackson.dataformat</groupId>
+            <artifactId>jackson-dataformat-cbor</artifactId>
+            <version>2.17.2</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jboss.logging</groupId>
+            <artifactId>jboss-logging</artifactId>
+            <version>3.5.3.Final</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <!--
+              Midgard Java client — provides Midgard.SignWithVrk + Midgard.SignModel
+              + SignRequestSettingsMidgard + ModelRequest. Used by the tide attestor's
+              firstAdmin VRK signing ceremony (TideAttestor.sign), which routes the
+              sign through Midgard's native core to the ORK network.
+
+              provided + optional: the artifact ships as its own jar in the Tide
+              deployment (it is on the Keycloak runtime classpath alongside the
+              idp-extensions key-provider jar that already declares it provided);
+              optional keeps non-Tide deployments building cleanly when the artifact
+              is absent from the consumer's classpath. Mirrors the scope the
+              idp-extensions key-provider pom uses (provided) and the legacy
+              tide-iga profile's MidgardJava declaration.
+            -->
+            <groupId>org.tide</groupId>
+            <artifactId>MidgardJava</artifactId>
+            <version>1.0-SNAPSHOT</version>
+            <scope>provided</scope>
+            <optional>true</optional>
+        </dependency>
+
+        <!--
+          Test-only stack. The runtime/compile deps above are all `provided`
+          (supplied by the Keycloak server at deploy time); unit tests run
+          outside the server, so the handful of types they exercise
+          (jackson-databind for ROWS_JSON, jboss-logging for the provisioner's
+          logger, the keycloak model SPI types we mock) must be on the TEST
+          classpath explicitly. JUnit 5 + Mockito; no live EntityManager —
+          IgaChangeRequestService + KeycloakSession are mocked.
+        -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.2</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>5.18.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <version>5.18.0</version>
+            <scope>test</scope>
+        </dependency>
+        <!--
+          Pin byte-buddy to a JDK-24-aware build. Mockito's inline mock maker
+          rewrites bytecode at runtime; the version transitively pulled by older
+          Mockito predates JVM 24 and fails with "Could not modify all classes".
+          1.17.6 supports the JVM this build runs on.
+        -->
+        <dependency>
+            <groupId>net.bytebuddy</groupId>
+            <artifactId>byte-buddy</artifactId>
+            <version>1.17.6</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>net.bytebuddy</groupId>
+            <artifactId>byte-buddy-agent</artifactId>
+            <version>1.17.6</version>
+            <scope>test</scope>
+        </dependency>
+        <!--
+          jakarta.ws.rs.core.Response is built by the REST resource under test;
+          instantiating it needs a RuntimeDelegate impl on the classpath. The
+          ws.rs API is `provided` (Keycloak supplies RESTEasy at runtime); pull
+          RESTEasy core at test scope so Response.status(...).build() resolves.
+          Version matches the RESTEasy shipped with Keycloak 26.5.5.
+        -->
+        <dependency>
+            <groupId>org.jboss.resteasy</groupId>
+            <artifactId>resteasy-core</artifactId>
+            <version>6.2.12.Final</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+              Embed a Jandex index in the produced jar so Quarkus ARC reliably
+              honours @Vetoed on the admin sub-resources (IgaTveBundleResource,
+              IgaAdminResource, TideAdminCompatResource) at re-augmentation time.
+              Without an in-jar index, Quarkus's CDI bean discovery has been
+              observed to fail to mark these classes as vetoed and then attempts
+              to inject their non-CDI constructor params (RealmModel,
+              AdminPermissionEvaluator), producing UnsatisfiedResolutionException
+              on every container restart that re-builds the augmentation cache.
+              Added to unblock the producer-extension redeploy; safe / inert for
+              the rest of the jar.
+            -->
+            <plugin>
+                <groupId>io.smallrye</groupId>
+                <artifactId>jandex-maven-plugin</artifactId>
+                <version>3.2.0</version>
+                <executions>
+                    <execution>
+                        <id>make-index</id>
+                        <goals>
+                            <goal>jandex</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!--
+              The inherited default surefire (2.12.4) predates the JUnit 5
+              platform and would silently skip jupiter tests. Pin a version that
+              ships the JUnit Platform provider so `mvn test` actually runs them.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>

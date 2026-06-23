@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.8.0: Add a REQUEST_MODEL column to IGA_CHANGE_REQUEST.
+
+      Carries the per-CR serialized Midgard Policy:1 ModelRequest for the
+      multiAdmin two-phase approval ceremony (M1 doken-collection seam):
+
+        - Phase 1 builds a Policy:1 ModelRequest (the action's draft + the M0
+          admin Policy via SetPolicy + the VRK creation-authorization) and stores
+          its Base64(Encode()) here. The admin-UI fetches it and hands ONLY the
+          serialized request to the browser enclave (Heimdall).
+        - Phase 2 accepts the doken-embedded serialized request back and
+          overwrites this column with the doken-embedded bytes (NO re-SetPolicy —
+          that would invalidate the embedded doken).
+
+      Only ever populated for multiAdmin-mode CRs; the firstAdmin single-phase
+      path never touches it. TEXT (nullable) because it holds the Base64 of a
+      CBOR-ish request (larger than a UUID); NULL = no approval ceremony begun.
+      Existing rows backfill to NULL, which is the correct legacy semantic — no
+      pre-2.8.0 CR ever carried an approval ModelRequest.
+    -->
+
+    <changeSet id="iga-2.8.0-1" author="tidecloak-iga">
+        <addColumn tableName="IGA_CHANGE_REQUEST">
+            <column name="REQUEST_MODEL" type="TEXT"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>

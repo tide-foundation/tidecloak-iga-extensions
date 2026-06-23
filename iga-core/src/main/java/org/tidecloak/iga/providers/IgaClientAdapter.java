@@ -1,0 +1,869 @@
+package org.tidecloak.iga.providers;
+
+import org.jboss.logging.Logger;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.ProtocolMapperModel;
+import org.keycloak.models.RealmModel;
+import org.keycloak.models.RoleModel;
+import org.keycloak.models.jpa.ClientAdapter;
+import org.keycloak.models.jpa.entities.ClientEntity;
+import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.models.utils.ModelToRepresentation;
+import org.keycloak.representations.idm.ClientRepresentation;
+import org.tidecloak.iga.services.IgaQuarantineCache;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import jakarta.persistence.EntityManager;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Wraps ClientAdapter and intercepts scope/mapper operations for IGA.
+ *
+ * <h2>Two modes</h2>
+ * <ul>
+ *   <li><b>Inline mode</b> ({@code captureMode == false}, the default): the
+ *       adapter wraps an already-approved, already-persisted client returned by
+ *       {@code IgaRealmProvider.getClientById/getClientByClientId}. Every
+ *       mutating call (setAttribute, addProtocolMapper, setWebOrigins, …)
+ *       records a targeted delta change request and (for the
+ *       SET/REMOVE-attribute path) throws to interrupt the write — the original
+ *       inline interception behaviour, unchanged.</li>
+ *   <li><b>Capture mode</b> ({@code captureMode == true}): the adapter wraps a
+ *       <em>scratch</em> {@link ClientEntity} that {@code IgaRealmProvider
+ *       .addClient} just persisted. Per-setter interception is fully bypassed so
+ *       Keycloak's {@code RepresentationToModel.createClient} can apply the
+ *       <em>complete</em> incoming {@link ClientRepresentation} to the real
+ *       model (web origins, redirect URIs, attributes, protocol mappers, flow
+ *       flags, …). The LAST mutation Keycloak makes in that path,
+ *       {@code ClientModel.updateClient()}
+ *       ({@code RepresentationToModel.createClient}, KC 26.5.5), is the
+ *       <b>terminal seam</b>: at that point every admin-supplied field is on the
+ *       model, so {@link #updateClient()} snapshots the live model into a
+ *       {@link ClientRepresentation} via
+ *       {@link ModelToRepresentation#toRepresentation(org.keycloak.models.ClientModel, KeycloakSession)},
+ *       persists the {@code CREATE_CLIENT} change request (with the full
+ *       {@code REP_JSON}) in a SEPARATE transaction, marks the REQUEST
+ *       transaction rollback-only, and throws
+ *       {@link IgaPendingApprovalException} → HTTP 202. The scratch entity is
+ *       never committed: mapping the exception to a 202 fully CONSUMES it (it
+ *       does NOT propagate to {@code DefaultKeycloakSession#close()}), so the
+ *       request tx is NOT auto-rolled-back by exception propagation — it would
+ *       in fact be {@code commit()}ed and leak the scratch client (the original
+ *       throw-at-{@code addClient} only escaped this because it threw BEFORE
+ *       {@code super.addClient}, persisting nothing). The explicit
+ *       {@code getTransactionManager().setRollbackOnly()} on the request
+ *       session is what makes {@code DefaultKeycloakSession#closeTransaction
+ *       Manager()} call {@code rollback()} instead of {@code commit()}, so
+ *       nothing the create flow touched reaches the DB while the already-built
+ *       202 still stands (same idiom as {@code KeycloakErrorHandler#getResponse}).
+ *       Because the throw happens LATE — after the full entity graph is built —
+ *       there are no transient references at the (possible) auto-flush, which is
+ *       why this avoids the {@code TransientPropertyValueException}/cascade that
+ *       made the original throw-at-{@code addClient} design necessary.</li>
+ * </ul>
+ */
+public class IgaClientAdapter extends ClientAdapter {
+
+    private static final Logger log = Logger.getLogger(IgaClientAdapter.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private final KeycloakSession igaSession;
+
+    /**
+     * When true this adapter wraps a scratch entity mid-{@code createClient}
+     * and the only special behaviour is {@link #updateClient()} (the terminal
+     * snapshot-and-throw seam); all per-setter interception is bypassed so
+     * Keycloak's builder can apply the full representation to the real model.
+     */
+    private final boolean captureMode;
+
+    /**
+     * True when this capture-mode adapter was created on the
+     * {@code partialImport} {@code ClientsPartialImport.create} →
+     * {@code RepresentationToModel.createClient} path
+     * ({@code IgaRealmProvider.addClient} registered it with
+     * {@link IgaImportMode#registerImportClient}). The
+     * {@code CREATE_CLIENT} row is then harvested ONCE at batch-emit time by
+     * {@link #buildImportClientPendingCr()} (after
+     * {@code RepresentationToModel.createClient} has called its terminal
+     * {@code updateClient()} on the pass-through scratch model), so
+     * {@link #updateClient()} is a pure
+     * pass-through to {@code super.updateClient()} for this client (no
+     * per-entity accumulate, no throw, no setRollbackOnly — the BatchEmit
+     * prepare-tx owns the veto). Defaults false → the single-entity
+     * admin-create path is byte-unchanged.
+     */
+    private boolean importDeferred = false;
+
+    /**
+     * Pre-built {@code CREATE_CLIENT} row cached at the
+     * eager-harvest seam ({@link #updateClient()} in {@code importDeferred}
+     * mode), so {@link IgaImportMode.BatchEmitTransaction#commit} can read it
+     * WITHOUT calling {@link ModelToRepresentation#toRepresentation
+     * (org.keycloak.models.ClientModel, KeycloakSession)} during the parent
+     * session's prepare-list iteration. See {@link #updateClient()} for the
+     * full root-cause analysis.
+     */
+    private Map<String, Object> cachedImportRow;
+
+    public IgaClientAdapter(RealmModel realm, EntityManager em, KeycloakSession session, ClientEntity clientEntity) {
+        this(realm, em, session, clientEntity, false);
+    }
+
+    public IgaClientAdapter(RealmModel realm, EntityManager em, KeycloakSession session,
+                            ClientEntity clientEntity, boolean captureMode) {
+        super(realm, em, session, clientEntity);
+        this.igaSession = session;
+        this.captureMode = captureMode;
+    }
+
+    /**
+     * Mark this capture-mode adapter for partialImport deferred-harvest. Called
+     * once by {@code IgaRealmProvider.addClient} immediately after
+     * {@link IgaImportMode#registerImportClient}.
+     */
+    void markImportDeferred() {
+        this.importDeferred = true;
+    }
+
+    private IgaChangeRequestService getService() {
+        EntityManager em = igaSession.getProvider(JpaConnectionProvider.class).getEntityManager();
+        return new IgaChangeRequestService(em, igaSession);
+    }
+
+    private boolean isIgaActive() {
+        // In capture mode every per-setter override must fall straight through
+        // to the real ClientAdapter so RepresentationToModel.createClient can
+        // build the complete model; interception is concentrated at the single
+        // terminal seam updateClient() instead.
+        if (captureMode) return false;
+        IgaChangeRequestService service = getService();
+        if (!service.isIgaEnabled(realm)) return false;
+        // Scoped vendor/system provisioning bypass (see
+        // IgaChangeRequestService.IGA_VENDOR_PROVISIONING): apply directly, no capture.
+        if (service.isVendorProvisioning()) return false;
+        Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
+        return !"true".equals(replay);
+    }
+
+    /**
+     * Terminal seam for CREATE_CLIENT (capture mode only).
+     *
+     * <p>{@code RepresentationToModel.createClient} (KC 26.5.5,
+     * {@code org.keycloak.models.utils.RepresentationToModel}) calls
+     * {@code client.updateClient()} as its FINAL model mutation, AFTER
+     * {@code updateClientProperties} (name/enabled/flows/redirectUris/
+     * webOrigins/attributes), the protocol-mapper rebuild
+     * and {@code updateClientScopes}. So when this fires every
+     * admin-supplied field is already on the live model. We snapshot the
+     * complete model into a {@link ClientRepresentation} with Keycloak's own
+     * {@link ModelToRepresentation#toRepresentation}, fold it into the
+     * {@code CREATE_CLIENT} change request as {@code REP_JSON} (persisted in a
+     * separate transaction so it survives the rollback), and throw
+     * {@link IgaPendingApprovalException}. {@code IgaReplayDispatcher
+     * .replayCreateClient} deserializes exactly this {@code ClientRepresentation}
+     * and feeds it back through {@code RepresentationToModel.createClient} under
+     * {@code IGA_REPLAY_ACTIVE}, so the round-trip is faithful.</p>
+     *
+     * <p>We deliberately do NOT call {@code super.updateClient()}: that would
+     * publish a {@code ClientUpdatedEvent} for a client that is about to be
+     * rolled back. Nothing here is committed — after writing the CR we call
+     * {@code igaSession.getTransactionManager().setRollbackOnly()} on the
+     * REQUEST transaction, so {@code DefaultKeycloakSession#close()} rolls back
+     * (not commits) and the scratch entity dies with the rolled-back request
+     * transaction. The CR survives because it was written on a separate
+     * session/tx by {@code runJobInTransaction}.</p>
+     */
+    @Override
+    public void updateClient() {
+        if (!captureMode) {
+            super.updateClient();
+            return;
+        }
+
+        // partialImport EAGER-HARVEST at the terminal create seam. When this
+        // capture-mode adapter was created on the
+        // ClientsPartialImport.create → RepresentationToModel.createClient
+        // path (IgaRealmProvider.addClient registered it with IgaImportMode),
+        // the CREATE_CLIENT row MUST be harvested HERE — inside KC's
+        // create-callable — not later in BatchEmitTransaction.commit().
+        //
+        // Why: harvesting inside BatchEmitTransaction.commit() runs
+        // INSIDE DefaultKeycloakTransactionManager.commit()'s prepare-list
+        // iteration (`for (KeycloakTransaction tx : prepare)`). buildCapturedClientRow
+        // calls ModelToRepresentation.toRepresentation(this, igaSession), which
+        // does `session.getProvider(AuthorizationProvider.class)` and
+        // `authorization.getStoreFactory().findByClient(clientModel)` — the
+        // first call lazily constructs StoreFactoryCacheSession whose constructor calls
+        // `session.getTransactionManager().enlistPrepare(getPrepareTransaction())`
+        // on the parent session's TM — the SAME `prepare` LinkedList that
+        // is currently being iterated. The next `iterator.next()` then fails
+        // the modCount check → ConcurrentModificationException. The
+        // 5 CRs are already written successfully by runJobInTransaction
+        // before the throw, but the CME bypasses the
+        // IgaPendingApprovalException → 202 mapping and bubbles a 500.
+        //
+        // So build the row HERE, while
+        // RepresentationToModel.createClient is still on the call stack and
+        // the parent TM is NOT yet iterating prepare. The
+        // StoreFactoryCacheSession's enlistPrepare therefore happens BEFORE
+        // TM.commit() begins iterating, so the prepare list is stable for the
+        // iteration. BatchEmitTransaction.commit() then just reads the
+        // pre-built `cachedImportRow` — zero model traversal, zero provider
+        // lookups, zero prepare-time mutation.
+        //
+        // updateClient() is the correct seam:
+        // RepresentationToModel.createClient calls
+        // `client.updateClient()` as its FINAL unconditional model mutation
+        // — AFTER updateClientProperties, the protocol-mapper
+        // rebuild and updateClientScopes. So every
+        // updateClientProperties field / protocol-mapper / scope link is on
+        // the live model when we serialize. The row is byte-faithful with
+        // the deferred-harvest path (identical buildCapturedClientRow,
+        // identical IgaReplayDispatcher consumption).
+        //
+        // The seam still calls super.updateClient() so KC's createClient
+        // finishes normally and ClientsPartialImport.getModelId — `realm
+        // .getClientByClientId(clientId).getId()` — resolves on the real
+        // persisted client. NO per-entity accumulate, NO throw, NO
+        // setRollbackOnly (the BatchEmit prepare-tx still owns the veto).
+        // The single-entity admin-create branch below is byte-unchanged.
+        if (importDeferred) {
+            applyProtocolClientDefaults();
+            cachedImportRow = buildCapturedClientRow();
+            log.infof("IGA multi-entity HARVEST: REP_JSON built at "
+                    + "register-time for CREATE_CLIENT (size=%d chars) — "
+                    + "prepare-time traversal eliminated",
+                    ((String) cachedImportRow.get("REP_JSON")).length());
+            super.updateClient();
+            return;
+        }
+
+        applyProtocolClientDefaults();
+        Map<String, Object> row = buildCapturedClientRow();
+        String clientUuid = (String) row.get("ID");
+
+        // partialImport batch governance: accumulate + return
+        // normally (NO per-entity CR/setRollbackOnly/throw). The single-entity
+        // branch below is unchanged.
+        if (IgaImportMode.isImportMode(igaSession, realm)) {
+            IgaImportMode.accumulate(igaSession, realm, "CLIENT", clientUuid,
+                    "CREATE_CLIENT", List.of(row), null);
+            return;
+        }
+
+        String[] crIdHolder = new String[1];
+        KeycloakModelUtils.runJobInTransaction(igaSession.getKeycloakSessionFactory(), newSession -> {
+            RealmModel newRealm = newSession.realms().getRealm(realm.getId());
+            EntityManager newEm = newSession.getProvider(JpaConnectionProvider.class).getEntityManager();
+            IgaChangeRequestService newService = new IgaChangeRequestService(newEm, newSession);
+            crIdHolder[0] = newService.create(newRealm, "CLIENT", clientUuid,
+                    "CREATE_CLIENT", List.of(row), null).getId();
+        });
+
+        // CRITICAL (the actual draft-no-persist guarantee): the CR has now been
+        // committed on a SEPARATE session/transaction by runJobInTransaction
+        // (KeycloakModelUtils.runJobInTransactionWithResult does
+        // factory.create() → its own KeycloakTransactionManager + EntityManager,
+        // begin()/commit() decoupled from the request tx; rollback-only is set
+        // there ONLY if its task throws — it survives a request-tx rollback).
+        //
+        // Now mark the REQUEST KeycloakTransaction rollback-only. igaSession is
+        // the thread-bound request session (bound by
+        // resteasy.TransactionalSessionHandler#handle →
+        // KeycloakSessionUtil.setKeycloakSession, with the request tx already
+        // begun); igaSession.getTransactionManager() is therefore the REQUEST
+        // DefaultKeycloakTransactionManager, NOT the runJobInTransaction job tx
+        // (that session was closed when its try-with-resources exited).
+        //
+        // Why this deterministically discards the scratch ClientEntity AND
+        // still returns 202 (KC 26.5.5 tx lifecycle, traced):
+        //   * DefaultKeycloakSession#close() (invoked by
+        //     jaxrs.CloseSessionFilter#closeSession at the end of the response
+        //     pipeline) calls closeTransactionManager(), which does
+        //     `if (transactionManager.getRollbackOnly()) rollback(); else
+        //     commit();`. With this flag set, getRollbackOnly() returns true so
+        //     rollback() runs — JpaKeycloakTransaction#rollback() →
+        //     em.getTransaction().rollback(): the scratch CLIENT INSERT (and
+        //     every row RepresentationToModel.createClient produced) is
+        //     discarded. ZERO client rows reach the DB at draft time.
+        //   * The 202 is unaffected: IgaPendingApprovalExceptionMapper builds
+        //     the 202 Response BEFORE CloseSessionFilter runs, and rollback
+        //     never escalates to a 500 (JpaKeycloakTransaction#rollback cannot
+        //     throw a mapped error; only commit() can). This is the exact idiom
+        //     KeycloakErrorHandler#getResponse uses (tx.setRollbackOnly() then
+        //     return a response) — here applied to a 2xx instead of a 4xx/5xx.
+        //   * Without this flag getRollbackOnly() is false, so close() would
+        //     commit() the request tx and leak the scratch client (a
+        //     duplicate-key collision).
+        igaSession.getTransactionManager().setRollbackOnly();
+
+        throw new IgaPendingApprovalException(crIdHolder[0], "CLIENT", "CREATE_CLIENT");
+    }
+
+    /**
+     * Build the {@code CREATE_CLIENT} CR row — the SINGLE source of truth
+     * shared by the single-entity terminal seam ({@link #updateClient()}) and
+     * the partialImport deferred-harvest path
+     * ({@link #buildImportClientPendingCr()}). Identical rep/row contract in
+     * both cases, so {@code IgaReplayDispatcher.replayCreateClient} is
+     * byte-unchanged. NO side effects (no CR write, no throw, no
+     * rollback-only). Reads the live (pass-through) scratch model via
+     * {@link ModelToRepresentation#toRepresentation(org.keycloak.models.ClientModel, KeycloakSession)},
+     * which serializes the complete client (name, enabled, protocol, flow
+     * flags, redirectUris, webOrigins, attributes, protocol mappers WITH
+     * config, default/optional client scopes) — exactly the fields
+     * {@code IgaReplayDispatcher.replayCreateClient} feeds back into
+     * {@code RepresentationToModel.createClient} on commit.
+     */
+    private Map<String, Object> buildCapturedClientRow() {
+        ClientRepresentation rep = ModelToRepresentation.toRepresentation(this, igaSession);
+        // Pin identity so replay recreates the client with the SAME UUID and
+        // human clientId the admin's create flow allocated. (replay also
+        // re-pins from the row's ID/CLIENT_ID, but keeping the rep self
+        // consistent avoids any ambiguity.)
+        String clientUuid = super.getId();
+        String clientId = super.getClientId();
+        rep.setId(clientUuid);
+        rep.setClientId(clientId);
+
+        String repJson;
+        try {
+            repJson = MAPPER.writeValueAsString(rep);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new RuntimeException(
+                    "IGA capture CREATE_CLIENT: failed to serialize captured ClientRepresentation "
+                    + "for clientId=" + clientId, e);
+        }
+
+        int webOrigins = rep.getWebOrigins() == null ? 0 : rep.getWebOrigins().size();
+        int redirectUris = rep.getRedirectUris() == null ? 0 : rep.getRedirectUris().size();
+        log.infof("IGA capture CREATE_CLIENT: full-rep path for clientId=%s "
+                + "(webOrigins=%d, redirectUris=%d, %d chars) captured at the model-layer "
+                + "terminal seam (RepresentationToModel.createClient#updateClient / "
+                + "partialImport deferred-harvest); full config will replay on commit",
+                clientId, webOrigins, redirectUris, repJson.length());
+
+        // rowsJson contract (must match IgaReplayDispatcher.replayCreateClient):
+        // ID = own client UUID, CLIENT_ID = human clientId,
+        // CLIENT_UUID = same UUID (referenced-client alias so replay's
+        // resolveClient works uniformly), REALM_ID = realm UUID,
+        // REP_JSON = the full ClientRepresentation JSON.
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("ID", clientUuid);
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", clientId);
+        row.put("REALM_ID", realm.getId());
+        row.put("REP_JSON", repJson);
+        return row;
+    }
+
+    /**
+     * Apply the login-protocol factory's {@code setupClientDefaults} to the live
+     * (pass-through) scratch model at the capture terminal seam, mirroring what
+     * {@code ClientManager.createClient} does immediately AFTER
+     * {@code RepresentationToModel.createClient} returns on a non-IGA create.
+     *
+     * <p>Why this is needed (defect: governed client-create left regenerating,
+     * un-committable default CRs). {@code RepresentationToModel.createClient}'s
+     * final mutation is {@code client.updateClient()} — the very seam we hijack to
+     * throw the 202. So in capture mode the throw fires BEFORE
+     * {@code ClientManager.createClient} reaches its {@code setupClientDefaults}
+     * line. The captured {@code CREATE_CLIENT} rep was therefore missing the OIDC
+     * defaults (default redirect-uri from rootUrl, web-origins, public/secret,
+     * flow flags, back-channel-logout attributes) that a real create would carry.
+     * A committed client built from that incomplete rep then diverges from a
+     * normal client, and the next admin write/UI step re-derives those defaults
+     * and captures them as separate UPDATE_CLIENT_* / SET_CLIENT_ATTRIBUTE CRs
+     * that never auto-commit and regenerate on commit.
+     *
+     * <p>By running {@code setupClientDefaults} here BEFORE the snapshot, the
+     * single {@code CREATE_CLIENT} CR carries a complete, defaults-applied
+     * representation — byte-identical to what a non-IGA create commits — so
+     * nothing is left to re-derive and no stranded default-field CRs exist.
+     *
+     * <p>Safe in capture mode: every setter {@code setupClientDefaults} touches
+     * ({@code setWebOrigins}, {@code setAttribute}, the flow/secret/public setters)
+     * sees {@code isIgaActive()==false} (capture mode) and passes straight through
+     * to the real {@code ClientAdapter} — zero CRs are filed here. Idempotent:
+     * {@code setupClientDefaults} only fills fields that are still null/empty, so
+     * a client that already supplied redirectUris/flows is untouched.
+     */
+    private void applyProtocolClientDefaults() {
+        try {
+            String protocol = super.getProtocol();
+            if (protocol == null) {
+                return;
+            }
+            org.keycloak.protocol.LoginProtocolFactory factory =
+                    (org.keycloak.protocol.LoginProtocolFactory) igaSession.getKeycloakSessionFactory()
+                            .getProviderFactory(org.keycloak.protocol.LoginProtocol.class, protocol);
+            if (factory == null) {
+                return;
+            }
+            // setupClientDefaults reads the incoming rep for "was this field
+            // explicitly supplied?" decisions. The live scratch model IS that rep
+            // (every admin-supplied field has been applied by
+            // RepresentationToModel.createClient before this seam), so a
+            // model-derived representation is the faithful input.
+            ClientRepresentation rep = ModelToRepresentation.toRepresentation(this, igaSession);
+            factory.setupClientDefaults(rep, this);
+        } catch (RuntimeException e) {
+            // Never let defaulting break the capture/202; a client missing a
+            // derived default is recoverable, a 500 on create is not.
+            log.warnf(e, "IGA capture CREATE_CLIENT: setupClientDefaults pass failed "
+                    + "for clientId=%s — capturing rep without protocol defaults", super.getClientId());
+        }
+    }
+
+    /**
+     * partialImport batch path. Build this client's
+     * {@code CREATE_CLIENT} {@link IgaImportMode.PendingCr} from the live
+     * (pass-through) scratch model. Called by
+     * {@link IgaImportMode.BatchEmitTransaction#commit} AFTER
+     * {@code RepresentationToModel.createClient} has called its terminal
+     * {@code updateClient()} on the scratch client (so every
+     * updateClientProperties field, every rebuilt protocol mapper, every
+     * default/optional client scope link has been applied to the live model)
+     * and BEFORE the scratch JPA tx commits. Uses the SAME
+     * {@link #buildCapturedClientRow()} contract as the single-entity seam —
+     * replay is identical, {@code IgaReplayDispatcher} byte-unchanged. NO
+     * throw, NO rollback-only here — the batch-emit tx owns that.
+     */
+    IgaImportMode.PendingCr buildImportClientPendingCr() {
+        if (!captureMode || !importDeferred) {
+            return null;
+        }
+        // Prefer the pre-built row that updateClient()
+        // captured at the terminal create seam (see updateClient() javadoc
+        // for the analysis: building the row HERE during the
+        // parent TM's prepare-list iteration causes
+        // StoreFactoryCacheSession.enlistPrepare to mutate the list under
+        // the iterator → ConcurrentModificationException). The
+        // fallback to buildCapturedClientRow() only fires if updateClient()
+        // was never called on this client during the import — that should
+        // be impossible on the ClientsPartialImport.create path
+        // (RepresentationToModel.createClient always calls it), but is
+        // retained as a defensive last resort that keeps the CR shape
+        // identical (and is logged so any drift is visible in production).
+        Map<String, Object> row = cachedImportRow;
+        if (row == null) {
+            log.warnf("IGA multi-entity HARVEST: pre-built row missing for "
+                    + "CREATE_CLIENT uuid=%s — falling back to batch-time "
+                    + "build (updateClient seam was never reached; this is "
+                    + "unexpected on the partialImport path and indicates a "
+                    + "control-flow regression — investigate)",
+                    super.getId());
+            row = buildCapturedClientRow();
+        }
+        String clientUuid = (String) row.get("ID");
+        log.infof("IGA multi-entity ACCUM: CREATE_CLIENT %s (uuid=%s) — row "
+                + "harvested at batch emit from the partialImport "
+                + "ClientsPartialImport.create → RepresentationToModel."
+                + "createClient path (source=%s)",
+                row.get("CLIENT_ID"), clientUuid,
+                cachedImportRow == row ? "pre-built (updateClient seam)"
+                                       : "batch-time fallback");
+        return new IgaImportMode.PendingCr("CLIENT", clientUuid, "CREATE_CLIENT",
+                List.of(row), null);
+    }
+
+    // -------------------------------------------------------------------------
+    // Client-scope attach/detach capture has MOVED to the provider layer:
+    // org.tidecloak.iga.providers.IgaRealmProvider#addClientScopes /
+    // #removeClientScope. With the infinispan cache ON (production), the admin
+    // routes and KC's own create flow route scope attach/detach through
+    // CacheClientAdapter → RealmCacheSession.addClientScopes/removeClientScope →
+    // getClientDelegate() (== IgaRealmProvider), which BYPASSES this ClientModel
+    // adapter entirely. The former IgaClientAdapter#addClientScope /
+    // #removeClientScope overrides here were therefore dead code (never hit at
+    // runtime) and have been removed to avoid misleading a future maintainer
+    // into thinking scope-attach capture lives on the adapter. See
+    // IgaRealmProvider's "CLIENT-SCOPE ATTACH / DETACH" section for the live
+    // ASSIGN_SCOPE / REMOVE_SCOPE capture seam.
+    // -------------------------------------------------------------------------
+
+    // -------------------------------------------------------------------------
+    // Attribute interception (CLIENT_ATTRIBUTES).
+    //
+    // Same one-pending-CR-per-entity rule as the rest of the inline-pattern
+    // operations: admins must drain a client's pending CR before issuing
+    // another one for that client.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void setAttribute(String name, String value) {
+        if (!isIgaActive()) {
+            super.setAttribute(name, value);
+            return;
+        }
+        // No-op guard (see setWebOrigins): KC's updateClientProperties re-applies
+        // every attribute in the PUT body unconditionally. An attribute already at
+        // this value must NOT spawn a phantom SET_CLIENT_ATTRIBUTE CR. Suppress
+        // when the value is unchanged.
+        if (java.util.Objects.equals(value, super.getAttribute(name))) {
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientUuid = getId();
+        checkNoPendingCr(service, clientUuid);
+        Map<String, Object> row = new HashMap<>();
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        row.put("NAME", name);
+        row.put("VALUE", value);
+        service.create(realm, "CLIENT", clientUuid, "SET_CLIENT_ATTRIBUTE",
+                List.of(row), null);
+    }
+
+    @Override
+    public void removeAttribute(String name) {
+        if (!isIgaActive()) {
+            super.removeAttribute(name);
+            return;
+        }
+        // No-op guard: removing an attribute that is already absent is not a
+        // change; suppress the phantom REMOVE_CLIENT_ATTRIBUTE CR.
+        if (super.getAttribute(name) == null) {
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientUuid = getId();
+        checkNoPendingCr(service, clientUuid);
+        Map<String, Object> row = new HashMap<>();
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        row.put("NAME", name);
+        service.create(realm, "CLIENT", clientUuid, "REMOVE_CLIENT_ATTRIBUTE",
+                List.of(row), null);
+    }
+
+    private void checkNoPendingCr(IgaChangeRequestService service, String clientUuid) {
+        var existing = service.findPending(realm.getId(), "CLIENT", clientUuid);
+        if (existing != null) {
+            throw new IgaConflictException(existing.getId());
+        }
+    }
+
+    @Override
+    public ProtocolMapperModel addProtocolMapper(ProtocolMapperModel model) {
+        if (!isIgaActive()) {
+            return super.addProtocolMapper(model);
+        }
+        IgaChangeRequestService service = getService();
+        String clientUuid = getId();
+        String mapperId = model.getId() != null ? model.getId() : java.util.UUID.randomUUID().toString();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("ID", mapperId);
+        row.put("NAME", model.getName());
+        row.put("PROTOCOL", model.getProtocol());
+        row.put("PROTOCOL_MAPPER_NAME", model.getProtocolMapper());
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        // Capture the FULL mapper config map (same shape as
+        // UPDATE_PROTOCOL_MAPPER) so replay can faithfully recreate the mapper
+        // instead of an empty-config one.
+        if (model.getConfig() != null) {
+            row.put("config", new LinkedHashMap<>(model.getConfig()));
+        }
+        service.create(realm, "CLIENT", clientUuid, "ADD_PROTOCOL_MAPPER",
+                List.of(row),
+                null);
+        // Return a stub model with the assigned id
+        model.setId(mapperId);
+        return model;
+    }
+
+    @Override
+    public void updateProtocolMapper(ProtocolMapperModel mapping) {
+        if (!isIgaActive()) {
+            super.updateProtocolMapper(mapping);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientUuid = getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("ID", mapping.getId());
+        row.put("NAME", mapping.getName());
+        row.put("PROTOCOL", mapping.getProtocol());
+        row.put("PROTOCOL_MAPPER_NAME", mapping.getProtocolMapper());
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        if (mapping.getConfig() != null) {
+            row.put("config", new LinkedHashMap<>(mapping.getConfig()));
+        }
+        service.create(realm, "CLIENT", clientUuid, "UPDATE_PROTOCOL_MAPPER",
+                List.of(row), null);
+    }
+
+    @Override
+    public void removeProtocolMapper(ProtocolMapperModel mapping) {
+        if (!isIgaActive()) {
+            super.removeProtocolMapper(mapping);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientUuid = getId();
+        Map<String, Object> row = new HashMap<>();
+        row.put("ID", mapping.getId());
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        service.create(realm, "CLIENT", clientUuid, "REMOVE_PROTOCOL_MAPPER",
+                List.of(row), null);
+    }
+
+    // -------------------------------------------------------------------------
+    // SCOPE_MAPPING — the client's scope->role allowlist (CLIENT_ID, ROLE_ID).
+    //
+    // When the client has fullScopeAllowed=false this allowlist bounds which
+    // roles can land in the issued token, so it is a token-shaping input.
+    // Admin add/remove via POST/DELETE
+    // /admin/realms/{r}/clients/{id}/scope-mappings/realm routes
+    // ClientModel.addScopeMapping(role) -> the infinispan CacheClientAdapter
+    // calls getDelegateForUpdate() then updated.addScopeMapping(role); under
+    // IGA the model adapter == this IgaClientAdapter, so this override IS hit
+    // (verified empirically: model/infinispan ClientAdapter.addScopeMapping
+    // delegates to the model adapter, same as commit-3's realm default-scope
+    // seam). We emit SCOPE_MAPPING_ADD / SCOPE_MAPPING_REMOVE CRs keyed on the
+    // actual table columns {CLIENT_UUID(=CLIENT_ID), CLIENT_ID(clientId for
+    // display), ROLE_ID} and defer persistence to commit/replay (no
+    // super.addScopeMapping in capture). Bootstrap built-in clients are set up
+    // at realm-create before IGA is active, so isIgaActive() lets them pass
+    // straight through; pre-toggle rows are covered by the ADOPT scan.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void addScopeMapping(RoleModel role) {
+        if (!isIgaActive()) {
+            super.addScopeMapping(role);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientUuid = getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        row.put("ROLE_ID", role.getId());
+        service.create(realm, "CLIENT", clientUuid, "SCOPE_MAPPING_ADD",
+                List.of(row), null);
+    }
+
+    @Override
+    public void deleteScopeMapping(RoleModel role) {
+        if (!isIgaActive()) {
+            super.deleteScopeMapping(role);
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientUuid = getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        row.put("ROLE_ID", role.getId());
+        service.create(realm, "CLIENT", clientUuid, "SCOPE_MAPPING_REMOVE",
+                List.of(row), null);
+    }
+
+    // -------------------------------------------------------------------------
+    // Web origins / redirect URIs — full set replacement.
+    //
+    // The CLIENT_WEB_ORIGINS and CLIENT_REDIRECT_URIS tables are list-collection
+    // tables and have no entity class for per-row attestation. Coverage is
+    // provided by the change request snapshot in rows_json; on replay we apply
+    // the full set.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void setWebOrigins(Set<String> webOrigins) {
+        if (!isIgaActive()) {
+            super.setWebOrigins(webOrigins);
+            return;
+        }
+        // No-op guard: KC's RepresentationToModel.updateClient calls every setter
+        // unconditionally on EVERY PUT (updateProperty never diffs) with the
+        // first-non-null of (rep value, current model value). An attributes-only
+        // PUT therefore re-applies the CURRENT web-origins, which must NOT spawn a
+        // phantom UPDATE_CLIENT_WEB_ORIGINS CR (that is the governed-create regen
+        // 409 — un-committable standing CRs that never converge). Suppress when
+        // the incoming set equals the persisted set.
+        if (sameStringSet(webOrigins, super.getWebOrigins())) {
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientUuid = getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        row.put("values", webOrigins == null ? new ArrayList<String>() : new ArrayList<>(webOrigins));
+        service.create(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_WEB_ORIGINS",
+                List.of(row), null);
+    }
+
+    @Override
+    public void setRedirectUris(Set<String> redirectUris) {
+        if (!isIgaActive()) {
+            super.setRedirectUris(redirectUris);
+            return;
+        }
+        // No-op guard (see setWebOrigins): an attributes-only PUT re-applies the
+        // current redirect-uris; suppress the phantom UPDATE_CLIENT_REDIRECT_URIS
+        // CR when unchanged.
+        if (sameStringSet(redirectUris, super.getRedirectUris())) {
+            return;
+        }
+        IgaChangeRequestService service = getService();
+        String clientUuid = getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        row.put("values", redirectUris == null ? new ArrayList<String>() : new ArrayList<>(redirectUris));
+        service.create(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_REDIRECT_URIS",
+                List.of(row), null);
+    }
+
+    /**
+     * Null-tolerant set equality used by the no-op guards: a null set and an
+     * empty set are treated as equal (KC's {@code CollectionUtil.collectionToSet}
+     * normalises a null collection to an empty set before the setter, and the
+     * model's getters return an empty set rather than null), so re-applying the
+     * current value never looks like a change.
+     */
+    private static boolean sameStringSet(Set<String> a, Set<String> b) {
+        java.util.Set<String> sa = a == null ? java.util.Collections.emptySet() : a;
+        java.util.Set<String> sb = b == null ? java.util.Collections.emptySet() : b;
+        return sa.equals(sb);
+    }
+
+    // -------------------------------------------------------------------------
+    // Token-shaping client-config columns: full_scope_allowed,
+    // service_accounts_enabled, protocol, client_id. These are NOT attributes —
+    // they live on the CLIENT row itself — and each is part of the attested
+    // client_config unit payload (RealmAttestationExporter.clientConfig):
+    // full_scope_allowed flips the role-intersection that shapes
+    // realm_access/resource_access/aud, service_accounts_enabled auto-attaches
+    // the service_account scope, protocol gates the whole OIDC mapper set, and
+    // client_id is azp / the resource_access map key. Left ungoverned (the prior
+    // state — these setters were never overridden) they (a) bypass the
+    // capture-then-veto pipeline entirely and (b) diverge the attested
+    // client_config bytes from the live model with no CR to re-stamp the column,
+    // fail-closing every login via the client until an unrelated config CR
+    // happens to re-frame it. Capture each as an UPDATE_CLIENT_PROPERTY CR
+    // (mirrors SET_CLIENT_ATTRIBUTE: same CLIENT entity, same clientConfig
+    // framing/stamping, replay applies the property) and suppress the direct
+    // write. (gap analysis F18.)
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void setFullScopeAllowed(boolean value) {
+        if (!isIgaActive()) {
+            super.setFullScopeAllowed(value);
+            return;
+        }
+        // No-op guard (see setWebOrigins): KC re-applies the current value on
+        // every PUT; suppress the phantom UPDATE_CLIENT_PROPERTY CR when unchanged.
+        if (value == super.isFullScopeAllowed()) {
+            return;
+        }
+        captureClientProperty("fullScopeAllowed", String.valueOf(value));
+    }
+
+    @Override
+    public void setServiceAccountsEnabled(boolean value) {
+        if (!isIgaActive()) {
+            super.setServiceAccountsEnabled(value);
+            return;
+        }
+        if (value == super.isServiceAccountsEnabled()) {
+            return;
+        }
+        captureClientProperty("serviceAccountsEnabled", String.valueOf(value));
+    }
+
+    @Override
+    public void setProtocol(String protocol) {
+        if (!isIgaActive()) {
+            super.setProtocol(protocol);
+            return;
+        }
+        if (java.util.Objects.equals(protocol, super.getProtocol())) {
+            return;
+        }
+        captureClientProperty("protocol", protocol);
+    }
+
+    @Override
+    public void setClientId(String clientId) {
+        if (!isIgaActive()) {
+            super.setClientId(clientId);
+            return;
+        }
+        if (java.util.Objects.equals(clientId, super.getClientId())) {
+            return;
+        }
+        // getClientId() here is the OLD human id (display only); the stable
+        // CLIENT_UUID is the replay/stamp resolution key, so a rename still
+        // resolves the same client row.
+        captureClientProperty("clientId", clientId);
+    }
+
+    /**
+     * Capture a single token-shaping client-config property change as an
+     * {@code UPDATE_CLIENT_PROPERTY} change request (PROPERTY = the field name,
+     * VALUE = its new value as a string) and defer the write to commit/replay.
+     * The rowsJson contract matches
+     * {@code IgaReplayDispatcher.replayUpdateClientProperty}: CLIENT_UUID
+     * (resolution key, stable across a clientId rename), CLIENT_ID (human id for
+     * display), PROPERTY, VALUE.
+     */
+    private void captureClientProperty(String property, String value) {
+        IgaChangeRequestService service = getService();
+        String clientUuid = getId();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("CLIENT_UUID", clientUuid);
+        row.put("CLIENT_ID", getClientId());
+        row.put("PROPERTY", property);
+        row.put("VALUE", value);
+        service.create(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_PROPERTY",
+                List.of(row), null);
+    }
+
+    // -------------------------------------------------------------------------
+    // Client quarantine hook (HARD refuse).
+    //
+    // KC checkpoints surfaced by client.isEnabled():
+    //   ClientIdAndSecretAuthenticator  (client_secret_basic/post)
+    //   AbstractJWTClientValidator      (client JWT auth)
+    //   AccessTokenIntrospectionProvider (introspection)
+    //
+    // Defers to super.isEnabled() first so an admin-disabled client stays
+    // disabled regardless. If super reports enabled, the quarantine cache
+    // refuses the operation when the client has an unattested sidecar row,
+    // making client_credentials / client-auth / introspection requests fail
+    // until the ADOPT_CLIENT CR commits.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public boolean isEnabled() {
+        boolean superEnabled = super.isEnabled();
+        if (!superEnabled) {
+            return false;
+        }
+        if (IgaQuarantineCache.isClientUnsigned(igaSession, realm, this)) {
+            if (IgaQuarantineCache.firstObservation(igaSession,
+                    "client:" + super.getId())) {
+                log.infof("IGA quarantine REFUSE: client=%s (uuid=%s) realm=%s — "
+                        + "ADOPT pending; treating as not-enabled.",
+                        super.getClientId(), super.getId(), realm.getName());
+            }
+            return false;
+        }
+        return true;
+    }
+}

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.6.0: Rename IGA_AUTHORIZATION.PARTIAL_SIG -> APPROVAL.
+
+      The column was misnamed: it never held a partial signature. The
+      IGA_AUTHORIZATION table is already one row per approver, and the value
+      stored is the approver's approval (today just the approver's username
+      stub, written by SimpleNameAttestor/TideAttestor.record). The column is
+      therefore renamed to APPROVAL (entity field IgaAuthorizationEntity.approval,
+      getter/setter getApproval/setApproval).
+
+      columnDataType matches the original 1.0.0 create (iga-1.0.0-2:
+      <column name="PARTIAL_SIG" type="TEXT"/>) and the entity @Column
+      (columnDefinition = "TEXT"); supplied because some DBs (e.g. MySQL/MariaDB)
+      require the existing type on a column rename.
+    -->
+
+    <changeSet id="iga-2.6.0-1" author="tidecloak-iga">
+        <renameColumn tableName="IGA_AUTHORIZATION"
+                      oldColumnName="PARTIAL_SIG"
+                      newColumnName="APPROVAL"
+                      columnDataType="TEXT"/>
+    </changeSet>
+
+</databaseChangeLog>

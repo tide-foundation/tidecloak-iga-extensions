@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!-- 1: Create IGA_LICENSE_HISTORY table -->
+    <changeSet id="iga-1.7.0-1" author="tidecloak-iga">
+        <createTable tableName="IGA_LICENSE_HISTORY">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="REALM_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="PROVIDER_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="VRK" type="clob">
+                <constraints nullable="false"/>
+            </column>
+            <column name="GVRK" type="clob">
+                <constraints nullable="false"/>
+            </column>
+            <column name="GVRK_CERTIFICATE" type="clob"/>
+            <column name="VVK_ID" type="VARCHAR(256)"/>
+            <column name="CUSTOMER_ID" type="VARCHAR(256)"/>
+            <column name="VENDOR_ID" type="VARCHAR(256)"/>
+            <column name="PAYER_PUB" type="VARCHAR(512)"/>
+            <column name="WALLET_ID" type="VARCHAR(512)"/>
+            <column name="EXPIRY" type="BIGINT"/>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+
+    <!-- 2: Index on REALM_ID for the common per-realm history lookup -->
+    <changeSet id="iga-1.7.0-2" author="tidecloak-iga">
+        <createIndex tableName="IGA_LICENSE_HISTORY" indexName="IDX_IGA_LICENSE_HISTORY_REALM">
+            <column name="REALM_ID"/>
+        </createIndex>
+    </changeSet>
+
+    <!-- 3: Index on PROVIDER_ID for per-provider history lookup -->
+    <changeSet id="iga-1.7.0-3" author="tidecloak-iga">
+        <createIndex tableName="IGA_LICENSE_HISTORY" indexName="IDX_IGA_LICENSE_HISTORY_PROVIDER">
+            <column name="PROVIDER_ID"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>
