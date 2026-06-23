@@ -39,6 +39,7 @@ import org.tidecloak.iga.producer.units.UserRoleMappingSetUnit;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
@@ -137,6 +138,13 @@ public class TideAttestor implements IgaAttestor {
      * {@code IgaReplayDispatcher}.
      */
     public static final String ACTION_OFFBOARD_REALM = "OFFBOARD_REALM";
+
+    /**
+     * Workload server-identity cert request (public {@code tide-server-identity} endpoint).
+     * Non-producer: signs three opaque ServerCert:1 blobs (leaf TBS / VVK-CA TBS / public key)
+     * via {@link org.tidecloak.iga.crypto.ServerCertSigner}, NOT a re-derivable AttestationUnit.
+     */
+    public static final String ACTION_REQUEST_SERVER_CERT = "REQUEST_SERVER_CERT";
 
     /**
      * Realm attribute overriding the minimum distinct-admin approvals required to
@@ -2105,6 +2113,34 @@ public class TideAttestor implements IgaAttestor {
         // Policy:1 PolicySignRequest with the EXISTING M0 policy embedded as the authorizer.
         if (ACTION_REGEN_ADMIN_POLICY.equals(cr.getActionType())) {
             return buildPolicyResignApprovalModel(session, realm, cr);
+        }
+
+        // REQUEST_SERVER_CERT is NOT a producer-unit CR — it signs three OPAQUE blobs (leaf
+        // X.509 TBS, self-signed VVK-CA TBS, raw workload public key) that have no
+        // re-derivable AttestationUnit envelope. So, like OFFBOARD_REALM above, it gets its own
+        // carrier-build seam: three separate ServerCert:1 ModelRequests (source-branch shape).
+        // The leaf rides this CR's REQUEST_MODEL (where the enclave appends dokens); the CA + PK
+        // models are persisted on the IGA_SERVER_CERT_DRAFT sidecar. Signing + assembly run at
+        // commit in IgaReplayDispatcher.replayRequestServerCert.
+        if (ACTION_REQUEST_SERVER_CERT.equals(cr.getActionType())) {
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            List<IgaServerCertDraftEntity> drafts = em.createNamedQuery(
+                            "IgaServerCertDraft.findByChangeRequestId", IgaServerCertDraftEntity.class)
+                    .setParameter("crId", cr.getId())
+                    .getResultList();
+            if (drafts.isEmpty()) {
+                throw new RuntimeException("IGA server-cert approval: CR " + cr.getId()
+                        + " has no IGA_SERVER_CERT_DRAFT sidecar — cannot build the ServerCert:1 models");
+            }
+            IgaServerCertDraftEntity draft = drafts.get(0);
+            byte[] adminPolicy = readM0AdminPolicyBytes(session, realm);
+            String leafCarrier = org.tidecloak.iga.crypto.ServerCertSigner.buildApprovalModels(
+                    realm, draft, adminPolicy);
+            cr.setRequestModel(leafCarrier);
+            em.flush();
+            log.infof("IGA server-cert approval (phase 1): built ServerCert:1 leaf/CA/PK models for "
+                    + "CR %s (instance %s, realm %s).", cr.getId(), draft.getInstanceId(), realm.getName());
+            return leafCarrier;
         }
 
         // The M0 admin Policy bytes to embed — the genuine VVK-signed threshold Policy.

@@ -59,6 +59,14 @@ public class IgaServerCertDraftRepresentation {
     public String getSignedPolicy() { return signedPolicy; }
     public void setSignedPolicy(String signedPolicy) { this.signedPolicy = signedPolicy; }
 
+    /**
+     * Read-only alias of {@link #getSignedPolicy()} exposed under the source branch's
+     * field name. The {@code signedPolicy} column stores the ORK-signed workload public
+     * key ({@code base64(pubKey) + "." + base64(vvkSig)}), surfaced to admin listings as
+     * {@code signedPublicKey} for parity with the {@code add-server-identity} branch.
+     */
+    public String getSignedPublicKey() { return signedPolicy; }
+
     public boolean isRevoked() { return revoked; }
     public void setRevoked(boolean revoked) { this.revoked = revoked; }
 
