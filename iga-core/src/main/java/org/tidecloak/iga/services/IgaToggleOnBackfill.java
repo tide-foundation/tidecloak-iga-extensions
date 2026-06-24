@@ -131,11 +131,17 @@ public final class IgaToggleOnBackfill {
                     + "(the uniform read only replays firstAdmin-pack sigs).", realm.getName());
             return Result.skipped("not_first_admin");
         }
-        if (!TideAttestor.isRealSigningCapableRealm(realm)) {
-            log.infof("IGA toggle-on backfill: realm %s is not real-signing-capable (no firstAdmin "
+        // GATE on PROVISIONED (realm-state only), NOT can-sign-now: a Tide-provisioned realm
+        // ALWAYS runs the real backfill. If its ORKs are down or THRESHOLD_T/N is unset the
+        // PHASE-2 signEnvelopesWithFirstAdminVvk → constructSignSettings THROWS (fail-loud,
+        // propagated to the sweep job tx → rollback → CRs PENDING), instead of silently
+        // skipping and leaving the closure stub-signed. Only a genuinely tideless/dev realm
+        // (no firstAdmin VVK material) is NOT provisioned → skip + keep stub behaviour.
+        if (!TideAttestor.isTideSigningProvisionedRealm(realm)) {
+            log.infof("IGA toggle-on backfill: realm %s is not Tide-signing-provisioned (no firstAdmin "
                     + "VVK material) — skipping; columns stay NULL and the dev/test login keeps "
                     + "its stub behaviour.", realm.getName());
-            return Result.skipped("not_real_signing_capable");
+            return Result.skipped("not_tide_signing_provisioned");
         }
 
         session.getContext().setRealm(realm);
@@ -314,14 +320,17 @@ public final class IgaToggleOnBackfill {
      *         {@link Result#skipped}{@code ("adopt_pending")} if ADOPT CRs remain
      */
     public static Result convergeAfterCommit(KeycloakSession session, RealmModel realm) {
-        // Cheap gate FIRST: if the realm is not a firstAdmin real-signing realm the whole
-        // pass is a no-op anyway — skip the pending-ADOPT count query entirely. Capability
-        // (a pure in-memory tide-vendor-key check) is evaluated before the firstAdmin-mode
-        // check (which reads realm state) so a non-provisioned dev/test realm short-circuits
-        // without touching the DB.
-        if (!TideAttestor.isRealSigningCapableRealm(realm)
+        // Cheap gate FIRST: if the realm is not a firstAdmin Tide-provisioned realm the whole
+        // pass is a no-op anyway — skip the pending-ADOPT count query entirely. Provisioning
+        // (a pure in-memory tide-vendor-key + activeVrk check, NO threshold env / NO ORK dial)
+        // is evaluated before the firstAdmin-mode check (which reads realm state) so a
+        // non-provisioned dev/test realm short-circuits without touching the DB. GATE on
+        // PROVISIONED, NOT can-sign-now: a provisioned realm whose ORKs are down or whose
+        // THRESHOLD env is unset still ENTERS backfill and FAILS LOUD at PHASE-2 sign (the
+        // throw propagates to the sweep job tx → rollback → CRs PENDING), never stub-stubs.
+        if (!TideAttestor.isTideSigningProvisionedRealm(realm)
                 || !TideAttestor.isFirstAdminMode(session, realm)) {
-            return Result.skipped("not_first_admin_or_not_capable");
+            return Result.skipped("not_first_admin_or_not_provisioned");
         }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         long pendingAdopt = em.createQuery(

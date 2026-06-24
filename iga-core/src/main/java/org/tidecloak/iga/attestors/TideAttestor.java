@@ -2737,10 +2737,15 @@ public class TideAttestor implements IgaAttestor {
     private String sign(KeycloakSession session, RealmModel realm, String mode,
                         boolean realCeremonyEligible, IgaChangeRequestEntity cr, byte[] canonical) {
         if (MODE_FIRST_ADMIN.equals(mode)) {
-            if (realCeremonyEligible && isRealSigningCapable(realm)) {
+            // GATE on PROVISIONED (realm-state only), NOT can-sign-now: a Tide-provisioned
+            // realm ALWAYS takes the real lane. If it cannot complete the sign (ORKs down or
+            // THRESHOLD_T/N unset) signFirstAdminUnitWithVvk → constructSignSettings throws
+            // (fail-loud) instead of silently stamping a stub. A genuinely tideless/dev realm
+            // (no vendor-key / no activeVrk) is NOT provisioned → keeps the stub.
+            if (realCeremonyEligible && isTideSigningProvisioned(realm)) {
                 return signFirstAdminUnitWithVvk(session, realm, cr);      // REAL VVK unit-CBOR ceremony (fail-closed)
             }
-            return stubSign(FIRSTADMIN_SIG_PREFIX, canonical);             // firstAdmin stub (not capable / non-producer-envelope CRs)
+            return stubSign(FIRSTADMIN_SIG_PREFIX, canonical);             // firstAdmin stub (not provisioned / non-producer-envelope CRs)
         }
         // multiAdmin: ONLY producer-envelope-signed actions carry a real per-unit producer
         // carrier worth Policy:1-signing here. A NON-producer-envelope action (DISABLE_IGA and
@@ -2832,6 +2837,19 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
+     * Public façade over {@link #isTideSigningProvisioned} for the cross-class real-vs-stub
+     * GATES (toggle-on backfill, post-commit converge, firstAdmin auto-commit sweep). Unlike
+     * {@link #isRealSigningCapableRealm} this is realm-state-ONLY: it does NOT read the
+     * {@code THRESHOLD_T/N} env, so a provisioned realm whose process is merely missing the
+     * threshold env (or whose ORKs are down) still takes the real-signing lane and FAILS LOUD
+     * at sign time instead of silently downgrading to a stub. A genuinely tideless/dev realm
+     * is FALSE here and keeps stubbing.
+     */
+    public static boolean isTideSigningProvisionedRealm(RealmModel realm) {
+        return isTideSigningProvisioned(realm);
+    }
+
+    /**
      * Is this realm in firstAdmin mode? Public façade over {@link #resolveMode} so
      * the toggle-on backfill (PR-B) signs only while the firstAdmin pack is ALIVE
      * (pre-flip) — once the realm flips to multiAdmin the firstAdmin pack is burned
@@ -2842,6 +2860,32 @@ public class TideAttestor implements IgaAttestor {
     }
 
     private static boolean isRealSigningCapable(RealmModel realm) {
+        // (1-4) realm-state provisioning + (5) THRESHOLD env. The env check is the ONLY
+        // difference between this "can sign right now" predicate and the realm-state-only
+        // {@link #isTideSigningProvisioned} below.
+        return isTideSigningProvisioned(realm)
+                // (5) THRESHOLD_T / THRESHOLD_N env, non-zero ints.
+                && thresholdEnv(ENV_THRESHOLD_T) > 0 && thresholdEnv(ENV_THRESHOLD_N) > 0;
+    }
+
+    /**
+     * REALM-STATE-ONLY signing-provisioning predicate — TRUE iff the realm carries the
+     * full firstAdmin Tide signing material (checks 1-4 of {@link #isRealSigningCapable}):
+     * a {@code tide-vendor-key} component whose {@code clientSecret} parses to a non-blank
+     * {@code activeVrk}, plus non-blank {@code gVRK} / {@code gVRKCertificate} /
+     * {@code systemHomeOrk} / {@code vvkId}. It deliberately does NOT read the
+     * {@code THRESHOLD_T/N} process env and does NOT pre-dial the ORKs.
+     *
+     * <p>This separates "provisioned for Tide signing" (a realm property the ORK being
+     * off, or a missing threshold env, cannot change) from "able to complete a sign right
+     * now" ({@link #isRealSigningCapable}). The real-vs-stub GATES use THIS predicate so a
+     * provisioned realm ALWAYS takes the real-signing lane: if it then cannot complete the
+     * sign (ORKs unreachable, or {@code THRESHOLD_T/N} unset), the ceremony FAILS LOUD at
+     * sign time ({@link #constructSignSettings} throws) — it never silently downgrades to a
+     * stub. A genuinely tideless/dev realm (no vendor-key / no activeVrk) is FALSE here and
+     * keeps its stub behaviour (no fail-loud).
+     */
+    static boolean isTideSigningProvisioned(RealmModel realm) {
         ComponentModel vendorKey = realm.getComponentsStream()
                 .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
                 .findFirst().orElse(null);
@@ -2850,7 +2894,7 @@ public class TideAttestor implements IgaAttestor {
         }
         MultivaluedHashMap<String, String> config = vendorKey.getConfig();
 
-        // (2) activeVrk from the clientSecret blob — a malformed/empty blob → not capable.
+        // (2) activeVrk from the clientSecret blob — a malformed/empty blob → not provisioned.
         String clientSecret = config.getFirst(CFG_CLIENT_SECRET);
         if (clientSecret == null || clientSecret.isBlank()) {
             return false;
@@ -2865,13 +2909,8 @@ public class TideAttestor implements IgaAttestor {
         }
 
         // (3) VRK authorizer material + (4) ork-endpoint settings.
-        if (isBlank(config.getFirst(CFG_GVRK)) || isBlank(config.getFirst(CFG_GVRK_CERTIFICATE))
-                || isBlank(config.getFirst(CFG_HOME_ORK)) || isBlank(config.getFirst(CFG_VVK_ID))) {
-            return false;
-        }
-
-        // (5) THRESHOLD_T / THRESHOLD_N env, non-zero ints.
-        return thresholdEnv(ENV_THRESHOLD_T) > 0 && thresholdEnv(ENV_THRESHOLD_N) > 0;
+        return !isBlank(config.getFirst(CFG_GVRK)) && !isBlank(config.getFirst(CFG_GVRK_CERTIFICATE))
+                && !isBlank(config.getFirst(CFG_HOME_ORK)) && !isBlank(config.getFirst(CFG_VVK_ID));
     }
 
     /** Parse a THRESHOLD_* env var to an int; 0 when unset/blank/non-numeric. */

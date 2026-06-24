@@ -516,12 +516,20 @@ public final class IgaFirstAdminAutoCommit {
                     realm.getName());
             return SweepResult.skipped("NOT_FIRST_ADMIN");
         }
-        // Gate 2 — VRK active. If the firstAdmin signer is not active, SKIP entirely
-        // (leave the CRs PENDING). Never stub-stamp, never fail-closed mid-sweep.
-        if (!TideAttestor.isRealSigningCapableRealm(realm)) {
-            log.infof("IGA firstAdmin auto-commit: realm %s VRK not active — baseline-config sweep SKIPPED; "
-                    + "the baseline CRs remain PENDING for later (manual/auto) handling.", realm.getName());
-            return SweepResult.skipped("VRK_NOT_ACTIVE");
+        // Gate 2 — Tide-signing PROVISIONED (VRK present + activeVrk), realm-state ONLY.
+        // SKIP entirely (leave CRs PENDING, never stub-stamp) ONLY when the realm is
+        // genuinely NOT provisioned for Tide signing (no tide-vendor-key / no activeVrk) —
+        // a tideless/dev realm. We deliberately do NOT gate on can-sign-now (threshold env /
+        // ORK reachability): a PROVISIONED realm whose ORKs are down or whose THRESHOLD_T/N is
+        // unset must still RUN the sweep so the converge ORK ceremony is ATTEMPTED and FAILS
+        // LOUD (its throw rolls back this sweep's dedicated job tx → ADOPT CRs revert to
+        // PENDING + the toggle surfaces completed_with_warnings naming the ORK/threshold
+        // cause), rather than silently stub-succeeding the toggle.
+        if (!TideAttestor.isTideSigningProvisionedRealm(realm)) {
+            log.infof("IGA firstAdmin auto-commit: realm %s is not Tide-signing-provisioned — baseline-config "
+                    + "sweep SKIPPED; the baseline CRs remain PENDING for later (manual/auto) handling.",
+                    realm.getName());
+            return SweepResult.skipped("NOT_TIDE_SIGNING_PROVISIONED");
         }
 
         // Per-CR allow-list filter (incl. the ADOPT system-default gate AND the

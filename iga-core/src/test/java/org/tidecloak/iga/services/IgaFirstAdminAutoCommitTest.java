@@ -255,7 +255,7 @@ class IgaFirstAdminAutoCommitTest {
 
         try (MockedStatic<TideAttestor> ta = mockStatic(TideAttestor.class)) {
             ta.when(() -> TideAttestor.isFirstAdminMode(session, realm)).thenReturn(true);
-            ta.when(() -> TideAttestor.isRealSigningCapableRealm(realm)).thenReturn(true);
+            ta.when(() -> TideAttestor.isTideSigningProvisionedRealm(realm)).thenReturn(true);
 
             IgaFirstAdminAutoCommit.SweepResult result =
                     IgaFirstAdminAutoCommit.sweep(session, realm, admin, pending, engine);
@@ -297,7 +297,7 @@ class IgaFirstAdminAutoCommitTest {
     }
 
     @Test
-    void sweep_vrkNotActive_isSkipped_noStubNoRollback() {
+    void sweep_notTideSigningProvisioned_isSkipped_noStubNoRollback() {
         KeycloakSession session = mock(KeycloakSession.class);
         RealmModel realm = defaultRoleRealm();
         UserModel admin = mock(UserModel.class);
@@ -308,13 +308,17 @@ class IgaFirstAdminAutoCommitTest {
 
         try (MockedStatic<TideAttestor> ta = mockStatic(TideAttestor.class)) {
             ta.when(() -> TideAttestor.isFirstAdminMode(session, realm)).thenReturn(true);
-            ta.when(() -> TideAttestor.isRealSigningCapableRealm(realm)).thenReturn(false); // VRK not active
+            // Genuinely NOT provisioned for Tide signing (tideless/dev realm) → skip + keep
+            // CRs PENDING, no stub stamps. NOTE: a realm that IS provisioned but merely lacks
+            // THRESHOLD env / has ORKs down would NOT short-circuit here — it would RUN the
+            // sweep and fail loud at the converge ORK ceremony (sign-at-toggle redesign).
+            ta.when(() -> TideAttestor.isTideSigningProvisionedRealm(realm)).thenReturn(false);
 
             IgaFirstAdminAutoCommit.SweepResult result =
                     IgaFirstAdminAutoCommit.sweep(session, realm, admin, pending, engine);
 
-            assertFalse(result.ran, "VRK not active → sweep skipped (CRs stay PENDING)");
-            assertEquals("VRK_NOT_ACTIVE", result.skipReason);
+            assertFalse(result.ran, "not Tide-signing-provisioned → sweep skipped (CRs stay PENDING)");
+            assertEquals("NOT_TIDE_SIGNING_PROVISIONED", result.skipReason);
             assertFalse(engineCalled[0], "no engine call → no stub stamps, no rollback mid-sweep");
         }
     }
@@ -340,7 +344,7 @@ class IgaFirstAdminAutoCommitTest {
         try (MockedStatic<TideAttestor> ta = mockStatic(TideAttestor.class);
              MockedStatic<DefaultRoleCompositeGuard> guard = mockStatic(DefaultRoleCompositeGuard.class)) {
             ta.when(() -> TideAttestor.isFirstAdminMode(session, realm)).thenReturn(true);
-            ta.when(() -> TideAttestor.isRealSigningCapableRealm(realm)).thenReturn(true);
+            ta.when(() -> TideAttestor.isTideSigningProvisionedRealm(realm)).thenReturn(true);
             guard.when(() -> DefaultRoleCompositeGuard.isBenignDefaultRoleComposite(realm)).thenReturn(false);
 
             IgaFirstAdminAutoCommit.SweepResult result =
@@ -383,7 +387,7 @@ class IgaFirstAdminAutoCommitTest {
 
         try (MockedStatic<TideAttestor> ta = mockStatic(TideAttestor.class)) {
             ta.when(() -> TideAttestor.isFirstAdminMode(session, realm)).thenReturn(true);
-            ta.when(() -> TideAttestor.isRealSigningCapableRealm(realm)).thenReturn(true);
+            ta.when(() -> TideAttestor.isTideSigningProvisionedRealm(realm)).thenReturn(true);
 
             IgaFirstAdminAutoCommit.SweepResult result =
                     IgaFirstAdminAutoCommit.sweep(session, realm, admin, pending, engine);
@@ -420,7 +424,7 @@ class IgaFirstAdminAutoCommitTest {
 
         try (MockedStatic<TideAttestor> ta = mockStatic(TideAttestor.class)) {
             ta.when(() -> TideAttestor.isFirstAdminMode(session, realm)).thenReturn(true);
-            ta.when(() -> TideAttestor.isRealSigningCapableRealm(realm)).thenReturn(true);
+            ta.when(() -> TideAttestor.isTideSigningProvisionedRealm(realm)).thenReturn(true);
 
             IgaFirstAdminAutoCommit.SweepResult result =
                     IgaFirstAdminAutoCommit.sweep(session, realm, admin, pending, engine);
