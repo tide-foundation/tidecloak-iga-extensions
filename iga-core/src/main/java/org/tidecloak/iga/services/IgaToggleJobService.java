@@ -48,7 +48,10 @@ public final class IgaToggleJobService {
 
     public static final String STATE_RUNNING = "running";
     public static final String STATE_COMPLETED = "completed";
+    public static final String STATE_COMPLETED_WITH_WARNINGS = "completed_with_warnings";
     public static final String STATE_FAILED = "failed";
+
+    public static final String STATUS_WARNING = "warning";
 
     public static final String STATUS_PENDING = "pending";
     public static final String STATUS_RUNNING = "running";
@@ -174,6 +177,24 @@ public final class IgaToggleJobService {
     }
 
     /**
+     * Mark the whole job {@code completed_with_warnings} (a non-fatal outcome:
+     * the toggle succeeded but some per-entity work did not). Marks {@code stageId}
+     * with a {@code warning} status and records the {@code message} in the error
+     * object so the UI can render it. Like {@link #complete}, this NEVER overrides a
+     * job already in the {@code failed} state — a truly-failed job stays failed
+     * (a hard failure outranks a warning).
+     */
+    public void completeWithWarnings(String jobId, String stageId, String message) {
+        if (jobId == null) return;
+        runInTx(em -> {
+            IgaToggleJobEntity job = em.find(IgaToggleJobEntity.class, jobId);
+            if (job == null) return;
+            applyCompleteWithWarnings(job, stageId, message);
+            em.merge(job);
+        });
+    }
+
+    /**
      * Mark a stage {@code failed}, the job {@code failed}, and populate the
      * {@code error} object with {@code stageId}/{@code message}.
      */
@@ -232,6 +253,39 @@ public final class IgaToggleJobService {
         if (STATE_RUNNING.equals(job.getState())) {
             job.setState(STATE_COMPLETED);
             job.setCurrentStageId(null);
+        }
+        job.setUpdatedAt(System.currentTimeMillis());
+    }
+
+    /**
+     * Mark a stage {@code warning}, set the job state to
+     * {@code completed_with_warnings}, and record the warning in the error object.
+     * Mirrors {@link #applyComplete}: only a {@code running} job is advanced, so a
+     * job already {@code failed} (a hard failure) is left untouched and a warning
+     * never downgrades it.
+     */
+    static void applyCompleteWithWarnings(IgaToggleJobEntity job, String stageId, String message) {
+        if (!STATE_RUNNING.equals(job.getState())) {
+            // Already failed (hard) or already terminal — never override.
+            job.setUpdatedAt(System.currentTimeMillis());
+            return;
+        }
+        List<Map<String, Object>> stages = parseStages(job.getStagesJson());
+        for (Map<String, Object> stage : stages) {
+            if (stageId != null && stageId.equals(stage.get("id"))) {
+                stage.put("status", STATUS_WARNING);
+            }
+        }
+        job.setStagesJson(writeStages(stages));
+        job.setState(STATE_COMPLETED_WITH_WARNINGS);
+        job.setCurrentStageId(null);
+        Map<String, Object> err = new LinkedHashMap<>();
+        err.put("stageId", stageId);
+        err.put("message", message);
+        try {
+            job.setErrorJson(MAPPER.writeValueAsString(err));
+        } catch (Exception ser) {
+            job.setErrorJson("{\"stageId\":null,\"message\":\"<unserializable>\"}");
         }
         job.setUpdatedAt(System.currentTimeMillis());
     }

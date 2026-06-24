@@ -146,6 +146,14 @@ public class TideAdminCompatResource {
         // per-surface counts under "approverRoleRepoint".
         Map<String, Object> body = new LinkedHashMap<>();
 
+        // Tier-3 silent-200 guard: track whether ANY stage marked the job failed
+        // (sweep-failure or total-scan-failure). At the single ok() return below we
+        // turn a failed job into a NON-2xx (mirroring the sidecar-cap 409 shape) so a
+        // status-code-only client cannot mistake a failed toggle for success. A
+        // completed_with_warnings outcome (Tier 2, per-entity ADOPT errors) is NOT a
+        // failure and stays a 200 carrying the "warning" field.
+        boolean jobFailed = false;
+
         // OFF→ON, non-master: auto-create the tide-realm-admin approver
         // role BEFORE the isIGAEnabled flip below. Creating it pre-flip means
         // IGA is still OFF, so the addRole/addCompositeRole/setSingleAttribute
@@ -241,6 +249,14 @@ public class TideAdminCompatResource {
                             "IGA toggle-on: approver-role repoint to tide-realm-admin FAILED for realm %s "
                                     + "— toggle continues; some surfaces may still carry a stale iga.approverRole.",
                             realm.getName());
+                    // Pre-flip, not a tracked stage, so this never hard-stops the
+                    // toggle. But the failure was previously invisible: record it in
+                    // the response body so an operator can see a stale iga.approverRole
+                    // may remain on some surface and re-run / fix it manually.
+                    Map<String, Object> repointErr = new LinkedHashMap<>();
+                    repointErr.put("error", repointEx.getClass().getSimpleName());
+                    repointErr.put("message", String.valueOf(repointEx.getMessage()));
+                    body.put("approverRoleRepointError", repointErr);
                 }
             }
         }
@@ -368,13 +384,13 @@ public class TideAdminCompatResource {
                                 "isIGAEnabled rolled back to false.",
                         realm.getName(), cap.getCap(), cap.getCurrent());
             } catch (RuntimeException ex) {
-                // Scan failed entirely — toggle ALREADY committed in the
-                // outer transaction. Surface the error in the response but
-                // do NOT roll back the toggle (per locked design: scan
-                // failure must not block the toggle).
+                // TOTAL scan failure. Captured here and HARD-STOPPED in the
+                // errHolder[0] branch below (Tier 1): the realm-attribute write is
+                // rolled back and a non-2xx is returned, mirroring the sidecar-cap
+                // branch. A half-enabled realm (IGA on, zero ADOPT CRs) fails logins
+                // closed with nothing to approve, so refusing is safer than the old
+                // silent-200 "toggle remains enabled" behaviour.
                 errHolder[0] = ex;
-                logger.errorf(ex, "IGA toggle-on scan FAILED for realm %s — toggle " +
-                        "remains enabled, no ADOPT CRs were emitted.", realm.getName());
             }
 
             if (capHolder[0] != null) {
@@ -512,9 +528,11 @@ public class TideAdminCompatResource {
                     sweepErr.put("message", String.valueOf(sweepEx.getMessage()));
                     body.put("autoCommit", sweepErr);
                     // The sweep failing does NOT roll back the toggle (the
-                    // attribute is committed); reflect that truthfully — the
-                    // sign-defaults stage failed, the job failed, but the toggle
-                    // response is still a normal 200.
+                    // attribute is already committed) — but the job IS failed, and
+                    // the HTTP response must reflect that (Tier 3): record jobFailed
+                    // so the single ok() return below turns into a non-2xx instead of
+                    // a silent 200.
+                    jobFailed = true;
                     if (trackProgress) {
                         jobService.fail(jobId, "sign-defaults",
                                 sweepEx.getClass().getSimpleName() + ": " + sweepEx.getMessage());
@@ -534,20 +552,57 @@ public class TideAdminCompatResource {
                 }
                 if (trackProgress) {
                     jobService.stageDone(jobId, "finalize", null, null);
+                }
+
+                // Tier 2: per-entity ADOPT failures (IgaAdoptScan caught them per row,
+                // incremented ScanResult.errors, and CONTINUED so one poison entity
+                // cannot abort adopting the rest). Those errors were previously never
+                // surfaced — the job reported completed/error:null. Surface them as a
+                // WARNING (not a hard failure): the toggle succeeded and the realm is
+                // enabled, but N entities did not get an ADOPT CR and need a re-scan.
+                long adoptErrors = resultHolder[0].errors;
+                if (adoptErrors > 0) {
+                    String adoptWarning = adoptErrors + " entit"
+                            + (adoptErrors == 1 ? "y" : "ies")
+                            + " failed to adopt; review the server log and re-scan.";
+                    body.put("adoptErrors", adoptErrors);
+                    body.put("adoptWarning", adoptWarning);
+                    logger.warnf("IGA toggle-on: %d entit%s failed to adopt for realm %s "
+                                    + "(per-entity errors, best-effort continue) — surfaced as a warning.",
+                            adoptErrors, adoptErrors == 1 ? "y" : "ies", realm.getName());
+                    if (trackProgress) {
+                        // completed_with_warnings: a non-fatal outcome. Marks the
+                        // adopt-scan stage with a warning indicator and records the
+                        // count; respects the applyComplete guard so a job already
+                        // failed (e.g. the sweep above) stays failed.
+                        jobService.completeWithWarnings(jobId, "adopt-scan", adoptWarning);
+                    }
+                } else if (trackProgress) {
                     jobService.complete(jobId);
                 }
             } else if (errHolder[0] != null) {
-                // Scan failed entirely (not a cap rejection). The toggle stays
-                // enabled but no ADOPT CRs were emitted — reflect the adopt-scan
-                // stage failure truthfully.
+                // Tier 1: TOTAL scan failure (not a cap rejection, not a per-entity
+                // error — the whole scan threw before emitting any ADOPT CR). Leaving
+                // the realm half-enabled (isIGAEnabled=true with ZERO ADOPT CRs) is the
+                // worst outcome: governance is on but nothing is attested, so logins
+                // fail-closed with no CRs to approve. HARD-STOP, mirroring the
+                // sidecar-cap branch: roll back the isIGAEnabled write (same outer tx,
+                // so the realm reverts to its pre-toggle state) and return a non-2xx
+                // with the error body, instead of falling through to the silent 200.
+                // The job is already fail()ed below.
+                writeIgaAttributeDirect(IGA_ATTRIBUTE, Boolean.toString(current));
                 if (trackProgress) {
                     jobService.fail(jobId, "adopt-scan",
                             errHolder[0].getClass().getSimpleName() + ": " + errHolder[0].getMessage());
                 }
+                logger.errorf(errHolder[0],
+                        "IGA toggle-on scan failed entirely for realm %s — isIGAEnabled rolled back to %s; "
+                                + "no ADOPT CRs were emitted.",
+                        realm.getName(), current);
                 Map<String, Object> scanErr = new LinkedHashMap<>();
                 scanErr.put("error", errHolder[0].getClass().getSimpleName());
                 scanErr.put("message", String.valueOf(errHolder[0].getMessage()));
-                body.put("scan", scanErr);
+                return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(scanErr).build();
             }
         }
 
@@ -561,6 +616,18 @@ public class TideAdminCompatResource {
         // (the writeIgaAttributeDirect above) with no teardown, exactly as before
         // (IGA is never on for master, so there is nothing to tear down).
 
+        // Tier 3: the silent-200 guard. If any tracked stage marked the job failed
+        // (the firstAdmin auto-commit sweep failure above; the total-scan failure
+        // already returned a non-2xx earlier), the toggle attribute is committed but
+        // the post-flip work did NOT all succeed. A status-code-only client must not
+        // read this as success: return a non-2xx (500, consistent with the cap branch's
+        // non-2xx shape) carrying the full body plus a top-level toggleFailed flag.
+        // completed_with_warnings (Tier 2) does NOT set jobFailed, so a warning stays a
+        // 200 with the "warning"/"adoptWarning" fields.
+        if (jobFailed) {
+            body.put("toggleFailed", true);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(body).build();
+        }
         return Response.ok(body).build();
     }
 
