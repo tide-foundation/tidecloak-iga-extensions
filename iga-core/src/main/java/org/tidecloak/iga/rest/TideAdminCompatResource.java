@@ -203,11 +203,40 @@ public class TideAdminCompatResource {
                     .filter(x -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(x.getProviderId()))
                     .findFirst()
                     .orElse(null);
-            if (tideIdp != null && tideVendorKey != null) {
+            final boolean tideRealm = tideIdp != null && tideVendorKey != null;
+
+            // SIGN-AT-TOGGLE FIX (Option A, deadlock-corrected 2026-06-24): DURABLE
+            // realm-state commit runs FIRST — before ANY request-tx write touches the
+            // realm row. 95d84f7 ran this AFTER the request tx had already written (and
+            // locked) iga.attestor / defaultSignatureAlgorithm / isIGAEnabled on the
+            // realm row, so the nested job tx's write to the SAME row deadlocked against
+            // the request tx's uncommitted lock (the request tx was synchronously waiting
+            // for the nested runJobInTransaction to return) → the toggle HUNG. Committing
+            // here FIRST means the nested tx acquires + releases the realm-row lock fully
+            // before the request tx ever touches that row; the request-tx in-memory writes
+            // below then run against rows no other tx still holds. NON-master OFF→ON always
+            // commits isIGAEnabled=true durably (so the scan/sweep job sessions observe it);
+            // the tide discriminator + EdDSA are committed only for a Tide realm. The
+            // desired sig-alg is decided HERE from the VRK-active probe (EdDSA when active,
+            // else the realm's current algorithm unchanged) — NOT read back from the request
+            // realm (which has not yet applied the switch at this point).
+            if (!"master".equals(realm.getName())) {
+                final String desiredSigAlg = (tideRealm && isVrkActive(tideVendorKey))
+                        ? "EdDSA"
+                        : realm.getDefaultSignatureAlgorithm();
+                persistRealmStateForSweep(realm.getId(), tideRealm, desiredSigAlg);
+            }
+
+            if (tideRealm) {
                 // (a) iga.attestor=tide — must be set before the ADOPT scan so
                 // the firstAdmin authorizer can seed. Write via the suppressed
                 // helper for consistency (IGA is still OFF here, so it is a
                 // plain realm.setAttribute under the IGA_REPLAY_ACTIVE guard).
+                // The DB row was already committed above; this in-memory write
+                // makes the REQUEST realm adapter reflect tide for the request-side
+                // sweep/repoint gates (isFirstAdminMode / resolveMode read the
+                // request realm). It contends with no other tx (the durable commit
+                // above already released its lock).
                 if (!"tide".equals(realm.getAttribute(IGA_ATTESTOR_ATTRIBUTE))) {
                     writeIgaAttributeDirect(IGA_ATTESTOR_ATTRIBUTE, "tide");
                     logger.infof("IGA toggle-on: set iga.attestor=tide for realm %s (firstAdmin/multiAdmin Tide mode)",
@@ -349,35 +378,16 @@ public class TideAdminCompatResource {
         writeIgaAttributeDirect(IGA_ATTRIBUTE, Boolean.toString(next));
         logger.infof("IGA has been toggled to : %s for realm %s", next, realm.getName());
 
-        // SIGN-AT-TOGGLE FIX (Option 1, 2026-06-24): on OFF→ON for a non-master
-        // realm, COMMIT the early realm-state writes (iga.attestor + isIGAEnabled,
-        // and EdDSA when switched) in a DEDICATED transaction NOW — before the ADOPT
-        // scan and the firstAdmin sweep open their own runJobInTransaction job
-        // sessions below.
-        //
-        // ROOT CAUSE this fixes: those writes above mutate ONLY the request-tx
-        // realm; they are UNCOMMITTED. The scan/sweep job sessions re-resolve a
-        // FRESH realm via sweepSession.realms().getRealm(realmId) that does NOT see
-        // the request tx's pending attribute writes. As a result the sweep's signer
-        // resolved iga.attestor=null → SimpleNameAttestor (TideAttestor signing
-        // BYPASSED), and convergeAfterCommit's resolveMode read the stale realm as
-        // non-tide → the real ORK firstAdmin backfill was SKIPPED at toggle
-        // (deferred to a later manual commit). The sweep GATE (resolveMode on the
-        // REQUEST realm) saw tide and passed, but the SIGNER (job realm) did not —
-        // two symptoms, one cause.
-        //
-        // Committing these durably (and evicting the realm cache so a job session's
-        // RealmCacheSession does not serve the pre-toggle CachedRealm snapshot) makes
-        // iga.attestor=tide + isIGAEnabled=true VISIBLE to every subsequent job
-        // session, so the sweep resolves TideAttestor and convergeAfterCommit runs
-        // the backfill DURING the toggle. This does NOT regress leave-PENDING: IGA
-        // staying enabled + tide is exactly the desired durable state even if the
-        // sweep's own job tx later rolls its ADOPT commits back to PENDING on a sign
-        // failure. The sidecar-cap refusal path below durably reverts isIGAEnabled
-        // (see revertIgaEnabledDurably) so a 409 still leaves the realm IGA-off.
-        if (!current && next && !"master".equals(realm.getName())) {
-            persistRealmStateForSweep(realm.getId());
-        }
+        // SIGN-AT-TOGGLE durable realm-state commit (iga.attestor + isIGAEnabled +
+        // EdDSA) already ran EARLIER — at the TOP of the OFF→ON block, BEFORE any
+        // request-tx realm-row write — via persistRealmStateForSweep(realmId, ...).
+        // It is no longer invoked HERE: running it after the request tx had locked
+        // those same realm-attribute rows is exactly what caused the nested-tx vs
+        // request-tx self-deadlock that hung the toggle in 95d84f7. The request-tx
+        // writes above (iga.attestor / EdDSA / isIGAEnabled) are kept as IN-MEMORY
+        // visibility for the REQUEST realm adapter only (the request-side sweep/repoint
+        // gates read it); the durable row is already committed and the scan/sweep job
+        // sessions read it through the evicted realm cache.
 
         // setup-realm complete: approver role + attestor/EdDSA + the
         // isIGAEnabled flip are all done. (If the scan below 409s on the
@@ -792,33 +802,43 @@ public class TideAdminCompatResource {
     }
 
     /**
-     * SIGN-AT-TOGGLE FIX (Option 1, 2026-06-24): durably COMMIT the OFF→ON realm-state
-     * the downstream scan / firstAdmin-sweep / convergeAfterCommit job sessions read,
-     * so they no longer see a STALE request-tx realm.
+     * SIGN-AT-TOGGLE FIX (Option A, deadlock-corrected 2026-06-24): durably COMMIT the
+     * OFF→ON realm-state the downstream scan / firstAdmin-sweep / convergeAfterCommit
+     * job sessions read, so they no longer see a STALE request-tx realm.
      *
-     * <p>Mechanism: the early request-session writes ({@code iga.attestor=tide},
-     * {@code isIGAEnabled=true}, and {@code defaultSignatureAlgorithm=EdDSA} when the
-     * VRK was active) live only on the UNCOMMITTED request transaction. The ADOPT scan
-     * ({@code IgaAdoptScan}), the firstAdmin auto-commit sweep, and its
-     * {@code IgaToggleOnBackfill.convergeAfterCommit} each open their OWN
-     * {@code runJobInTransaction} session and re-resolve a fresh
+     * <p><b>Ordering is load-bearing (deadlock fix).</b> This runs as the VERY FIRST
+     * realm-row write of the OFF→ON path — BEFORE the request transaction sets any of
+     * {@code iga.attestor} / {@code defaultSignatureAlgorithm} / {@code isIGAEnabled}
+     * on the realm row. An EARLIER revision (95d84f7) ran this AFTER the request tx had
+     * already written (and locked) those same realm-attribute rows; the nested job tx's
+     * write to the SAME rows then blocked on the request tx's uncommitted lock while the
+     * request tx synchronously waited for this nested {@code runJobInTransaction} to
+     * return → self-deadlock → the toggle HUNG. Running this committed write FIRST means
+     * it acquires, holds, and RELEASES the realm-row lock entirely before the request tx
+     * touches that row; the request tx's later in-memory writes (kept only so the
+     * REQUEST realm adapter reflects tide+enabled for the request-side sweep/repoint
+     * gates) then flush against rows no other tx still holds — no two transactions ever
+     * contend for the realm row.</p>
+     *
+     * <p>Why durable at all: the request-session writes alone live only on the
+     * UNCOMMITTED request transaction. The ADOPT scan ({@code IgaAdoptScan}), the
+     * firstAdmin auto-commit sweep, and its {@code IgaToggleOnBackfill.convergeAfterCommit}
+     * each open their OWN {@code runJobInTransaction} session and re-resolve a fresh
      * {@code session.realms().getRealm(realmId)} that does NOT observe the request tx's
      * pending writes. {@code IgaAttestors.resolveAttestor} (reads realm attr
      * {@code iga.attestor}) and {@code TideAttestor.resolveMode} (its no-authorizer-row
-     * branch also reads {@code iga.attestor}) therefore resolved {@code null} →
-     * {@code simple} / non-tide in the job session: the sweep signed via
-     * {@code SimpleNameAttestor} and the firstAdmin backfill was skipped, deferring the
-     * real ORK signing to a later manual commit. Committing the state HERE — in a
-     * dedicated job tx that flushes before those job sessions open — makes it visible
-     * to all of them.</p>
+     * branch also reads {@code iga.attestor}) would therefore resolve {@code null} →
+     * {@code simple} / non-tide in the job session: the sweep would sign via
+     * {@code SimpleNameAttestor} and the firstAdmin backfill would be skipped, deferring
+     * the real ORK signing to a later manual commit. Committing the state HERE — in a
+     * dedicated job tx that commits before those job sessions open — makes it visible to
+     * all of them.</p>
      *
-     * <p>The committed write re-reads the request realm's CURRENT
-     * {@code defaultSignatureAlgorithm} and persists it too, so an EdDSA switch the
-     * (VRK-active) request realm already applied is mirrored durably; if the request
-     * realm is still RS256 (VRK not yet active) we leave it RS256 (no change), matching
-     * the request-session decision exactly. All writes go under {@code IGA_REPLAY_ACTIVE}
-     * in the job session so the IGA capture interceptor does not re-route them into a
-     * {@code SET_REALM_ATTRIBUTE} CR.</p>
+     * <p>{@code desiredSigAlg} is computed by the caller from the VRK-active probe
+     * (EdDSA when active, else the pre-toggle algorithm unchanged) and persisted here so
+     * the durable row matches the request-side decision exactly. All writes go under
+     * {@code IGA_REPLAY_ACTIVE} in the job session so the IGA capture interceptor does
+     * not re-route them into a {@code SET_REALM_ATTRIBUTE} CR.</p>
      *
      * <p>After the commit we evict the realm cache on the REQUEST session (extended to
      * invalidate the realm singleton itself) so a {@code RealmCacheSession} opened by a
@@ -829,11 +849,7 @@ public class TideAdminCompatResource {
      * durable write itself is load-bearing, so a write failure propagates (the toggle's
      * outer non-blocking contract still applies to everything AFTER this point).</p>
      */
-    private void persistRealmStateForSweep(String realmId) {
-        // Capture the request realm's already-applied default-sig-alg so the durable
-        // write mirrors it (EdDSA when VRK active was switched above; otherwise the
-        // pre-toggle value, unchanged).
-        final String desiredSigAlg = realm.getDefaultSignatureAlgorithm();
+    private void persistRealmStateForSweep(String realmId, boolean tideRealm, String desiredSigAlg) {
         KeycloakModelUtils.runJobInTransaction(
                 session.getKeycloakSessionFactory(),
                 stateSession -> {
@@ -847,13 +863,18 @@ public class TideAdminCompatResource {
                     stateSession.setAttribute("IGA_REPLAY_ACTIVE", "true");
                     try {
                         // iga.attestor=tide — the discriminator resolveAttestor /
-                        // resolveMode read in the job session.
-                        if (!"tide".equals(stateRealm.getAttribute(IGA_ATTESTOR_ATTRIBUTE))) {
+                        // resolveMode read in the job session. Only on a Tide realm
+                        // (tide IdP + tide-vendor-key present); a non-Tide OFF→ON realm
+                        // commits only isIGAEnabled and leaves the attestor untouched.
+                        if (tideRealm
+                                && !"tide".equals(stateRealm.getAttribute(IGA_ATTESTOR_ATTRIBUTE))) {
                             stateRealm.setAttribute(IGA_ATTESTOR_ATTRIBUTE, "tide");
                         }
                         // isIGAEnabled=true — the firstAdmin/quarantine gate.
                         stateRealm.setAttribute(IGA_ATTRIBUTE, Boolean.TRUE.toString());
-                        // Mirror the request realm's default-sig-alg (EdDSA iff switched).
+                        // Mirror the request-side default-sig-alg decision (EdDSA iff the
+                        // VRK-active probe passed; otherwise the realm's current algorithm,
+                        // so this is a no-op write when unchanged).
                         if (desiredSigAlg != null
                                 && !desiredSigAlg.equals(stateRealm.getDefaultSignatureAlgorithm())) {
                             stateRealm.setDefaultSignatureAlgorithm(desiredSigAlg);
