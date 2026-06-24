@@ -88,6 +88,24 @@ public final class IgaRealmCacheEviction {
         String realmId = realm.getId();
         int clients = 0, roles = 0, groups = 0, scopes = 0, orgs = 0, idps = 0;
 
+        // Realm singleton (its by-id + by-name cache keys). REQUIRED so a realm
+        // ATTRIBUTE write (e.g. the toggle's iga.attestor=tide / isIGAEnabled=true)
+        // committed in a separate transaction is visible to a freshly-opened
+        // runJobInTransaction session: RealmCacheSession.getRealm returns a
+        // CachedRealm snapshot whose getAttribute() reads the values captured at
+        // cache-load time and does NOT delegate per-call. Without this the
+        // toggle-on sweep/converge job session reads a STALE iga.attestor (null →
+        // "simple") and signs via SimpleNameAttestor instead of TideAttestor, and
+        // resolveMode reports the realm as non-tide so the firstAdmin backfill is
+        // skipped. Best-effort, same contract as the per-entity evictions below.
+        try {
+            cache.registerRealmInvalidation(realmId, realm.getName());
+        } catch (RuntimeException ex) {
+            logger.debugf(ex,
+                    "IGA realm-cache eviction: realm=%s — registerRealmInvalidation failed (continuing); a separately-committed realm-attribute write may be stale in a fresh job session until the entry expires.",
+                    realm.getName());
+        }
+
         // Clients.
         try {
             for (ClientModel client : realm.getClientsStream().toList()) {
