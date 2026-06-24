@@ -297,27 +297,29 @@ public final class IgaToggleOnBackfill {
      * does NOT apply {@code IgaSystemEntityFilter} — every login-emitted unit (all 18
      * types) is stamped REAL by construction, not by a hand-listed subset.
      *
-     * <p><b>Fully-adopted gate.</b> We only run the (closure-wide) stamp once NO
-     * pending ADOPT_* CR remains for the realm — i.e. the admin has approved the whole
-     * ADOPT set. This keeps the convergence admin-triggered (it fires from the
-     * approve/commit endpoint, never at toggle), avoids re-enumerating the closure on
-     * every intermediate single-CR approval, and guarantees the entities the producer
-     * enumerates already exist + are attested. On a bulk-approve that drains the whole
-     * ADOPT set in one call, it fires once at the end; on serial single-CR approvals it
-     * fires on the LAST one. The pass is idempotent (only NULL/stub columns are
-     * (re)signed), firstAdmin+capable gated, and fail-closed (a real VVK ceremony
-     * failure propagates) — all inherited from {@link #backfill}.
+     * <p><b>Partial-closure sign (2026-06-24): no fully-adopted gate.</b> We NO LONGER
+     * defer the stamp while ADOPT_* CRs remain pending. On every commit (toggle sweep,
+     * bulk-approve, or single-CR approve) this runs the closure stamp over whatever is
+     * LIVE + COMMITTED right now: the {@link #backfill} enumeration walks the committed
+     * model and is idempotent (signs only NULL/stub columns, no-ops a unit whose owner
+     * row is absent), so an intentionally-held still-PENDING ADOPT entity is simply left
+     * UNSIGNED — its login fail-closes PER-LOGIN-SURFACE (the read in
+     * {@code IgaAttestationExporterProvider.exportSignedAccessTokenUnits} builds + checks
+     * ONLY one {@code (client,user,scope)} login's closure), never blocking the sign of
+     * the committed subset. As each held ADOPT is later approved/committed, that commit
+     * re-fires this idempotent converge and incrementally signs the newly-committed
+     * entity's units. The pass is firstAdmin+capable gated and fail-closed: only a
+     * GENUINE VVK ceremony failure (ORK down / threshold / pack) propagates — a pending
+     * ADOPT no longer short-circuits the closure sign.
      *
      * <p>Runs in the caller's commit JPA transaction (same {@code em}), so the stamps
-     * land atomically with the final ADOPT commit. A no-op (returns
-     * {@link Result#skipped}) when ADOPT CRs are still pending, or when the realm is
-     * not firstAdmin / not real-signing-capable (dev/test realms keep their stub
-     * behaviour).
+     * land atomically with that commit. A no-op (returns {@link Result#skipped}) only
+     * when the realm is not firstAdmin / not Tide-signing-provisioned (dev/test realms
+     * keep their stub behaviour).
      *
      * @param session the commit session (realm context will be set on it)
      * @param realm   the realm whose ADOPT set was just (partly) committed
-     * @return the {@link Result} of the full-closure pass, or
-     *         {@link Result#skipped}{@code ("adopt_pending")} if ADOPT CRs remain
+     * @return the {@link Result} of the (possibly partial) closure pass
      */
     public static Result convergeAfterCommit(KeycloakSession session, RealmModel realm) {
         // Cheap gate FIRST: if the realm is not a firstAdmin Tide-provisioned realm the whole
@@ -341,15 +343,29 @@ public final class IgaToggleOnBackfill {
                 .setParameter("adoptTypes",
                         org.tidecloak.iga.replay.IgaReplayExtension.ALL_ADOPT_ACTION_TYPES)
                 .getSingleResult();
+        // PARTIAL-CLOSURE SIGN (2026-06-24): we DO NOT defer the closure stamp while ADOPT
+        // CRs remain pending. The backfill enumerates the LIVE COMMITTED model and is
+        // idempotent — it signs only NULL/stub columns and no-ops a unit whose owner row is
+        // absent (IgaToggleOnBackfill.backfill PHASE 1b try/catch + PHASE 3 rows==0 skip), so
+        // an intentionally-held (still-PENDING) ADOPT entity is simply left UNSIGNED and its
+        // login fail-closes PER-LOGIN-SURFACE (IgaAttestationExporterProvider
+        // .exportSignedAccessTokenUnits builds + reads ONLY one (client,user,scope) login's
+        // closure), never blocking the committed subset. Already-committed entities get their
+        // real 64B VVK sig at toggle; a held ADOPT later approved/committed re-fires this
+        // converge (idempotent), incrementally completing the closure. The ONLY remaining
+        // throw is a GENUINE ORK ceremony failure at PHASE 2 (fail-loud → rollback → PENDING);
+        // a pending ADOPT no longer short-circuits the sign of everything else.
         if (pendingAdopt > 0) {
-            log.debugf("IGA post-commit convergence: realm %s still has %d pending ADOPT CR(s) "
-                    + "— deferring full-closure stamp until the ADOPT set is fully approved.",
+            log.infof("IGA post-commit convergence: realm %s has %d ADOPT CR(s) still PENDING — "
+                    + "signing the COMMITTED-model closure subset now (partial); the pending "
+                    + "entities are left unsigned and their logins fail-closed until approved, "
+                    + "each later approve/commit re-fires this idempotent converge.",
                     realm.getName(), pendingAdopt);
-            return Result.skipped("adopt_pending");
+        } else {
+            log.infof("IGA post-commit convergence: realm %s ADOPT set fully approved — running the "
+                    + "producer-driven full-closure stamp so EVERY login-emitted unit carries a real "
+                    + "64B sig (covers composite_role + protocol_mapper + all 18 types).", realm.getName());
         }
-        log.infof("IGA post-commit convergence: realm %s ADOPT set fully approved — running the "
-                + "producer-driven full-closure stamp so EVERY login-emitted unit carries a real "
-                + "64B sig (covers composite_role + protocol_mapper + all 18 types).", realm.getName());
         return backfill(session, realm);
     }
 
