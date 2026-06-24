@@ -214,12 +214,16 @@ public class TideAdminCompatResource {
             // for the nested runJobInTransaction to return) → the toggle HUNG. Committing
             // here FIRST means the nested tx acquires + releases the realm-row lock fully
             // before the request tx ever touches that row; the request-tx in-memory writes
-            // below then run against rows no other tx still holds. NON-master OFF→ON always
-            // commits isIGAEnabled=true durably (so the scan/sweep job sessions observe it);
-            // the tide discriminator + EdDSA are committed only for a Tide realm. The
-            // desired sig-alg is decided HERE from the VRK-active probe (EdDSA when active,
-            // else the realm's current algorithm unchanged) — NOT read back from the request
-            // realm (which has not yet applied the switch at this point).
+            // below then run against rows no other tx still holds. Only the SIGNING state
+            // is committed here — the tide discriminator (iga.attestor=tide) + EdDSA, and
+            // only for a Tide realm. isIGAEnabled is NOT committed early (regression fix
+            // 2026-06-24): committing it here activated IGA governance mid-toggle and
+            // 409'd the toggle's own baseline resource creation / the realm's later delete;
+            // the flip stays in the request tx, after the baseline approver-role creation.
+            // The desired sig-alg is decided HERE from the VRK-active probe (EdDSA when
+            // active, else the realm's current algorithm unchanged) — NOT read back from
+            // the request realm (which has not yet applied the switch at this point). For a
+            // non-Tide realm this commits nothing durable (cache evict only) — harmless.
             if (!"master".equals(realm.getName())) {
                 final String desiredSigAlg = (tideRealm && isVrkActive(tideVendorKey))
                         ? "EdDSA"
@@ -454,15 +458,13 @@ public class TideAdminCompatResource {
                 // isIgaActive() route this revert through SET_REALM_ATTRIBUTE
                 // CR creation instead of an actual rollback).
                 writeIgaAttributeDirect(IGA_ATTRIBUTE, Boolean.toString(current));
-                // SIGN-AT-TOGGLE FIX (2026-06-24): the request-tx revert above is no
-                // longer sufficient on its own — persistRealmStateForSweep COMMITTED
-                // isIGAEnabled=true in a separate tx so the request-tx rollback would
-                // not undo it. Durably revert isIGAEnabled (and re-evict the realm
-                // cache) so a sidecar-cap 409 leaves the realm genuinely IGA-OFF, as
-                // before. iga.attestor=tide is intentionally LEFT — it is an idempotent
-                // discriminator, harmless while IGA is off, and re-running the toggle
-                // is a no-op for it.
-                revertIgaEnabledDurably(realm.getId(), current);
+                // SIGN-AT-TOGGLE (2026-06-24): isIGAEnabled was only ever written in the
+                // REQUEST tx (it is no longer committed early by persistRealmStateForSweep),
+                // so the request-tx revert above is sufficient on its own — it resets the
+                // flag to its pre-toggle value before the request commits, leaving the realm
+                // genuinely IGA-OFF. iga.attestor=tide (if a Tide realm) is intentionally
+                // LEFT — it is an idempotent discriminator, harmless while IGA is off, and
+                // re-running the toggle is a no-op for it.
                 if (trackProgress) {
                     jobService.fail(jobId, "adopt-scan",
                             "SIDECAR_CAP_EXCEEDED: cap=" + capHolder[0].getCap()
@@ -802,9 +804,23 @@ public class TideAdminCompatResource {
     }
 
     /**
-     * SIGN-AT-TOGGLE FIX (Option A, deadlock-corrected 2026-06-24): durably COMMIT the
-     * OFF→ON realm-state the downstream scan / firstAdmin-sweep / convergeAfterCommit
-     * job sessions read, so they no longer see a STALE request-tx realm.
+     * SIGN-AT-TOGGLE FIX (Option A, deadlock-corrected 2026-06-24; 409-regression fixed
+     * 2026-06-24): durably COMMIT the OFF→ON SIGNING realm-state the downstream scan /
+     * firstAdmin-sweep / convergeAfterCommit job sessions read, so they no longer see a
+     * STALE request-tx realm.
+     *
+     * <p><b>What is committed (and what is NOT).</b> Only the SIGNING-visible state is
+     * committed here: {@code iga.attestor=tide} (Tide realms only) and the desired
+     * {@code defaultSignatureAlgorithm} (EdDSA when the VRK is active). {@code isIGAEnabled}
+     * is INTENTIONALLY NOT committed here — committing it early activated IGA governance
+     * mid-toggle (the cache eviction below made the request session re-read the committed
+     * flag), which then intercepted the toggle's OWN baseline resource creation — and, on a
+     * re-run, the realm delete — into governed CRs, surfacing as a 409 "Duplicate resource
+     * error" on a fresh-realm toggle. The flip stays in the request tx
+     * ({@code writeIgaAttributeDirect(IGA_ATTRIBUTE)}), AFTER the baseline approver-role /
+     * approver-role-repoint creation, and commits at request end. The scan and firstAdmin
+     * sweep do not need {@code isIGAEnabled} committed (they are driven directly by the
+     * toggle handler and gate on {@code iga.attestor} / firstAdmin mode).
      *
      * <p><b>Ordering is load-bearing (deadlock fix).</b> This runs as the VERY FIRST
      * realm-row write of the OFF→ON path — BEFORE the request transaction sets any of
@@ -865,13 +881,29 @@ public class TideAdminCompatResource {
                         // iga.attestor=tide — the discriminator resolveAttestor /
                         // resolveMode read in the job session. Only on a Tide realm
                         // (tide IdP + tide-vendor-key present); a non-Tide OFF→ON realm
-                        // commits only isIGAEnabled and leaves the attestor untouched.
+                        // commits nothing here (its scan resolves the non-tide
+                        // SimpleNameAttestor from the unchanged DB state).
                         if (tideRealm
                                 && !"tide".equals(stateRealm.getAttribute(IGA_ATTESTOR_ATTRIBUTE))) {
                             stateRealm.setAttribute(IGA_ATTESTOR_ATTRIBUTE, "tide");
                         }
-                        // isIGAEnabled=true — the firstAdmin/quarantine gate.
-                        stateRealm.setAttribute(IGA_ATTRIBUTE, Boolean.TRUE.toString());
+                        // NOTE (regression fix 2026-06-24): isIGAEnabled is DELIBERATELY
+                        // NOT committed here. The OFF→ON path creates baseline resources
+                        // (the tide-realm-admin approver role, repointed approver-role
+                        // attributes) WHILE IGA IS STILL OFF, before the isIGAEnabled flip,
+                        // so those writes are plain model writes — NOT captured as CRs.
+                        // An earlier revision committed isIGAEnabled=true here in this
+                        // separate job tx, which activated IGA governance mid-toggle: the
+                        // request session (after the cache eviction below re-read the
+                        // committed flag) then routed the toggle's OWN baseline writes —
+                        // and, on a re-run, blocked the realm's delete — through the IGA
+                        // capture interceptor, producing a 409 "Duplicate resource error".
+                        // The scan / firstAdmin sweep do NOT need isIGAEnabled committed
+                        // (they are driven directly by the toggle handler and gate on
+                        // iga.attestor / firstAdmin mode, not isIGAEnabled). The flip
+                        // stays in the REQUEST tx (writeIgaAttributeDirect(IGA_ATTRIBUTE))
+                        // and commits at request end, AFTER the baseline resources.
+                        //
                         // Mirror the request-side default-sig-alg decision (EdDSA iff the
                         // VRK-active probe passed; otherwise the realm's current algorithm,
                         // so this is a no-op write when unchanged).
@@ -891,46 +923,11 @@ public class TideAdminCompatResource {
         // on the request session so a later job session re-reads the committed attrs.
         evictRealmCache(session, realm);
         logger.infof("IGA toggle-on: committed sweep-visible realm state for realm %s "
-                        + "(iga.attestor=tide, isIGAEnabled=true, defaultSignatureAlgorithm=%s) "
-                        + "and evicted realm cache so the scan/sweep job sessions resolve TideAttestor.",
-                realm.getName(), desiredSigAlg);
-    }
-
-    /**
-     * SIGN-AT-TOGGLE FIX (2026-06-24): durably revert {@code isIGAEnabled} to its
-     * pre-toggle value when the OFF→ON path refuses on the sidecar-cap precondition
-     * (409). {@link #persistRealmStateForSweep} committed {@code isIGAEnabled=true} in a
-     * separate tx, so the request-tx rollback alone would leave the realm half-enabled.
-     * This re-opens a job tx and writes the pre-toggle value durably (under
-     * {@code IGA_REPLAY_ACTIVE}), then re-evicts the realm cache. {@code iga.attestor}
-     * is intentionally LEFT at tide — a harmless, idempotent discriminator while IGA is
-     * off. Best-effort cache eviction; the durable write propagates on failure.
-     */
-    private void revertIgaEnabledDurably(String realmId, boolean priorEnabled) {
-        KeycloakModelUtils.runJobInTransaction(
-                session.getKeycloakSessionFactory(),
-                stateSession -> {
-                    RealmModel stateRealm = stateSession.realms().getRealm(realmId);
-                    if (stateRealm == null) {
-                        throw new IllegalStateException(
-                                "IGA toggle revertIgaEnabledDurably: realm " + realmId
-                                        + " not loadable in state session");
-                    }
-                    Object prior = stateSession.getAttribute("IGA_REPLAY_ACTIVE");
-                    stateSession.setAttribute("IGA_REPLAY_ACTIVE", "true");
-                    try {
-                        stateRealm.setAttribute(IGA_ATTRIBUTE, Boolean.toString(priorEnabled));
-                    } finally {
-                        if (prior == null) {
-                            stateSession.removeAttribute("IGA_REPLAY_ACTIVE");
-                        } else {
-                            stateSession.setAttribute("IGA_REPLAY_ACTIVE", prior);
-                        }
-                    }
-                });
-        evictRealmCache(session, realm);
-        logger.infof("IGA toggle-on refused (sidecar cap): durably reverted isIGAEnabled=%s for realm %s.",
-                priorEnabled, realm.getName());
+                        + "(iga.attestor=%s, defaultSignatureAlgorithm=%s; isIGAEnabled is "
+                        + "NOT committed here — it flips in the request tx after baseline "
+                        + "resource creation) and evicted realm cache so the scan/sweep job "
+                        + "sessions resolve TideAttestor.",
+                realm.getName(), tideRealm ? "tide" : "(unchanged)", desiredSigAlg);
     }
 
     /**
