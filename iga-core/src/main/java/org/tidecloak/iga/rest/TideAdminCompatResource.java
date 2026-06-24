@@ -562,14 +562,25 @@ public class TideAdminCompatResource {
                     // ROLLED BACK to PENDING by the dedicated sweep tx (so it is genuinely
                     // PENDING, never committed-but-unsigned). The failure is carried into the
                     // end-summary as a commitFailures entry so the response returns 200 +
-                    // completed_with_warnings (NOT failed / 500). The synthetic entry below
-                    // guarantees the end-summary marks completed_with_warnings even though the
-                    // engine threw before returning any per-CR outcome.
+                    // completed_with_warnings (NOT failed / 500).
+                    //
+                    // This synthetic CONVERGE-failure entry is for the case where converge
+                    // (the closure-signing ORK ceremony) itself threw. It now COEXISTS with
+                    // the per-CR commitFailures entries that the engine ALREADY recorded
+                    // in-lambda (per chunk) before the throw — those survived the job-tx
+                    // rollback because commitFailures is request-scoped. The distinct
+                    // sentinel crId="(sign-defaults sweep)" + converge-specific message keeps
+                    // this entry visibly separate from the per-CR rows, so the UI can show
+                    // BOTH "N CRs failed authorize/commit" AND "closure signing failed, left
+                    // PENDING". The synthetic entry also guarantees the end-summary marks
+                    // completed_with_warnings even if converge threw before any per-CR row.
                     Map<String, Object> sweepFail = new LinkedHashMap<>();
-                    sweepFail.put("crId", null);
+                    sweepFail.put("crId", "(sign-defaults sweep)");
                     sweepFail.put("actionType", "SIGN_DEFAULTS_SWEEP");
-                    sweepFail.put("outcome", sweepEx.getClass().getSimpleName() + ": " + sweepEx.getMessage());
-                    sweepFail.put("message", closureUnsignedMsg);
+                    sweepFail.put("outcome", "CONVERGE_FAILED:"
+                            + sweepEx.getClass().getSimpleName() + ": " + sweepEx.getMessage());
+                    sweepFail.put("message", "Closure signing (convergeAfterCommit) failed; the "
+                            + "baseline ADOPT set was rolled back to PENDING. " + closureUnsignedMsg);
                     commitFailures.add(sweepFail);
                     if (trackProgress) {
                         // Close the stage out (it was left running) WITHOUT failing
@@ -1140,6 +1151,11 @@ public class TideAdminCompatResource {
             final int total = crIdIn.size();
             final int chunkSize = 25;
             List<Map<String, Object>> out = new ArrayList<>();
+            // committed counter is written INSIDE the job lambda (per chunk) so the
+            // request-side progress report below reflects the real committed count even
+            // though the per-CR collection now happens in-lambda. A 1-element holder is
+            // used because a lambda can only capture effectively-final locals.
+            final int[] committedHolder = {0};
             if (jobId != null) {
                 jobService.stageProgress(jobId, "sign-defaults", 0L, (long) total);
             }
@@ -1192,6 +1208,30 @@ public class TideAdminCompatResource {
                                             @SuppressWarnings("unchecked")
                                             Map<String, Object> cast = (Map<String, Object>) m;
                                             out.add(cast);
+                                            // SURFACING HARDENING (2026-06-24): convert each
+                                            // per-CR outcome into commitFailures/committed count
+                                            // HERE, per chunk, INSIDE the job lambda — BEFORE the
+                                            // NEXT chunk's bulkAuthorizeInternal (which may fire
+                                            // convergeAfterCommit and THROW out of the lambda).
+                                            // commitFailures is a REQUEST-scope list (it lives on
+                                            // the outer request tx, NOT this job tx), so entries
+                                            // added here SURVIVE a job-tx rollback caused by a
+                                            // later converge throw. Previously this conversion ran
+                                            // AFTER the lambda returned, so a converge throw
+                                            // discarded every per-CR row in `out` along with the
+                                            // rolled-back job tx, leaving only the coarse synthetic
+                                            // SIGN_DEFAULTS_SWEEP entry from the caller's catch.
+                                            String status = String.valueOf(cast.get("status"));
+                                            if ("COMMITTED".equals(status)) {
+                                                committedHolder[0]++;
+                                            } else {
+                                                Map<String, Object> fail = new LinkedHashMap<>();
+                                                fail.put("crId", cast.get("crId"));
+                                                fail.put("actionType", cast.get("actionType"));
+                                                Object err = cast.get("error");
+                                                fail.put("outcome", err != null ? status + ":" + err : status);
+                                                commitFailures.add(fail);
+                                            }
                                         }
                                     }
                                 }
@@ -1199,28 +1239,15 @@ public class TideAdminCompatResource {
                         }
                     });
 
-            // The job tx COMMITTED (no converge throw). Post-process the per-CR outcomes
-            // on the request side: count committed for progress and collect any
-            // non-COMMITTED outcome (REJECTED / SKIPPED — these did NOT throw and left
-            // their CR PENDING) into the toggle end-summary's commitFailures so the UI
-            // can list them (crId / actionType / outcome). A genuine ORK-sign failure
-            // never reaches here — it threw above and rolled the whole set back.
-            int committedSoFar = 0;
-            for (Map<String, Object> cast : out) {
-                String status = String.valueOf(cast.get("status"));
-                if ("COMMITTED".equals(status)) {
-                    committedSoFar++;
-                } else {
-                    Map<String, Object> fail = new LinkedHashMap<>();
-                    fail.put("crId", cast.get("crId"));
-                    fail.put("actionType", cast.get("actionType"));
-                    Object err = cast.get("error");
-                    fail.put("outcome", err != null ? status + ":" + err : status);
-                    commitFailures.add(fail);
-                }
-            }
+            // The job tx COMMITTED (no converge throw). The per-CR outcomes were already
+            // converted into commitFailures (non-COMMITTED) / committedHolder (COMMITTED)
+            // INSIDE the lambda above, per chunk, so they survive even on a converge throw
+            // (which rolls the job tx back but NOT the request-scope commitFailures list).
+            // Do NOT re-walk `out` here — that would DOUBLE-count the same rows. This block
+            // only mirrors the final committed count into the request-side progress report
+            // (a sweep rollback never reaches this line — it threw out of the lambda).
             if (jobId != null) {
-                jobService.stageProgress(jobId, "sign-defaults", (long) committedSoFar, (long) total);
+                jobService.stageProgress(jobId, "sign-defaults", (long) committedHolder[0], (long) total);
             }
             return out;
         };
