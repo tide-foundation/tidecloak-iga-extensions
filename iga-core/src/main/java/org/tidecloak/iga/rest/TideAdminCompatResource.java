@@ -26,7 +26,10 @@ import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.IdentityProviderModel;
 import org.keycloak.models.cache.CacheRealmProvider;
+import org.keycloak.models.cache.CachedRealmModel;
 import org.keycloak.models.cache.UserCache;
+import org.keycloak.models.jpa.JpaModel;
+import org.keycloak.models.jpa.entities.RealmEntity;
 import org.keycloak.models.OrganizationModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.organization.OrganizationProvider;
@@ -232,43 +235,27 @@ public class TideAdminCompatResource {
             }
 
             if (tideRealm) {
-                // (a) iga.attestor=tide — must be set before the ADOPT scan so
-                // the firstAdmin authorizer can seed. Write via the suppressed
-                // helper for consistency (IGA is still OFF here, so it is a
-                // plain realm.setAttribute under the IGA_REPLAY_ACTIVE guard).
-                // The DB row was already committed above; this in-memory write
-                // makes the REQUEST realm adapter reflect tide for the request-side
-                // sweep/repoint gates (isFirstAdminMode / resolveMode read the
-                // request realm). It contends with no other tx (the durable commit
-                // above already released its lock).
-                if (!"tide".equals(realm.getAttribute(IGA_ATTESTOR_ATTRIBUTE))) {
-                    writeIgaAttributeDirect(IGA_ATTESTOR_ATTRIBUTE, "tide");
-                    logger.infof("IGA toggle-on: set iga.attestor=tide for realm %s (firstAdmin/multiAdmin Tide mode)",
-                            realm.getName());
-                }
+                // SINGLE-SOURCE-OF-TRUTH (409 fix, 2026-06-24): iga.attestor=tide and
+                // defaultSignatureAlgorithm=EdDSA are written EXACTLY ONCE — by the job tx
+                // in persistRealmStateForSweep above (which decided EdDSA from the same
+                // VRK-active probe via desiredSigAlg, and set iga.attestor=tide only on a
+                // Tide realm). The request tx no longer re-writes either attribute here.
+                //
+                // The earlier (a)/(b) block re-wrote both via writeIgaAttributeDirect /
+                // writeDefaultSignatureAlgorithmDirect "so the request realm adapter
+                // reflects tide". But the request RealmEntity's attributes collection was
+                // loaded BEFORE the job-tx commit, so RealmAdapter.setAttribute scanned a
+                // stale in-memory collection, missed the just-committed row, and em.persist'd
+                // a DUPLICATE → composite-PK (REALM_ID, NAME) collision → 409 "Duplicate
+                // resource error" on a fresh Tide-realm toggle. The request realm is now made
+                // to reflect the committed attrs by refreshRequestRealmAttributes() (called
+                // at the end of persistRealmStateForSweep), which em.refresh()es the request
+                // RealmEntity so its attributes collection reloads from the DB and CONTAINS
+                // iga.attestor=tide — no second INSERT, no 409. The request-side firstAdmin
+                // gate (isFirstAdminMode → resolveMode → realm.getAttribute) reads tide off
+                // that refreshed request realm.
 
-                // (b) defaultSignatureAlgorithm=EdDSA — GUARDED on the VRK
-                // being ACTIVE. EdDSA with an empty/unprovisioned active key
-                // breaks all signing, so we only switch when the tide-vendor-key
-                // config carries live active-key material: a non-empty clientId
-                // (the active EdDSA public point), a non-empty vvkId (the
-                // active-VRK proxy), AND a non-blank activeVrk parsed from the
-                // clientSecret SecretKeys blob. If active → switch to EdDSA
-                // (only if not already EdDSA). If not active → keep
-                // iga.attestor=tide set, but defer the EdDSA switch and warn.
-                if (isVrkActive(tideVendorKey)) {
-                    String currentAlgorithm = realm.getDefaultSignatureAlgorithm();
-                    if (!"EdDSA".equalsIgnoreCase(currentAlgorithm)) {
-                        writeDefaultSignatureAlgorithmDirect("EdDSA");
-                        logger.infof("IGA toggle-on: VRK active, default signature algorithm set to EdDSA for realm %s",
-                                realm.getName());
-                    }
-                } else {
-                    logger.warnf("IGA toggle-on: VRK not yet active for realm %s, deferring EdDSA switch (iga.attestor=tide still set)",
-                            realm.getName());
-                }
-
-                // (c) Repoint EVERY declared iga.approverRole to the canonical
+                // Repoint EVERY declared iga.approverRole to the canonical
                 // Tide approver role tide-realm-admin (created above in stage 1).
                 // In Tideless IGA an operator may pin approvals to a custom /
                 // attribute-derived role; in Tide mode the multiAdmin quorum
@@ -922,12 +909,98 @@ public class TideAdminCompatResource {
         // The state tx has committed. Evict the realm cache (incl. the realm singleton)
         // on the request session so a later job session re-reads the committed attrs.
         evictRealmCache(session, realm);
+        // SINGLE-SOURCE-OF-TRUTH (409 fix, 2026-06-24): the iga.attestor=tide /
+        // defaultSignatureAlgorithm=EdDSA rows were INSERTed exactly ONCE, here, by the
+        // job tx above. The REQUEST tx no longer re-writes them (the old ~:244-262
+        // setAttribute/writeIgaAttributeDirect block is removed) — a request-tx
+        // setAttribute would scan the request RealmEntity's STALE in-memory attributes
+        // collection (loaded before this job-tx commit; JPA never re-reads a
+        // committed-elsewhere row into an already-managed entity), miss the row, and
+        // em.persist a DUPLICATE → composite-PK (REALM_ID, NAME) collision → 409
+        // "Duplicate resource error". Instead we REFRESH the request realm's JPA
+        // RealmEntity so its attributes collection reloads from DB and now CONTAINS the
+        // committed rows; the request-side gates (isFirstAdminMode → resolveMode →
+        // realm.getAttribute("iga.attestor")) then read tide off the request realm with
+        // no second write. evictRealmCache only schedules an infinispan invalidation on
+        // commit and does NOT touch the request session's already-resolved realm
+        // adapter, so this explicit refresh is required.
+        refreshRequestRealmAttributes();
         logger.infof("IGA toggle-on: committed sweep-visible realm state for realm %s "
                         + "(iga.attestor=%s, defaultSignatureAlgorithm=%s; isIGAEnabled is "
                         + "NOT committed here — it flips in the request tx after baseline "
-                        + "resource creation) and evicted realm cache so the scan/sweep job "
-                        + "sessions resolve TideAttestor.",
+                        + "resource creation), evicted realm cache, and refreshed the "
+                        + "request realm so the scan/sweep job sessions AND the request-side "
+                        + "firstAdmin gate resolve TideAttestor.",
                 realm.getName(), tideRealm ? "tide" : "(unchanged)", desiredSigAlg);
+    }
+
+    /**
+     * Refresh the REQUEST realm's underlying JPA {@code RealmEntity} so its
+     * {@code attributes} collection reloads from the database and reflects the
+     * {@code iga.attestor=tide} / {@code defaultSignatureAlgorithm=EdDSA} rows that
+     * {@link #persistRealmStateForSweep}'s job tx just committed — WITHOUT the request
+     * tx re-writing (and thereby double-INSERTing) those rows.
+     *
+     * <p><b>Why this is needed.</b> The request realm adapter ({@link #realm}) was
+     * resolved at resource construction; its JPA delegate's {@code RealmEntity} (an
+     * EAGER-fetched {@code attributes} collection) may have been loaded into the request
+     * EntityManager's persistence context BEFORE the separate job tx committed the new
+     * attribute rows. JPA's first-level cache returns that already-managed instance with
+     * its STALE collection and never silently merges a row committed by another
+     * transaction. So {@code realm.getAttribute("iga.attestor")} would return null on the
+     * request side (the firstAdmin sweep gate would mis-resolve the realm as non-tide),
+     * and any request-tx {@code setAttribute("iga.attestor", "tide")} would scan that
+     * stale collection, miss the row, and {@code em.persist} a duplicate → 409. An
+     * explicit {@code em.refresh(entity)} forces the entity (and its EAGER attributes
+     * collection) to be re-read from the DB.</p>
+     *
+     * <p><b>Adapter unwrap.</b> When the infinispan realm-cache layer is installed,
+     * {@link #realm} is a {@link CachedRealmModel} whose {@code getAttribute} reads a
+     * pre-toggle {@code CachedRealm} snapshot until a delegate is resolved. We call
+     * {@code invalidate()} (sets the invalidated flag and resolves a fresh JPA delegate
+     * via {@code getDelegateForUpdate}) so subsequent reads go through that delegate, then
+     * refresh the delegate's {@code RealmEntity}. When no cache layer is installed,
+     * {@link #realm} is already the JPA {@link JpaModel}; we refresh it directly. The
+     * refresh runs in the request EM (no new transaction, no realm-row write → no lock
+     * contention with the just-committed job tx and no deadlock).</p>
+     *
+     * <p>Best-effort: a refresh failure must never abort the toggle (the durable rows are
+     * already committed and visible to the job sessions via the cache evict). It is logged;
+     * the request-side firstAdmin gate would then fall back to the committed-but-not-yet-
+     * refreshed state, which the job-session sweep still resolves correctly from the DB.</p>
+     */
+    private void refreshRequestRealmAttributes() {
+        try {
+            RealmModel jpaRealm = realm;
+            if (realm instanceof CachedRealmModel cachedRealm) {
+                // Resolve a fresh JPA delegate (post-commit) and route reads through it.
+                cachedRealm.invalidate();
+                jpaRealm = cachedRealm.getDelegateForUpdate();
+            }
+            if (jpaRealm instanceof JpaModel<?> jpaModel) {
+                Object entity = jpaModel.getEntity();
+                if (entity instanceof RealmEntity realmEntity) {
+                    EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+                    // Reload the entity + its EAGER attributes collection from the DB so the
+                    // job-tx-committed iga.attestor / defaultSignatureAlgorithm rows are now
+                    // present on the request realm.
+                    em.refresh(realmEntity);
+                    logger.debugf("IGA toggle-on: refreshed request realm %s JPA entity; iga.attestor now reads %s on the request side",
+                            realm.getName(), realm.getAttribute(IGA_ATTESTOR_ATTRIBUTE));
+                    return;
+                }
+            }
+            logger.warnf("IGA toggle-on: could not unwrap request realm %s to a JPA RealmEntity for refresh "
+                            + "(adapter type %s) — request-side firstAdmin gate relies on the cache evict; "
+                            + "the job-session sweep still resolves tide from the committed DB state.",
+                    realm.getName(), realm.getClass().getName());
+        } catch (RuntimeException refreshEx) {
+            logger.warnf(refreshEx,
+                    "IGA toggle-on: request realm %s JPA refresh FAILED (continuing) — the iga.attestor/EdDSA "
+                            + "rows are already committed by the job tx and visible to the scan/sweep job sessions; "
+                            + "only the request-side gate read may be stale this request.",
+                    realm.getName());
+        }
     }
 
     /**
@@ -985,37 +1058,12 @@ public class TideAdminCompatResource {
         }
     }
 
-    /**
-     * Sibling of {@link #writeIgaAttributeDirect}: write the realm's default
-     * signature algorithm while bypassing the IGA realm-adapter capture
-     * interceptor.
-     *
-     * <p>Prior investigation found {@link
-     * org.tidecloak.iga.providers.IgaRealmAdapter} does NOT override
-     * {@code setDefaultSignatureAlgorithm}, so this write would pass straight
-     * through and is not captured. We still wrap it under the same
-     * {@code IGA_REPLAY_ACTIVE} suppression as {@link #writeIgaAttributeDirect}
-     * for safety and consistency: should the adapter ever start intercepting
-     * this setter, the bypass already declares "this write is the act of
-     * governance itself; do not capture it". The try/finally restore is
-     * mandatory for the same reason documented on {@link
-     * #writeIgaAttributeDirect} — a lingering IGA_REPLAY_ACTIVE on this
-     * request-scoped session would silently disable all subsequent IGA
-     * capture for the rest of the request.</p>
-     */
-    private void writeDefaultSignatureAlgorithmDirect(String value) {
-        Object prior = session.getAttribute("IGA_REPLAY_ACTIVE");
-        session.setAttribute("IGA_REPLAY_ACTIVE", "true");
-        try {
-            realm.setDefaultSignatureAlgorithm(value);
-        } finally {
-            if (prior == null) {
-                session.removeAttribute("IGA_REPLAY_ACTIVE");
-            } else {
-                session.setAttribute("IGA_REPLAY_ACTIVE", prior);
-            }
-        }
-    }
+    // NOTE (single-source-of-truth 409 fix, 2026-06-24): writeDefaultSignatureAlgorithmDirect
+    // was REMOVED. The default-signature-algorithm switch to EdDSA is now performed exactly
+    // once, in the job tx (persistRealmStateForSweep → stateRealm.setDefaultSignatureAlgorithm
+    // from the desiredSigAlg computed off the same isVrkActive probe). The request tx no longer
+    // re-writes it (that duplicate request-tx write was part of the double-INSERT 409). The
+    // request realm reflects the committed value via refreshRequestRealmAttributes().
 
     /**
      * VRK-active gate for the OFF→ON EdDSA switch. Switching a realm's default
