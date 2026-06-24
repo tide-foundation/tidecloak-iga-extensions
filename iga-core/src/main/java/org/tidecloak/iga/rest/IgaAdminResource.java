@@ -1672,15 +1672,21 @@ public class IgaAdminResource {
                             "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
                     .setParameter("changeRequestId", cr.getId())
                     .getResultList();
+            // admin may be null on the system-bootstrap firstAdmin sweep (a cross-realm
+            // super-admin not resolvable in the job session). A null admin cannot have
+            // an existing signature attributed to it, so treat it as not-yet-signed and
+            // let record() stamp the system principal — never deref a null admin here.
             boolean alreadySigned = false;
-            for (IgaAuthorizationEntity a : existing) {
-                if (admin.getUsername() != null && admin.getUsername().equals(a.getApproval())) {
-                    alreadySigned = true;
-                    break;
-                }
-                if (admin.getId() != null && admin.getId().equals(a.getAuthorizedBy())) {
-                    alreadySigned = true;
-                    break;
+            if (admin != null) {
+                for (IgaAuthorizationEntity a : existing) {
+                    if (admin.getUsername() != null && admin.getUsername().equals(a.getApproval())) {
+                        alreadySigned = true;
+                        break;
+                    }
+                    if (admin.getId() != null && admin.getId().equals(a.getAuthorizedBy())) {
+                        alreadySigned = true;
+                        break;
+                    }
                 }
             }
 

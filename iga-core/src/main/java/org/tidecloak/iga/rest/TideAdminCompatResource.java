@@ -1097,7 +1097,18 @@ public class TideAdminCompatResource {
         // Resolve the firstAdmin signer by ID so the job-tx engine can re-load the
         // same admin in its OWN session (a UserModel is bound to the session that
         // created it and must not cross the request → job-session boundary).
+        //
+        // CROSS-REALM CAPTURE (2026-06-24 NPE fix): also capture the realm the admin
+        // actually LIVES in. The toggle caller is frequently a master-realm / cross-realm
+        // super-admin who does NOT exist in the target realm, so re-resolving solely via
+        // sweepSession.users().getUserById(targetRealm, adminId) returns null → every CR
+        // NPEs at SimpleNameAttestor.record. The admin's home realm comes from the
+        // AdminAuth (auth.adminAuth().getRealm()); the sweep re-loads them from THAT realm
+        // first, falling back to the target realm for the same-realm case. The attestor is
+        // additionally null-tolerant (records a system principal) so a still-unresolved
+        // admin can never abort the system-bootstrap sweep again.
         final String adminId = admin != null ? admin.getId() : null;
+        final String adminRealmId = currentAdminRealmId();
         final String realmId = realm.getId();
 
         IgaFirstAdminAutoCommit.BulkEngine engine = crIdIn -> {
@@ -1142,9 +1153,24 @@ public class TideAdminCompatResource {
                                     "IGA firstAdmin sweep: realm " + realmId + " not loadable in sweep session");
                         }
                         sweepSession.getContext().setRealm(sweepRealm);
-                        UserModel sweepAdmin = adminId != null
-                                ? sweepSession.users().getUserById(sweepRealm, adminId)
-                                : null;
+                        // Re-resolve the toggle-calling admin inside the JOB session. Try the
+                        // admin's HOME realm first (handles the master/cross-realm super-admin
+                        // who does not exist in the target realm), then fall back to the target
+                        // realm (same-realm admin). May still be null (e.g. no AdminAuth on a
+                        // service-driven toggle) — the attestor tolerates that and records a
+                        // system principal rather than NPEing the whole sweep.
+                        UserModel sweepAdmin = null;
+                        if (adminId != null) {
+                            if (adminRealmId != null && !adminRealmId.equals(realmId)) {
+                                RealmModel adminRealm = sweepSession.realms().getRealm(adminRealmId);
+                                if (adminRealm != null) {
+                                    sweepAdmin = sweepSession.users().getUserById(adminRealm, adminId);
+                                }
+                            }
+                            if (sweepAdmin == null) {
+                                sweepAdmin = sweepSession.users().getUserById(sweepRealm, adminId);
+                            }
+                        }
                         // Construct the bulk engine on the JOB session (auth=null is safe:
                         // bulkAuthorizeInternal does NOT call requireManageRealm — the toggle
                         // endpoint already gated this; the signer is passed explicitly).
@@ -1207,6 +1233,23 @@ public class TideAdminCompatResource {
         try {
             if (auth != null && auth.adminAuth() != null) {
                 return auth.adminAuth().getUser();
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /**
+     * Best-effort id of the realm the toggle-calling admin actually LIVES in (the realm
+     * they authenticated against — master for a cross-realm super-admin). Used by the
+     * auto-commit sweep to re-resolve the {@link UserModel} in the correct realm inside
+     * its job session: {@code getUserById(targetRealm, masterAdminId)} would return null
+     * for a cross-realm caller and NPE the attestor. Null when no AdminAuth is present.
+     */
+    private String currentAdminRealmId() {
+        try {
+            if (auth != null && auth.adminAuth() != null && auth.adminAuth().getRealm() != null) {
+                return auth.adminAuth().getRealm().getId();
             }
         } catch (Exception ignored) {
         }

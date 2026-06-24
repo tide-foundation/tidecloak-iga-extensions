@@ -42,6 +42,16 @@ public class SimpleNameAttestor implements IgaAttestor {
         return ID;
     }
 
+    /**
+     * Stable principal recorded when no human admin {@link UserModel} is resolvable for
+     * the authorization — i.e. a system-bootstrap auto-commit (firstAdmin ADOPT sweep,
+     * threshold=1, approver-gate bypassed) driven by a cross-realm caller who cannot be
+     * re-loaded in the job session. Recording this instead of NPEing keeps the whole
+     * sweep from aborting (every ADOPT CR → AUTHORIZE_FAILED) and leaves an honest audit
+     * marker that the actor was the system, not an individual admin.
+     */
+    public static final String SYSTEM_PRINCIPAL = "iga-system-bootstrap";
+
     @Override
     public IgaAuthorizationEntity record(KeycloakSession session,
                                          IgaChangeRequestEntity cr,
@@ -53,15 +63,25 @@ public class SimpleNameAttestor implements IgaAttestor {
         // requireApprover — they are a system-bootstrap onramp, not a
         // governance decision. The action-type-aware overload handles that
         // short-circuit; all other action types enforce the gate as before.
+        // (requireApprover is null-admin-safe for exactly these bypassed paths —
+        // ADOPT / firstAdmin return before any admin deref; a non-bypassed CR with
+        // a null admin still fails the gate, which is correct.)
         IgaScopeResolver.requireApprover(session, realm, admin, scope, cr);
+
+        // Null-admin tolerance: the system-bootstrap sweep can arrive with no resolvable
+        // UserModel (cross-realm super-admin not present in the job session's realm). Record
+        // a stable system principal rather than NPE — guarantees a missing admin can never
+        // again abort the firstAdmin ADOPT sweep at SimpleNameAttestor.record.
+        String authorizedBy = admin != null ? admin.getId() : SYSTEM_PRINCIPAL;
+        String approvalName = admin != null ? admin.getUsername() : SYSTEM_PRINCIPAL;
 
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         IgaAuthorizationEntity auth = new IgaAuthorizationEntity();
         auth.setId(UUID.randomUUID().toString());
         auth.setChangeRequest(cr);
-        auth.setAuthorizedBy(admin.getId());
+        auth.setAuthorizedBy(authorizedBy);
         // The "name" is the attestation for the simple attestor; ignore attestationPayload.
-        auth.setApproval(admin.getUsername());
+        auth.setApproval(approvalName);
         auth.setCreatedAt(System.currentTimeMillis());
         em.persist(auth);
         em.flush();
