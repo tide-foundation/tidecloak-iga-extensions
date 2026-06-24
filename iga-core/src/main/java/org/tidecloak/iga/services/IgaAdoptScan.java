@@ -10,6 +10,8 @@ import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.replay.IgaReplayExtension;
 import org.tidecloak.iga.replay.SidecarCapExceededException;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -123,12 +125,23 @@ public final class IgaAdoptScan {
          * skip-built-ins invariant held on toggle-on.
          */
         public final long skippedSystemEdges;
+        /**
+         * The per-entity ADOPT failures behind the {@link #errors} count. Each
+         * map is {@code {type, id, error}} (entity type, entity / synthetic-edge
+         * id, and a short error string). Best-effort processing CONTINUES past
+         * each failure (one poison row must not abort the rest), but the failed
+         * entities are now collected here so the toggle response can LIST them in
+         * its warnings summary rather than reporting only a count. Always
+         * non-null (empty when {@code errors == 0}); an unmodifiable view.
+         */
+        public final List<Map<String, Object>> failedEntities;
 
         ScanResult(String realmId, long durationMs, long totalEntitiesScanned,
                    Map<String, Long> adoptCrsCreated, long skippedSystemFilter,
                    long skippedAlreadyCommittedAdopt, long skippedPendingCreateCr,
                    long skippedAlreadyAttested, long errors,
-                   long sessionsInvalidated, long skippedSystemEdges) {
+                   long sessionsInvalidated, long skippedSystemEdges,
+                   List<Map<String, Object>> failedEntities) {
             this.realmId = realmId;
             this.durationMs = durationMs;
             this.totalEntitiesScanned = totalEntitiesScanned;
@@ -140,6 +153,9 @@ public final class IgaAdoptScan {
             this.errors = errors;
             this.sessionsInvalidated = sessionsInvalidated;
             this.skippedSystemEdges = skippedSystemEdges;
+            this.failedEntities = failedEntities == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(failedEntities);
         }
 
         /**
@@ -152,7 +168,8 @@ public final class IgaAdoptScan {
             return new ScanResult(realmId, durationMs, totalEntitiesScanned,
                     adoptCrsCreated, skippedSystemFilter,
                     skippedAlreadyCommittedAdopt, skippedPendingCreateCr,
-                    skippedAlreadyAttested, errors, count, skippedSystemEdges);
+                    skippedAlreadyAttested, errors, count, skippedSystemEdges,
+                    failedEntities);
         }
 
         /** Map shape for the toggle response body — matches the locked contract. */
@@ -170,6 +187,10 @@ public final class IgaAdoptScan {
             skipped.put("systemEdges", skippedSystemEdges);
             m.put("skipped", skipped);
             m.put("errors", errors);
+            // The LIST of per-entity failures behind the errors count ({type,
+            // id, error} each), so the toggle warnings summary can name the
+            // entities that did not adopt rather than only reporting how many.
+            m.put("failedEntities", failedEntities);
             m.put("sessionsInvalidated", sessionsInvalidated);
             return m;
         }
@@ -311,6 +332,13 @@ public final class IgaAdoptScan {
         long[] counters = new long[5]; // total, sysSkip, committedSkip, pendingSkip, errors
         long[] alreadyAttestedCounter = new long[1];
         long[] systemEdgesCounter = new long[1]; // commit 2 — built-in edges skipped
+        // Best-effort failure LIST behind counters[4] (errors): every per-entity
+        // catch (node / realm-node / edge) appends a {type, id, error} descriptor
+        // here AND increments counters[4]. The two stay in lockstep so the
+        // ScanResult.errors count and the failedEntities list agree. The list is
+        // surfaced in the toggle warnings summary so the admin can see WHICH
+        // entities failed, not just how many.
+        List<Map<String, Object>> failedEntities = new ArrayList<>();
 
         // The committed-ADOPT skip set is the contract's idempotent-re-toggle
         // key: every entity in this realm that already has an APPROVED
@@ -339,27 +367,27 @@ public final class IgaAdoptScan {
         for (IgaUnsignedRowScanner.InfoRow row : scanner.usersWithNames(realm.getId())) {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_USER, row, null,
                     requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
-                    created, counters, alreadyAttestedCounter);
+                    created, counters, alreadyAttestedCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.InfoRow row : scanner.rolesWithNames(realm.getId())) {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_ROLE, row, row.parentClientId(),
                     requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
-                    created, counters, alreadyAttestedCounter);
+                    created, counters, alreadyAttestedCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.InfoRow row : scanner.groupsWithNames(realm.getId())) {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_GROUP, row, null,
                     requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
-                    created, counters, alreadyAttestedCounter);
+                    created, counters, alreadyAttestedCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.InfoRow row : scanner.clientsWithNames(realm.getId())) {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_CLIENT, row, null,
                     requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
-                    created, counters, alreadyAttestedCounter);
+                    created, counters, alreadyAttestedCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.InfoRow row : scanner.clientScopesWithNames(realm.getId())) {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, row, null,
                     requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
-                    created, counters, alreadyAttestedCounter);
+                    created, counters, alreadyAttestedCounter, failedEntities);
         }
         // Orgs. The org is a first-class NODE in the attested
         // set; the scanner enumerates only UNSIGNED orgs (the
@@ -378,7 +406,7 @@ public final class IgaAdoptScan {
         for (IgaUnsignedRowScanner.InfoRow row : scanner.organizationsWithNames(realm.getId())) {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_ORGANIZATION, row, null,
                     requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
-                    created, counters, alreadyAttestedCounter);
+                    created, counters, alreadyAttestedCounter, failedEntities);
         }
 
         // ---------------------------------------------------------------------
@@ -402,6 +430,7 @@ public final class IgaAdoptScan {
             }
         } catch (RuntimeException ex) {
             counters[4]++;
+            failedEntities.add(failure(IgaReplayExtension.ENTITY_TYPE_REALM, realm.getId(), ex));
             log.warnf(ex, "IGA scan ERROR on realm-node ADOPT realm=%s — continuing", realm.getName());
         }
 
@@ -422,25 +451,25 @@ public final class IgaAdoptScan {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_COMPOSITE_ROLE,
                     IgaReplayExtension.ACTION_ADOPT_COMPOSITE_ROLE, e,
                     requestedBy, includeSystem, committedAdoptByType,
-                    created, counters, systemEdgesCounter);
+                    created, counters, systemEdgesCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.EdgeRow e : scanner.clientScopeClientEdges(realm.getId())) {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_CLIENT,
                     IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE_CLIENT, e,
                     requestedBy, includeSystem, committedAdoptByType,
-                    created, counters, systemEdgesCounter);
+                    created, counters, systemEdgesCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.EdgeRow e : scanner.clientScopeRoleEdges(realm.getId())) {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_ROLE,
                     IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE_ROLE, e,
                     requestedBy, includeSystem, committedAdoptByType,
-                    created, counters, systemEdgesCounter);
+                    created, counters, systemEdgesCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.EdgeRow e : scanner.protocolMapperEdges(realm.getId())) {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_PROTOCOL_MAPPER,
                     IgaReplayExtension.ACTION_ADOPT_PROTOCOL_MAPPER, e,
                     requestedBy, includeSystem, committedAdoptByType,
-                    created, counters, systemEdgesCounter);
+                    created, counters, systemEdgesCounter, failedEntities);
         }
         // Commit 3 — realm default-scope edges (DEFAULT_CLIENT_SCOPE rows). The
         // EdgeRow's ownerNodeType is CLIENT_SCOPE (the scope decides built-in
@@ -453,7 +482,7 @@ public final class IgaAdoptScan {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_REALM_DEFAULT_SCOPE,
                     IgaReplayExtension.ACTION_ADOPT_DEFAULT_CLIENT_SCOPE, e,
                     requestedBy, includeSystem, committedAdoptByType,
-                    created, counters, systemEdgesCounter);
+                    created, counters, systemEdgesCounter, failedEntities);
         }
         // Commit 4 — client scope-mapping edges (SCOPE_MAPPING rows). The
         // EdgeRow's ownerNodeType is CLIENT (the owning client decides built-in
@@ -466,7 +495,7 @@ public final class IgaAdoptScan {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_SCOPE_MAPPING,
                     IgaReplayExtension.ACTION_ADOPT_SCOPE_MAPPING, e,
                     requestedBy, includeSystem, committedAdoptByType,
-                    created, counters, systemEdgesCounter);
+                    created, counters, systemEdgesCounter, failedEntities);
         }
 
         long durationMs = System.currentTimeMillis() - t0;
@@ -486,7 +515,8 @@ public final class IgaAdoptScan {
                 alreadyAttestedCounter[0],
                 counters[4],
                 0L,
-                systemEdgesCounter[0]
+                systemEdgesCounter[0],
+                failedEntities
         );
         log.infof("IGA toggle-on scan: realm=%s durationMs=%d scanned=%d created=%s "
                         + "skippedSystem=%d skippedCommittedAdopt=%d skippedPendingCreate=%d "
@@ -512,7 +542,8 @@ public final class IgaAdoptScan {
                                     Map<String, Set<String>> pendingCreateByType,
                                     Map<String, Long> created,
                                     long[] counters,
-                                    long[] alreadyAttestedCounter) {
+                                    long[] alreadyAttestedCounter,
+                                    List<Map<String, Object>> failedEntities) {
         counters[0]++; // total scanned
         try {
             // 1. System-entity classification. The manual-signing redesign (2026-06-06)
@@ -568,6 +599,7 @@ public final class IgaAdoptScan {
                     realm.getName(), entityType, row.entityId());
         } catch (RuntimeException ex) {
             counters[4]++;
+            failedEntities.add(failure(entityType, row.entityId(), ex));
             log.warnf(ex,
                     "IGA scan ERROR on realm=%s type=%s id=%s name=%s — continuing",
                     realm.getName(), entityType, row.entityId(), row.entityName());
@@ -602,7 +634,8 @@ public final class IgaAdoptScan {
                                        Map<String, Set<String>> committedAdoptByType,
                                        Map<String, Long> created,
                                        long[] counters,
-                                       long[] systemEdgesCounter) {
+                                       long[] systemEdgesCounter,
+                                       List<Map<String, Object>> failedEntities) {
         counters[0]++; // total scanned (nodes + edges)
         // FIX (ENTITY_ID overflow): the skip-key MUST be the same deterministic
         // 36-char synthetic id the CR + sidecar store (NOT key1|key2, which is
@@ -665,11 +698,28 @@ public final class IgaAdoptScan {
             created.merge(entityType, 1L, Long::sum);
         } catch (RuntimeException ex) {
             counters[4]++;
+            failedEntities.add(failure(entityType, syntheticEntityId, ex));
             log.warnf(ex,
                     "IGA scan ERROR on edge realm=%s type=%s key1=%s key2=%s — child txn rolled "
                             + "back, node-ADOPT work preserved; continuing",
                     realm.getName(), entityType, edge.key1(), edge.key2());
         }
+    }
+
+    /**
+     * Build one {@code {type, id, error}} failure descriptor for the
+     * best-effort failedEntities list. {@code error} is the exception simple
+     * name plus its message, kept short and serializable for the toggle
+     * warnings summary. Never throws.
+     */
+    private static Map<String, Object> failure(String entityType, String entityId, Throwable ex) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type", entityType);
+        m.put("id", entityId);
+        m.put("error", ex == null
+                ? "unknown"
+                : ex.getClass().getSimpleName() + ": " + ex.getMessage());
+        return m;
     }
 
     /**
