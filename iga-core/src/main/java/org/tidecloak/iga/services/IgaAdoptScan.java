@@ -102,6 +102,17 @@ public final class IgaAdoptScan {
         public final Map<String, Long> adoptCrsCreated;
         public final long skippedSystemFilter;
         public final long skippedAlreadyCommittedAdopt;
+        /**
+         * Count of entities skipped because they already have a PENDING
+         * (unsigned, not-yet-committed) ADOPT_X CR. A re-toggle re-runs the
+         * full ADOPT scan; an entity that is MISSING its adopt CR is healed
+         * (recreated), but an entity that already has a PENDING adopt CR is
+         * already signable and MUST NOT get a duplicate second PENDING CR
+         * stacked on it. Surfaced under {@code skipped.pendingAdopt}.
+         * Analogous to {@link #skippedAlreadyCommittedAdopt} but keyed on
+         * status PENDING rather than APPROVED.
+         */
+        public final long skippedPendingAdopt;
         public final long skippedPendingCreateCr;
         public final long skippedAlreadyAttested;
         public final long errors;
@@ -138,7 +149,8 @@ public final class IgaAdoptScan {
 
         ScanResult(String realmId, long durationMs, long totalEntitiesScanned,
                    Map<String, Long> adoptCrsCreated, long skippedSystemFilter,
-                   long skippedAlreadyCommittedAdopt, long skippedPendingCreateCr,
+                   long skippedAlreadyCommittedAdopt, long skippedPendingAdopt,
+                   long skippedPendingCreateCr,
                    long skippedAlreadyAttested, long errors,
                    long sessionsInvalidated, long skippedSystemEdges,
                    List<Map<String, Object>> failedEntities) {
@@ -148,6 +160,7 @@ public final class IgaAdoptScan {
             this.adoptCrsCreated = adoptCrsCreated;
             this.skippedSystemFilter = skippedSystemFilter;
             this.skippedAlreadyCommittedAdopt = skippedAlreadyCommittedAdopt;
+            this.skippedPendingAdopt = skippedPendingAdopt;
             this.skippedPendingCreateCr = skippedPendingCreateCr;
             this.skippedAlreadyAttested = skippedAlreadyAttested;
             this.errors = errors;
@@ -167,7 +180,8 @@ public final class IgaAdoptScan {
         public ScanResult withSessionsInvalidated(long count) {
             return new ScanResult(realmId, durationMs, totalEntitiesScanned,
                     adoptCrsCreated, skippedSystemFilter,
-                    skippedAlreadyCommittedAdopt, skippedPendingCreateCr,
+                    skippedAlreadyCommittedAdopt, skippedPendingAdopt,
+                    skippedPendingCreateCr,
                     skippedAlreadyAttested, errors, count, skippedSystemEdges,
                     failedEntities);
         }
@@ -182,6 +196,7 @@ public final class IgaAdoptScan {
             Map<String, Long> skipped = new LinkedHashMap<>();
             skipped.put("systemFilter", skippedSystemFilter);
             skipped.put("alreadyCommittedAdopt", skippedAlreadyCommittedAdopt);
+            skipped.put("pendingAdopt", skippedPendingAdopt);
             skipped.put("pendingCreateCr", skippedPendingCreateCr);
             skipped.put("alreadyAttested", skippedAlreadyAttested);
             skipped.put("systemEdges", skippedSystemEdges);
@@ -288,6 +303,44 @@ public final class IgaAdoptScan {
         committedAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_SCOPE_MAPPING,
                 queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_SCOPE_MAPPING, "APPROVED"));
 
+        // Build per-type "already PENDING ADOPT" skip sets ONCE at scan start,
+        // exactly like the committed/APPROVED set above but keyed on status
+        // PENDING. A re-toggle re-runs the full ADOPT scan; an entity MISSING
+        // its adopt CR is healed (recreated), but an entity that already has a
+        // PENDING (unsigned, not-yet-committed) adopt CR is already signable —
+        // re-emitting would stack a DUPLICATE second PENDING adopt CR on it.
+        // Same entity types + the same synthetic-edge id form as
+        // committedAdoptByType, so the dedup keys match across re-toggles. The
+        // realm-node path (below) already does this APPROVED+PENDING skip
+        // inline; nodes and edges did not — this set gives them the parity.
+        Map<String, Set<String>> pendingAdoptByType = new LinkedHashMap<>();
+        pendingAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_USER,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_USER, "PENDING"));
+        pendingAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_ROLE,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_ROLE, "PENDING"));
+        pendingAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_GROUP,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_GROUP, "PENDING"));
+        pendingAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_CLIENT,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_CLIENT, "PENDING"));
+        pendingAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE, "PENDING"));
+        pendingAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_ORGANIZATION,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_ORGANIZATION, "PENDING"));
+        // Edge entity types — synthetic (key1|key2) id form, same as the
+        // committed set, so the PENDING skip keys match what createAdoptEdgeCr wrote.
+        pendingAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_COMPOSITE_ROLE,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_COMPOSITE_ROLE, "PENDING"));
+        pendingAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_CLIENT,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE_CLIENT, "PENDING"));
+        pendingAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_ROLE,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE_ROLE, "PENDING"));
+        pendingAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_PROTOCOL_MAPPER,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_PROTOCOL_MAPPER, "PENDING"));
+        pendingAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_REALM_DEFAULT_SCOPE,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_DEFAULT_CLIENT_SCOPE, "PENDING"));
+        pendingAdoptByType.put(IgaReplayExtension.ENTITY_TYPE_SCOPE_MAPPING,
+                queryEntityIdsByCr(em, realm.getId(), IgaReplayExtension.ACTION_ADOPT_SCOPE_MAPPING, "PENDING"));
+
         // Build per-type "pending CREATE_*" race skip sets. CREATE actions
         // are literal strings (no central constants in the IgaReplayExtension
         // surface today — see IgaGroupAdapter / IgaUserProvider / etc).
@@ -332,6 +385,12 @@ public final class IgaAdoptScan {
         long[] counters = new long[5]; // total, sysSkip, committedSkip, pendingSkip, errors
         long[] alreadyAttestedCounter = new long[1];
         long[] systemEdgesCounter = new long[1]; // commit 2 — built-in edges skipped
+        // PENDING-ADOPT dedup skips. Counted at the per-entity short-circuit
+        // (NOT pre-tallied like the committed/APPROVED set): a PENDING adopt CR
+        // does NOT stamp the entity's attestation, so the scanner's
+        // attestation-IS-NULL filter still surfaces these rows and the skip
+        // fires in processOne/processOneEdge. Surfaced under skipped.pendingAdopt.
+        long[] pendingAdoptCounter = new long[1];
         // Best-effort failure LIST behind counters[4] (errors): every per-entity
         // catch (node / realm-node / edge) appends a {type, id, error} descriptor
         // here AND increments counters[4]. The two stay in lockstep so the
@@ -366,28 +425,33 @@ public final class IgaAdoptScan {
         // process each list independently so per-type counts are clean.
         for (IgaUnsignedRowScanner.InfoRow row : scanner.usersWithNames(realm.getId())) {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_USER, row, null,
-                    requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
-                    created, counters, alreadyAttestedCounter, failedEntities);
+                    requestedBy, includeSystem, committedAdoptByType, pendingAdoptByType,
+                    pendingCreateByType,
+                    created, counters, alreadyAttestedCounter, pendingAdoptCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.InfoRow row : scanner.rolesWithNames(realm.getId())) {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_ROLE, row, row.parentClientId(),
-                    requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
-                    created, counters, alreadyAttestedCounter, failedEntities);
+                    requestedBy, includeSystem, committedAdoptByType, pendingAdoptByType,
+                    pendingCreateByType,
+                    created, counters, alreadyAttestedCounter, pendingAdoptCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.InfoRow row : scanner.groupsWithNames(realm.getId())) {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_GROUP, row, null,
-                    requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
-                    created, counters, alreadyAttestedCounter, failedEntities);
+                    requestedBy, includeSystem, committedAdoptByType, pendingAdoptByType,
+                    pendingCreateByType,
+                    created, counters, alreadyAttestedCounter, pendingAdoptCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.InfoRow row : scanner.clientsWithNames(realm.getId())) {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_CLIENT, row, null,
-                    requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
-                    created, counters, alreadyAttestedCounter, failedEntities);
+                    requestedBy, includeSystem, committedAdoptByType, pendingAdoptByType,
+                    pendingCreateByType,
+                    created, counters, alreadyAttestedCounter, pendingAdoptCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.InfoRow row : scanner.clientScopesWithNames(realm.getId())) {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE, row, null,
-                    requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
-                    created, counters, alreadyAttestedCounter, failedEntities);
+                    requestedBy, includeSystem, committedAdoptByType, pendingAdoptByType,
+                    pendingCreateByType,
+                    created, counters, alreadyAttestedCounter, pendingAdoptCounter, failedEntities);
         }
         // Orgs. The org is a first-class NODE in the attested
         // set; the scanner enumerates only UNSIGNED orgs (the
@@ -405,8 +469,9 @@ public final class IgaAdoptScan {
         // for now an explicit skip would be invented complexity.
         for (IgaUnsignedRowScanner.InfoRow row : scanner.organizationsWithNames(realm.getId())) {
             processOne(crService, realm, IgaReplayExtension.ENTITY_TYPE_ORGANIZATION, row, null,
-                    requestedBy, includeSystem, committedAdoptByType, pendingCreateByType,
-                    created, counters, alreadyAttestedCounter, failedEntities);
+                    requestedBy, includeSystem, committedAdoptByType, pendingAdoptByType,
+                    pendingCreateByType,
+                    created, counters, alreadyAttestedCounter, pendingAdoptCounter, failedEntities);
         }
 
         // ---------------------------------------------------------------------
@@ -450,26 +515,26 @@ public final class IgaAdoptScan {
         for (IgaUnsignedRowScanner.EdgeRow e : scanner.compositeRoleEdges(realm.getId())) {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_COMPOSITE_ROLE,
                     IgaReplayExtension.ACTION_ADOPT_COMPOSITE_ROLE, e,
-                    requestedBy, includeSystem, committedAdoptByType,
-                    created, counters, systemEdgesCounter, failedEntities);
+                    requestedBy, includeSystem, committedAdoptByType, pendingAdoptByType,
+                    created, counters, systemEdgesCounter, pendingAdoptCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.EdgeRow e : scanner.clientScopeClientEdges(realm.getId())) {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_CLIENT,
                     IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE_CLIENT, e,
-                    requestedBy, includeSystem, committedAdoptByType,
-                    created, counters, systemEdgesCounter, failedEntities);
+                    requestedBy, includeSystem, committedAdoptByType, pendingAdoptByType,
+                    created, counters, systemEdgesCounter, pendingAdoptCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.EdgeRow e : scanner.clientScopeRoleEdges(realm.getId())) {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE_ROLE,
                     IgaReplayExtension.ACTION_ADOPT_CLIENT_SCOPE_ROLE, e,
-                    requestedBy, includeSystem, committedAdoptByType,
-                    created, counters, systemEdgesCounter, failedEntities);
+                    requestedBy, includeSystem, committedAdoptByType, pendingAdoptByType,
+                    created, counters, systemEdgesCounter, pendingAdoptCounter, failedEntities);
         }
         for (IgaUnsignedRowScanner.EdgeRow e : scanner.protocolMapperEdges(realm.getId())) {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_PROTOCOL_MAPPER,
                     IgaReplayExtension.ACTION_ADOPT_PROTOCOL_MAPPER, e,
-                    requestedBy, includeSystem, committedAdoptByType,
-                    created, counters, systemEdgesCounter, failedEntities);
+                    requestedBy, includeSystem, committedAdoptByType, pendingAdoptByType,
+                    created, counters, systemEdgesCounter, pendingAdoptCounter, failedEntities);
         }
         // Commit 3 — realm default-scope edges (DEFAULT_CLIENT_SCOPE rows). The
         // EdgeRow's ownerNodeType is CLIENT_SCOPE (the scope decides built-in
@@ -481,8 +546,8 @@ public final class IgaAdoptScan {
         for (IgaUnsignedRowScanner.EdgeRow e : scanner.defaultClientScopeEdges(realm.getId())) {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_REALM_DEFAULT_SCOPE,
                     IgaReplayExtension.ACTION_ADOPT_DEFAULT_CLIENT_SCOPE, e,
-                    requestedBy, includeSystem, committedAdoptByType,
-                    created, counters, systemEdgesCounter, failedEntities);
+                    requestedBy, includeSystem, committedAdoptByType, pendingAdoptByType,
+                    created, counters, systemEdgesCounter, pendingAdoptCounter, failedEntities);
         }
         // Commit 4 — client scope-mapping edges (SCOPE_MAPPING rows). The
         // EdgeRow's ownerNodeType is CLIENT (the owning client decides built-in
@@ -494,8 +559,8 @@ public final class IgaAdoptScan {
         for (IgaUnsignedRowScanner.EdgeRow e : scanner.scopeMappingEdges(realm.getId())) {
             processOneEdge(session, realm, IgaReplayExtension.ENTITY_TYPE_SCOPE_MAPPING,
                     IgaReplayExtension.ACTION_ADOPT_SCOPE_MAPPING, e,
-                    requestedBy, includeSystem, committedAdoptByType,
-                    created, counters, systemEdgesCounter, failedEntities);
+                    requestedBy, includeSystem, committedAdoptByType, pendingAdoptByType,
+                    created, counters, systemEdgesCounter, pendingAdoptCounter, failedEntities);
         }
 
         long durationMs = System.currentTimeMillis() - t0;
@@ -511,6 +576,7 @@ public final class IgaAdoptScan {
                 created,
                 counters[1],
                 counters[2],
+                pendingAdoptCounter[0],
                 counters[3],
                 alreadyAttestedCounter[0],
                 counters[4],
@@ -519,10 +585,12 @@ public final class IgaAdoptScan {
                 failedEntities
         );
         log.infof("IGA toggle-on scan: realm=%s durationMs=%d scanned=%d created=%s "
-                        + "skippedSystem=%d skippedCommittedAdopt=%d skippedPendingCreate=%d "
+                        + "skippedSystem=%d skippedCommittedAdopt=%d skippedPendingAdopt=%d "
+                        + "skippedPendingCreate=%d "
                         + "skippedAlreadyAttested=%d skippedSystemEdges=%d errors=%d",
                 realm.getName(), durationMs, counters[0], created, counters[1], counters[2],
-                counters[3], alreadyAttestedCounter[0], systemEdgesCounter[0], counters[4]);
+                pendingAdoptCounter[0], counters[3], alreadyAttestedCounter[0],
+                systemEdgesCounter[0], counters[4]);
         return result;
     }
 
@@ -539,10 +607,12 @@ public final class IgaAdoptScan {
                                     String requestedBy,
                                     boolean includeSystem,
                                     Map<String, Set<String>> committedAdoptByType,
+                                    Map<String, Set<String>> pendingAdoptByType,
                                     Map<String, Set<String>> pendingCreateByType,
                                     Map<String, Long> created,
                                     long[] counters,
                                     long[] alreadyAttestedCounter,
+                                    long[] pendingAdoptCounter,
                                     List<Map<String, Object>> failedEntities) {
         counters[0]++; // total scanned
         try {
@@ -575,6 +645,19 @@ public final class IgaAdoptScan {
             Set<String> committed = committedAdoptByType.get(entityType);
             if (committed != null && committed.contains(row.entityId())) {
                 log.debugf("IGA scan skip(alreadyCommittedAdopt): realm=%s type=%s id=%s",
+                        realm.getName(), entityType, row.entityId());
+                return;
+            }
+            // 2b. Already-PENDING ADOPT skip (re-toggle dedup). The entity
+            //     already has an unsigned, not-yet-committed ADOPT CR — it is
+            //     already signable, so short-circuit WITHOUT creating a
+            //     duplicate second PENDING adopt CR. Unlike the APPROVED set
+            //     this IS counted here (a PENDING adopt CR does not stamp the
+            //     entity's attestation, so the scanner still surfaces the row).
+            Set<String> pendingAdopt = pendingAdoptByType.get(entityType);
+            if (pendingAdopt != null && pendingAdopt.contains(row.entityId())) {
+                pendingAdoptCounter[0]++;
+                log.debugf("IGA scan skip(pendingAdopt): realm=%s type=%s id=%s",
                         realm.getName(), entityType, row.entityId());
                 return;
             }
@@ -632,9 +715,11 @@ public final class IgaAdoptScan {
                                        String requestedBy,
                                        boolean includeSystem,
                                        Map<String, Set<String>> committedAdoptByType,
+                                       Map<String, Set<String>> pendingAdoptByType,
                                        Map<String, Long> created,
                                        long[] counters,
                                        long[] systemEdgesCounter,
+                                       long[] pendingAdoptCounter,
                                        List<Map<String, Object>> failedEntities) {
         counters[0]++; // total scanned (nodes + edges)
         // FIX (ENTITY_ID overflow): the skip-key MUST be the same deterministic
@@ -664,6 +749,18 @@ public final class IgaAdoptScan {
         Set<String> committed = committedAdoptByType.get(entityType);
         if (committed != null && committed.contains(syntheticEntityId)) {
             log.debugf("IGA scan skip(alreadyCommittedAdopt edge): realm=%s type=%s id=%s",
+                    realm.getName(), entityType, syntheticEntityId);
+            return;
+        }
+        // 2b. Already-PENDING ADOPT skip (re-toggle dedup). Keyed on the SAME
+        //     synthetic (key1|key2) entityId the CR + sidecar store, so the
+        //     dedup matches what createAdoptEdgeCr wrote. Counted here (a
+        //     PENDING edge adopt CR does not stamp the edge attestation, so the
+        //     scanner still surfaces it), mirroring the node path.
+        Set<String> pendingAdopt = pendingAdoptByType.get(entityType);
+        if (pendingAdopt != null && pendingAdopt.contains(syntheticEntityId)) {
+            pendingAdoptCounter[0]++;
+            log.debugf("IGA scan skip(pendingAdopt edge): realm=%s type=%s id=%s",
                     realm.getName(), entityType, syntheticEntityId);
             return;
         }
