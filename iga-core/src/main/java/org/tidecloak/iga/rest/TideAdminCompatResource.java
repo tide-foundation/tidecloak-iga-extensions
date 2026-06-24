@@ -536,23 +536,40 @@ public class TideAdminCompatResource {
                     logger.errorf(sweepEx, "IGA toggle-on firstAdmin auto-commit sweep FAILED for realm %s "
                             + "— toggle remains enabled; baseline-config CRs stay PENDING for manual handling.",
                             realm.getName());
+                    // SIGN-AT-TOGGLE failure copy (Option 1 = rollback-to-PENDING).
+                    // The sweep ran the commit flips + the converge ORK ceremony in a
+                    // DEDICATED job tx; this throw means that tx already ROLLED BACK, so
+                    // every ADOPT CR reverted to its scan-created PENDING state (NOT
+                    // committed, NOT stub-committed) and the login closure is UNSIGNED.
+                    final String closureUnsignedMsg =
+                            "Default-config signing failed during toggle (likely the ORK "
+                            + "network was unreachable or below threshold). IGA stays ENABLED "
+                            + "and the baseline ADOPT change-requests were rolled back to "
+                            + "PENDING — nothing was committed unsigned. Because the login "
+                            + "closure is unsigned, logins FAIL CLOSED until an admin "
+                            + "re-approves the PENDING ADOPT set (which rebuilds and re-signs "
+                            + "the closure). Re-approve while the firstAdmin signing pack is "
+                            + "still valid — it has a limited lifetime; if it expires before "
+                            + "re-approval the realm must be re-provisioned.";
                     Map<String, Object> sweepErr = new LinkedHashMap<>();
                     sweepErr.put("error", sweepEx.getClass().getSimpleName());
                     sweepErr.put("message", String.valueOf(sweepEx.getMessage()));
+                    sweepErr.put("warning", closureUnsignedMsg);
                     body.put("autoCommit", sweepErr);
-                    // SOFTENED (2026-06-24): a sign-defaults sweep failure is now a
-                    // WARNING, not a hard failure. The toggle stays NON-BLOCKING —
-                    // the attribute is committed, the realm is IGA-on, the
-                    // baseline-config CRs stay PENDING for manual handling — and the
-                    // failure is carried into the end-summary as a commitFailures
-                    // entry so the response returns 200 + completed_with_warnings
-                    // (NOT failed / 500). The synthetic commitFailures entry below
-                    // guarantees the end-summary marks completed_with_warnings even
-                    // if the engine threw before returning any per-CR outcome.
+                    // SOFTENED (2026-06-24): a sign-defaults sweep failure is a WARNING,
+                    // not a hard failure. The toggle stays NON-BLOCKING — the attribute is
+                    // committed, the realm is IGA-on, and (sign-at-toggle) the ADOPT set was
+                    // ROLLED BACK to PENDING by the dedicated sweep tx (so it is genuinely
+                    // PENDING, never committed-but-unsigned). The failure is carried into the
+                    // end-summary as a commitFailures entry so the response returns 200 +
+                    // completed_with_warnings (NOT failed / 500). The synthetic entry below
+                    // guarantees the end-summary marks completed_with_warnings even though the
+                    // engine threw before returning any per-CR outcome.
                     Map<String, Object> sweepFail = new LinkedHashMap<>();
                     sweepFail.put("crId", null);
                     sweepFail.put("actionType", "SIGN_DEFAULTS_SWEEP");
                     sweepFail.put("outcome", sweepEx.getClass().getSimpleName() + ": " + sweepEx.getMessage());
+                    sweepFail.put("message", closureUnsignedMsg);
                     commitFailures.add(sweepFail);
                     if (trackProgress) {
                         // Close the stage out (it was left running) WITHOUT failing
@@ -1077,6 +1094,11 @@ public class TideAdminCompatResource {
                 service.listPendingByActionTypeIn(realm.getId(), allowList, null, 100_000);
 
         UserModel admin = currentUserModel();
+        // Resolve the firstAdmin signer by ID so the job-tx engine can re-load the
+        // same admin in its OWN session (a UserModel is bound to the session that
+        // created it and must not cross the request → job-session boundary).
+        final String adminId = admin != null ? admin.getId() : null;
+        final String realmId = realm.getId();
 
         IgaFirstAdminAutoCommit.BulkEngine engine = crIdIn -> {
             // Drive the bulk engine by the EXACT per-CR-eligible ids (not action
@@ -1084,65 +1106,95 @@ public class TideAdminCompatResource {
             // eligible and ineligible CRs (system vs admin-authored ADOPT, benign
             // vs non-default composite), so an action-type drain would over-commit.
             //
-            // PROGRESS: this is the slow ORK-signing stage. To surface live
-            // counts we process the eligible ids in small CHUNKS and emit a
-            // stageProgress(committed/total) after each chunk, so a poller sees
-            // the count climb as the sweep iterates. The bulk endpoint hard cap
-            // is 1000; the chunk size stays well under it. Functionally the
-            // chunking is transparent — each chunk re-enters the same hardened,
-            // mutex-guarded bulkAuthorize engine.
+            // SIGN-AT-TOGGLE TX SCOPING (Option 1 = rollback-to-PENDING, 2026-06-24):
+            // the per-CR commit flips (processOneCr → APPROVED) AND the post-batch
+            // converge (IgaToggleOnBackfill.convergeAfterCommit → the firstAdmin VVK
+            // ORK ceremony) run inside ONE dedicated KeycloakModelUtils.runJobInTransaction
+            // — a SEPARATE session/tx from the outer toggle request tx. Two end-states:
+            //   • ORK sign SUCCEEDS → the job tx commits: the whole ADOPT set is APPROVED
+            //     and the full login closure carries real 64B sigs.
+            //   • ORK sign FAILS (ORK down / threshold / pack) → convergeAfterCommit throws
+            //     out of the bulk core; runJobInTransaction ROLLS BACK the job tx, so every
+            //     APPROVED flip reverts to its scan-created PENDING state. The throw
+            //     propagates to runFirstAdminAutoCommitSweep's caller, which records a
+            //     warning and returns 200 completed_with_warnings. CRUCIALLY this rollback
+            //     is scoped to the sweep: the outer request tx (IGA-enable flag) and the
+            //     ADOPT scan (its own already-committed job tx) are untouched — IGA stays
+            //     ENABLED and the PENDING ADOPT CRs persist for a later manual re-approve
+            //     (which rebuilds the sign request fresh and re-fires converge).
+            // The whole eligible set runs in a SINGLE job tx (chunked only for the bulk
+            // core's internal limit) so a failure rolls back ALL flips, never a partial
+            // commit. Progress is reported on the REQUEST jobService (separate from the
+            // job tx) so the live count is not part of what a sweep rollback reverts.
             final int total = crIdIn.size();
             final int chunkSize = 25;
             List<Map<String, Object>> out = new ArrayList<>();
-            int committedSoFar = 0;
             if (jobId != null) {
                 jobService.stageProgress(jobId, "sign-defaults", 0L, (long) total);
             }
-            for (int from = 0; from < total; from += chunkSize) {
-                int to = Math.min(from + chunkSize, total);
-                List<String> chunk = crIdIn.subList(from, to);
-                Map<String, Object> bulkBody = new LinkedHashMap<>();
-                bulkBody.put("crIdIn", new ArrayList<>(chunk));
-                bulkBody.put("limit", 1000); // bulk endpoint hard cap
-                Response resp = new IgaAdminResource(session, realm, auth).bulkAuthorize(bulkBody);
-                Object entity = resp.getEntity();
-                if (entity instanceof Map<?, ?> respMap) {
-                    Object results = respMap.get("results");
-                    if (results instanceof List<?> list) {
-                        for (Object o : list) {
-                            if (o instanceof Map<?, ?> m) {
-                                @SuppressWarnings("unchecked")
-                                Map<String, Object> cast = (Map<String, Object>) m;
-                                out.add(cast);
-                                String status = String.valueOf(cast.get("status"));
-                                if ("COMMITTED".equals(status)) {
-                                    committedSoFar++;
-                                } else {
-                                    // NON-BLOCKING capture (2026-06-24): bulkAuthorize
-                                    // returns per-CR outcomes and leaves any
-                                    // non-COMMITTED CR (REJECTED / SKIPPED / error)
-                                    // PENDING silently. The sweep stays best-effort
-                                    // (continue through every CR) but each
-                                    // non-committed outcome is now collected so the
-                                    // toggle end-summary can LIST it (crId / actionType
-                                    // / outcome) instead of swallowing it. "outcome"
-                                    // folds the status + the error/reason (e.g.
-                                    // THRESHOLD_NOT_MET, FORBIDDEN_APPROVER_ROLE,
-                                    // DEPENDENCY_NOT_MET, ALREADY_RESOLVED).
-                                    Map<String, Object> fail = new LinkedHashMap<>();
-                                    fail.put("crId", cast.get("crId"));
-                                    fail.put("actionType", cast.get("actionType"));
-                                    Object err = cast.get("error");
-                                    fail.put("outcome", err != null ? status + ":" + err : status);
-                                    commitFailures.add(fail);
+
+            KeycloakModelUtils.runJobInTransaction(
+                    session.getKeycloakSessionFactory(),
+                    sweepSession -> {
+                        RealmModel sweepRealm = sweepSession.realms().getRealm(realmId);
+                        if (sweepRealm == null) {
+                            throw new IllegalStateException(
+                                    "IGA firstAdmin sweep: realm " + realmId + " not loadable in sweep session");
+                        }
+                        sweepSession.getContext().setRealm(sweepRealm);
+                        UserModel sweepAdmin = adminId != null
+                                ? sweepSession.users().getUserById(sweepRealm, adminId)
+                                : null;
+                        // Construct the bulk engine on the JOB session (auth=null is safe:
+                        // bulkAuthorizeInternal does NOT call requireManageRealm — the toggle
+                        // endpoint already gated this; the signer is passed explicitly).
+                        IgaAdminResource sweepResource =
+                                new IgaAdminResource(sweepSession, sweepRealm, null);
+                        for (int from = 0; from < total; from += chunkSize) {
+                            int to = Math.min(from + chunkSize, total);
+                            List<String> chunk = new ArrayList<>(crIdIn.subList(from, to));
+                            // bulkAuthorizeInternal commits each chunk's eligible CRs + runs
+                            // convergeAfterCommit when the last ADOPT drains. A converge throw
+                            // here propagates → the whole job tx rolls back (Option 1).
+                            Response resp = sweepResource.bulkAuthorizeInternal(sweepAdmin, chunk, 1000);
+                            Object entity = resp.getEntity();
+                            if (entity instanceof Map<?, ?> respMap) {
+                                Object results = respMap.get("results");
+                                if (results instanceof List<?> list) {
+                                    for (Object o : list) {
+                                        if (o instanceof Map<?, ?> m) {
+                                            @SuppressWarnings("unchecked")
+                                            Map<String, Object> cast = (Map<String, Object>) m;
+                                            out.add(cast);
+                                        }
+                                    }
                                 }
                             }
                         }
-                    }
+                    });
+
+            // The job tx COMMITTED (no converge throw). Post-process the per-CR outcomes
+            // on the request side: count committed for progress and collect any
+            // non-COMMITTED outcome (REJECTED / SKIPPED — these did NOT throw and left
+            // their CR PENDING) into the toggle end-summary's commitFailures so the UI
+            // can list them (crId / actionType / outcome). A genuine ORK-sign failure
+            // never reaches here — it threw above and rolled the whole set back.
+            int committedSoFar = 0;
+            for (Map<String, Object> cast : out) {
+                String status = String.valueOf(cast.get("status"));
+                if ("COMMITTED".equals(status)) {
+                    committedSoFar++;
+                } else {
+                    Map<String, Object> fail = new LinkedHashMap<>();
+                    fail.put("crId", cast.get("crId"));
+                    fail.put("actionType", cast.get("actionType"));
+                    Object err = cast.get("error");
+                    fail.put("outcome", err != null ? status + ":" + err : status);
+                    commitFailures.add(fail);
                 }
-                if (jobId != null) {
-                    jobService.stageProgress(jobId, "sign-defaults", (long) committedSoFar, (long) total);
-                }
+            }
+            if (jobId != null) {
+                jobService.stageProgress(jobId, "sign-defaults", (long) committedSoFar, (long) total);
             }
             return out;
         };

@@ -112,10 +112,14 @@ public final class IgaFirstAdminAutoCommit {
      */
     public static final Set<String> BASELINE_CONFIG_ACTION_TYPES = Set.of(
             // ADOPT_* — the toggle-on scan's attestation of pre-existing state. ON THE
-            // ALLOW-LIST, but additionally gated PER CR by isSystemDefaultAdopt: only an
-            // ADOPT CR whose target is a system/stock-default entity (marked
-            // ATTESTATION_ONLY=true by the scan via IgaSystemEntityFilter) auto-signs. An
-            // ADOPT CR for a MANUALLY-ADDED (non-system) entity stays manual.
+            // ALLOW-LIST and, under firstAdmin, ALL auto-committable (sign-at-toggle
+            // relaxation 2026-06-24): the whole ADOPT closure (system AND admin-authored)
+            // is the firstAdmin's initial attested baseline, committed + signed in one
+            // pass at toggle. The ATTESTATION_ONLY=true system marker the scan writes via
+            // IgaSystemEntityFilter is STILL read (it drives the quarantine sidecar — a
+            // system ADOPT signs without one, an admin-authored ADOPT writes one); it no
+            // longer gates auto-commit eligibility. sweep() runs only in firstAdmin mode,
+            // so multiAdmin ADOPT sets keep the manual approve/commit flow.
             "ADOPT_REALM",
             "ADOPT_ROLE",
             "ADOPT_GROUP",
@@ -249,7 +253,14 @@ public final class IgaFirstAdminAutoCommit {
      * {@code (entityType, entityName, parentClientId)} → {@code shouldSkip} at
      * scan time and stamped the boolean onto the CR, so the sweep is a pure read
      * of the CR's own rows.</p>
+     *
+     * <p>NOTE (sign-at-toggle relaxation, 2026-06-24): this is NO LONGER the
+     * auto-commit gate for ADOPT_* — under firstAdmin ALL ADOPT_* CRs auto-commit
+     * (see {@link #isAutoCommittable}). It is retained as the canonical reader of
+     * the {@link #ROWS_KEY_ATTESTATION_ONLY} system marker, which still classifies
+     * a system vs admin-authored ADOPT for the quarantine sidecar.</p>
      */
+    @SuppressWarnings("unused")
     static boolean isSystemDefaultAdopt(IgaChangeRequestEntity cr) {
         if (cr == null) {
             return false;
@@ -350,9 +361,12 @@ public final class IgaFirstAdminAutoCommit {
      * Full per-CR auto-commit eligibility decision. A CR is auto-committable iff:
      * <ul>
      *   <li>its action type is on the {@link #BASELINE_CONFIG_ACTION_TYPES} allow-list; AND</li>
-     *   <li>if {@code ADOPT_*}: the target is a SYSTEM/stock-default entity (the
-     *       scan marked it {@link #ROWS_KEY_ATTESTATION_ONLY}). An ADOPT CR for a
-     *       manually-added (non-system) entity stays manual; AND</li>
+     *   <li>if {@code ADOPT_*}: ALWAYS auto-committable under firstAdmin
+     *       (sign-at-toggle relaxation, 2026-06-24) — the WHOLE ADOPT closure,
+     *       system AND admin-authored, is the firstAdmin's initial attested baseline.
+     *       The {@link #ROWS_KEY_ATTESTATION_ONLY} system marker is still read elsewhere
+     *       (it drives the quarantine sidecar, not auto-commit eligibility). {@code sweep}
+     *       gates the whole pass on firstAdmin mode, so this never relaxes multiAdmin; AND</li>
      *   <li>if {@code ASSIGN_SCOPE}: the assigned scope is {@code tide-claims} AND the target
      *       client is a built-in/stock client ({@link #isSystemTideClaimsAssignScope}). Any other
      *       scope assignment (custom client, or any non-tide-claims scope) stays manual; AND</li>
@@ -372,11 +386,22 @@ public final class IgaFirstAdminAutoCommit {
             return false;
         }
         if (isAdoptAction(actionType)) {
-            // Only a system/stock-default ADOPT is baseline config; a manually-added
-            // (non-system) entity's ADOPT stays manual.
-            if (!isSystemDefaultAdopt(cr)) {
-                return false;
-            }
+            // firstAdmin relaxation (sign-at-toggle, 2026-06-24): under firstAdmin
+            // mode ALL ADOPT_* CRs are auto-committable — admin-authored / non-system
+            // entities included, NOT only the system/stock-default ones the toggle-on
+            // scan marked ATTESTATION_ONLY. firstAdmin is a 1-of-1 bootstrap signer;
+            // the whole ADOPT closure (system + admin-authored) is the realm's initial
+            // attested baseline and is committed + signed in one firstAdmin pass at
+            // toggle. The ATTESTATION_ONLY / system distinction is PRESERVED everywhere
+            // it drives OTHER behavior (the quarantine sidecar: a system ADOPT signs
+            // without a quarantine sidecar, an admin-authored ADOPT writes one) — only
+            // the AUTO-COMMIT ELIGIBILITY for ADOPT_* is relaxed here. {@code sweep}
+            // already gates the whole pass on firstAdmin mode, so this relaxation never
+            // applies in multiAdmin (where the manual approve/commit flow governs the
+            // ADOPT set). Governed mutations (CREATE_USER / GRANT_ROLES / JOIN_GROUPS /
+            // REVOKE_ROLES / …) are NOT ADOPT_* and remain off the allow-list above, so
+            // they stay PENDING regardless.
+            return true;
         }
         if ("ASSIGN_SCOPE".equals(actionType)) {
             // Only the tide-claims scope onto a built-in/stock client is baseline config; any
@@ -403,12 +428,15 @@ public final class IgaFirstAdminAutoCommit {
 
     /**
      * The injected authorize+commit engine. Implemented by the REST layer as a thin
-     * delegate to {@code IgaAdminResource.bulkAuthorize(actionTypeIn=...)} so the sweep
-     * reuses the hardened, mutex-guarded {@code processOneCr} engine verbatim (the
-     * per-realm {@code IgaBulkLock}, the per-CR PENDING re-check, the
-     * {@code stampProducerUnitColumns} producer-column signing, and the
+     * delegate to {@code IgaAdminResource.bulkAuthorizeInternal(admin, crIdIn, limit)}
+     * (run inside a dedicated {@code runJobInTransaction} for sign-at-toggle rollback
+     * scoping) so the sweep reuses the hardened, mutex-guarded {@code processOneCr}
+     * engine verbatim (the per-realm {@code IgaBulkLock}, the per-CR PENDING re-check,
+     * the {@code stampProducerUnitColumns} producer-column signing, and the
      * {@code convergeAfterCommit} full-closure backfill) without this service taking a
-     * compile dependency on the REST resource.
+     * compile dependency on the REST resource. A converge ORK-sign failure propagates out
+     * of {@code runBulk} so the REST caller's dedicated sweep tx rolls back every APPROVED
+     * flip to PENDING (Option 1) without un-enabling IGA.
      */
     @FunctionalInterface
     public interface BulkEngine {

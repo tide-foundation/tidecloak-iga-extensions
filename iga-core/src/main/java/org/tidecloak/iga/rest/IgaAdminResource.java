@@ -854,8 +854,11 @@ public class IgaAdminResource {
         // producer-driven full-closure stamp (the SAME RealmAttestationExporter.export ->
         // signEnvelopesWithFirstAdminVvk -> UnitColumnMapping.stamp the login read consumes), so
         // EVERY login-emitted unit (all 18 types) carries a real 64B sig BY CONSTRUCTION.
-        // Idempotent (only NULL/stub columns), firstAdmin+capable gated, fail-closed, admin-
-        // triggered (fires here at approval, never at toggle). No-op while ADOPT CRs pend.
+        // Idempotent (only NULL/stub columns), firstAdmin+capable gated, fail-closed. Fires
+        // whenever a commit drains the last pending ADOPT CR — at MANUAL admin approval AND,
+        // since the sign-at-toggle change (2026-06-24), at TOGGLE time via the firstAdmin
+        // sign-defaults sweep (which auto-commits the ADOPT set through the bulk core). No-op
+        // while ADOPT CRs pend.
         //
         // SKIP for DISABLE_IGA and OFFBOARD_REALM: the convergence does an ORK signing
         // ceremony (on a firstAdmin real-signing realm once no ADOPTs pend). Turning
@@ -1434,6 +1437,77 @@ public class IgaAdminResource {
                     .build();
         }
 
+        IgaBulkLock.Result<Map<String, Object>> lockResult =
+                runBulkLocked(admin, byId, crIdIn, actionTypes, olderThan, limit);
+
+        if (!lockResult.isHeld()) {
+            // Preserve the existing 429 response shape so the existing
+            // phase6e-bulk-authorize.spec.ts "concurrent bulk lock" case
+            // (regex /already running/i + realm name) still passes — the
+            // underlying lock is now cluster-safe (executeIfNotExecuted),
+            // see IgaBulkLock.
+            return Response.status(429)
+                    .entity(Map.of("error",
+                            "Another bulk-authorize is already running for this realm",
+                            "realm", realm.getName()))
+                    .build();
+        }
+
+        return Response.ok(lockResult.getValue()).build();
+    }
+
+    /**
+     * Internal, NON-HTTP bulk authorize+commit entry used by the firstAdmin
+     * sign-at-toggle sweep ({@code TideAdminCompatResource.runFirstAdminAutoCommitSweep}).
+     *
+     * <p>Differs from the public {@link #bulkAuthorize} endpoint in exactly two ways:
+     * (1) it does NOT call {@code auth.realm().requireManageRealm()} — the caller is
+     * the toggle endpoint, already manage-realm gated, running this on a child
+     * {@code KeycloakModelUtils.runJobInTransaction} session that has NO admin-auth
+     * context; (2) the {@code admin} signer is passed in explicitly (resolved by id in
+     * the job session) rather than read from {@code currentUser()}. It returns the SAME
+     * {@code {results, summary}} map shape so the sweep's per-CR outcome parsing is
+     * unchanged.</p>
+     *
+     * <p>CRUCIAL (sign-at-toggle Option 1 = rollback-to-PENDING): the per-CR commit
+     * flips ({@code processOneCr} → APPROVED) AND the final
+     * {@link org.tidecloak.iga.services.IgaToggleOnBackfill#convergeAfterCommit} ORK
+     * signing ceremony BOTH run on the {@code session}/{@code realm} this instance was
+     * constructed with. The sweep constructs this instance on a dedicated job session,
+     * so a converge throw (ORK down / threshold / pack) rolls back the whole job tx —
+     * every APPROVED flip reverts to its scan-created PENDING state — WITHOUT touching
+     * the outer toggle request tx (IGA-enable flag + the ADOPT scan stay committed). The
+     * throw propagates to the sweep caller, which catches it, records a warning, and
+     * returns HTTP 200 completed_with_warnings.</p>
+     */
+    Response bulkAuthorizeInternal(UserModel admin, List<String> crIdIn, int limit) {
+        IgaBulkLock.Result<Map<String, Object>> lockResult =
+                runBulkLocked(admin, /*byId*/ true, crIdIn, java.util.Collections.emptyList(),
+                        /*olderThan*/ null, limit);
+        if (!lockResult.isHeld()) {
+            return Response.status(429)
+                    .entity(Map.of("error",
+                            "Another bulk-authorize is already running for this realm",
+                            "realm", realm.getName()))
+                    .build();
+        }
+        return Response.ok(lockResult.getValue()).build();
+    }
+
+    /**
+     * Shared bulk authorize+commit core (the per-realm cluster mutex, the candidate
+     * load, the policy-last sort, the per-CR {@code processOneCr} loop, and the single
+     * post-batch {@link org.tidecloak.iga.services.IgaToggleOnBackfill#convergeAfterCommit}
+     * full-closure stamp). Used by both the public {@link #bulkAuthorize} endpoint and the
+     * internal {@link #bulkAuthorizeInternal} sweep entry. Does NOT enforce authz — callers
+     * gate access (the endpoint via {@code requireManageRealm}; the sweep via the toggle
+     * endpoint that spawned it). Runs everything on this instance's {@code session}/{@code
+     * realm}, so the caller controls the transaction boundary (the sweep runs it inside a
+     * dedicated job tx so a converge failure rolls back the commit flips).
+     */
+    private IgaBulkLock.Result<Map<String, Object>> runBulkLocked(
+            UserModel admin, boolean byId, List<String> crIdIn, List<String> actionTypes,
+            Long olderThan, int limit) {
         // -- Per-realm cluster-safe concurrency lock --------------------------
         // Wrap the whole bulk loop in ClusterProvider.executeIfNotExecuted via
         // IgaBulkLock. If another node (or another in-flight call on this
@@ -1448,7 +1522,7 @@ public class IgaAdminResource {
         final boolean finalById = byId;
         final UserModel finalAdmin = admin;
 
-        IgaBulkLock.Result<Map<String, Object>> lockResult = IgaBulkLock.runIfNotRunning(
+        return IgaBulkLock.runIfNotRunning(
                 session,
                 realm.getId(),
                 () -> {
@@ -1495,8 +1569,14 @@ public class IgaAdminResource {
                     // (the SAME RealmAttestationExporter.export -> signEnvelopesWithFirstAdminVvk ->
                     // UnitColumnMapping.stamp the login read consumes), so EVERY login-emitted unit
                     // (all 18 types incl composite_role + protocol_mapper) carries a real 64B sig BY
-                    // CONSTRUCTION. Idempotent, firstAdmin+capable gated, fail-closed, admin-
-                    // triggered (fires here on approval, never at toggle). No-op while ADOPT pend.
+                    // CONSTRUCTION. Idempotent, firstAdmin+capable gated, fail-closed. Fires whenever
+                    // a bulk-approve drains the last pending ADOPT CR — at MANUAL admin approval AND,
+                    // since the sign-at-toggle change (2026-06-24), at TOGGLE time once the firstAdmin
+                    // sign-defaults sweep auto-commits the whole ADOPT set (the sweep drives this same
+                    // bulk core via bulkAuthorizeInternal). FAIL-CLOSED: a converge ORK failure throws
+                    // out of here; the sweep runs this core inside a dedicated job tx, so the throw
+                    // rolls back every APPROVED flip back to PENDING (Option 1) without un-enabling
+                    // IGA. No-op while ADOPT CRs still pend.
                     org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, realm);
 
                     Map<String, Object> summary = new LinkedHashMap<>();
@@ -1514,21 +1594,6 @@ public class IgaAdminResource {
                     response.put("summary", summary);
                     return response;
                 });
-
-        if (!lockResult.isHeld()) {
-            // Preserve the existing 429 response shape so the existing
-            // phase6e-bulk-authorize.spec.ts "concurrent bulk lock" case
-            // (regex /already running/i + realm name) still passes — the
-            // underlying lock is now cluster-safe (executeIfNotExecuted),
-            // see IgaBulkLock.
-            return Response.status(429)
-                    .entity(Map.of("error",
-                            "Another bulk-authorize is already running for this realm",
-                            "realm", realm.getName()))
-                    .build();
-        }
-
-        return Response.ok(lockResult.getValue()).build();
     }
 
     /**
