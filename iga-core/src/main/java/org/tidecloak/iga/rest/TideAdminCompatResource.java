@@ -1421,10 +1421,18 @@ public class TideAdminCompatResource {
                         for (int from = 0; from < total; from += chunkSize) {
                             int to = Math.min(from + chunkSize, total);
                             List<String> chunk = new ArrayList<>(crIdIn.subList(from, to));
-                            // bulkAuthorizeInternal commits each chunk's eligible CRs + runs
-                            // convergeAfterCommit when the last ADOPT drains. A converge throw
-                            // here propagates → the whole job tx rolls back (Option 1).
-                            Response resp = sweepResource.bulkAuthorizeInternal(sweepAdmin, chunk, 1000);
+                            // bulkAuthorizeInternal commits each chunk's eligible CRs. We pass
+                            // deferConverge=true so the bulk core does NOT run convergeAfterCommit
+                            // per chunk — since the partial-closure relax (016e661) made converge
+                            // sign on EVERY call, a per-chunk converge fired ~one ORK full-closure
+                            // ceremony per chunk (~9 small round-trips for a ~200-CR closure). The
+                            // sweep instead converges EXACTLY ONCE after the chunk loop (below),
+                            // restoring the batched (2x100) sign. A commit failure in processOneCr
+                            // is captured per-CR (never throws); the only converge throw now comes
+                            // from the single trailing convergeAfterCommit, which still rolls back
+                            // the whole job tx (Option 1).
+                            Response resp = sweepResource.bulkAuthorizeInternal(sweepAdmin, chunk, 1000,
+                                    /*deferConverge*/ true);
                             Object entity = resp.getEntity();
                             if (entity instanceof Map<?, ?> respMap) {
                                 Object results = respMap.get("results");
@@ -1463,6 +1471,23 @@ public class TideAdminCompatResource {
                                 }
                             }
                         }
+
+                        // SINGLE TRAILING CONVERGE (2026-06-25): run the full-closure firstAdmin
+                        // VVK sign EXACTLY ONCE, after ALL chunks have committed, still INSIDE this
+                        // dedicated job tx. Each chunk above passed deferConverge=true so the bulk
+                        // core skipped its per-chunk converge; here we converge once over the whole
+                        // committed-this-sweep set, restoring the batched (2x100) ORK sign instead of
+                        // ~one round-trip per chunk. Fail-loud is preserved: a GENUINE ORK ceremony
+                        // failure (ORK down / threshold / pack) throws out of the lambda → the
+                        // runJobInTransaction ROLLS BACK every APPROVED flip back to PENDING (Option 1)
+                        // without un-enabling IGA; the throw propagates to the sweep caller, which
+                        // records a warning and returns 200 completed_with_warnings. Partial-closure
+                        // is intact — convergeAfterCommit signs the LIVE COMMITTED subset and leaves
+                        // any still-PENDING ADOPT entity unsigned (a later manual approve re-fires the
+                        // non-sweep per-commit converge to complete it incrementally). Run on the
+                        // sweepSession/sweepRealm so the stamps land in THIS job tx.
+                        org.tidecloak.iga.services.IgaToggleOnBackfill
+                                .convergeAfterCommit(sweepSession, sweepRealm);
                     });
 
             // The job tx COMMITTED (no converge throw). The per-CR outcomes were already

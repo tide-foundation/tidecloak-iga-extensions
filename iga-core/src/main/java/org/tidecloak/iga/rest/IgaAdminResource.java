@@ -1438,7 +1438,8 @@ public class IgaAdminResource {
         }
 
         IgaBulkLock.Result<Map<String, Object>> lockResult =
-                runBulkLocked(admin, byId, crIdIn, actionTypes, olderThan, limit);
+                runBulkLocked(admin, byId, crIdIn, actionTypes, olderThan, limit,
+                        /*deferConverge*/ false);
 
         if (!lockResult.isHeld()) {
             // Preserve the existing 429 response shape so the existing
@@ -1479,11 +1480,22 @@ public class IgaAdminResource {
      * the outer toggle request tx (IGA-enable flag + the ADOPT scan stay committed). The
      * throw propagates to the sweep caller, which catches it, records a warning, and
      * returns HTTP 200 completed_with_warnings.</p>
+     *
+     * <p>{@code deferConverge} (2026-06-25): when {@code true} the per-chunk
+     * {@code convergeAfterCommit} call inside the bulk core is SKIPPED. The sweep chunks
+     * the eligible ADOPT set and calls this once per chunk; since the partial-closure relax
+     * (016e661) made converge sign on EVERY call, a per-chunk converge fired ~one ORK
+     * full-closure ceremony per chunk. The sweep now passes {@code true} and runs
+     * {@code convergeAfterCommit} EXACTLY ONCE after all chunks drain (still inside its
+     * dedicated job tx, so the rollback-on-failure semantics are preserved, just batched).
+     * The public {@link #bulkAuthorize} endpoint and the single-CR commit path pass
+     * {@code false} and keep their existing converge behaviour.</p>
      */
-    Response bulkAuthorizeInternal(UserModel admin, List<String> crIdIn, int limit) {
+    Response bulkAuthorizeInternal(UserModel admin, List<String> crIdIn, int limit,
+            boolean deferConverge) {
         IgaBulkLock.Result<Map<String, Object>> lockResult =
                 runBulkLocked(admin, /*byId*/ true, crIdIn, java.util.Collections.emptyList(),
-                        /*olderThan*/ null, limit);
+                        /*olderThan*/ null, limit, deferConverge);
         if (!lockResult.isHeld()) {
             return Response.status(429)
                     .entity(Map.of("error",
@@ -1507,7 +1519,7 @@ public class IgaAdminResource {
      */
     private IgaBulkLock.Result<Map<String, Object>> runBulkLocked(
             UserModel admin, boolean byId, List<String> crIdIn, List<String> actionTypes,
-            Long olderThan, int limit) {
+            Long olderThan, int limit, boolean deferConverge) {
         // -- Per-realm cluster-safe concurrency lock --------------------------
         // Wrap the whole bulk loop in ClusterProvider.executeIfNotExecuted via
         // IgaBulkLock. If another node (or another in-flight call on this
@@ -1521,6 +1533,7 @@ public class IgaAdminResource {
         final List<String> finalCrIdIn = crIdIn;
         final boolean finalById = byId;
         final UserModel finalAdmin = admin;
+        final boolean finalDeferConverge = deferConverge;
 
         return IgaBulkLock.runIfNotRunning(
                 session,
@@ -1577,7 +1590,22 @@ public class IgaAdminResource {
                     // out of here; the sweep runs this core inside a dedicated job tx, so the throw
                     // rolls back every APPROVED flip back to PENDING (Option 1) without un-enabling
                     // IGA. No-op while ADOPT CRs still pend.
-                    org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, realm);
+                    //
+                    // ONCE-AT-END FOR THE SWEEP (deferConverge, 2026-06-25): the firstAdmin toggle
+                    // sweep chunks the eligible ADOPT set (chunkSize 25) and calls this bulk core
+                    // ONCE PER CHUNK. Since the partial-closure relax (016e661) made converge do real
+                    // signing work on EVERY call (no longer deferring while ADOPT_* pend), a per-chunk
+                    // converge fired the full-closure ORK ceremony ~once per chunk (~9 small round-trips
+                    // for a ~200-CR provisioning closure) instead of one batched (2x100) sign. The
+                    // sweep now passes deferConverge=true so this per-chunk call is SKIPPED, and the
+                    // sweep runs convergeAfterCommit EXACTLY ONCE after all chunks drain — still inside
+                    // its dedicated job tx, so the rollback-on-ORK-failure (fail-loud → PENDING)
+                    // semantics are preserved, just batched. The public bulkAuthorize endpoint and the
+                    // single-CR commit path keep deferConverge=false (their existing per-call converge
+                    // is unchanged).
+                    if (!finalDeferConverge) {
+                        org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, realm);
+                    }
 
                     Map<String, Object> summary = new LinkedHashMap<>();
                     summary.put("total", results.size());
