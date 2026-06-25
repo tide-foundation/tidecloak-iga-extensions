@@ -17,6 +17,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -41,6 +42,7 @@ import org.tidecloak.iga.providers.IgaLicenseHistoryService;
 import org.tidecloak.iga.providers.IgaLicensingDraftService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
+import org.tidecloak.iga.providers.IgaServerCertEnrollmentTokenService;
 import org.tidecloak.iga.replay.EntityVanishedException;
 import org.tidecloak.iga.replay.IgaMapperConflictException;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
@@ -102,6 +104,10 @@ public class IgaAdminResource {
 
     private IgaServerCertDraftService getServerCertDraftService() {
         return new IgaServerCertDraftService(getEm(), getService());
+    }
+
+    private IgaServerCertEnrollmentTokenService getEnrollmentTokenService() {
+        return new IgaServerCertEnrollmentTokenService(getEm());
     }
 
     private IgaLicensingDraftService getLicensingDraftService() {
@@ -2490,6 +2496,69 @@ public class IgaAdminResource {
         }
         service.deleteById(id);
         return Response.noContent().build();
+    }
+
+    /**
+     * Mint a ONE-TIME enrollment token for a client's server-identity flow. The plaintext is
+     * returned ONCE and never stored (only its SHA-256 hash is persisted). The workload then
+     * presents the plaintext as an {@code Authorization: Bearer} header on the public
+     * {@code /realms/{realm}/tide-server-identity/request} call.
+     *
+     * <p>Body: {@code {clientId (required), ttlSeconds (optional, default 86400, clamp 60..604800)}}.
+     * Minting also sets {@code tide.server-identity.enabled=true} on the client (idempotent) and
+     * SUPERSEDES (invalidates) any prior unconsumed token for the client.
+     */
+    @POST
+    @Path("server-certs/enrollment-token")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response mintEnrollmentToken(Map<String, Object> body) {
+        auth.realm().requireManageRealm();
+
+        String clientId = body != null ? (String) body.get("clientId") : null;
+        if (clientId == null || clientId.isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "clientId is required"))
+                    .build();
+        }
+
+        // ttlSeconds: default 86400 (24h), clamp 60..604800 (7d).
+        long ttlSeconds = 86400L;
+        if (body != null && body.get("ttlSeconds") != null) {
+            Object raw = body.get("ttlSeconds");
+            if (raw instanceof Number) {
+                ttlSeconds = ((Number) raw).longValue();
+            } else {
+                try {
+                    ttlSeconds = Long.parseLong(raw.toString().trim());
+                } catch (NumberFormatException e) {
+                    return Response.status(Response.Status.BAD_REQUEST)
+                            .entity(Map.of("error", "ttlSeconds must be an integer"))
+                            .build();
+                }
+            }
+        }
+        ttlSeconds = Math.max(60L, Math.min(604800L, ttlSeconds));
+
+        // Validate the client exists in this realm (mirror requestServerCert).
+        ClientModel client = realm.getClientByClientId(clientId);
+        if (client == null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Client '" + clientId + "' not found in realm"))
+                    .build();
+        }
+
+        // Mark the client as server-identity enabled (idempotent gate for the request endpoint).
+        client.setAttribute("tide.server-identity.enabled", "true");
+
+        IgaServerCertEnrollmentTokenService.MintResult result =
+                getEnrollmentTokenService().mint(realm.getId(), clientId, ttlSeconds, currentUserId());
+
+        LinkedHashMap<String, Object> resp = new LinkedHashMap<>();
+        resp.put("token", result.plaintext);
+        resp.put("clientId", clientId);
+        resp.put("expiresAt", result.expiresAt);
+        return Response.status(Response.Status.CREATED).entity(resp).build();
     }
 
     // -------------------------------------------------------------------------

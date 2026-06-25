@@ -15,6 +15,7 @@ import org.keycloak.services.resource.RealmResourceProvider;
 import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
+import org.tidecloak.iga.providers.IgaServerCertEnrollmentTokenService;
 
 import jakarta.persistence.EntityManager;
 import java.security.MessageDigest;
@@ -66,6 +67,30 @@ public class ServerIdentityResourceProvider implements RealmResourceProvider {
         return new IgaServerCertDraftService(getEm(), new IgaChangeRequestService(getEm(), session));
     }
 
+    private IgaServerCertEnrollmentTokenService getEnrollmentTokenService() {
+        return new IgaServerCertEnrollmentTokenService(getEm());
+    }
+
+    /**
+     * Extract the bearer token from the {@code Authorization} header, or null if absent/empty.
+     */
+    private String extractBearerToken() {
+        var headers = session.getContext().getHttpRequest().getHttpHeaders();
+        if (headers == null) {
+            return null;
+        }
+        String authz = headers.getHeaderString("Authorization");
+        if (authz == null) {
+            return null;
+        }
+        authz = authz.trim();
+        if (authz.regionMatches(true, 0, "Bearer ", 0, 7)) {
+            String token = authz.substring(7).trim();
+            return token.isEmpty() ? null : token;
+        }
+        return null;
+    }
+
     /**
      * Submit a server certificate request. No auth required.
      * Files a pending IGA change request (REQUEST_SERVER_CERT) the admins must approve.
@@ -96,6 +121,24 @@ public class ServerIdentityResourceProvider implements RealmResourceProvider {
             if (client == null) {
                 return errorResponse(Response.Status.BAD_REQUEST,
                         "Client '" + clientId + "' not found in realm");
+            }
+
+            // --- Enrollment-token authentication (clientId is now known) ---
+            // No/empty token -> 401.
+            String enrollmentToken = extractBearerToken();
+            if (enrollmentToken == null) {
+                return errorResponse(Response.Status.UNAUTHORIZED, "Enrollment token required");
+            }
+            // The bound client must be opted-in to server-identity enrollment. Opaque on failure.
+            if (!"true".equals(client.getAttribute("tide.server-identity.enabled"))) {
+                return errorResponse(Response.Status.FORBIDDEN, "Invalid or expired enrollment token");
+            }
+            // Non-consuming validity gate. The actual single-use consume happens AFTER the CR is
+            // created, so a token is not burned on a request that fails to file. Opaque on failure
+            // (no oracle distinguishing not-found / expired / consumed / clientId-mismatch).
+            IgaServerCertEnrollmentTokenService tokenService = getEnrollmentTokenService();
+            if (!tokenService.isValid(realm.getId(), clientId, enrollmentToken)) {
+                return errorResponse(Response.Status.FORBIDDEN, "Invalid or expired enrollment token");
             }
 
             // Validate lifetime
@@ -141,6 +184,13 @@ public class ServerIdentityResourceProvider implements RealmResourceProvider {
                     fingerprint,
                     requestedLifetime,
                     null);
+
+            // Atomic single-use consume AFTER the CR is filed. The conditional UPDATE is the
+            // TOCTOU guard: under a concurrent double-present exactly one caller consumes the
+            // row. If it returns false here, a racing request already consumed it -> 403 opaque.
+            if (!tokenService.consumeIfValid(realm.getId(), clientId, enrollmentToken)) {
+                return errorResponse(Response.Status.FORBIDDEN, "Invalid or expired enrollment token");
+            }
 
             String changeRequestId = created.getChangeRequest() != null
                     ? created.getChangeRequest().getId()
