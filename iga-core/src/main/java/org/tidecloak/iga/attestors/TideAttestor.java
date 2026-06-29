@@ -2003,6 +2003,33 @@ public class TideAttestor implements IgaAttestor {
      */
     public String buildMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
                                                IgaChangeRequestEntity cr) {
+        return buildMultiAdminApprovalModel(session, realm, cr, SERVER_CERT_CARRIER_LEAF);
+    }
+
+    /** Carrier selector tokens for the multi-carrier REQUEST_SERVER_CERT approval ceremony. */
+    public static final String SERVER_CERT_CARRIER_LEAF = "leaf";
+    public static final String SERVER_CERT_CARRIER_CA = "ca";
+    public static final String SERVER_CERT_CARRIER_PK = "pk";
+
+    /**
+     * Carrier-selector overload. For every action EXCEPT {@link #ACTION_REQUEST_SERVER_CERT}
+     * the {@code carrierSel} is ignored and the single per-CR carrier on
+     * {@code cr.getRequestModel()} is built/returned (back-compat: the 3-arg overload passes
+     * {@link #SERVER_CERT_CARRIER_LEAF}). REQUEST_SERVER_CERT is the ONE multi-carrier action:
+     * it has THREE independent {@code ServerCert:1} carriers (leaf / CA / PK), each enclave-dokened
+     * separately and stored in its own column (leaf -> {@code cr.requestModel}, CA ->
+     * {@code draft.caRequestModel}, PK -> {@code draft.pkRequestModel}). The admin-UI drives the
+     * enclave once PER carrier (3 GET + 3 POST round-trips), mirroring the source branch's
+     * {@code <csId>} / {@code <csId>-ca} / {@code <csId>-pk} sibling-item protocol.
+     */
+    public String buildMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
+                                               IgaChangeRequestEntity cr, String carrierSel) {
+        // ---------------------------------------------------------------------
+        // REQUEST_SERVER_CERT — MULTI-CARRIER (leaf / CA / PK), each dokened separately.
+        // ---------------------------------------------------------------------
+        if (ACTION_REQUEST_SERVER_CERT.equals(cr.getActionType())) {
+            return buildServerCertApprovalCarrier(session, realm, cr, carrierSel);
+        }
         // ACCUMULATION SHORT-CIRCUIT (covers BOTH the producer-unit and REGEN_ADMIN_POLICY
         // paths — this is the ONE place both flow through). The build is invoked once
         // per admin who opens the approval popup. The enclave APPENDS its doken onto whatever
@@ -2115,33 +2142,9 @@ public class TideAttestor implements IgaAttestor {
             return buildPolicyResignApprovalModel(session, realm, cr);
         }
 
-        // REQUEST_SERVER_CERT is NOT a producer-unit CR — it signs three OPAQUE blobs (leaf
-        // X.509 TBS, self-signed VVK-CA TBS, raw workload public key) that have no
-        // re-derivable AttestationUnit envelope. So, like OFFBOARD_REALM above, it gets its own
-        // carrier-build seam: three separate ServerCert:1 ModelRequests (source-branch shape).
-        // The leaf rides this CR's REQUEST_MODEL (where the enclave appends dokens); the CA + PK
-        // models are persisted on the IGA_SERVER_CERT_DRAFT sidecar. Signing + assembly run at
-        // commit in IgaReplayDispatcher.replayRequestServerCert.
-        if (ACTION_REQUEST_SERVER_CERT.equals(cr.getActionType())) {
-            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-            List<IgaServerCertDraftEntity> drafts = em.createNamedQuery(
-                            "IgaServerCertDraft.findByChangeRequestId", IgaServerCertDraftEntity.class)
-                    .setParameter("crId", cr.getId())
-                    .getResultList();
-            if (drafts.isEmpty()) {
-                throw new RuntimeException("IGA server-cert approval: CR " + cr.getId()
-                        + " has no IGA_SERVER_CERT_DRAFT sidecar — cannot build the ServerCert:1 models");
-            }
-            IgaServerCertDraftEntity draft = drafts.get(0);
-            byte[] adminPolicy = readM0AdminPolicyBytes(session, realm);
-            String leafCarrier = org.tidecloak.iga.crypto.ServerCertSigner.buildApprovalModels(
-                    realm, draft, adminPolicy);
-            cr.setRequestModel(leafCarrier);
-            em.flush();
-            log.infof("IGA server-cert approval (phase 1): built ServerCert:1 leaf/CA/PK models for "
-                    + "CR %s (instance %s, realm %s).", cr.getId(), draft.getInstanceId(), realm.getName());
-            return leafCarrier;
-        }
+        // REQUEST_SERVER_CERT is multi-carrier and is handled up-front by
+        // buildServerCertApprovalCarrier (routed at the top of this method via the
+        // carrier-selector overload) — it never reaches this single-carrier body.
 
         // The M0 admin Policy bytes to embed — the genuine VVK-signed threshold Policy.
         byte[] adminPolicyBytes = readM0AdminPolicyBytes(session, realm);
@@ -2436,6 +2439,25 @@ public class TideAttestor implements IgaAttestor {
     public boolean acceptMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
                                                  IgaChangeRequestEntity cr,
                                                  String dokenEmbeddedModelB64, UserModel admin) {
+        return acceptMultiAdminApprovalModel(session, realm, cr, dokenEmbeddedModelB64, admin,
+                SERVER_CERT_CARRIER_LEAF);
+    }
+
+    /**
+     * Carrier-selector overload. For every action EXCEPT {@link #ACTION_REQUEST_SERVER_CERT} the
+     * {@code carrierSel} is ignored and the dokened carrier is persisted on {@code cr.requestModel}
+     * (back-compat). For REQUEST_SERVER_CERT the dokened carrier is persisted on the column the
+     * selector names: {@code leaf} -> {@code cr.requestModel}, {@code ca} ->
+     * {@code draft.caRequestModel}, {@code pk} -> {@code draft.pkRequestModel}. The per-admin
+     * approval is recorded toward threshold ONCE per admin across all three carriers (the
+     * once-per-admin dedup below: the first of the admin's three POSTs records the approval; the
+     * other two persist their carrier without double-counting), so a single admin approving all
+     * three ServerCert items still counts as one approval.
+     */
+    public boolean acceptMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
+                                                 IgaChangeRequestEntity cr,
+                                                 String dokenEmbeddedModelB64, UserModel admin,
+                                                 String carrierSel) {
         if (dokenEmbeddedModelB64 == null || dokenEmbeddedModelB64.isBlank()) {
             throw new RuntimeException("IGA multiAdmin approval (phase 2): empty doken-embedded model "
                     + "for CR " + cr.getId());
@@ -2455,9 +2477,13 @@ public class TideAttestor implements IgaAttestor {
                     + cr.getId() + " is not a valid ModelRequest: " + e.getMessage(), e);
         }
 
-        // (2) Persist the doken-embedded model back on the carrier. NO re-SetPolicy —
+        // (2) Persist the doken-embedded model back on the SELECTED carrier. NO re-SetPolicy —
         // that would invalidate the embedded doken (gold reference MultiAdmin.commit).
-        cr.setRequestModel(dokenEmbeddedModelB64);
+        if (ACTION_REQUEST_SERVER_CERT.equals(cr.getActionType())) {
+            persistServerCertDokenedCarrier(session, cr, carrierSel, dokenEmbeddedModelB64);
+        } else {
+            cr.setRequestModel(dokenEmbeddedModelB64);
+        }
 
         // (3) Once-per-admin dedup, then record toward threshold.
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
@@ -2480,6 +2506,102 @@ public class TideAttestor implements IgaAttestor {
         log.infof("IGA multiAdmin approval (phase 2): recorded approval by %s for CR %s "
                 + "(doken-embedded model persisted).", admin.getUsername(), cr.getId());
         return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // REQUEST_SERVER_CERT multi-carrier (leaf / CA / PK) doken collection
+    // -------------------------------------------------------------------------
+
+    /** Load the single IGA_SERVER_CERT_DRAFT sidecar for a REQUEST_SERVER_CERT CR (throws if absent). */
+    private static IgaServerCertDraftEntity loadServerCertDraft(KeycloakSession session,
+                                                                IgaChangeRequestEntity cr) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<IgaServerCertDraftEntity> drafts = em.createNamedQuery(
+                        "IgaServerCertDraft.findByChangeRequestId", IgaServerCertDraftEntity.class)
+                .setParameter("crId", cr.getId())
+                .getResultList();
+        if (drafts.isEmpty()) {
+            throw new RuntimeException("IGA server-cert approval: CR " + cr.getId()
+                    + " has no IGA_SERVER_CERT_DRAFT sidecar — cannot build/persist the ServerCert:1 models");
+        }
+        return drafts.get(0);
+    }
+
+    /** Read the currently-stored carrier for a given ServerCert selector. */
+    private static String readServerCertCarrier(IgaChangeRequestEntity cr,
+                                                IgaServerCertDraftEntity draft, String carrierSel) {
+        if (SERVER_CERT_CARRIER_CA.equals(carrierSel)) return draft.getCaRequestModel();
+        if (SERVER_CERT_CARRIER_PK.equals(carrierSel)) return draft.getPkRequestModel();
+        return cr.getRequestModel(); // leaf (default)
+    }
+
+    /**
+     * <b>Phase 1</b> for a REQUEST_SERVER_CERT carrier. On the FIRST open of ANY of the three
+     * selectors (0 recorded approvals) build ALL THREE {@code ServerCert:1} carriers in one shot
+     * ({@link org.tidecloak.iga.crypto.ServerCertSigner#buildApprovalModels}, which persists leaf
+     * on {@code cr.requestModel}, CA on {@code draft.caRequestModel}, PK on
+     * {@code draft.pkRequestModel}), then return the one the selector names. On a 2nd..Nth open
+     * (>=1 recorded approval) return the ALREADY-ACCUMULATED carrier for that selector verbatim so
+     * the enclave appends the next doken onto the prior ones (NOT a fresh 0-doken rebuild — that
+     * is the same accumulation invariant the single-carrier path enforces). Mirrors the source
+     * branch's per-item {@code <csId>} / {@code <csId>-ca} / {@code <csId>-pk} enclave protocol.
+     */
+    private String buildServerCertApprovalCarrier(KeycloakSession session, RealmModel realm,
+                                                  IgaChangeRequestEntity cr, String carrierSel) {
+        String sel = (carrierSel == null || carrierSel.isBlank()) ? SERVER_CERT_CARRIER_LEAF : carrierSel;
+        if (!SERVER_CERT_CARRIER_LEAF.equals(sel) && !SERVER_CERT_CARRIER_CA.equals(sel)
+                && !SERVER_CERT_CARRIER_PK.equals(sel)) {
+            throw new RuntimeException("IGA server-cert approval: unknown carrier selector '" + sel
+                    + "' for CR " + cr.getId() + " (expected leaf|ca|pk)");
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaServerCertDraftEntity draft = loadServerCertDraft(session, cr);
+
+        // ACCUMULATION SHORT-CIRCUIT (per selector): once >=1 admin has approved, return the
+        // already-accumulated carrier for THIS selector verbatim so the enclave stacks dokens.
+        String existing = readServerCertCarrier(cr, draft, sel);
+        if (existing != null && !existing.isBlank() && countRecordedApprovals(session, cr) >= 1) {
+            log.infof("IGA server-cert approval (phase 1): CR %s carrier=%s already has %d recorded "
+                            + "approval(s) — returning the ACCUMULATED carrier verbatim (enclave appends "
+                            + "the next doken).", cr.getId(), sel, countRecordedApprovals(session, cr));
+            return existing;
+        }
+
+        // FIRST open: build all three fresh (vendor-initialized, 0 dokens) and persist each to its
+        // store, then return the requested one. Building all three on the first selector keeps the
+        // three carriers' creation-auth + draft timestamps consistent (they are signed/assembled as
+        // a set at commit) and is idempotent across re-opens before any approval is recorded.
+        byte[] adminPolicy = readM0AdminPolicyBytes(session, realm);
+        String leafCarrier = org.tidecloak.iga.crypto.ServerCertSigner.buildApprovalModels(
+                realm, draft, adminPolicy); // persists CA + PK onto the draft, returns the leaf
+        cr.setRequestModel(leafCarrier);
+        em.merge(draft);
+        em.flush();
+        log.infof("IGA server-cert approval (phase 1): built ServerCert:1 leaf/CA/PK models for CR %s "
+                + "(instance %s, realm %s); returning carrier=%s.",
+                cr.getId(), draft.getInstanceId(), realm.getName(), sel);
+        return readServerCertCarrier(cr, draft, sel);
+    }
+
+    /** <b>Phase 2</b> persistence: store the dokened carrier on the column the selector names. */
+    private void persistServerCertDokenedCarrier(KeycloakSession session, IgaChangeRequestEntity cr,
+                                                 String carrierSel, String dokenEmbeddedModelB64) {
+        String sel = (carrierSel == null || carrierSel.isBlank()) ? SERVER_CERT_CARRIER_LEAF : carrierSel;
+        if (SERVER_CERT_CARRIER_LEAF.equals(sel)) {
+            cr.setRequestModel(dokenEmbeddedModelB64);
+            return;
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaServerCertDraftEntity draft = loadServerCertDraft(session, cr);
+        if (SERVER_CERT_CARRIER_CA.equals(sel)) {
+            draft.setCaRequestModel(dokenEmbeddedModelB64);
+        } else if (SERVER_CERT_CARRIER_PK.equals(sel)) {
+            draft.setPkRequestModel(dokenEmbeddedModelB64);
+        } else {
+            throw new RuntimeException("IGA server-cert approval (phase 2): unknown carrier selector '"
+                    + sel + "' for CR " + cr.getId() + " (expected leaf|ca|pk)");
+        }
+        em.merge(draft);
     }
 
     /**
