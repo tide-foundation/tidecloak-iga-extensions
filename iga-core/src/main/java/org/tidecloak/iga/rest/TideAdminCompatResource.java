@@ -38,7 +38,9 @@ import org.keycloak.storage.UserStorageUtil;
 import org.tidecloak.iga.crypto.SecretKeys;
 import org.tidecloak.iga.replay.SidecarCapExceededException;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
+import org.tidecloak.iga.providers.IgaServerCertDraftService;
 import org.tidecloak.iga.services.IgaAdoptCancel;
 import org.tidecloak.iga.services.IgaAdoptScan;
 import org.tidecloak.iga.services.IgaApproverRoleRepointer;
@@ -788,6 +790,92 @@ public class TideAdminCompatResource {
                     .build();
         }
         return Response.ok(status).build();
+    }
+
+    // -------------------------------------------------------------------------
+    // Server-identity (SPIFFE server-cert) list + revoke compat routes.
+    //
+    // The admin SPA's Server Identity tab / page call GET .../tide-admin/server-cert/requests
+    // and POST .../tide-admin/server-cert/revoke (api-client tide-admin/index.ts). The
+    // authoritative data lives under iga/server-certs* (IgaAdminResource), but the SPA was
+    // never repointed, so without these compat routes the GET 404s and the SPA shows
+    // "0 pending / 0 active / 0 denied". These bridge the SPA wire shape to the iga-core
+    // server-cert drafts, including the computed {@code status} the SPA's Zod schema requires
+    // (the IgaServerCertDraftRepresentation never carried a status; an issued, non-revoked
+    // cert is ACTIVE). clientId is the HUMAN clientId (the drafts store it that way), matching
+    // the SPA's per-app filter (row.clientId === app.clientId).
+    // -------------------------------------------------------------------------
+
+    private IgaServerCertDraftService serverCertDraftService() {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        return new IgaServerCertDraftService(em, new IgaChangeRequestService(em, session));
+    }
+
+    /**
+     * Derive the SPA status enum (PENDING | ACTIVE | DENIED) for a draft.
+     * ACTIVE = certificate issued and not revoked. DENIED = revoked, or the parent CR was
+     * DENIED/REJECTED/CANCELLED. PENDING = otherwise (CR still awaiting approval, no cert yet).
+     */
+    private static String serverCertStatus(IgaServerCertDraftEntity d) {
+        if (d.getCertificate() != null && !d.getCertificate().isBlank() && !d.isRevoked()) {
+            return "ACTIVE";
+        }
+        if (d.isRevoked()) {
+            return "DENIED";
+        }
+        String crStatus = d.getChangeRequest() != null ? d.getChangeRequest().getStatus() : null;
+        if (crStatus != null) {
+            String s = crStatus.toUpperCase();
+            if (s.equals("DENIED") || s.equals("REJECTED") || s.equals("CANCELLED")) {
+                return "DENIED";
+            }
+        }
+        return "PENDING";
+    }
+
+    private static Map<String, Object> serverCertRow(IgaServerCertDraftEntity d) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("id", d.getId());
+        row.put("instanceId", d.getInstanceId());
+        row.put("clientId", d.getClientId());
+        row.put("spiffeId", d.getSpiffeId());
+        row.put("status", serverCertStatus(d));
+        row.put("certificate", d.getCertificate());
+        row.put("trustBundle", d.getTrustBundle());
+        row.put("requestedAt", d.getCreatedAt());
+        row.put("issuedAt", d.getUpdatedAt());
+        row.put("revokedAt", d.getRevokedAt());
+        row.put("changeRequestId",
+                d.getChangeRequest() != null ? d.getChangeRequest().getId() : null);
+        return row;
+    }
+
+    @GET
+    @Path("server-cert/requests")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response serverCertRequests() {
+        auth.realm().requireManageRealm();
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (IgaServerCertDraftEntity d : serverCertDraftService().listByRealm(realm.getId())) {
+            out.add(serverCertRow(d));
+        }
+        return Response.ok(out).build();
+    }
+
+    @POST
+    @Path("server-cert/revoke")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response serverCertRevoke(Map<String, Object> body) {
+        auth.realm().requireManageRealm();
+        String instanceId = body != null && body.get("instanceId") instanceof String s ? s : null;
+        if (instanceId == null || instanceId.isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "instanceId is required"))
+                    .build();
+        }
+        int revoked = serverCertDraftService().revokeByInstance(realm.getId(), instanceId);
+        return Response.ok(Map.of("revoked", revoked, "instanceId", instanceId)).build();
     }
 
     /**
