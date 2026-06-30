@@ -638,6 +638,16 @@ public class TideAdminCompatResource {
         return "PENDING";
     }
 
+    /**
+     * The draft timestamps are stored in epoch MILLISECONDS, but the SPA expects epoch SECONDS
+     * for requestedAt/issuedAt/revokedAt: both the per-app tab and the realm page render
+     * {@code <RelativeTime value={r.requestedAt * 1000} />} (multiplying back to ms). Emitting raw
+     * ms would render ~58,470 AD ("in 56,475 years"). Convert ms -> seconds; null stays null.
+     */
+    private static Long epochMsToSeconds(Long epochMs) {
+        return epochMs == null ? null : epochMs / 1000L;
+    }
+
     private static Map<String, Object> serverCertRow(IgaServerCertDraftEntity d) {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("id", d.getId());
@@ -647,9 +657,10 @@ public class TideAdminCompatResource {
         row.put("status", serverCertStatus(d));
         row.put("certificate", d.getCertificate());
         row.put("trustBundle", d.getTrustBundle());
-        row.put("requestedAt", d.getCreatedAt());
-        row.put("issuedAt", d.getUpdatedAt());
-        row.put("revokedAt", d.getRevokedAt());
+        // ms -> Unix SECONDS (the SPA multiplies these back by 1000 for RelativeTime).
+        row.put("requestedAt", epochMsToSeconds(d.getCreatedAt()));
+        row.put("issuedAt", epochMsToSeconds(d.getUpdatedAt()));
+        row.put("revokedAt", epochMsToSeconds(d.getRevokedAt()));
         row.put("changeRequestId",
                 d.getChangeRequest() != null ? d.getChangeRequest().getId() : null);
         return row;
