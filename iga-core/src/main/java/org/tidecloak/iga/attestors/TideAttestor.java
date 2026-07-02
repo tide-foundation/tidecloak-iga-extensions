@@ -4103,22 +4103,38 @@ public class TideAttestor implements IgaAttestor {
                  "UPDATE_CLIENT_REDIRECT_URIS", "UPDATE_CLIENT_PROPERTY" -> {
                 ClientModel c = resolveClientForStamp(realm, cr);
                 if (c != null) {
-                    units.add(RealmAttestationExporter.clientConfig(session, c, realmId));
-                    // CREATE_CLIENT: also frame the new client's client_scope_assignment_set
-                    // (unit 11). A freshly-created client folds in its default + optional
-                    // client-scope assignments at create time (captured in the CR's REP_JSON
-                    // defaultClientScopes/optionalClientScopes and re-applied on replay by
-                    // RepresentationToModel.updateClientScopes), so unit 11 is meaningful and
-                    // MUST be framed+signed here — the post-flip multiAdmin carrier is the ONLY
-                    // signer of it, so omitting it leaves ClientEntity.clientScopeAssignmentAttestation
-                    // NULL and fail-closes the client's login (mirrors the firstAdmin delta
-                    // stamper). The phase-1 scratch replay runs the SAME RepresentationToModel
-                    // .createClient, so the framed scope-set bytes equal the live post-commit
-                    // bytes the login reads and the distribution stamps (byte-identity by
-                    // construction). SET_/UPDATE_ client CRs do NOT touch scope assignments, so
-                    // they keep re-signing only the node (unit 11 is already real by then).
                     if ("CREATE_CLIENT".equals(action)) {
-                        units.add(RealmAttestationExporter.clientScopeAssignmentSet(c, realmId));
+                        // Frame the FULL client-owned derived closure a newly-created client
+                        // folds in — client_config (1), client_mapper_set (12),
+                        // client_scope_assignment_set (11), scope_role_allowlist_set (14) and a
+                        // protocol_mapper (3) per client-owned mapper — the SAME per-client set
+                        // RealmAttestationExporter.exportRealmMetadata and the login read emit
+                        // (clientOwnedUnits). Post-flip the multiAdmin carrier is the ONLY signer
+                        // of these (convergeAfterCommit is a firstAdmin-only backstop, a no-op
+                        // here since the firstAdmin pack is burned), so EVERY client-owned unit
+                        // the login reads MUST be framed here or its column stays NULL and
+                        // fail-closes the login (unit 11 was framed before; scope_role_allowlist_set
+                        // / client_mapper_set / client protocol_mappers were not). A freshly-created
+                        // client materializes all of these at create time via RepresentationToModel
+                        // .createClient (config, default+optional scopes, protocol mappers, full-scope
+                        // / scope-mappings), which the phase-1 scratch replay runs identically, so the
+                        // framed bytes equal the live post-commit bytes the login reads and the
+                        // distribution stamps (byte-identity by construction, same invariant as unit 11).
+                        // Sorted by (unit-type wire value, target id) for a DETERMINISTIC carrier
+                        // order so phase-1 framing and phase-2 distribution enumerate the same units
+                        // in the same order (index alignment); client_config has the lowest wire value
+                        // so it stays at index 0. The login read + the firstAdmin stamper key by
+                        // column, so the sort is login-neutral.
+                        List<AttestationUnit> owned =
+                                new RealmAttestationExporter().clientOwnedUnits(session, c, realmId);
+                        owned.sort(java.util.Comparator
+                                .comparingInt((AttestationUnit u) -> u.type().wireValue())
+                                .thenComparing(AttestationUnit::targetId));
+                        units.addAll(owned);
+                    } else {
+                        // SET_/UPDATE_ client CRs do NOT touch the derived sets — frame only the
+                        // client_config node (the derived units are already real by then).
+                        units.add(RealmAttestationExporter.clientConfig(session, c, realmId));
                     }
                     // Part C: post-flip the multiAdmin carrier is the ONLY signer of the SA user's
                     // user_identity, so frame its per-user units alongside the clientConfig node.
@@ -4541,18 +4557,32 @@ public class TideAttestor implements IgaAttestor {
             switch (action) {
                 // ---- NODE units: re-stamp the owner's node column with the real envelope ----
                 case "CREATE_CLIENT" -> {
-                        stampClientConfig(session, realm, mode, em, cr);
-                        // A newly-created client folds in its default client-scope assignments
-                        // at create time, so its client_scope_assignment_set (unit 11) is
-                        // meaningful and MUST be signed at CREATE_CLIENT commit. Pre-toggle
-                        // clients get unit 11 via ADOPT_CLIENT (stampAdoptClient); later scope
-                        // changes re-stamp it via ASSIGN_SCOPE/REMOVE_SCOPE. Without this, a
-                        // client created while IGA is ON had a NULL unit-11 column and the
-                        // fail-closed login TVE producer 500'd the token mint. CREATE_CLIENT
-                        // carries the owner under ID (not CLIENT_UUID), so resolve it the same
-                        // way stampClientConfig does.
-                        stampClientScopeAssignmentSetForClient(session, realm, mode, em,
-                                resolveClientForStamp(realm, cr));
+                        // Stamp the FULL client-owned derived closure a newly-created client
+                        // folds in at create time — client_config (1), client_mapper_set (12),
+                        // client_scope_assignment_set (11), scope_role_allowlist_set (14) and a
+                        // protocol_mapper (3) per client-owned mapper — the EXACT set the login
+                        // reads (RealmAttestationExporter.clientOwnedUnits, the shared per-client
+                        // emission of exportRealmMetadata). Before this, only client_config (+
+                        // unit 11) were stamped, so scope_role_allowlist_set / client_mapper_set /
+                        // client protocol_mappers stayed NULL and the fail-closed login TVE
+                        // producer 500'd the mint on whichever was read first. Reuse the
+                        // producer's own enumeration so we never drift from what login emits.
+                        // Signed per-unit via signProducerEnvelope (real firstAdmin VVK when
+                        // capable, else stub) + stamped by column key (order-independent), the
+                        // SAME path the dedicated node/derived stampers use. Pre-toggle clients
+                        // get this set via ADOPT_CLIENT (stampAdoptClient); later scope/mapper
+                        // changes re-stamp the affected unit via ASSIGN_SCOPE / SCOPE_MAPPING_* /
+                        // ADD_PROTOCOL_MAPPER.
+                        ClientModel newClient = resolveClientForStamp(realm, cr);
+                        if (newClient != null) {
+                            try {
+                                for (AttestationUnit u : new RealmAttestationExporter()
+                                        .clientOwnedUnits(session, newClient, realm.getId())) {
+                                    UnitColumnMapping.stamp(em, u,
+                                            signProducerEnvelope(session, realm, mode, u.serialize()));
+                                }
+                            } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+                        }
                         // Part B3: also stamp the SA user's user_identity when the client has
                         // serviceAccountsEnabled. Self-gates (no-op for non-SA clients / SA-less
                         // UPDATE rows), so safe to call unconditionally for every client CR.

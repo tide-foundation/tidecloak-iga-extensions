@@ -579,15 +579,8 @@ public final class RealmAttestationExporter {
         // 4) All clients — config + mapper-set + scope-assignment-set + scope→role allowlist
         //    + a protocol_mapper per JWT-relevant mapper the client owns + the client's own
         //    roles (client roles are owned by the client, not surfaced by getRealmRolesStream).
-        realm.getClientsStream().forEach(client -> {
-            out.add(clientConfig(session, client, realmId));
-            out.add(clientMapperSet(client, realmId));
-            out.add(clientScopeAssignmentSet(client, realmId));
-            out.add(scopeRoleAllowlistSet(ParentType.client, client.getId(), client, realmId));
-            emitContainerProtocolMappers(client.getProtocolMappersStream(),
-                    ParentType.client, client.getId(), realmId, out);
-            client.getRolesStream().forEach(role -> emitRoleMetadata(role, realmId, out));
-        });
+        realm.getClientsStream().forEach(client ->
+                out.addAll(clientOwnedUnits(session, client, realmId)));
 
         // 5) All groups (flat stream, incl. sub-groups) — definition + role-mapping set.
         realm.getGroupsStream().forEach(group -> {
@@ -602,6 +595,42 @@ public final class RealmAttestationExporter {
         log.infof("producer: realm-METADATA export realm=%s -> %d unit(s) (membership-independent; "
                 + "all roles incl tide-realm-admin/realm-management, all scopes, all clients, "
                 + "all groups, all orgs)", realm.getName(), out.size());
+        return out;
+    }
+
+    /**
+     * Every producer attestation unit a CLIENT OWNS for its login closure — the exact
+     * per-client emission of {@link #exportRealmMetadata}: {@code client_config} (1),
+     * {@code client_mapper_set} (12), {@code client_scope_assignment_set} (11),
+     * {@code scope_role_allowlist_set} (14, parent=client), a {@code protocol_mapper} (3)
+     * per JWT-relevant client-owned mapper, and — for a client that owns roles —
+     * {@code role_definition} (4) + {@code role_composite_children_set} (10) per client role.
+     *
+     * <p>Extracted so the CREATE_CLIENT commit stampers (the firstAdmin
+     * {@code TideAttestor#stampProducerUnitColumns} and the multiAdmin
+     * {@code TideAttestor#enumerateLiveCrUnits} carrier framing) stamp/frame EXACTLY the
+     * client-owned set the login reads — never a hand-listed subset that silently misses a
+     * unit and fail-closes the login. A freshly-created client materializes ALL of these at
+     * create time via {@code RepresentationToModel.createClient} (config, default+optional
+     * scopes, protocol mappers, full-scope / scope-mappings), which the multiAdmin phase-1
+     * scratch replay runs identically — so the framed bytes equal the live post-commit bytes
+     * the login reads (byte-identity by construction, the same invariant as unit 11).
+     *
+     * <p>NOTE the returned order matches {@code exportRealmMetadata}'s (definition order); the
+     * multiAdmin carrier framing SORTS this list deterministically before framing so phase-1
+     * framing and phase-2 distribution stay index-aligned. The login read and the firstAdmin
+     * stamper both key by column, so order is irrelevant for them.
+     */
+    public List<AttestationUnit> clientOwnedUnits(KeycloakSession session, ClientModel client,
+                                                  String realmId) {
+        List<AttestationUnit> out = new ArrayList<>();
+        out.add(clientConfig(session, client, realmId));
+        out.add(clientMapperSet(client, realmId));
+        out.add(clientScopeAssignmentSet(client, realmId));
+        out.add(scopeRoleAllowlistSet(ParentType.client, client.getId(), client, realmId));
+        emitContainerProtocolMappers(client.getProtocolMappersStream(),
+                ParentType.client, client.getId(), realmId, out);
+        client.getRolesStream().forEach(role -> emitRoleMetadata(role, realmId, out));
         return out;
     }
 
