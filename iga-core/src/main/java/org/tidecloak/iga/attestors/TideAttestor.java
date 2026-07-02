@@ -4104,6 +4104,22 @@ public class TideAttestor implements IgaAttestor {
                 ClientModel c = resolveClientForStamp(realm, cr);
                 if (c != null) {
                     units.add(RealmAttestationExporter.clientConfig(session, c, realmId));
+                    // CREATE_CLIENT: also frame the new client's client_scope_assignment_set
+                    // (unit 11). A freshly-created client folds in its default + optional
+                    // client-scope assignments at create time (captured in the CR's REP_JSON
+                    // defaultClientScopes/optionalClientScopes and re-applied on replay by
+                    // RepresentationToModel.updateClientScopes), so unit 11 is meaningful and
+                    // MUST be framed+signed here — the post-flip multiAdmin carrier is the ONLY
+                    // signer of it, so omitting it leaves ClientEntity.clientScopeAssignmentAttestation
+                    // NULL and fail-closes the client's login (mirrors the firstAdmin delta
+                    // stamper). The phase-1 scratch replay runs the SAME RepresentationToModel
+                    // .createClient, so the framed scope-set bytes equal the live post-commit
+                    // bytes the login reads and the distribution stamps (byte-identity by
+                    // construction). SET_/UPDATE_ client CRs do NOT touch scope assignments, so
+                    // they keep re-signing only the node (unit 11 is already real by then).
+                    if ("CREATE_CLIENT".equals(action)) {
+                        units.add(RealmAttestationExporter.clientScopeAssignmentSet(c, realmId));
+                    }
                     // Part C: post-flip the multiAdmin carrier is the ONLY signer of the SA user's
                     // user_identity, so frame its per-user units alongside the clientConfig node.
                     // Mirrors the CREATE_ORGANIZATION backing-group precedent below. perUserUnits
