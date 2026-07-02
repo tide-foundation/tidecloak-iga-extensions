@@ -4530,6 +4530,32 @@ public class TideAttestor implements IgaAttestor {
             return;
         }
 
+        // CREATE_CLIENT mapper-visibility realignment. RepresentationToModel.createClient
+        // (run by the replay above, in THIS commit tx) reads the client's protocol-mapper
+        // stream to strip the built-in defaults BEFORE adding the CR's own mappers, so a
+        // cached ClientAdapter in this session can still report ZERO protocol mappers. That
+        // makes BOTH the multiAdmin phase-2 distribution (buildAllCrUnits over the live model)
+        // and the firstAdmin clientOwnedUnits stamp below enumerate the client WITHOUT its
+        // protocol_mapper units — diverging from the phase-1 SCRATCH carrier (a fresh nested
+        // session that DID see the mappers and framed them). The fallout: the protocol_mapper
+        // columns keep the DUMMY the replay's signNestedChildSet wrote, and (multiAdmin) the
+        // shorter live list index-misaligns against the longer carrier. Invalidate the client
+        // so every live read in this commit session (this method's stampers AND the trailing
+        // convergeAfterCommit) re-reads its protocol mappers from the DB, where the replay
+        // persisted them — realigning phase-2 with the phase-1 carrier. No-op on a non-cached
+        // realm (the JPA model is already fresh).
+        if ("CREATE_CLIENT".equals(action)) {
+            org.keycloak.models.cache.CacheRealmProvider clientCache =
+                    session.getProvider(org.keycloak.models.cache.CacheRealmProvider.class);
+            if (clientCache != null) {
+                ClientModel created = resolveClientForStamp(realm, cr);
+                if (created != null) {
+                    clientCache.registerClientInvalidation(
+                            created.getId(), created.getClientId(), realm.getId());
+                }
+            }
+        }
+
         // multiAdmin distribution. Post-flip the firstAdmin pack is burned, so the
         // node/derived/realm/org stampers below would only stub (signProducerEnvelope's
         // multiAdmin branch → DUMMY_SIG_PREFIX). Instead, on a real-signing-capable
@@ -4709,10 +4735,20 @@ public class TideAttestor implements IgaAttestor {
             return;
         }
         List<String> sigs = signMultiAdminUnitsViaPolicy(session, realm, cr);
-        if (sigs.size() < units.size()) {
+        // Fail-closed on ANY count mismatch, not just sigs < units. The carrier framed at
+        // approval (phase-1 scratch) and the live commit enumeration (phase-2) MUST produce
+        // the identical unit set/order (the "cannot drift by construction" contract). If the
+        // carrier has MORE sigs than the live model enumerates — e.g. a CREATE_CLIENT whose
+        // freshly-created protocol mappers the phase-1 fresh session saw but a stale cached
+        // client at commit does not (now realigned by the invalidation above) — stamping the
+        // shorter live prefix index-MISALIGNS sigs onto the wrong columns AND drops the
+        // trailing units' columns on their replay stub. A sigs>units drift is therefore just
+        // as corrupting as sigs<units and must fail loud, not silently mis-stamp.
+        if (sigs.size() != units.size()) {
             throw new RuntimeException("IGA multiAdmin distribute: Policy:1 ceremony returned "
-                    + sigs.size() + " sig(s) for CR " + cr.getId() + " but the carrier framed "
-                    + units.size() + " unit(s) — cannot stamp all per-unit columns (fail-closed)");
+                    + sigs.size() + " sig(s) for CR " + cr.getId() + " but the live commit enumerated "
+                    + units.size() + " unit(s) — phase-1/phase-2 framing drift, cannot align per-unit "
+                    + "columns (fail-closed)");
         }
         for (int i = 0; i < units.size(); i++) {
             int rows = UnitColumnMapping.stamp(em, units.get(i), sigs.get(i));
