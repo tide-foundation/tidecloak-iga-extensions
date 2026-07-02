@@ -634,6 +634,36 @@ public final class RealmAttestationExporter {
         return out;
     }
 
+    /**
+     * A CLIENT's protocol-mapper closure — {@code client_mapper_set} (unit 12) + a
+     * {@code protocol_mapper} (unit 3) per JWT-relevant owned mapper. Framed/stamped on every
+     * ADD/UPDATE_PROTOCOL_MAPPER commit so NO owned mapper's individual
+     * {@code ProtocolMapperEntity.attestation} survives on the replay's SET fan-out stub: an
+     * ADD fans the (multiAdmin) DUMMY set-sig across EVERY sibling mapper's individual column
+     * ({@code stampOwnerSetFanOut}), and login reads each mapper's INDIVIDUAL unit-3 column, so
+     * the whole owner mapper set must be re-signed, not just the changed mapper. The individual
+     * unit bytes are final at commit (the mapper config is applied by the replay), so this
+     * byte-matches the login read.
+     */
+    public List<AttestationUnit> clientMapperUnits(ClientModel client, String realmId) {
+        List<AttestationUnit> out = new ArrayList<>();
+        out.add(clientMapperSet(client, realmId));
+        emitContainerProtocolMappers(client.getProtocolMappersStream(),
+                ParentType.client, client.getId(), realmId, out);
+        return out;
+    }
+
+    /** Symmetric counterpart to {@link #clientMapperUnits} for a client-SCOPE-owned mapper set:
+     *  {@code client_scope_mapper_set} (unit 13) + a {@code protocol_mapper} (unit 3) per
+     *  JWT-relevant scope-owned mapper. */
+    public List<AttestationUnit> clientScopeMapperUnits(ClientScopeModel scope, String realmId) {
+        List<AttestationUnit> out = new ArrayList<>();
+        out.add(clientScopeMapperSet(scope, realmId));
+        emitContainerProtocolMappers(scope.getProtocolMappersStream(),
+                ParentType.client_scope, scope.getId(), realmId, out);
+        return out;
+    }
+
     /** {@code role_definition} (unit 4) + {@code role_composite_children_set} (unit 10) for a role. */
     private void emitRoleMetadata(RoleModel role, String realmId, List<AttestationUnit> out) {
         out.add(roleDefinition(role, realmId));

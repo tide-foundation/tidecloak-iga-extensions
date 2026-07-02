@@ -4222,7 +4222,38 @@ public class TideAttestor implements IgaAttestor {
                 ClientModel c = clientUuid == null ? null : realm.getClientById(clientUuid);
                 if (c != null) units.add(RealmAttestationExporter.clientScopeAssignmentSet(c, realmId));
             }
-            case "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER", "REMOVE_PROTOCOL_MAPPER" -> {
+            case "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER" -> {
+                // Frame the owner's FULL mapper closure — the mapper-set unit (12 client / 13
+                // scope) AND a protocol_mapper unit (3) per owned mapper — not just the set.
+                // The changed/added mapper's INDIVIDUAL ProtocolMapperEntity.attestation column
+                // is what login reads (unit 3, keyed on mapper id); the replay leaves it on the
+                // set fan-out's TIDE-DUMMY (ADD fans that stub across EVERY sibling mapper), and
+                // the multiAdmin carrier is the only signer, so every owned mapper's unit 3 must
+                // be framed here or its column stays DUMMY and fail-closes the login. Sorted by
+                // (unit-type wire value, target id) for a deterministic carrier order so phase-1
+                // framing and phase-2 distribution align. Byte-match holds — the mapper config is
+                // final at commit (the stampProducerUnitColumns invalidation refreshes it).
+                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+                String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
+                List<AttestationUnit> closure = null;
+                if (clientUuid != null) {
+                    ClientModel c = realm.getClientById(clientUuid);
+                    if (c != null) closure = new RealmAttestationExporter().clientMapperUnits(c, realmId);
+                } else if (scopeId != null) {
+                    ClientScopeModel s = realm.getClientScopeById(scopeId);
+                    if (s != null) closure = new RealmAttestationExporter().clientScopeMapperUnits(s, realmId);
+                }
+                if (closure != null) {
+                    closure.sort(java.util.Comparator
+                            .comparingInt((AttestationUnit u) -> u.type().wireValue())
+                            .thenComparing(AttestationUnit::targetId));
+                    units.addAll(closure);
+                }
+            }
+            case "REMOVE_PROTOCOL_MAPPER" -> {
+                // The removed mapper's row (and its unit-3 column) is deleted, and REMOVE does NOT
+                // fan-out a stub onto the survivors (replayRemoveProtocolMapper writes no
+                // attestation), so only the owner's mapper-SET unit changed — frame just that.
                 String clientUuid = firstRowKey(cr, "CLIENT_UUID");
                 String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
                 if (clientUuid != null) {
@@ -4556,6 +4587,30 @@ public class TideAttestor implements IgaAttestor {
             }
         }
 
+        // Same visibility realignment for the protocol-mapper CRs: the replay added/updated/
+        // removed a mapper on the owner (client OR client_scope) in THIS commit tx, but a cached
+        // owner adapter can report the STALE mapper set/config. Invalidate the owner so the live
+        // stamp/distribution below (and the phase-2 enumeration) re-reads the current mappers
+        // from the DB — matching the fresh phase-1 scratch carrier. No-op on a non-cached realm.
+        if ("ADD_PROTOCOL_MAPPER".equals(action) || "UPDATE_PROTOCOL_MAPPER".equals(action)
+                || "REMOVE_PROTOCOL_MAPPER".equals(action)) {
+            org.keycloak.models.cache.CacheRealmProvider ownerCache =
+                    session.getProvider(org.keycloak.models.cache.CacheRealmProvider.class);
+            if (ownerCache != null) {
+                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+                String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
+                if (clientUuid != null) {
+                    ClientModel owner = realm.getClientById(clientUuid);
+                    if (owner != null) {
+                        ownerCache.registerClientInvalidation(
+                                owner.getId(), owner.getClientId(), realm.getId());
+                    }
+                } else if (scopeId != null) {
+                    ownerCache.registerClientScopeInvalidation(scopeId, realm.getId());
+                }
+            }
+        }
+
         // multiAdmin distribution. Post-flip the firstAdmin pack is burned, so the
         // node/derived/realm/org stampers below would only stub (signProducerEnvelope's
         // multiAdmin branch → DUMMY_SIG_PREFIX). Instead, on a real-signing-capable
@@ -4637,7 +4692,9 @@ public class TideAttestor implements IgaAttestor {
                 // ---- DERIVED sets: re-sign the owner's set into the owner's set column ----
                 case "ASSIGN_SCOPE", "REMOVE_SCOPE" ->
                         stampClientScopeAssignmentSet(session, realm, mode, em, cr);
-                case "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER", "REMOVE_PROTOCOL_MAPPER" ->
+                case "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER" ->
+                        stampMapperClosure(session, realm, mode, em, cr);
+                case "REMOVE_PROTOCOL_MAPPER" ->
                         stampMapperSet(session, realm, mode, em, cr);
                 case "SCOPE_MAPPING_ADD", "SCOPE_MAPPING_REMOVE" ->
                         stampScopeRoleAllowlistClient(session, realm, mode, em, cr);
@@ -5057,6 +5114,41 @@ public class TideAttestor implements IgaAttestor {
                 String sig = signProducerEnvelope(session, realm, mode, env);
                 em.createQuery("UPDATE ClientScopeEntity e SET e.clientScopeMapperSetAttestation = :sig WHERE e.id = :id")
                         .setParameter("sig", sig).setParameter("id", scopeId).executeUpdate();
+            }
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    /**
+     * ADD/UPDATE_PROTOCOL_MAPPER stamp: re-sign the owner's FULL mapper closure — the
+     * mapper-SET unit (12 client / 13 scope) AND every owned mapper's INDIVIDUAL
+     * {@code protocol_mapper} unit (3, column {@code ProtocolMapperEntity.attestation}) — not
+     * just the changed mapper. The replay leaves each owned mapper's individual column on the
+     * set fan-out's stub (an ADD fans that stub across EVERY sibling via
+     * {@code stampOwnerSetFanOut}), and login reads each mapper's unit-3 column, so re-stamping
+     * only the SET (the previous behaviour) left the individual columns on TIDE-DUMMY and
+     * fail-closed the login. Real per-unit VVK sign (firstAdmin capable) / stub otherwise, the
+     * SAME signProducerEnvelope + column-keyed stamp the other derived stampers use.
+     */
+    private void stampMapperClosure(KeycloakSession session, RealmModel realm, String mode,
+                                    EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+            String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
+            List<AttestationUnit> closure = null;
+            if (clientUuid != null) {
+                ClientModel client = realm.getClientById(clientUuid);
+                if (client != null) {
+                    closure = new RealmAttestationExporter().clientMapperUnits(client, realm.getId());
+                }
+            } else if (scopeId != null) {
+                ClientScopeModel scope = realm.getClientScopeById(scopeId);
+                if (scope != null) {
+                    closure = new RealmAttestationExporter().clientScopeMapperUnits(scope, realm.getId());
+                }
+            }
+            if (closure == null) return;
+            for (AttestationUnit u : closure) {
+                UnitColumnMapping.stamp(em, u, signProducerEnvelope(session, realm, mode, u.serialize()));
             }
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
