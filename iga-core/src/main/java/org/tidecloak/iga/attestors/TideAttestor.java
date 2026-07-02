@@ -4524,7 +4524,25 @@ public class TideAttestor implements IgaAttestor {
         try {
             switch (action) {
                 // ---- NODE units: re-stamp the owner's node column with the real envelope ----
-                case "CREATE_CLIENT", "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
+                case "CREATE_CLIENT" -> {
+                        stampClientConfig(session, realm, mode, em, cr);
+                        // A newly-created client folds in its default client-scope assignments
+                        // at create time, so its client_scope_assignment_set (unit 11) is
+                        // meaningful and MUST be signed at CREATE_CLIENT commit. Pre-toggle
+                        // clients get unit 11 via ADOPT_CLIENT (stampAdoptClient); later scope
+                        // changes re-stamp it via ASSIGN_SCOPE/REMOVE_SCOPE. Without this, a
+                        // client created while IGA is ON had a NULL unit-11 column and the
+                        // fail-closed login TVE producer 500'd the token mint. CREATE_CLIENT
+                        // carries the owner under ID (not CLIENT_UUID), so resolve it the same
+                        // way stampClientConfig does.
+                        stampClientScopeAssignmentSetForClient(session, realm, mode, em,
+                                resolveClientForStamp(realm, cr));
+                        // Part B3: also stamp the SA user's user_identity when the client has
+                        // serviceAccountsEnabled. Self-gates (no-op for non-SA clients / SA-less
+                        // UPDATE rows), so safe to call unconditionally for every client CR.
+                        stampServiceAccountUserIfPresent(session, realm, mode, em, cr);
+                }
+                case "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
                      "UPDATE_CLIENT_REDIRECT_URIS", "UPDATE_CLIENT_PROPERTY" -> {
                         stampClientConfig(session, realm, mode, em, cr);
                         // Part B3: also stamp the SA user's user_identity when the client has
@@ -4912,15 +4930,28 @@ public class TideAttestor implements IgaAttestor {
 
     private void stampClientScopeAssignmentSet(KeycloakSession session, RealmModel realm, String mode,
                                                EntityManager em, IgaChangeRequestEntity cr) {
+        // ASSIGN_SCOPE / REMOVE_SCOPE carry the owner under CLIENT_UUID.
+        String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+        if (clientUuid == null) return;
+        stampClientScopeAssignmentSetForClient(session, realm, mode, em, realm.getClientById(clientUuid));
+    }
+
+    /**
+     * Sign + stamp a client's {@code client_scope_assignment_set} (unit 11) onto its
+     * {@code ClientEntity.clientScopeAssignmentAttestation} column, resolving the scope
+     * set from the live model. Split from {@link #stampClientScopeAssignmentSet} so the
+     * CREATE_CLIENT commit (whose CR carries the owner under {@code ID}, not
+     * {@code CLIENT_UUID}) can stamp unit 11 from an already-resolved client, reusing the
+     * exact same sign+stamp path as ASSIGN_SCOPE/REMOVE_SCOPE. No-op on a null client.
+     */
+    private void stampClientScopeAssignmentSetForClient(KeycloakSession session, RealmModel realm,
+                                                        String mode, EntityManager em, ClientModel client) {
+        if (client == null) return;
         try {
-            String clientUuid = firstRowKey(cr, "CLIENT_UUID");
-            if (clientUuid == null) return;
-            ClientModel client = realm.getClientById(clientUuid);
-            if (client == null) return;
             byte[] env = RealmAttestationExporter.clientScopeAssignmentSet(client, realm.getId()).serialize();
             String sig = signProducerEnvelope(session, realm, mode, env);
             em.createQuery("UPDATE ClientEntity e SET e.clientScopeAssignmentAttestation = :sig WHERE e.id = :id")
-                    .setParameter("sig", sig).setParameter("id", clientUuid).executeUpdate();
+                    .setParameter("sig", sig).setParameter("id", client.getId()).executeUpdate();
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
 
