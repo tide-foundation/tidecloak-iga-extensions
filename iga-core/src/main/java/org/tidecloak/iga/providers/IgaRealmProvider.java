@@ -97,6 +97,50 @@ public class IgaRealmProvider extends JpaRealmProvider {
         return base;
     }
 
+    // -------------------------------------------------------------------------
+    // REALM delete — governed as a first-class DELETE_REALM change request.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Whole-realm delete (DELETE {realm} → RealmAdminResource.deleteRealm →
+     * RealmManager.removeRealm → model.removeRealm(id)). Governed as a first-class
+     * {@code DELETE_REALM} CR (entityType {@code REALM}).
+     *
+     * <p><b>Why this override exists.</b> Without it, the delete falls through to
+     * {@code JpaRealmProvider.removeRealm}, whose cascade calls
+     * {@code session.clients().removeClients(realm)} →
+     * {@code JpaRealmProvider.removeClients} which iterates
+     * {@code forEach(id -> removeClient(realm, id))}. That is a VIRTUAL call and
+     * {@code this} is the IGA mega-provider, so it re-enters
+     * {@link #removeClient(RealmModel, String)} — which, on an IGA-on realm, MIS-FILES
+     * a {@code DELETE_CLIENT} CR for the realm's first client and rolls the whole
+     * realm-delete back. The admin then sees "a change request was created" (a
+     * DELETE_CLIENT, not a DELETE_REALM), and committing it deletes only that one
+     * client while the realm survives. Capturing the delete HERE, before the cascade,
+     * closes that leak.
+     *
+     * <p>The REAL teardown runs on commit-replay
+     * ({@code IgaReplayDispatcher.replayDeleteRealm} → {@code RealmManager.removeRealm})
+     * under {@code IGA_REPLAY_ACTIVE}, where {@link #isIgaActive(RealmModel)} returns
+     * false — so this override falls straight through to {@code super.removeRealm(id)}
+     * and the internal cascade passes through the IGA wrappers WITHOUT re-capture.
+     */
+    @Override
+    public boolean removeRealm(String id) {
+        if (id != null) {
+            RealmModel realm = getRealm(id);
+            if (realm != null && isIgaActive(realm)) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("REALM_ID", id);
+                // REALM_NAME so the approval UI can render which realm is being deleted.
+                row.put("REALM_NAME", realm.getName());
+                recordAndThrow(realm, "REALM", id, "DELETE_REALM", List.of(row));
+                return false; // unreachable
+            }
+        }
+        return super.removeRealm(id);
+    }
+
     /**
      * Persist the change request in a SEPARATE Keycloak session/transaction so it survives
      * the rollback caused by the pending-approval exception we throw afterwards, mark the

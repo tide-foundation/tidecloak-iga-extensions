@@ -139,6 +139,19 @@ public class TideAttestor implements IgaAttestor {
     public static final String ACTION_OFFBOARD_REALM = "OFFBOARD_REALM";
 
     /**
+     * Action type for a governed whole-realm delete. Like {@code OFFBOARD_REALM} it
+     * is an irreversible, NON-producer realm-teardown CR (stub-signed own attestation,
+     * NOT auto-committable, NOT an ADOPT action). UNLIKE offboard it runs NO
+     * ORK/doken ceremony: the teardown is a plain {@code RealmManager.removeRealm} on
+     * commit ({@code IgaReplayDispatcher.replayDeleteRealm}), and in multiAdmin its
+     * quorum is collected as ordinary enclave dokens over a canonical carrier exactly
+     * like {@code DISABLE_IGA}. Its commit threshold is floored at the SAME
+     * min-admins as offboard ({@link #resolveOffboardMinAdmins}) so a realm-delete is
+     * never easier to pass than an offboard.
+     */
+    public static final String ACTION_DELETE_REALM = "DELETE_REALM";
+
+    /**
      * Realm attribute overriding the minimum distinct-admin approvals required to
      * commit an {@code OFFBOARD_REALM} CR. Optional; absent/invalid →
      * {@link #OFFBOARD_MIN_ADMINS_DEFAULT}.
@@ -367,13 +380,18 @@ public class TideAttestor implements IgaAttestor {
 
     @Override
     public int getThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr) {
-        // OFFBOARD_REALM is irreversible: it MUST require a minimum number of distinct
-        // admin approvals REGARDLESS of mode (even firstAdmin's single-signer 1-of-1 is
-        // not enough to tear a realm down). The gate is max(normal quorum, min-admins),
-        // so a larger multiAdmin quorum still wins, but the floor can never drop below
-        // the configured minimum (default 3). Computed FIRST, before the firstAdmin
-        // short-circuit, so firstAdmin offboards are NOT 1-of-1.
-        if (cr != null && ACTION_OFFBOARD_REALM.equals(cr.getActionType())) {
+        // OFFBOARD_REALM and DELETE_REALM are irreversible realm-teardowns: BOTH MUST
+        // require a minimum number of distinct admin approvals REGARDLESS of mode (even
+        // firstAdmin's single-signer 1-of-1 is not enough to tear a realm down). The gate
+        // is max(normal quorum, min-admins), so a larger multiAdmin quorum still wins, but
+        // the floor can never drop below the configured minimum (default 3). Computed
+        // FIRST, before the firstAdmin short-circuit, so firstAdmin teardowns are NOT
+        // 1-of-1. DELETE_REALM shares OFFBOARD's floor deliberately — a realm-delete must
+        // never be EASIER to pass than an offboard. (Consequence: a firstAdmin / small
+        // realm with fewer than min-admins admins cannot governed-delete itself, exactly
+        // like offboard; out-of-band deletion, e.g. after DISABLE_IGA, remains available.)
+        if (cr != null && (ACTION_OFFBOARD_REALM.equals(cr.getActionType())
+                || ACTION_DELETE_REALM.equals(cr.getActionType()))) {
             return Math.max(normalQuorumThreshold(session, realm, cr), resolveOffboardMinAdmins(realm));
         }
         // firstAdmin is single-signer onboarding: ALWAYS 1, unconditionally — it
@@ -2125,7 +2143,21 @@ public class TideAttestor implements IgaAttestor {
         // action (dev/non-real-signing carry-through — never exercised by the live
         // Policy:1 round-trip) frame the single regular canonical so the carrier wiring
         // still round-trips.
-        byte[][] unitCbors = buildAllCrUnitCbor(session, realm, cr);
+        // DELETE_REALM is a non-producer, IRREVERSIBLE realm teardown that frames NO producer
+        // unit. It MUST NOT be discovered via the scratch replay (buildAllCrUnitCbor): that path
+        // runs the WHOLE CR replay — replayDeleteRealm → RealmManager.removeRealm — in a throwaway
+        // tx, and removeRealm's RealmModel.RealmRemovedEvent publish + session.onRealmRemoved
+        // cleanup are NON-transactional, so they would NOT roll back with the scratch tx — evicting
+        // the REAL realm from cache and killing its sessions just to build an approval carrier.
+        // Frame the plain canonical carrier DIRECTLY (the SAME non-unit carrier the 0-unit fallback
+        // below builds), skipping the scratch replay — mirrors how OFFBOARD_REALM returns its own
+        // carrier before ever reaching buildAllCrUnitCbor.
+        byte[][] unitCbors;
+        if (ACTION_DELETE_REALM.equals(cr.getActionType())) {
+            unitCbors = new byte[][]{ canonicalForRegularCr(session, cr) };
+        } else {
+            unitCbors = buildAllCrUnitCbor(session, realm, cr);
+        }
         // A producer CR (CREATE_USER / GRANT_ROLES / etc.) MUST frame ≥1 typed
         // AttestationUnit. unitCbors.length==0 means the scratch-replay enumeration found no
         // unit — the carrier would then fall back to canonicalForRegularCr (a NON-CBOR
