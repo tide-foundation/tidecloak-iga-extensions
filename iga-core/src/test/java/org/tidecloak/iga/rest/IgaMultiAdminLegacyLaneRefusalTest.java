@@ -100,6 +100,23 @@ class IgaMultiAdminLegacyLaneRefusalTest {
         row.setMode(TideAttestor.MODE_MULTI_ADMIN);
         stubAuthorizerFindByRealm(row);
         stubEmptyAuthorizations();
+        stubNoTideRealmAdminPolicy();
+    }
+
+    /**
+     * The commit lane's sub-quorum guard resolves the multiAdmin threshold via
+     * {@code TideAttestor.getThreshold -> findTideRealmAdminPolicy}, which queries
+     * {@code IgaRolePolicy.findByRealmAndName}. With no policy row the threshold falls back to
+     * {@code max(1, floor(0.7 * activeAdmins))} = 1 (the bare realm mock has no admins), so a
+     * commit with 0 collected approvals is refused sub-quorum. Stub the query to no rows.
+     */
+    @SuppressWarnings("unchecked")
+    private void stubNoTideRealmAdminPolicy() {
+        TypedQuery<org.tidecloak.iga.entities.IgaRolePolicyEntity> q = mock(TypedQuery.class);
+        lenient().when(em.createNamedQuery(eq("IgaRolePolicy.findByRealmAndName"),
+                eq(org.tidecloak.iga.entities.IgaRolePolicyEntity.class))).thenReturn(q);
+        lenient().when(q.setParameter(anyString(), any())).thenReturn(q);
+        lenient().when(q.getResultStream()).thenAnswer(inv -> Stream.empty());
     }
 
     /** A firstAdmin tide realm: iga.attestor=tide, authorizer row mode=firstAdmin. */
@@ -132,8 +149,12 @@ class IgaMultiAdminLegacyLaneRefusalTest {
         lenient().when(em.createNamedQuery(eq("IgaAuthorizer.findByRealm"), eq(IgaAuthorizerEntity.class)))
                 .thenReturn(q);
         lenient().when(q.setParameter(anyString(), any())).thenReturn(q);
+        // A single commit() call resolves the mode more than once (isMultiAdminMode, then
+        // getThreshold -> resolveMode), each consuming this stream. A single Stream.of(row)
+        // is closed after the first findFirst -> "stream has already been operated upon".
+        // Return a FRESH stream per invocation so every resolveMode read succeeds.
         lenient().when(q.getResultStream())
-                .thenReturn(row == null ? Stream.empty() : Stream.of(row));
+                .thenAnswer(inv -> row == null ? Stream.empty() : Stream.of(row));
     }
 
     @SuppressWarnings("unchecked")
@@ -183,23 +204,33 @@ class IgaMultiAdminLegacyLaneRefusalTest {
 
         Response resp = resource.commit("cr-delete-user");
 
-        assertEquals(409, resp.getStatus(),
-                "a multiAdmin CR on the legacy commit lane must be refused with 409 BEFORE replay");
+        // Two-button model (2026-06-16): approve (/approve, collects dokens) and commit
+        // (/commit, apply-only) are now separate. The legacy commit lane no longer refuses
+        // multiAdmin OUTRIGHT with 409 MULTIADMIN_REQUIRES_APPROVAL_ENCLAVE; instead
+        // refuseSubQuorumCommitForMultiAdmin refuses a commit with < threshold collected
+        // approvals as 412 QUORUM_NOT_MET (BEFORE replay). With 0 approvals and threshold 1
+        // the lone-admin bypass is still refused — the security property is preserved.
+        assertEquals(412, resp.getStatus(),
+                "a multiAdmin CR committed sub-quorum must be refused with 412 BEFORE replay");
         Map<String, Object> body = (Map<String, Object>) resp.getEntity();
-        assertEquals("MULTIADMIN_REQUIRES_APPROVAL_ENCLAVE", body.get("error"));
+        assertEquals("QUORUM_NOT_MET", body.get("error"));
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     void commit_multiAdmin_producerCr_isAlsoRefused() {
-        // Even a producer-envelope action (GRANT_ROLES) cannot use the simple lane in
-        // multiAdmin — the quorum/doken obligation is identical.
+        // Even a producer-envelope action (GRANT_ROLES) cannot commit sub-quorum in
+        // multiAdmin — the quorum/doken obligation is identical. Same two-button 412
+        // QUORUM_NOT_MET refusal as the non-producer case above.
         asMultiAdminTideRealm();
         IgaChangeRequestEntity cr = pendingCr("cr-grant", "GRANT_ROLES");
         when(em.find(IgaChangeRequestEntity.class, "cr-grant")).thenReturn(cr);
 
         Response resp = resource.commit("cr-grant");
 
-        assertEquals(409, resp.getStatus());
+        assertEquals(412, resp.getStatus());
+        Map<String, Object> body = (Map<String, Object>) resp.getEntity();
+        assertEquals("QUORUM_NOT_MET", body.get("error"));
     }
 
     // -- Scope: firstAdmin / Tideless / ADOPT keep the legacy lane --------------

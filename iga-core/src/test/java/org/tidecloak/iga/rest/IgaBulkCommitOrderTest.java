@@ -71,6 +71,12 @@ class IgaBulkCommitOrderTest {
         when(realm.getId()).thenReturn(REALM_ID);
         when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
         when(jpa.getEntityManager()).thenReturn(em);
+        // bulkAuthorize's post-batch convergeAfterCommit block re-resolves the LIVE realm via
+        // session.realms().getRealm(realmId) (added with the DELETE_REALM guard) and only runs
+        // converge when it is non-null. These tests pin the sort/loop ORDERING, not converge, so
+        // return a RealmProvider whose getRealm(...) is null → the converge block is skipped.
+        org.keycloak.models.RealmProvider realmProvider = mock(org.keycloak.models.RealmProvider.class);
+        when(session.realms()).thenReturn(realmProvider);
         resource = new IgaAdminResource(session, realm, auth);
     }
 

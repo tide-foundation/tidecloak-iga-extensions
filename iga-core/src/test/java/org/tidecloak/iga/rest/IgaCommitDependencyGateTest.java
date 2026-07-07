@@ -68,6 +68,12 @@ class IgaCommitDependencyGateTest {
         when(realm.getId()).thenReturn(REALM_ID);
         when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
         when(jpa.getEntityManager()).thenReturn(em);
+        // The bulk path's post-batch convergeAfterCommit block re-resolves the LIVE realm via
+        // session.realms().getRealm(realmId) and only runs converge when non-null. This test
+        // pins the dependency gate, not converge, so return a RealmProvider whose getRealm(...)
+        // is null → the converge block is skipped (avoids an unrelated NPE on the bare mock).
+        org.keycloak.models.RealmProvider realmProvider = mock(org.keycloak.models.RealmProvider.class);
+        when(session.realms()).thenReturn(realmProvider);
         // requireManageRealm() is a void no-op on the mock (permission granted).
         resource = new IgaAdminResource(session, realm, auth);
 
