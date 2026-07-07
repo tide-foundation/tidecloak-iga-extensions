@@ -139,4 +139,63 @@ class IgaIdpSettingsResignTest {
                 () -> IgaIdpSettingsResign.maybeReSign(session, realm, c));
         org.junit.jupiter.api.Assertions.assertSame(boom, thrown);
     }
+
+    // ---- client-settings scope predicate --------------------------------
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "SET_CLIENT_ATTRIBUTE", "REMOVE_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_PROPERTY",
+            "UPDATE_CLIENT_WEB_ORIGINS", "UPDATE_CLIENT_REDIRECT_URIS", "ADD_PROTOCOL_MAPPER",
+            "UPDATE_PROTOCOL_MAPPER", "REMOVE_PROTOCOL_MAPPER", "SCOPE_MAPPING_ADD",
+            "SCOPE_MAPPING_REMOVE"})
+    void clientPredicateTrueForEveryCapturedClientActionType(String actionType) {
+        // Rows are irrelevant to the client predicate (it is action-type only); the
+        // re-sign rebuilds the client-origin list wholesale from realm state.
+        assertTrue(IgaIdpSettingsResign.changesClientSignedSetting(cr(actionType, "[]")));
+    }
+
+    @Test
+    void clientPredicateFalseForNonClientActions() {
+        // RegOn realm-config is handled by the separate maybeReSign path, not the
+        // client re-sign; CREATE_CLIENT is intentionally NOT in the captured set.
+        assertFalse(IgaIdpSettingsResign.changesClientSignedSetting(
+                cr("SET_REALM_CONFIG", "[{\"key\":\"setRegistrationAllowed\",\"value\":\"true\"}]")));
+        assertFalse(IgaIdpSettingsResign.changesClientSignedSetting(cr("CREATE_CLIENT", "[]")));
+        assertFalse(IgaIdpSettingsResign.changesClientSignedSetting(cr("GRANT_ROLES", "[]")));
+        assertFalse(IgaIdpSettingsResign.changesClientSignedSetting(null));
+    }
+
+    // ---- client-settings dispatch ---------------------------------------
+
+    @Test
+    void reSignForClientSettingsInvokesSignerWhenRegistered() {
+        when(session.getProvider(IdpSettingsSigner.class)).thenReturn(signer);
+
+        IgaIdpSettingsResign.reSignForClientSettings(session, realm);
+
+        verify(signer, times(1)).reSignIdpSettings(session, realm);
+    }
+
+    @Test
+    void reSignForClientSettingsNoOpWhenNoSignerRegistered() {
+        when(session.getProvider(IdpSettingsSigner.class)).thenReturn(null);
+
+        // Plain Tideless realm: nothing signed to keep valid -> clean no-op (no throw).
+        IgaIdpSettingsResign.reSignForClientSettings(session, realm);
+
+        verify(signer, never()).reSignIdpSettings(session, realm);
+    }
+
+    @Test
+    void reSignForClientSettingsFailClosedPropagatesSignerException() {
+        when(session.getProvider(IdpSettingsSigner.class)).thenReturn(signer);
+        IdpSettingsSignException boom = new IdpSettingsSignException("ORKs unreachable");
+        org.mockito.Mockito.doThrow(boom).when(signer).reSignIdpSettings(session, realm);
+
+        // Fail-closed: the exception must propagate so the commit tx rolls back rather
+        // than leaving stale client-origin signatures.
+        IdpSettingsSignException thrown = assertThrows(IdpSettingsSignException.class,
+                () -> IgaIdpSettingsResign.reSignForClientSettings(session, realm));
+        org.junit.jupiter.api.Assertions.assertSame(boom, thrown);
+    }
 }

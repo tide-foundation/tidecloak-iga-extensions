@@ -893,6 +893,23 @@ public class IgaAdminResource {
         // multiAdmin commit tail; bulk has the identical call in processOneCr.
         org.tidecloak.iga.signing.IgaIdpSettingsResign.maybeReSign(session, realm, cr);
 
+        // Also re-sign when this commit changed CLIENT settings that feed the
+        // VVK-signed IdP-settings bundle (per-client web origins + the realm's
+        // client-origin list). client-settings saves coalesce into per-action CRs
+        // (SET_CLIENT_ATTRIBUTE / UPDATE_CLIENT_WEB_ORIGINS / UPDATE_CLIENT_REDIRECT_URIS
+        // / UPDATE_CLIENT_PROPERTY / protocol-mapper + scope-mapping writes); committing
+        // any of them can leave the stored clientAuth:* signatures stale — this replaces
+        // the manual "re-sign settings" step admins ran after a client save. This is the
+        // single-CR commit lane (commit() and /approve via commitIfReady), which applies
+        // exactly ONE CR, so at most one re-sign fires here; the bulk lane coalesces to
+        // one re-sign per batch (see runBulkLocked). Disjoint from the RegOn predicate
+        // above (SET_REALM_CONFIG is not a client action type), so no double-sign. Same
+        // fail-closed / Tideless-no-op contract as maybeReSign (a signer failure throws
+        // out of here and rolls this commit tx back rather than leaving stale sigs).
+        if (org.tidecloak.iga.signing.IgaIdpSettingsResign.changesClientSignedSetting(cr)) {
+            org.tidecloak.iga.signing.IgaIdpSettingsResign.reSignForClientSettings(session, realm);
+        }
+
         IgaChangeRequestService service = getService();
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
         return Response.ok(toRepresentation(updated, service)).build();
@@ -1580,12 +1597,22 @@ public class IgaAdminResource {
                         return 0;
                     }));
 
+                    // Track whether ANY committed CR in this batch changed client
+                    // settings that feed the signed IdP-settings bundle, so the re-sign
+                    // ceremony runs ONCE after the whole batch drains (a client save
+                    // coalesces into up to 10 per-action CRs — see the post-loop block).
+                    boolean anyClientReSign = false;
                     for (IgaChangeRequestEntity candidate : candidates) {
                         String crId = candidate.getId();
                         Map<String, Object> outcome = processOneCr(crId, finalAdmin);
                         results.add(outcome);
                         String status = String.valueOf(outcome.get("status"));
-                        if ("COMMITTED".equals(status)) committed++;
+                        if ("COMMITTED".equals(status)) {
+                            committed++;
+                            if (org.tidecloak.iga.signing.IgaIdpSettingsResign.changesClientSignedSetting(candidate)) {
+                                anyClientReSign = true;
+                            }
+                        }
                         else if ("REJECTED".equals(status)) rejected++;
                         else skipped++;
                     }
@@ -1628,6 +1655,26 @@ public class IgaAdminResource {
                         RealmModel liveRealm = session.realms().getRealm(realm.getId());
                         if (liveRealm != null) {
                             org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, liveRealm);
+                        }
+                    }
+
+                    // Coalesced client-settings re-sign (ONCE per batch). If any CR
+                    // committed above changed client settings that feed the VVK-signed
+                    // IdP-settings bundle (per-client web origins), re-run the signing
+                    // ceremony EXACTLY ONCE for the whole batch — a client save coalesces
+                    // into up to 10 per-action CRs, so a per-CR re-sign (10 ORK round-trips)
+                    // would be wasteful; one re-sign rebuilds the whole signed bundle from
+                    // current realm state. Not gated on deferConverge: the firstAdmin ADOPT
+                    // sweep commits ADOPT_* CRs (never client CRs), so anyClientReSign is
+                    // false there and this is a no-op. Same fail-closed contract as the
+                    // convergeAfterCommit above (a signer failure throws here and rolls back
+                    // the batch's commit flips rather than leaving stale clientAuth:*
+                    // signatures). No-op on Tideless realms. Re-resolve the live realm in
+                    // case a batch member removed it (mirrors the DELETE_REALM guard above).
+                    if (anyClientReSign) {
+                        RealmModel liveRealmForResign = session.realms().getRealm(realm.getId());
+                        if (liveRealmForResign != null) {
+                            org.tidecloak.iga.signing.IgaIdpSettingsResign.reSignForClientSettings(session, liveRealmForResign);
                         }
                     }
 

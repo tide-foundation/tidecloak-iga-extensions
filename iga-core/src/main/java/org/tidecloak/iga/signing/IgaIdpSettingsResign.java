@@ -109,6 +109,82 @@ public final class IgaIdpSettingsResign {
     }
 
     /**
+     * The client-settings CR action types whose commit can stale the VVK-signed
+     * IdP-settings bundle. {@code SignIdpSettings} folds every realm client's web
+     * origins into the signed draft (the {@code clientJsonUrls} segment) and emits a
+     * per-origin {@code clientAuth:<clientId><origin>} signature, where a client's
+     * origin set is derived from its web-origins, rootUrl/baseUrl/managementUrl and
+     * redirect-URI origins ({@code VendorResource.getAllWebOriginsForClient}).
+     * Committing any of these client CRs can therefore leave the stored
+     * {@code clientAuth:*} signatures stale until the ceremony re-runs.
+     *
+     * <p>Kept in lockstep with the client-update capture in {@code IgaClientAdapter}
+     * (iga-core 875888c6). NOTE: only {@code UPDATE_CLIENT_WEB_ORIGINS},
+     * {@code UPDATE_CLIENT_REDIRECT_URIS} and (root/base/management-URL)
+     * {@code UPDATE_CLIENT_PROPERTY} actually mutate a currently-signed field; the
+     * attribute / protocol-mapper / scope-mapping types do not feed today's signed
+     * draft. They are still included because the re-sign rebuilds the WHOLE bundle
+     * from current realm state (idempotent), so triggering on the full client-CR
+     * family is safe, matches the manual "re-sign settings" button admins run after
+     * any client save, and stays correct if the signed draft is ever widened.
+     */
+    static final java.util.Set<String> CLIENT_SIGNED_ACTION_TYPES = java.util.Set.of(
+            "SET_CLIENT_ATTRIBUTE",
+            "REMOVE_CLIENT_ATTRIBUTE",
+            "UPDATE_CLIENT_PROPERTY",
+            "UPDATE_CLIENT_WEB_ORIGINS",
+            "UPDATE_CLIENT_REDIRECT_URIS",
+            "ADD_PROTOCOL_MAPPER",
+            "UPDATE_PROTOCOL_MAPPER",
+            "REMOVE_PROTOCOL_MAPPER",
+            "SCOPE_MAPPING_ADD",
+            "SCOPE_MAPPING_REMOVE");
+
+    /**
+     * True iff {@code cr} is one of the client-settings action types whose commit can
+     * stale the signed IdP-settings bundle. Pure action-type predicate — no per-row
+     * inspection is needed because the re-sign rebuilds the client-origin list
+     * wholesale from current realm state. The commit seam uses this to decide whether
+     * a committed batch needs a single coalesced re-sign.
+     */
+    public static boolean changesClientSignedSetting(IgaChangeRequestEntity cr) {
+        return cr != null && CLIENT_SIGNED_ACTION_TYPES.contains(cr.getActionType());
+    }
+
+    /**
+     * Unconditionally re-run the Tide {@code signIdpSettings} ceremony for
+     * {@code realm} from current state. The caller has ALREADY decided a re-sign is
+     * warranted (a client-settings CR committed in this batch — see
+     * {@link #changesClientSignedSetting}). This is the once-per-batch coalesced
+     * entry point, distinct from the per-CR RegOn {@link #maybeReSign} path: a client
+     * save coalesces into up to ten per-action CRs, so the bulk commit lane calls
+     * this EXACTLY ONCE after the batch drains rather than per CR (the single-CR
+     * commit lane applies one CR, so it re-signs at most once there too).
+     *
+     * <p>No-op when no {@link IdpSettingsSigner} is registered (plain Tideless realm —
+     * nothing signed to keep valid). Fail-closed when a signer IS present but the
+     * re-sign throws: the exception propagates so the caller's commit tx rolls back
+     * rather than leaving stale {@code clientAuth:*} signatures — the SAME contract as
+     * {@link #maybeReSign} and {@code IgaToggleOnBackfill.convergeAfterCommit}.
+     */
+    public static void reSignForClientSettings(KeycloakSession session, RealmModel realm) {
+        IdpSettingsSigner signer = session.getProvider(IdpSettingsSigner.class);
+        if (signer == null) {
+            log.debugf("IGA idp-settings re-sign: a client-settings CR committed on realm %s but no "
+                            + "IdpSettingsSigner is registered — nothing to re-sign (no Tide key stack).",
+                    realm.getName());
+            return;
+        }
+        log.infof("IGA idp-settings re-sign: client-settings change committed on realm %s — re-running "
+                        + "signIdpSettings once for the batch so the enclave-verified client-origin "
+                        + "signatures stay valid.", realm.getName());
+        // Fail-closed, exactly like maybeReSign: a thrown IdpSettingsSignException
+        // propagates so the commit tx rolls back rather than committing with stale
+        // client-origin signatures.
+        signer.reSignIdpSettings(session, realm);
+    }
+
+    /**
      * True iff {@code cr} is a {@code SET_REALM_CONFIG} change request whose rows
      * include the {@code setRegistrationAllowed} setter. Pure predicate — the
      * unit-testable scope gate.
