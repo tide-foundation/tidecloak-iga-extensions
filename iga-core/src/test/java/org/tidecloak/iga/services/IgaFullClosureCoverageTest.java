@@ -244,7 +244,12 @@ class IgaFullClosureCoverageTest {
 
         assertFalse(result.ran,
                 "a non-capable (no-vendor-key) realm must NOT run the full-closure stamp");
-        assertEquals("not_first_admin_or_not_capable", result.skipReason);
+        // convergeAfterCommit now gates on PROVISIONED (in-memory tide-vendor-key + activeVrk),
+        // NOT can-sign-now/"capable" (a provisioned realm with ORKs down still ENTERS and fails
+        // loud at PHASE-2 sign). The no-vendor-key test realm is not provisioned, so the skip
+        // reason is "not_first_admin_or_not_provisioned"; the old "..._not_capable" literal is
+        // stale. Behavior (ran=false, unitsSigned=0) is unchanged — only the reason string moved.
+        assertEquals("not_first_admin_or_not_provisioned", result.skipReason);
         assertEquals(0, result.unitsSigned, "a gated-out convergence signs zero units");
     }
 }

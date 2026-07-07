@@ -92,6 +92,17 @@ class ReplayOffboardRealmTest {
                 .thenReturn(RagnarokOffboardResult.ok("torn down 3 things"));
         KeycloakSession session = sessionWith(realm, svc);
         EntityManager em = mock(EntityManager.class);
+        // After the SPI teardown, replayOffboardRealm neutralizes the realm's IGA_AUTHORIZER
+        // mode row(s) via em.createNamedQuery("IgaAuthorizer.findByRealm", ...).getResultList()
+        // (so resolveMode falls to the Tideless branch post-offboard). The bare EntityManager
+        // mock returns null for createNamedQuery → NPE; stub it to yield an empty result list.
+        @SuppressWarnings("unchecked")
+        jakarta.persistence.TypedQuery<org.tidecloak.iga.entities.IgaAuthorizerEntity> authQ =
+                mock(jakarta.persistence.TypedQuery.class);
+        when(em.createNamedQuery(eq("IgaAuthorizer.findByRealm"),
+                eq(org.tidecloak.iga.entities.IgaAuthorizerEntity.class))).thenReturn(authQ);
+        when(authQ.setParameter(org.mockito.ArgumentMatchers.anyString(), any())).thenReturn(authQ);
+        when(authQ.getResultList()).thenReturn(java.util.Collections.emptyList());
 
         assertDoesNotThrow(() -> {
             try {

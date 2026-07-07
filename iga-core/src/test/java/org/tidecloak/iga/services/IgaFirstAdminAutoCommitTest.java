@@ -159,14 +159,16 @@ class IgaFirstAdminAutoCommitTest {
     }
 
     @Test
-    void adopt_manuallyAddedEntity_isNotAutoCommittable() {
+    void adopt_manuallyAddedEntity_isAlsoAutoCommittable_firstAdminRelaxation() {
         KeycloakSession session = mock(KeycloakSession.class);
         RealmModel realm = defaultRoleRealm();
-        // An ADOPT CR for an admin-authored (non-system) entity carries NO
-        // ATTESTATION_ONLY marker (it writes a quarantine sidecar instead) → manual.
+        // firstAdmin relaxation (sign-at-toggle, 2026-06-24): under firstAdmin ALL ADOPT_* CRs
+        // auto-commit — admin-authored/non-system entities included, NOT only the ATTESTATION_ONLY
+        // system ones. The whole ADOPT closure is the firstAdmin's initial attested baseline; the
+        // marker now only drives the quarantine sidecar, not auto-commit eligibility. (Was: false.)
         IgaChangeRequestEntity cr = adoptCr("ADOPT_CLIENT", false);
-        assertFalse(IgaFirstAdminAutoCommit.isAutoCommittable(session, realm, cr),
-                "an ADOPT CR targeting a manually-added (non-system) entity must NOT auto-commit");
+        assertTrue(IgaFirstAdminAutoCommit.isAutoCommittable(session, realm, cr),
+                "under the firstAdmin relaxation every ADOPT_* CR (system + admin-authored) auto-commits");
     }
 
     @Test
@@ -176,9 +178,11 @@ class IgaFirstAdminAutoCommitTest {
         assertTrue(IgaFirstAdminAutoCommit.isAutoCommittable(session, realm,
                         adoptCr("ADOPT_PROTOCOL_MAPPER", true)),
                 "system edge ADOPT (attestation-only) → auto");
-        assertFalse(IgaFirstAdminAutoCommit.isAutoCommittable(session, realm,
+        // firstAdmin relaxation (2026-06-24): a manually-added ADOPT is now ALSO auto (was: manual).
+        // The ATTESTATION_ONLY marker no longer gates ADOPT auto-commit under firstAdmin.
+        assertTrue(IgaFirstAdminAutoCommit.isAutoCommittable(session, realm,
                         adoptCr("ADOPT_PROTOCOL_MAPPER", false)),
-                "manually-added edge ADOPT (no marker) → manual");
+                "manually-added edge ADOPT under firstAdmin → also auto (whole ADOPT closure signs)");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -361,7 +365,7 @@ class IgaFirstAdminAutoCommitTest {
     }
 
     @Test
-    void sweep_manuallyAddedAndNonSystemAdopt_stayPending() {
+    void sweep_manuallyAddedStayPending_butAllAdoptSweep() {
         KeycloakSession session = mock(KeycloakSession.class);
         RealmModel realm = defaultRoleRealm();
         UserModel admin = mock(UserModel.class);
@@ -375,7 +379,10 @@ class IgaFirstAdminAutoCommitTest {
         pending.add(simpleCr("c5", "CREATE_CLIENT_SCOPE"));           // admin-authored scope → manual
         pending.add(simpleCr("c6", "CREATE_GROUP"));                  // admin-authored group → manual
         pending.add(simpleCr("c7", "ADD_PROTOCOL_MAPPER"));          // admin-authored mapper → manual
-        pending.add(adoptCr("adopt-manual", "ADOPT_CLIENT", false));  // admin-authored adopt → manual
+        // firstAdmin relaxation (2026-06-24): an admin-authored (non-ATTESTATION_ONLY) ADOPT
+        // now ALSO auto-commits under firstAdmin — the whole ADOPT closure is the initial
+        // attested baseline. It IS swept; only the non-ADOPT CREATE_* CRs stay manual.
+        pending.add(adoptCr("adopt-manual", "ADOPT_CLIENT", false));  // admin-authored adopt → AUTO
 
         AtomicReference<List<String>> seen = new AtomicReference<>();
         IgaFirstAdminAutoCommit.BulkEngine engine = crIdIn -> {
@@ -393,15 +400,17 @@ class IgaFirstAdminAutoCommitTest {
                     IgaFirstAdminAutoCommit.sweep(session, realm, admin, pending, engine);
 
             assertTrue(result.ran);
-            assertEquals(2, result.eligible,
-                    "only the realm-attribute CR + the SYSTEM ADOPT CR are eligible");
+            assertEquals(3, result.eligible,
+                    "the realm-attribute CR + BOTH ADOPT CRs (system + admin-authored) are eligible "
+                            + "under the firstAdmin ADOPT relaxation (was 2 before 2026-06-24)");
             List<String> requested = seen.get();
             assertTrue(requested.contains("c1"));
             assertTrue(requested.contains("adopt-sys"),
                     "the SYSTEM adopt CR IS swept (its target is a stock-default entity)");
-            // The non-system adopt + every manually-added entity CR must never be requested.
-            assertFalse(requested.contains("adopt-manual"),
-                    "the non-system (admin-authored) ADOPT CR must stay manual");
+            // firstAdmin relaxation (2026-06-24): the admin-authored ADOPT is now ALSO swept.
+            assertTrue(requested.contains("adopt-manual"),
+                    "the admin-authored ADOPT CR is also swept under the firstAdmin relaxation");
+            // Every non-ADOPT manually-added entity CR must still never be requested.
             assertFalse(requested.contains("c3"));
             assertFalse(requested.contains("c4"));
             assertFalse(requested.contains("c5"));

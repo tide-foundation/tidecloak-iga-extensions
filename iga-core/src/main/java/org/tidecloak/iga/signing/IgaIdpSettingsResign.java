@@ -127,8 +127,20 @@ public final class IgaIdpSettingsResign {
      * from current realm state (idempotent), so triggering on the full client-CR
      * family is safe, matches the manual "re-sign settings" button admins run after
      * any client save, and stays correct if the signed draft is ever widened.
+     *
+     * <p>{@code CREATE_CLIENT} and {@code DELETE_CLIENT} are included because the
+     * signed bundle's client-origin list is built from the set of live realm
+     * clients: adding a client introduces a new {@code clientAuth:<clientId><origin>}
+     * signature that must be minted, and removing one leaves the remaining bundle
+     * needing a re-sign (the now-orphan {@code clientAuth:*} keys for the deleted
+     * client are harmless and are not pruned). Their replay runs BEFORE the commit
+     * tail's {@link #reSignForClientSettings}, so at re-sign time a created client
+     * already exists and a deleted client is already gone, so the rebuild
+     * reflects live state.
      */
     static final java.util.Set<String> CLIENT_SIGNED_ACTION_TYPES = java.util.Set.of(
+            "CREATE_CLIENT",
+            "DELETE_CLIENT",
             "SET_CLIENT_ATTRIBUTE",
             "REMOVE_CLIENT_ATTRIBUTE",
             "UPDATE_CLIENT_PROPERTY",
