@@ -164,6 +164,63 @@ class IgaCommitIdpResignSeamTest {
         driveCommitAndVerify(cr, true);
     }
 
+    /**
+     * A committed client-settings CR (one of the 10 captured client action types)
+     * must drive the coalesced client re-sign
+     * ({@code IgaIdpSettingsResign.reSignForClientSettings}) from the single-CR
+     * commit tail. Stubs the client predicate true (its exhaustive coverage lives in
+     * {@code IgaIdpSettingsResignTest}) and asserts the tail dispatches the re-sign.
+     */
+    @SuppressWarnings("unchecked")
+    @Test
+    void commitTailReSignsForClientSettingsCr() {
+        IgaChangeRequestEntity cr = cr("cr-client", "UPDATE_CLIENT_WEB_ORIGINS",
+                "[{\"client_id\":\"acme\"}]");
+        when(em.find(IgaChangeRequestEntity.class, cr.getId())).thenReturn(cr);
+
+        UserModel admin = mock(UserModel.class);
+        when(auth.adminAuth().getUser()).thenReturn(admin);
+
+        TypedQuery<IgaAuthorizationEntity> q = mock(TypedQuery.class);
+        when(em.createNamedQuery("IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class))
+                .thenReturn(q);
+        when(q.setParameter(anyString(), any())).thenReturn(q);
+        when(q.getResultList()).thenReturn(List.of(new IgaAuthorizationEntity()));
+
+        TypedQuery<Long> countQ = mock(TypedQuery.class);
+        when(em.createNamedQuery("IgaAuthorization.countByChangeRequest", Long.class))
+                .thenReturn(countQ);
+        when(countQ.setParameter(anyString(), any())).thenReturn(countQ);
+        when(countQ.getSingleResult()).thenReturn(1L);
+
+        IgaAttestor attestor = mock(IgaAttestor.class);
+        when(attestor.getThreshold(any(), any(), any())).thenReturn(1);
+        when(attestor.combineFinal(any(), any(), any())).thenReturn("ATTEST");
+        when(attestor.isSetSigned()).thenReturn(false);
+
+        try (MockedStatic<IgaAttestors> attestors = mockStatic(IgaAttestors.class);
+             MockedStatic<IgaScopeResolver> scope = mockStatic(IgaScopeResolver.class);
+             MockedStatic<IgaReplayExtension> ext = mockStatic(IgaReplayExtension.class);
+             MockedStatic<IgaReplayDispatcher> disp = mockStatic(IgaReplayDispatcher.class);
+             MockedStatic<IgaToggleOnBackfill> backfill = mockStatic(IgaToggleOnBackfill.class);
+             MockedStatic<IgaIdpSettingsResign> resign = mockStatic(IgaIdpSettingsResign.class)) {
+
+            attestors.when(() -> IgaAttestors.resolveAttestor(any(), any())).thenReturn(attestor);
+            scope.when(() -> IgaScopeResolver.resolve(any(), any(), any()))
+                    .thenReturn(mock(IgaScopeResolver.ResolvedScope.class));
+            ext.when(() -> IgaReplayExtension.tryReplay(any(), any(), anyString(), anyBoolean()))
+                    .thenReturn(false);
+            resign.when(() -> IgaIdpSettingsResign.changesClientSignedSetting(cr)).thenReturn(true);
+
+            Response resp = resource.commit(cr.getId());
+            assertEquals(200, resp.getStatus(), "commit should reach its 200 tail");
+
+            // The per-CR RegOn hook still fires (unconditional tail call, no-op here);
+            // the client-settings CR additionally drives the coalesced client re-sign.
+            resign.verify(() -> IgaIdpSettingsResign.reSignForClientSettings(session, realm), times(1));
+        }
+    }
+
     @Test
     void commitTailDoesNotReSignForVerifyEmailOnly() {
         // The hook is still INVOKED (it's an unconditional tail call), but with a

@@ -842,7 +842,13 @@ public class IgaAdminResource {
         // state and stamped into their DEDICATED per-unit columns (commit bytes ==
         // login bytes by construction). Set-signing (tide) only; a no-op on simple.
         // Runs in the SAME JPA transaction as the replay above.
-        if (attestor instanceof org.tidecloak.iga.attestors.TideAttestor tideAttestor) {
+        // SKIP for DELETE_REALM: the replay above deleted the realm outright, so `realm`
+        // is now a removed/detached adapter — resolving modes and stamping producer
+        // columns against it is meaningless (and DELETE_REALM frames no producer unit
+        // anyway). All other actions (incl. DISABLE_IGA / OFFBOARD_REALM, whose realm
+        // survives) still stamp.
+        if (attestor instanceof org.tidecloak.iga.attestors.TideAttestor tideAttestor
+                && !org.tidecloak.iga.attestors.TideAttestor.ACTION_DELETE_REALM.equals(cr.getActionType())) {
             tideAttestor.stampProducerUnitColumns(session, realm, cr);
         }
 
@@ -860,15 +866,18 @@ public class IgaAdminResource {
         // sign-defaults sweep (which auto-commits the ADOPT set through the bulk core). No-op
         // while ADOPT CRs pend.
         //
-        // SKIP for DISABLE_IGA and OFFBOARD_REALM: the convergence does an ORK signing
-        // ceremony (on a firstAdmin real-signing realm once no ADOPTs pend). Turning
-        // IGA OFF must never be blocked by ORK reachability, and re-stamping producer
-        // columns on a realm being disabled is pointless. OFFBOARD_REALM tears the
-        // realm down entirely (ragnarok teardown ran in the replay above), so
-        // re-stamping its producer columns is likewise pointless and must not block
-        // the offboard on ORK reachability — so neither commit runs convergence.
+        // SKIP for DISABLE_IGA, OFFBOARD_REALM and DELETE_REALM: the convergence does an
+        // ORK signing ceremony (on a firstAdmin real-signing realm once no ADOPTs pend).
+        // Turning IGA OFF must never be blocked by ORK reachability, and re-stamping
+        // producer columns on a realm being disabled is pointless. OFFBOARD_REALM tears
+        // the realm down entirely (ragnarok teardown ran in the replay above), so
+        // re-stamping its producer columns is likewise pointless and must not block the
+        // offboard on ORK reachability. DELETE_REALM removed the realm outright in the
+        // replay above — there is no realm left to converge over — so it must be skipped
+        // too (convergeAfterCommit would otherwise run against a deleted realm).
         if (!"DISABLE_IGA".equals(cr.getActionType())
-                && !org.tidecloak.iga.attestors.TideAttestor.ACTION_OFFBOARD_REALM.equals(cr.getActionType())) {
+                && !org.tidecloak.iga.attestors.TideAttestor.ACTION_OFFBOARD_REALM.equals(cr.getActionType())
+                && !org.tidecloak.iga.attestors.TideAttestor.ACTION_DELETE_REALM.equals(cr.getActionType())) {
             org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, realm);
         }
 
@@ -883,6 +892,23 @@ public class IgaAdminResource {
         // on any non-(setRegistrationAllowed) CR. This is the COMMON single-CR /
         // multiAdmin commit tail; bulk has the identical call in processOneCr.
         org.tidecloak.iga.signing.IgaIdpSettingsResign.maybeReSign(session, realm, cr);
+
+        // Also re-sign when this commit changed CLIENT settings that feed the
+        // VVK-signed IdP-settings bundle (per-client web origins + the realm's
+        // client-origin list). client-settings saves coalesce into per-action CRs
+        // (SET_CLIENT_ATTRIBUTE / UPDATE_CLIENT_WEB_ORIGINS / UPDATE_CLIENT_REDIRECT_URIS
+        // / UPDATE_CLIENT_PROPERTY / protocol-mapper + scope-mapping writes); committing
+        // any of them can leave the stored clientAuth:* signatures stale — this replaces
+        // the manual "re-sign settings" step admins ran after a client save. This is the
+        // single-CR commit lane (commit() and /approve via commitIfReady), which applies
+        // exactly ONE CR, so at most one re-sign fires here; the bulk lane coalesces to
+        // one re-sign per batch (see runBulkLocked). Disjoint from the RegOn predicate
+        // above (SET_REALM_CONFIG is not a client action type), so no double-sign. Same
+        // fail-closed / Tideless-no-op contract as maybeReSign (a signer failure throws
+        // out of here and rolls this commit tx back rather than leaving stale sigs).
+        if (org.tidecloak.iga.signing.IgaIdpSettingsResign.changesClientSignedSetting(cr)) {
+            org.tidecloak.iga.signing.IgaIdpSettingsResign.reSignForClientSettings(session, realm);
+        }
 
         IgaChangeRequestService service = getService();
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
@@ -1558,16 +1584,35 @@ public class IgaAdminResource {
                     // loop below commits candidates in list order, so this stable sort (which only
                     // pushes REGEN_ADMIN_POLICY to the end, preserving the relative order of every
                     // other CR) strictly enforces policy-last in the COMMIT, not just the listing.
+                    // DELETE_REALM must commit STRICTLY LAST (rank 2): its replay removes the
+                    // realm outright, so any CR after it in the batch would run against a
+                    // deleted realm. REGEN_ADMIN_POLICY stays commit-last-among-the-rest
+                    // (rank 1) for the threshold-ordering reason below. The stable sort keeps
+                    // every other CR's relative order.
                     candidates = new ArrayList<>(candidates);
-                    candidates.sort(java.util.Comparator.comparingInt(
-                            c -> "REGEN_ADMIN_POLICY".equals(c.getActionType()) ? 1 : 0));
+                    candidates.sort(java.util.Comparator.comparingInt(c -> {
+                        String at = c.getActionType();
+                        if ("DELETE_REALM".equals(at)) return 2;
+                        if ("REGEN_ADMIN_POLICY".equals(at)) return 1;
+                        return 0;
+                    }));
 
+                    // Track whether ANY committed CR in this batch changed client
+                    // settings that feed the signed IdP-settings bundle, so the re-sign
+                    // ceremony runs ONCE after the whole batch drains (a client save
+                    // coalesces into up to 10 per-action CRs — see the post-loop block).
+                    boolean anyClientReSign = false;
                     for (IgaChangeRequestEntity candidate : candidates) {
                         String crId = candidate.getId();
                         Map<String, Object> outcome = processOneCr(crId, finalAdmin);
                         results.add(outcome);
                         String status = String.valueOf(outcome.get("status"));
-                        if ("COMMITTED".equals(status)) committed++;
+                        if ("COMMITTED".equals(status)) {
+                            committed++;
+                            if (org.tidecloak.iga.signing.IgaIdpSettingsResign.changesClientSignedSetting(candidate)) {
+                                anyClientReSign = true;
+                            }
+                        }
                         else if ("REJECTED".equals(status)) rejected++;
                         else skipped++;
                     }
@@ -1604,7 +1649,33 @@ public class IgaAdminResource {
                     // single-CR commit path keep deferConverge=false (their existing per-call converge
                     // is unchanged).
                     if (!finalDeferConverge) {
-                        org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, realm);
+                        // A DELETE_REALM committed in this batch (sorted LAST, see above)
+                        // removed the realm outright — re-check existence before the converge
+                        // ORK ceremony rather than running it against a deleted realm.
+                        RealmModel liveRealm = session.realms().getRealm(realm.getId());
+                        if (liveRealm != null) {
+                            org.tidecloak.iga.services.IgaToggleOnBackfill.convergeAfterCommit(session, liveRealm);
+                        }
+                    }
+
+                    // Coalesced client-settings re-sign (ONCE per batch). If any CR
+                    // committed above changed client settings that feed the VVK-signed
+                    // IdP-settings bundle (per-client web origins), re-run the signing
+                    // ceremony EXACTLY ONCE for the whole batch — a client save coalesces
+                    // into up to 10 per-action CRs, so a per-CR re-sign (10 ORK round-trips)
+                    // would be wasteful; one re-sign rebuilds the whole signed bundle from
+                    // current realm state. Not gated on deferConverge: the firstAdmin ADOPT
+                    // sweep commits ADOPT_* CRs (never client CRs), so anyClientReSign is
+                    // false there and this is a no-op. Same fail-closed contract as the
+                    // convergeAfterCommit above (a signer failure throws here and rolls back
+                    // the batch's commit flips rather than leaving stale clientAuth:*
+                    // signatures). No-op on Tideless realms. Re-resolve the live realm in
+                    // case a batch member removed it (mirrors the DELETE_REALM guard above).
+                    if (anyClientReSign) {
+                        RealmModel liveRealmForResign = session.realms().getRealm(realm.getId());
+                        if (liveRealmForResign != null) {
+                            org.tidecloak.iga.signing.IgaIdpSettingsResign.reSignForClientSettings(session, liveRealmForResign);
+                        }
                     }
 
                     Map<String, Object> summary = new LinkedHashMap<>();
@@ -1785,7 +1856,11 @@ public class IgaAdminResource {
             // realm_config / realm_default_groups / the derived-set columns / user_role_mapping
             // NULL and the node columns carrying only combineFinal's stub. Runs in the SAME
             // JPA transaction as the replay above. Set-signing (tide) only; no-op on simple.
-            if (attestor instanceof org.tidecloak.iga.attestors.TideAttestor tideAttestor) {
+            // SKIP for DELETE_REALM: the replay above deleted the realm outright, so `realm`
+            // is a removed/detached adapter and DELETE_REALM frames no producer unit anyway
+            // (identical guard to the single-CR commit() tail).
+            if (attestor instanceof org.tidecloak.iga.attestors.TideAttestor tideAttestor
+                    && !org.tidecloak.iga.attestors.TideAttestor.ACTION_DELETE_REALM.equals(cr.getActionType())) {
                 tideAttestor.stampProducerUnitColumns(session, realm, cr);
             }
 

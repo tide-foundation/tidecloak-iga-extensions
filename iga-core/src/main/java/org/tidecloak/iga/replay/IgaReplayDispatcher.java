@@ -245,6 +245,14 @@ public class IgaReplayDispatcher {
             // depend on ragnarok). Fail-closed when the SPI is absent.
             case "OFFBOARD_REALM" -> replayOffboardRealm(session, realm, cr, em);
 
+            // ----- Governed whole-realm delete (DELETE_REALM) -----
+            // Irreversible full realm teardown, captured by IgaRealmProvider.removeRealm as a
+            // first-class DELETE_REALM CR (entityType REALM) instead of letting KC's realm-delete
+            // cascade leak into the single-entity capture seam and mis-file a DELETE_CLIENT CR.
+            // Unlike OFFBOARD_REALM there is NO ORK/doken ceremony — the teardown is a plain
+            // RealmManager.removeRealm. Fail-closed within the replay tx (mirrors OFFBOARD).
+            case "DELETE_REALM" -> replayDeleteRealm(session, realm, cr, em);
+
             // ----- Admin-policy threshold re-sign (steady-state multiAdmin) -----
             // NOT a model mutation: it Policy:1-signs the NEW admin Policy (carried in
             // ROWS_JSON, approved via the two-phase ceremony) with the collected dokens and
@@ -2557,6 +2565,75 @@ public class IgaReplayDispatcher {
                         + "Default signature algorithm left intact (offboard reconstructs the VVK as a "
                         + "local eddsaPrivateKey, so EdDSA token signing stays viable without ORKs).",
                 realm.getName(), org.tidecloak.iga.attestors.SimpleNameAttestor.ID, removedAuthorizerRows);
+    }
+
+    // -------------------------------------------------------------------------
+    // Governed whole-realm delete (DELETE_REALM)
+    //
+    // The irreversible full-realm teardown, captured by IgaRealmProvider.removeRealm
+    // as a first-class DELETE_REALM CR (entityType REALM) rather than letting KC's
+    // realm-delete cascade re-enter the single-entity capture seam and mis-file a
+    // DELETE_CLIENT CR. Mirrors the replayOffboardRealm precedent for destructive
+    // realm-level teardown from a commit, but performs a FULL delete (not a Tideless
+    // cutover) and runs NO ORK ceremony / doken carrier: DELETE_REALM is non-producer
+    // (combineFinal stub-signs its own attestation) and its multiAdmin quorum is
+    // collected as ordinary enclave dokens over a plain canonical carrier, exactly
+    // like DISABLE_IGA.
+    //
+    // Runs INSIDE the commit/replay tx (IGA_REPLAY_ACTIVE already true), so:
+    //   * CR resolution + realm removal are ATOMIC — any failure rolls the whole tx
+    //     back, nothing is deleted, and the CR stays committable-retry (fail-closed,
+    //     same contract as replayOffboardRealm);
+    //   * RealmManager.removeRealm's internal cascade (session.clients().removeClients
+    //     → removeClient(...) → the IGA mega-provider) passes STRAIGHT THROUGH the IGA
+    //     capture wrappers because isIgaActive() is false under replay — so it does NOT
+    //     re-file DELETE_CLIENT/ROLE/GROUP CRs (this is exactly the leak the removeRealm
+    //     capture override closes, and that replay relies on).
+    //
+    // ORDERING: resolve + FLUSH the CR to APPROVED BEFORE removing the realm. The
+    // IGA_CHANGE_REQUEST row is NOT FK-cascaded to the realm (removeRealm won't delete
+    // it), but JpaRealmProvider.removeRealm calls em.clear() at the end, detaching every
+    // managed entity; writing the resolved status first (while the CR is managed) keeps
+    // the dispatcher tail's re-find/re-set idempotent and the resolution durable within
+    // this tx. RealmManager.removeRealm (NOT the raw model.removeRealm) is used so the
+    // master-realm <realm>-realm admin client is also removed and the
+    // RealmModel.RealmRemovedEvent fires (user/auth-session cleanup + cache invalidation).
+    // -------------------------------------------------------------------------
+
+    private static void replayDeleteRealm(KeycloakSession session, RealmModel realm,
+                                          IgaChangeRequestEntity cr, EntityManager em) {
+        if (realm == null) {
+            throw new IllegalStateException("DELETE_REALM replay: realm not loadable");
+        }
+        // Bind the realm on the session context so the teardown runs on a realm-bound
+        // session (same contract as replayOffboardRealm / replayDisableIga).
+        session.getContext().setRealm(realm);
+
+        String realmName = realm.getName();
+        String realmId = realm.getId();
+
+        // Resolve the CR FIRST — durable within THIS tx, before removeRealm's trailing
+        // em.clear() detaches it. The dispatcher tail re-finds + re-sets APPROVED
+        // idempotently; doing it here too keeps the resolution atomic with the delete.
+        if (cr != null) {
+            IgaChangeRequestEntity managed = em.find(IgaChangeRequestEntity.class, cr.getId());
+            if (managed != null) {
+                managed.setStatus("APPROVED");
+                managed.setResolvedAt(System.currentTimeMillis());
+                em.flush();
+            }
+        }
+
+        // The REAL, full teardown. Fail-closed: a false return or a thrown exception
+        // rolls the whole commit tx back (nothing torn down, CR stays committable-retry).
+        boolean removed = new RealmManager(session).removeRealm(realm);
+        if (!removed) {
+            throw new IllegalStateException("DELETE_REALM replay: RealmManager.removeRealm returned "
+                    + "false for realm " + realmName + " (" + realmId + ") — nothing removed; rolling "
+                    + "back so the CR stays committable-retry.");
+        }
+        log.infof("DELETE_REALM replay: realm %s (%s) removed via RealmManager.removeRealm.",
+                realmName, realmId);
     }
 
     // -------------------------------------------------------------------------

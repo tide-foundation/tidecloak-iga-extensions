@@ -513,14 +513,16 @@ public class IgaClientAdapter extends ClientAdapter {
         }
         IgaChangeRequestService service = getService();
         String clientUuid = getId();
-        checkNoPendingCr(service, clientUuid);
         Map<String, Object> row = new HashMap<>();
         row.put("CLIENT_UUID", clientUuid);
         row.put("CLIENT_ID", getClientId());
         row.put("NAME", name);
         row.put("VALUE", value);
-        service.create(realm, "CLIENT", clientUuid, "SET_CLIENT_ATTRIBUTE",
-                List.of(row), null);
+        // Coalesce same-request client-attribute writes into one CR (a
+        // multi-field client-settings save); merge keys on the attribute NAME.
+        // A foreign pending CR still 409s.
+        service.coalesceOrCreate(realm, "CLIENT", clientUuid, "SET_CLIENT_ATTRIBUTE",
+                List.of(row), null, Set.of(name));
     }
 
     @Override
@@ -536,20 +538,14 @@ public class IgaClientAdapter extends ClientAdapter {
         }
         IgaChangeRequestService service = getService();
         String clientUuid = getId();
-        checkNoPendingCr(service, clientUuid);
         Map<String, Object> row = new HashMap<>();
         row.put("CLIENT_UUID", clientUuid);
         row.put("CLIENT_ID", getClientId());
         row.put("NAME", name);
-        service.create(realm, "CLIENT", clientUuid, "REMOVE_CLIENT_ATTRIBUTE",
-                List.of(row), null);
-    }
-
-    private void checkNoPendingCr(IgaChangeRequestService service, String clientUuid) {
-        var existing = service.findPending(realm.getId(), "CLIENT", clientUuid);
-        if (existing != null) {
-            throw new IgaConflictException(existing.getId());
-        }
+        // Coalesce same-request client-attribute removals into one CR; merge
+        // keys on the attribute NAME. A foreign pending CR still 409s.
+        service.coalesceOrCreate(realm, "CLIENT", clientUuid, "REMOVE_CLIENT_ATTRIBUTE",
+                List.of(row), null, Set.of(name));
     }
 
     @Override
@@ -573,9 +569,11 @@ public class IgaClientAdapter extends ClientAdapter {
         if (model.getConfig() != null) {
             row.put("config", new LinkedHashMap<>(model.getConfig()));
         }
-        service.create(realm, "CLIENT", clientUuid, "ADD_PROTOCOL_MAPPER",
-                List.of(row),
-                null);
+        // Coalesce same-request mapper adds into one CR (bulk add-models);
+        // merge keys on the mapper NAME. A foreign pending CR still 409s.
+        service.coalesceOrCreate(realm, "CLIENT", clientUuid, "ADD_PROTOCOL_MAPPER",
+                List.of(row), null,
+                model.getName() != null ? Set.of(model.getName()) : null);
         // Return a stub model with the assigned id
         model.setId(mapperId);
         return model;
@@ -599,8 +597,11 @@ public class IgaClientAdapter extends ClientAdapter {
         if (mapping.getConfig() != null) {
             row.put("config", new LinkedHashMap<>(mapping.getConfig()));
         }
-        service.create(realm, "CLIENT", clientUuid, "UPDATE_PROTOCOL_MAPPER",
-                List.of(row), null);
+        // Coalesce same-request mapper updates into one CR; merge keys on the
+        // mapper NAME. A foreign pending CR still 409s.
+        service.coalesceOrCreate(realm, "CLIENT", clientUuid, "UPDATE_PROTOCOL_MAPPER",
+                List.of(row), null,
+                mapping.getName() != null ? Set.of(mapping.getName()) : null);
     }
 
     @Override
@@ -615,8 +616,11 @@ public class IgaClientAdapter extends ClientAdapter {
         row.put("ID", mapping.getId());
         row.put("CLIENT_UUID", clientUuid);
         row.put("CLIENT_ID", getClientId());
-        service.create(realm, "CLIENT", clientUuid, "REMOVE_PROTOCOL_MAPPER",
-                List.of(row), null);
+        // Coalesce same-request mapper removals into one CR; the row carries no
+        // NAME/PROPERTY identity key, so rows append (distinct mapper ids). A
+        // foreign pending CR still 409s.
+        service.coalesceOrCreate(realm, "CLIENT", clientUuid, "REMOVE_PROTOCOL_MAPPER",
+                List.of(row), null, null);
     }
 
     // -------------------------------------------------------------------------
@@ -651,8 +655,11 @@ public class IgaClientAdapter extends ClientAdapter {
         row.put("CLIENT_UUID", clientUuid);
         row.put("CLIENT_ID", getClientId());
         row.put("ROLE_ID", role.getId());
-        service.create(realm, "CLIENT", clientUuid, "SCOPE_MAPPING_ADD",
-                List.of(row), null);
+        // Coalesce same-request scope-mapping adds into one CR; the row carries
+        // no NAME/PROPERTY identity key, so rows append (distinct ROLE_IDs). A
+        // foreign pending CR still 409s.
+        service.coalesceOrCreate(realm, "CLIENT", clientUuid, "SCOPE_MAPPING_ADD",
+                List.of(row), null, null);
     }
 
     @Override
@@ -667,8 +674,11 @@ public class IgaClientAdapter extends ClientAdapter {
         row.put("CLIENT_UUID", clientUuid);
         row.put("CLIENT_ID", getClientId());
         row.put("ROLE_ID", role.getId());
-        service.create(realm, "CLIENT", clientUuid, "SCOPE_MAPPING_REMOVE",
-                List.of(row), null);
+        // Coalesce same-request scope-mapping removals into one CR; the row
+        // carries no NAME/PROPERTY identity key, so rows append (distinct
+        // ROLE_IDs). A foreign pending CR still 409s.
+        service.coalesceOrCreate(realm, "CLIENT", clientUuid, "SCOPE_MAPPING_REMOVE",
+                List.of(row), null, null);
     }
 
     // -------------------------------------------------------------------------
@@ -702,8 +712,12 @@ public class IgaClientAdapter extends ClientAdapter {
         row.put("CLIENT_UUID", clientUuid);
         row.put("CLIENT_ID", getClientId());
         row.put("values", webOrigins == null ? new ArrayList<String>() : new ArrayList<>(webOrigins));
-        service.create(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_WEB_ORIGINS",
-                List.of(row), null);
+        // Coalesce into this request's CLIENT CR (multi-field client save). The
+        // full-set row carries no NAME/PROPERTY identity key; KC calls this setter
+        // once per PUT so rows never duplicate, and replay applies rows last-wins.
+        // A foreign pending CR still 409s.
+        service.coalesceOrCreate(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_WEB_ORIGINS",
+                List.of(row), null, null);
     }
 
     @Override
@@ -724,8 +738,11 @@ public class IgaClientAdapter extends ClientAdapter {
         row.put("CLIENT_UUID", clientUuid);
         row.put("CLIENT_ID", getClientId());
         row.put("values", redirectUris == null ? new ArrayList<String>() : new ArrayList<>(redirectUris));
-        service.create(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_REDIRECT_URIS",
-                List.of(row), null);
+        // Coalesce into this request's CLIENT CR (see setWebOrigins). Full-set
+        // row, no identity key, one call per PUT, replay last-wins. A foreign
+        // pending CR still 409s.
+        service.coalesceOrCreate(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_REDIRECT_URIS",
+                List.of(row), null, null);
     }
 
     /**
@@ -830,8 +847,12 @@ public class IgaClientAdapter extends ClientAdapter {
         row.put("CLIENT_ID", getClientId());
         row.put("PROPERTY", property);
         row.put("VALUE", value);
-        service.create(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_PROPERTY",
-                List.of(row), null);
+        // Coalesce same-request client-property writes into one CR (a multi-field
+        // client save touching several token-shaping columns); merge keys on the
+        // PROPERTY name so a repeated edit of the same property folds. A foreign
+        // pending CR still 409s.
+        service.coalesceOrCreate(realm, "CLIENT", clientUuid, "UPDATE_CLIENT_PROPERTY",
+                List.of(row), null, Set.of(property));
     }
 
     // -------------------------------------------------------------------------
