@@ -2049,6 +2049,13 @@ public class IgaReplayDispatcher {
                 }
                 case "protocol" -> client.setProtocol(value);
                 case "clientId" -> { if (value != null) client.setClientId(value); }
+                // Origin-URL columns (see IgaClientAdapter setRootUrl/setBaseUrl/
+                // setManagementUrl). A null value is a legitimate "field cleared"
+                // and is applied as-is; these feed getAllWebOriginsForClient, so
+                // the commit tail's reSignForClientSettings rebuilds clientAuth:*.
+                case "rootUrl" -> client.setRootUrl(value);
+                case "baseUrl" -> client.setBaseUrl(value);
+                case "managementUrl" -> client.setManagementUrl(value);
                 default -> log.warnf("IGA replay UPDATE_CLIENT_PROPERTY: unknown property '%s' "
                         + "for client %s — ignoring", property, client.getId());
             }

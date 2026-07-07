@@ -830,6 +830,60 @@ public class IgaClientAdapter extends ClientAdapter {
         captureClientProperty("clientId", clientId);
     }
 
+    // -------------------------------------------------------------------------
+    // Client origin-URL columns: rootUrl, baseUrl, managementUrl (the console
+    // "Root URL" / "Home URL" / "Admin URL"). These feed the signed client
+    // origin set: VendorResource.getAllWebOriginsForClient unions a client's
+    // web-origins with its rootUrl/baseUrl/managementUrl origins and the
+    // redirect-URI origins, and SignIdpSettings emits a per-origin
+    // clientAuth:<clientId><origin> signature. Left ungoverned (previously no
+    // override existed) a Root/Home/Admin-URL change applied directly at SAVE
+    // with no CR and no re-sign, staling the clientAuth:* signatures so the
+    // enclave rejects the client at login ("Signed Settings were not able to be
+    // verified"). Capture each as an UPDATE_CLIENT_PROPERTY CR (same entity,
+    // same clientConfig framing; already in CLIENT_SIGNED_ACTION_TYPES so the
+    // commit tail re-signs) and suppress the direct write. Replay applies the
+    // property via IgaReplayDispatcher.replayUpdateClientProperty.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void setRootUrl(String rootUrl) {
+        if (!isIgaActive()) {
+            super.setRootUrl(rootUrl);
+            return;
+        }
+        // No-op guard (see setWebOrigins): KC re-applies the current value on
+        // every PUT; suppress the phantom UPDATE_CLIENT_PROPERTY CR when unchanged.
+        if (java.util.Objects.equals(rootUrl, super.getRootUrl())) {
+            return;
+        }
+        captureClientProperty("rootUrl", rootUrl);
+    }
+
+    @Override
+    public void setBaseUrl(String baseUrl) {
+        if (!isIgaActive()) {
+            super.setBaseUrl(baseUrl);
+            return;
+        }
+        if (java.util.Objects.equals(baseUrl, super.getBaseUrl())) {
+            return;
+        }
+        captureClientProperty("baseUrl", baseUrl);
+    }
+
+    @Override
+    public void setManagementUrl(String managementUrl) {
+        if (!isIgaActive()) {
+            super.setManagementUrl(managementUrl);
+            return;
+        }
+        if (java.util.Objects.equals(managementUrl, super.getManagementUrl())) {
+            return;
+        }
+        captureClientProperty("managementUrl", managementUrl);
+    }
+
     /**
      * Capture a single token-shaping client-config property change as an
      * {@code UPDATE_CLIENT_PROPERTY} change request (PROPERTY = the field name,
