@@ -139,15 +139,15 @@ public class TideAttestor implements IgaAttestor {
     public static final String ACTION_OFFBOARD_REALM = "OFFBOARD_REALM";
 
     /**
-     * Action type for a governed whole-realm delete. Like {@code OFFBOARD_REALM} it
-     * is an irreversible, NON-producer realm-teardown CR (stub-signed own attestation,
-     * NOT auto-committable, NOT an ADOPT action). UNLIKE offboard it runs NO
-     * ORK/doken ceremony: the teardown is a plain {@code RealmManager.removeRealm} on
+     * Action type for a governed whole-realm delete. It is a NON-producer teardown CR
+     * (stub-signed own attestation, NOT auto-committable, NOT an ADOPT action) and runs
+     * NO ORK/doken ceremony: the teardown is a plain {@code RealmManager.removeRealm} on
      * commit ({@code IgaReplayDispatcher.replayDeleteRealm}), and in multiAdmin its
      * quorum is collected as ordinary enclave dokens over a canonical carrier exactly
-     * like {@code DISABLE_IGA}. Its commit threshold is floored at the SAME
-     * min-admins as offboard ({@link #resolveOffboardMinAdmins}) so a realm-delete is
-     * never easier to pass than an offboard.
+     * like {@code DISABLE_IGA}. UNLIKE {@code OFFBOARD_REALM}, DELETE_REALM is governed
+     * at the realm's ORDINARY admin quorum — the SAME threshold path as
+     * {@code DELETE_CLIENT} / {@code DELETE_USER}. It has NO offboard min-admins floor
+     * and NO dedicated delete floor; {@code iga.offboardMinAdmins} does not affect it.
      */
     public static final String ACTION_DELETE_REALM = "DELETE_REALM";
 
@@ -380,18 +380,20 @@ public class TideAttestor implements IgaAttestor {
 
     @Override
     public int getThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr) {
-        // OFFBOARD_REALM and DELETE_REALM are irreversible realm-teardowns: BOTH MUST
-        // require a minimum number of distinct admin approvals REGARDLESS of mode (even
-        // firstAdmin's single-signer 1-of-1 is not enough to tear a realm down). The gate
-        // is max(normal quorum, min-admins), so a larger multiAdmin quorum still wins, but
-        // the floor can never drop below the configured minimum (default 3). Computed
-        // FIRST, before the firstAdmin short-circuit, so firstAdmin teardowns are NOT
-        // 1-of-1. DELETE_REALM shares OFFBOARD's floor deliberately — a realm-delete must
-        // never be EASIER to pass than an offboard. (Consequence: a firstAdmin / small
-        // realm with fewer than min-admins admins cannot governed-delete itself, exactly
-        // like offboard; out-of-band deletion, e.g. after DISABLE_IGA, remains available.)
-        if (cr != null && (ACTION_OFFBOARD_REALM.equals(cr.getActionType())
-                || ACTION_DELETE_REALM.equals(cr.getActionType()))) {
+        // OFFBOARD_REALM is irreversible: it MUST require a minimum number of distinct
+        // admin approvals REGARDLESS of mode (even firstAdmin's single-signer 1-of-1 is
+        // not enough to tear a realm down). The gate is max(normal quorum, min-admins),
+        // so a larger multiAdmin quorum still wins, but the floor can never drop below
+        // the configured minimum (default 3). Computed FIRST, before the firstAdmin
+        // short-circuit, so firstAdmin offboards are NOT 1-of-1.
+        //
+        // DELETE_REALM is deliberately NOT here: a realm-delete is governed at the
+        // realm's ORDINARY admin quorum, exactly like DELETE_CLIENT / DELETE_USER (which
+        // also fall through to the normal-quorum branches below). It carries NO offboard
+        // floor and NO dedicated delete floor — iga.offboardMinAdmins / the offboard
+        // min-admins path have NO effect on DELETE_REALM. So a single-admin realm needs
+        // 1 approval to delete a realm, the same as to delete a client there.
+        if (cr != null && ACTION_OFFBOARD_REALM.equals(cr.getActionType())) {
             return Math.max(normalQuorumThreshold(session, realm, cr), resolveOffboardMinAdmins(realm));
         }
         // firstAdmin is single-signer onboarding: ALWAYS 1, unconditionally — it
