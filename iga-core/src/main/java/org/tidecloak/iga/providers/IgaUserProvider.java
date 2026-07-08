@@ -153,69 +153,70 @@ public class IgaUserProvider extends JpaUserProvider {
             // full model on it and the terminal IgaUserAdapter#getId seam emits
             // the CREATE_USER CR + rollback-only + throws (→ 202 + Location).
             //
-            // accept-unattested SELF-ENROLLMENT default-role grant (PATH-ROBUST).
-            // For genuine self-enrollment under RegOn — BOTH the registration form
-            // (a RegistrationUserCreation frame) AND the Tide-enrolled IdP-broker /
-            // link-tide-account import (which arrives here as UserCacheSession#addUser,
-            // with NO RegistrationUserCreation frame) — pass addDefaultRoles=true to
-            // the 5-arg local-storage super.addUser. KC's JpaUserProvider.addUser then
-            // grants realm.getDefaultRole() + joins the default groups on the REAL
-            // JpaUser (a plain UserAdapter — in JpaUserProvider), BEFORE
-            // we wrap it in the capture adapter. That grant is therefore NOT routed
-            // through the IGA capture path → no nested GRANT_ROLES CR — and it
-            // PERSISTS on the live user.
+            // accept-unattested default-role grant (PATH-INDEPENDENT).
+            // Pass addDefaultRoles=true to the 5-arg local-storage super.addUser for
+            // EVERY create path under an open-registration (RegOn) realm — registration
+            // form, Tide IdP-broker first-login, link-tide-account enrollment,
+            // external-IdP first-login, token-exchange, admin-create — subject only to
+            // the MF2 benign-composite guard. KC's JpaUserProvider.addUser then grants
+            // realm.getDefaultRole() + joins the default groups on the REAL JpaUser (a
+            // plain UserAdapter — in JpaUserProvider), BEFORE we wrap it in the capture
+            // adapter. That grant is therefore NOT routed through the IGA capture path →
+            // no nested GRANT_ROLES CR — and it PERSISTS on the live user (for the
+            // persist-pending self-enrollment terminals).
             //
-            // WHY PATH-ROBUST (the Round-1 gap): the earlier gate keyed SOLELY on a
-            // RegistrationUserCreation StackWalker frame (isSelfRegistrationFrame),
-            // which fires for the plain registration form but NOT for the
-            // Tide-enrolled broker/link-tide import — the ACTUAL user flow. That left
-            // Tide-enrolled self-registrants ROLELESS → no account aud → ORK TVE
-            // "attested claim 'aud' is suppressed". The gate is now keyed on RegOn
-            // (realm.isRegistrationAllowed()) with admin-create / service-account
-            // EXCLUDED (see shouldGrantDefaultRolesOnSelfCreate), so BOTH self-enroll
-            // paths land the local default-role while admin/internal paths are
-            // unchanged.
+            // WHY PATH-INDEPENDENT (the staging bug fix): the earlier gate keyed the
+            // grant on a live StackWalker signal — a RegistrationUserCreation frame OR a
+            // positive Tide-broker check that required the auth-session BROKERED_CONTEXT
+            // note's IdP *alias* to equal the literal "tide". On the deployed
+            // Tide-broker / link-tide enrollment path that signal did not resolve (no
+            // live Tide-broker note at the addUser instant, and the brokered IdP alias
+            // need not be "tide"), so grantDefaultRoles came back false and Tide-enrolled
+            // users (e.g. staging keylessh 6d1a3bbf, uvuv) were created ROLELESS → no
+            // account aud → ORK TVE "attested claim 'aud' is suppressed". The gate is now
+            // keyed ONLY on RegOn + the MF2 benign-composite guard (see
+            // shouldGrantDefaultRolesOnSelfCreate) — no stack-frame / broker-alias
+            // sniffing — so EVERY enrollment path lands the local default-role.
             //
-            // WHY: an accept-unattested self-reg user is admitted UNSIGNED at
-            // login and its CREATE_USER CR never commits, so the D3 commit-replay
-            // default-role grant (IgaReplayDispatcher.replayCreateUser)
-            // never runs. Without granting here the self-reg user is ROLELESS →
-            // KC builds the token with empty resource_access → no `account`
-            // audience → the ORK TVE rejects "attested claim 'aud' is suppressed
-            // in token" (the producer closure attests aud=[account] from the
-            // universal-inherited realm default-role's account children).
+            // WHY GRANT AT CREATION: an accept-unattested self-enroll user is admitted
+            // UNSIGNED at login and its CREATE_USER CR never commits, so the D3
+            // commit-replay default-role grant (IgaReplayDispatcher.replayCreateUser)
+            // never runs. Without granting here the user is ROLELESS → KC builds the
+            // token with empty resource_access → no `account` audience → the ORK TVE
+            // rejects "attested claim 'aud' is suppressed in token" (the producer closure
+            // attests aud=[account] from the universal-inherited realm default-role's
+            // account children).
             //
             // CLOSURE INVARIANT (gate still admits): the realm default-role id is
             // the D1b exclusion in RealmAttestationExporter.perUserUnits — a user
             // holding ONLY default-roles → empty role_ids → NO user_role_mapping_set
             // unit. So the user HOLDS default-roles (token carries the account aud)
             // AND the producer closure has no role-mapping unit (the
-            // default-roles-only gate still admits the unsigned user_identity).
+            // default-roles-only gate still admits the unsigned user_identity). This
+            // holds because the ORK universal-inherits the realm default-role set
+            // (U19 RealmDefaultRolesSetAttestationUnit) for everyone.
             //
-            // SCOPE: the 1-arg overload is NOT registration-only — admin-create
-            // (UsersResource#createUser, via profile.create()), service-account
-            // (ClientManager), token-exchange and IdP-broker/link-tide all reach this
-            // branch. Under RegOn we grant default-roles for genuine self-enrollment
-            // (registration form AND Tide-enrolled broker/link-tide import) but EXCLUDE
-            // admin-create (its CR commits and the D3 commit-replay grant assigns
-            // default-roles; granting at creation too would double-grant) and
-            // service-account creates (ClientManager — internal, no account aud needed,
-            // keeps stock-suppressed creation). When RegOn is OFF nothing is granted
-            // here (stock-suppressed), so the open-registration posture is the gate.
+            // BLAST RADIUS: admin-create / service-account / governed creates are
+            // captured-then-vetoed — the creation-time grant is on the scratch user and
+            // is discarded with the request-tx rollback, then re-granted for real at
+            // commit via the D3 replay path — so granting here is a harmless idempotent
+            // no-op for them; only the persist-pending self-enrollment terminals retain
+            // it. When RegOn is OFF nothing is granted here (stock-suppressed), so the
+            // open-registration posture is the gate.
             boolean grantDefaultRoles = shouldGrantDefaultRolesOnSelfCreate(realm);
             String userId = KeycloakModelUtils.generateId();
             UserModel base = super.addUser(realm, userId,
                     username == null ? null : username.toLowerCase(),
                     grantDefaultRoles, false);
             if (grantDefaultRoles) {
-                log.infof("IGA capture CREATE_USER: self-enrollment under RegOn detected "
-                        + "(registration form OR Tide-enrolled broker/link-tide import; "
-                        + "registrationAllowed=true, not admin-create/service-account) — "
-                        + "granted realm default-role + default groups on the live user "
-                        + "(uuid=%s) at creation so the accept-unattested self-enroll token "
-                        + "carries the account aud; the default-role is D1b-excluded so no "
-                        + "user_role_mapping_set unit is produced (gate still admits the "
-                        + "unsigned user_identity).",
+                log.infof("IGA capture CREATE_USER: default-role grant under RegOn "
+                        + "(path-independent: registration form / Tide IdP-broker / "
+                        + "link-tide / any create; registrationAllowed=true, benign "
+                        + "default-role composite) — granted realm default-role + default "
+                        + "groups on the live user (uuid=%s) at creation so the "
+                        + "accept-unattested enroll token carries the account aud; the "
+                        + "default-role is D1b-excluded so no user_role_mapping_set unit is "
+                        + "produced (gate still admits the unsigned user_identity).",
                         userId);
             }
             if (base == null) return null;
@@ -304,57 +305,6 @@ public class IgaUserProvider extends JpaUserProvider {
         return base;
     }
 
-    /**
-     * The KC 26.5.5 self-registration form-action class. {@code success(FormContext)}
-     * (services {@code RegistrationUserCreation.success}) calls
-     * {@code profile.create()} → {@code DefaultUserProfile.create} →
-     * {@code DeclarativeUserProfileProvider}'s {@code createUserFactory().apply} →
-     * {@code session.users().addUser(realm, username)} (the 1-arg seam above). So when
-     * the 1-arg {@code addUser} runs inside the self-registration flow, this class is
-     * present in the live stack (above the user-profile factory). It is NOT present for
-     * admin-create ({@code UsersResource#createUser} is the {@code profile.create()}
-     * entry instead), service-account ({@code ClientManager}), token-exchange
-     * ({@code AbstractTokenExchangeProvider}), IdP-broker
-     * ({@code IdpCreateUserIfUniqueAuthenticator}) or master bootstrap
-     * ({@code ApplianceBootstrap}) — the other 1-arg callers.
-     */
-    private static final String KC_REGISTRATION_USER_CREATION =
-            "org.keycloak.authentication.forms.RegistrationUserCreation";
-
-    /**
-     * The KC admin user-create resource. Its presence anywhere in the live 1-arg
-     * {@code addUser} stack marks the call as ADMIN-create
-     * ({@code UsersResource.createUser} → {@code profile.create()} → the 1-arg seam).
-     * Admin-create is EXCLUDED from the creation-time default-role grant: its
-     * CREATE_USER CR commits and {@code IgaReplayDispatcher.replayCreateUser} D3-grants
-     * default-roles at replay; granting at creation too would double-grant.
-     */
-    private static final String KC_USERS_RESOURCE =
-            "org.keycloak.services.resources.admin.UsersResource";
-
-    /**
-     * The KC service-account manager. Its presence marks an internal
-     * service-account user-create ({@code ClientManager.enableServiceAccount} →
-     * {@code addUser}). Service-account users are EXCLUDED — they are internal, need
-     * no {@code account} audience, and granting the realm default-role to them would
-     * be a regression.
-     */
-    private static final String KC_CLIENT_MANAGER =
-            "org.keycloak.services.managers.ClientManager";
-
-    /**
-     * The stock KC broker first-login authenticator. Its presence in the live 1-arg
-     * {@code addUser} stack marks the create as an IdP-broker first-login
-     * ({@code IdpCreateUserIfUniqueAuthenticator.authenticateImpl} →
-     * {@code session.users().addUser(realm, username)}). This fires for EVERY brokered
-     * IdP — Tide AND external (non-Tide) — so the frame ALONE does NOT distinguish a
-     * genuine Tide self-enrollment from an external-IdP first-login. The allow-list gate
-     * pairs this frame with a positive Tide-broker check ({@link #isTideBrokerEnrollment})
-     * that reads the brokered IdP id from the auth session and admits ONLY the Tide IdP.
-     */
-    private static final String KC_IDP_CREATE_USER =
-            "org.keycloak.authentication.authenticators.broker.IdpCreateUserIfUniqueAuthenticator";
-
     /** The Tide social/broker IdP provider id (TideIdentityProviderFactory.PROVIDER_ID). */
     private static final String TIDE_IDP_PROVIDER_ID = "tide";
 
@@ -362,54 +312,98 @@ public class IgaUserProvider extends JpaUserProvider {
     private static final String BROKERED_CONTEXT_NOTE = "BROKERED_CONTEXT";
 
     /**
-     * Live-stack + RegOn predicate driving the {@code addDefaultRoles=true} scoping in
-     * the 1-arg {@link #addUser(RealmModel, String)} capture branch (ALLOW-LIST).
-     * Walks the live stack once, resolves the genuine-self-enrollment signal (registration
-     * form OR Tide-broker first-login), and ANDs it with the benign-composite guard
-     * so a tainted {@code default-roles-<realm>} (a privileged composite child) refuses
-     * self-reg eligibility (the user falls back to the normal fail-closed / CR path) rather
-     * than conferring privilege to an unsigned self-registrant.
+     * PATH-INDEPENDENT default-role grant gate for the 1-arg
+     * {@link #addUser(RealmModel, String)} capture branch.
+     *
+     * <p><b>Why path-independent (the staging bug fix).</b> The former gate keyed the
+     * grant on a live {@link StackWalker} self-enrollment signal — a
+     * {@code RegistrationUserCreation} frame OR a positive Tide-broker check that
+     * required the auth-session {@code BROKERED_CONTEXT} note's IdP <em>alias</em> to
+     * equal the literal {@code "tide"}. On the deployed Tide-broker / link-tide
+     * enrollment path that signal did NOT resolve (the stock broker create carries no
+     * live Tide-broker note at the {@code addUser} instant, and
+     * {@code SerializedBrokeredIdentityContext.getIdentityProviderId()} returns the
+     * configured IdP <em>alias</em>, which need not be {@code "tide"}), so
+     * {@code grantDefaultRoles} came back {@code false} and Tide-enrolled users were
+     * created ROLELESS → empty {@code resource_access} → no {@code account} audience →
+     * the ORK TVE rejects the login ("attested claim 'aud' is suppressed in token").
+     * Fragile stack-frame / broker-alias sniffing is removed; the grant now fires for
+     * EVERY create path (registration form, Tide IdP-broker first-login,
+     * link-tide-account enrollment, external-IdP first-login, token-exchange,
+     * admin-create) — that is what a realm <em>default</em> role means.
+     *
+     * <p><b>The two guards that remain (both genuinely load-bearing):</b>
+     * <ol>
+     *   <li><b>RegOn</b> ({@code realm.isRegistrationAllowed()}) — the open-registration
+     *       posture. When RegOn is OFF nothing is granted here (stock-suppressed); the
+     *       accept-unattested admit-unsigned behaviour is scoped to open-registration
+     *       realms, and closed-realm admin creates still receive default-roles via the
+     *       commit-time D3 replay grant ({@code IgaReplayDispatcher.replayCreateUser}).</li>
+     *   <li><b>MF2 benign-composite guard</b>
+     *       ({@link org.tidecloak.iga.services.DefaultRoleCompositeGuard#isBenignDefaultRoleComposite})
+     *       — never confer a TAINTED {@code default-roles-<realm>} (a privileged composite
+     *       child) to an unsigned self-registrant. If the composite is non-benign the grant
+     *       refuses and the user falls back to the normal fail-closed / CR path. This is
+     *       the sole privilege-escalation gate; dropping the frame narrowing does NOT
+     *       reopen the MF2 vector because a privileged default-role is still refused here.</li>
+     * </ol>
+     *
+     * <p><b>TVE-safety (unchanged).</b> The realm default-role id is the D1b exclusion in
+     * {@code RealmAttestationExporter.perUserUnits}: a user holding ONLY default-roles →
+     * empty {@code role_ids} → NO {@code user_role_mapping_set} unit, and the ORK
+     * universal-inherits the realm default-role set (U19
+     * {@code RealmDefaultRolesSetAttestationUnit}). So granting default-roles directly at
+     * creation carries the {@code account} audience in the token while the producer
+     * closure still emits no per-user role-mapping unit — the default-roles-only
+     * user_identity is admitted unsigned exactly as before.
+     *
+     * <p><b>Blast radius on non-self-enroll paths.</b> Admin-create and governed creates
+     * are captured-then-vetoed: the creation-time grant is on the real (scratch) user and
+     * is discarded with the request-tx rollback, then re-granted for real at commit via
+     * the D3 replay path — so granting here is a harmless no-op for them. Service-account
+     * creates are likewise vetoed/replayed. Only the persist-pending self-enrollment paths
+     * (registration form, Tide-broker, link-tide) actually retain the creation-time grant,
+     * which is precisely the intent. The underlying
+     * {@code JpaUserProvider.addUser(..., addDefaultRoles=true)} grant is idempotent
+     * ({@code grantRole} no-ops when the role is already present), so no double-grant occurs.
      */
     private boolean shouldGrantDefaultRolesOnSelfCreate(RealmModel realm) {
-        java.util.List<String> frames = StackWalker.getInstance()
-                .walk(s -> s.map(f -> f.getClassName() + "#" + f.getMethodName())
-                        .collect(java.util.stream.Collectors.toList()));
-        boolean selfEnroll = isSelfEnrollmentFrame(frames, realm.isRegistrationAllowed(),
-                isTideBrokerEnrollment());
-        if (!selfEnroll) {
-            return false;
-        }
-        // MF2: never grant (and never mark eligible) a tainted default-role composite.
-        if (!org.tidecloak.iga.services.DefaultRoleCompositeGuard
-                .isBenignDefaultRoleComposite(realm)) {
+        boolean registrationAllowed = realm.isRegistrationAllowed();
+        boolean benignComposite = org.tidecloak.iga.services.DefaultRoleCompositeGuard
+                .isBenignDefaultRoleComposite(realm);
+        if (registrationAllowed && !benignComposite) {
+            // MF2: never grant (and never mark eligible) a tainted default-role composite.
             log.warnf("IGA self-enroll REFUSED (MF2 guard): realm '%s' default-role "
                     + "composite is NON-BENIGN (privileged child present). NOT granting "
-                    + "default-roles at creation and NOT admitting unsigned — the self-reg "
+                    + "default-roles at creation and NOT admitting unsigned — the create "
                     + "falls back to the normal fail-closed / CR path.", realm.getName());
-            return false;
         }
-        return true;
+        return shouldGrantDefaultRolesOnSelfCreate(registrationAllowed, benignComposite);
     }
 
     /**
-     * Live-stack Tide-broker enrollment check: true iff the current auth session carries a
-     * brokered-identity context whose IdP id is the Tide provider ({@value #TIDE_IDP_PROVIDER_ID}).
-     * This is the POSITIVE Tide self-enrollment signal that the generic
-     * {@link #KC_IDP_CREATE_USER} frame cannot provide (the frame fires for external IdPs too).
-     * The genuine Tide-enrolled browser registration creates its user via the stock broker
-     * first-login authenticator (Tide IdP-extensions do NOT override it), so the brokered IdP
-     * id is {@value #TIDE_IDP_PROVIDER_ID} for exactly that flow and some external alias for a
-     * non-Tide IdP. Defensive: any failure to resolve the context → false (no grant).
+     * Pure, path-independent, unit-testable form of the default-role grant gate. Grant iff
+     * RegOn is on AND the realm default-role composite is benign (MF2). There is NO
+     * stack-frame or broker-alias input — the decision does not depend on the call path,
+     * which is what fixes the Tide IdP-broker / link-tide enrollment miss.
+     *
+     * @param registrationAllowed        the realm RegOn flag ({@code realm.isRegistrationAllowed()})
+     * @param benignDefaultRoleComposite MF2 guard result
+     *        ({@code DefaultRoleCompositeGuard.isBenignDefaultRoleComposite(realm)})
      */
-    private boolean isTideBrokerEnrollment() {
-        return isTideBrokerEnrollment(igaSession);
+    static boolean shouldGrantDefaultRolesOnSelfCreate(boolean registrationAllowed,
+                                                       boolean benignDefaultRoleComposite) {
+        return registrationAllowed && benignDefaultRoleComposite;
     }
 
     /**
-     * Static, session-parameterised variant of {@link #isTideBrokerEnrollment()} so the
-     * capture adapter ({@link IgaUserAdapter}) can reuse the exact same Tide-broker
-     * enrollment seam when deciding whether the admin-terminal capture-then-veto rollback
-     * applies. Same contract: true iff the current auth session carries a brokered-identity
+     * Live-stack Tide-broker enrollment check, session-parameterised so the capture
+     * adapter ({@link IgaUserAdapter}) can reuse the exact same Tide-broker enrollment
+     * seam when deciding whether the admin-terminal capture-then-veto rollback applies
+     * (see {@code IgaUserAdapter#getId}). NOTE: this is NOT used by the default-role grant
+     * gate — that gate is now path-independent (see
+     * {@link #shouldGrantDefaultRolesOnSelfCreate(RealmModel)}). Contract: true iff the
+     * current auth session carries a brokered-identity
      * context whose IdP id is the Tide provider ({@value #TIDE_IDP_PROVIDER_ID}); any failure
      * to resolve the context → false.
      */
@@ -429,78 +423,6 @@ public class IgaUserProvider extends JpaUserProvider {
             // Out of an auth-session context, or a malformed note — treat as not-Tide-broker.
             return false;
         }
-    }
-
-    /**
-     * Pure, unit-testable ALLOW-LIST self-enrollment classifier. Given the live
-     * stack-frame signatures as {@code "<FQN>#<method>"} (any order), the realm's RegOn
-     * flag, and whether the current auth session is a Tide-broker enrollment, return true
-     * iff the just-created user should receive the LOCAL realm default-role at creation.
-     *
-     * <p><b>Why an allow-list (the F2 fix).</b> The former gate was a DENY-list — it
-     * granted under RegOn for EVERYTHING except {@link #KC_USERS_RESOURCE}{@code #createUser}
-     * and {@link #KC_CLIENT_MANAGER}. That silently granted default-roles (→ admitted
-     * unsigned) to TWO non-self-reg paths that ALSO reach the 1-arg {@code addUser} under
-     * RegOn: token-exchange user creation ({@code AbstractTokenExchangeProvider}) and
-     * external (non-Tide) IdP first-login ({@link #KC_IDP_CREATE_USER}). Those are the
-     * delivery vehicle for MF2. The allow-list grants ONLY for a recognised genuine
-     * self-registration frame.</p>
-     *
-     * <p>Decision (RegOn-gated; grant requires a POSITIVE self-enrollment signal):
-     * <ol>
-     *   <li>If {@code registrationAllowed} is false → {@code false} (no open-registration
-     *       posture; stock-suppressed).</li>
-     *   <li>Else grant iff EITHER:
-     *     <ul>
-     *       <li>the registration FORM is present
-     *           ({@link #KC_REGISTRATION_USER_CREATION} — the browser self-sign-up); OR</li>
-     *       <li>this is a genuine Tide-broker first-login enrollment:
-     *           {@code tideBrokerEnrollment} is true (the brokered IdP id is the Tide
-     *           provider, resolved from the auth-session broker context by the live caller).
-     *           The frame for this is the stock {@link #KC_IDP_CREATE_USER}; the Tide IdP
-     *           uses the stock broker authenticator (no override), so the IdP-id check is
-     *           what separates a Tide enrollment from an external-IdP first-login.</li>
-     *     </ul>
-     *   </li>
-     *   <li>Otherwise → {@code false}. This now EXCLUDES, by omission from the allow-list:
-     *       admin-create ({@link #KC_USERS_RESOURCE}), service-account
-     *       ({@link #KC_CLIENT_MANAGER}), token-exchange ({@code AbstractTokenExchangeProvider}),
-     *       AND external (non-Tide) IdP first-login (the generic {@link #KC_IDP_CREATE_USER}
-     *       frame WITHOUT a Tide broker context).</li>
-     * </ol>
-     *
-     * <p>The genuine Tide-enrolled browser registration the user confirmed working creates
-     * its user via the stock broker first-login authenticator (Tide IdP-extensions do NOT
-     * override it) brokered from the Tide IdP, so {@code tideBrokerEnrollment} is true for
-     * exactly that flow and it keeps granting. The plain registration form keeps granting
-     * via the form frame.</p>
-     */
-    static boolean isSelfEnrollmentFrame(
-            java.util.List<String> frameSignatures, boolean registrationAllowed,
-            boolean tideBrokerEnrollment) {
-        if (!registrationAllowed) {
-            return false;
-        }
-        // Positive Tide-broker enrollment signal (IdP id = "tide"), resolved by the live
-        // caller from the auth-session broker context. Independent of the frame list.
-        if (tideBrokerEnrollment) {
-            return true;
-        }
-        if (frameSignatures == null) {
-            return false;
-        }
-        // Registration FORM frame → genuine browser self-sign-up.
-        for (String sig : frameSignatures) {
-            if (sig == null) {
-                continue;
-            }
-            int hash = sig.lastIndexOf('#');
-            String cn = hash >= 0 ? sig.substring(0, hash) : sig;
-            if (KC_REGISTRATION_USER_CREATION.equals(cn)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     // addFederatedIdentity is NOT overridden — federated identities are IdP
