@@ -3979,7 +3979,27 @@ public class TideAttestor implements IgaAttestor {
                  "UPDATE_CLIENT_REDIRECT_URIS", "UPDATE_CLIENT_PROPERTY" -> {
                 ClientModel c = resolveClientForStamp(realm, cr);
                 if (c != null) {
-                    units.add(RealmAttestationExporter.clientConfig(session, c, realmId));
+                    if ("CREATE_CLIENT".equals(action)) {
+                        // COMPLETE BY CONSTRUCTION (mirrors the CREATE_USER branch below): a
+                        // freshly-created client's LOGIN replay reads its WHOLE client-owned
+                        // family, not just the client_config node. KC attaches the realm
+                        // default/optional scopes during client creation and any rep-carried
+                        // protocol mappers are FOLDED into this CR (isOnClientCreationPath),
+                        // so NO separate ASSIGN_SCOPE / ADD_PROTOCOL_MAPPER CR is ever filed
+                        // for them. This CR is therefore the ONLY signer of
+                        // client_scope_assignment_set, client_mapper_set,
+                        // scope_role_allowlist_set and each folded protocol_mapper unit.
+                        // Framing only client_config left those columns NULL forever on
+                        // multiAdmin realms (no convergeAfterCommit backstop) and the first
+                        // login to the client fail-closed in replayOrFailClosed.
+                        units.addAll(clientOwnedUnits(session, c, realmId,
+                                /* includeOwnedMappers */ true));
+                    } else {
+                        // SET_* / UPDATE_*: only the client_config node changed. The derived
+                        // owner-sets are already real (signed at create / their own CRs);
+                        // re-framing them would needlessly re-sign already-attested units.
+                        units.add(RealmAttestationExporter.clientConfig(session, c, realmId));
+                    }
                     // Part C: post-flip the multiAdmin carrier is the ONLY signer of the SA user's
                     // user_identity, so frame its per-user units alongside the clientConfig node.
                     // Mirrors the CREATE_ORGANIZATION backing-group precedent below. perUserUnits
@@ -4160,6 +4180,56 @@ public class TideAttestor implements IgaAttestor {
                 RealmAttestationExporter.groupRoleMappingSet(em, groupId, realm.getId());
         if (!roles.roleIds().isEmpty()) {
             units.add(roles);
+        }
+        return units;
+    }
+
+    /**
+     * The FULL producer unit family a client OWNS, built from the (post-change) live model
+     * via the SAME {@link RealmAttestationExporter} builders the login export uses:
+     * {@code client_config} (1, first), {@code client_scope_assignment_set} (11),
+     * {@code client_mapper_set} (12) and {@code scope_role_allowlist_set}/client (14),
+     * plus, when {@code includeOwnedMappers}, one {@code protocol_mapper} (3) per
+     * JWT-relevant mapper the client owns (the {@code jwtRelevantMapperIds} filter + sort,
+     * exactly the login's emission set).
+     *
+     * <p>SINGLE source of truth for "what does a client own", shared by:
+     * <ul>
+     *   <li>{@code enumerateLiveCrUnits}' CREATE_CLIENT framing (multiAdmin lane, with
+     *       mappers: the create rep's mappers are FOLDED into the CR, so no separate
+     *       ADD_PROTOCOL_MAPPER CR ever signs them);</li>
+     *   <li>{@code stampCreateClientUnitFamily} (firstAdmin lane, with mappers);</li>
+     *   <li>{@code stampAdoptClient} (WITHOUT mappers: pre-existing mappers get their own
+     *       ADOPT_PROTOCOL_MAPPER edge CRs, which stamp the per-mapper column).</li>
+     * </ul>
+     * so the two commit lanes and the ADOPT lane cannot drift on the client family list.
+     *
+     * <p>The three set units are emitted even when EMPTY: their columns live on the
+     * always-present ClientEntity row (UnitColumnMapping 11/12/14), so an empty-set stamp
+     * never dangles (unlike the row-carried user/group set units), and the login emits the
+     * assignment/allowlist sets unconditionally.
+     */
+    private static List<AttestationUnit> clientOwnedUnits(KeycloakSession session, ClientModel client,
+                                                          String realmId, boolean includeOwnedMappers) {
+        List<AttestationUnit> units = new ArrayList<>();
+        units.add(RealmAttestationExporter.clientConfig(session, client, realmId));
+        units.add(RealmAttestationExporter.clientScopeAssignmentSet(client, realmId));
+        units.add(RealmAttestationExporter.clientMapperSet(client, realmId));
+        units.add(RealmAttestationExporter.scopeRoleAllowlistSet(
+                ParentType.client, client.getId(), client, realmId));
+        if (includeOwnedMappers) {
+            // jwtRelevantMapperIds applies the login's JWT_BODY_IRRELEVANT_FACTORIES filter
+            // AND sorts ascending, so the per-mapper unit order is deterministic across the
+            // phase-1 scratch framing and the commit-time distribution (mapper ids are pinned
+            // in the CR's REP_JSON, so both replays materialize identical mapper rows).
+            for (String mapperId : RealmAttestationExporter.jwtRelevantMapperIds(
+                    client.getProtocolMappersStream())) {
+                org.keycloak.models.ProtocolMapperModel pm = client.getProtocolMapperById(mapperId);
+                if (pm != null) {
+                    units.add(RealmAttestationExporter.protocolMapperUnit(
+                            pm, ParentType.client, client.getId(), realmId));
+                }
+            }
         }
         return units;
     }
@@ -4400,7 +4470,20 @@ public class TideAttestor implements IgaAttestor {
         try {
             switch (action) {
                 // ---- NODE units: re-stamp the owner's node column with the real envelope ----
-                case "CREATE_CLIENT", "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
+                // CREATE_CLIENT stamps the client's FULL owned unit family (config + the three
+                // derived owner-sets + each folded protocol_mapper), NOT just the node: the
+                // default-scope attachments and any rep-carried mappers are FOLDED into this CR
+                // (isOnClientCreationPath), so no ASSIGN_SCOPE / ADD_PROTOCOL_MAPPER CR ever
+                // signs them and this commit is their ONLY signer. Same family the multiAdmin
+                // lane frames (enumerateLiveCrUnits) via the shared clientOwnedUnits enumerator.
+                case "CREATE_CLIENT" -> {
+                        stampCreateClientUnitFamily(session, realm, mode, em, cr);
+                        // Part B3: also stamp the SA user's user_identity when the client has
+                        // serviceAccountsEnabled. Self-gates (no-op for non-SA clients), so safe
+                        // to call unconditionally for every client CR.
+                        stampServiceAccountUserIfPresent(session, realm, mode, em, cr);
+                }
+                case "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
                      "UPDATE_CLIENT_REDIRECT_URIS", "UPDATE_CLIENT_PROPERTY" -> {
                         stampClientConfig(session, realm, mode, em, cr);
                         // Part B3: also stamp the SA user's user_identity when the client has
@@ -4572,6 +4655,29 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
+     * BATCH form of {@link #signProducerEnvelope}: the identical mode dispatch, but a
+     * real-signing-capable firstAdmin realm signs the WHOLE batch in one (chunked)
+     * VVK ceremony round-trip via {@link #signEnvelopesWithFirstAdminVvk} instead of one
+     * ceremony per envelope. {@code out[i]} is byte-identical to what
+     * {@code signProducerEnvelope(session, realm, mode, envelopes[i])} would return
+     * (same real sig bytes for the same envelope on the real path, same deterministic
+     * stub on the stub path), so callers may batch freely. Fail-closed like the single
+     * form: a real ceremony failure propagates.
+     */
+    String[] signProducerEnvelopes(KeycloakSession session, RealmModel realm, String mode,
+                                   byte[][] envelopes) {
+        if (MODE_FIRST_ADMIN.equals(mode) && isRealSigningCapable(realm)) {
+            return signEnvelopesWithFirstAdminVvk(realm, envelopes);
+        }
+        String prefix = MODE_FIRST_ADMIN.equals(mode) ? FIRSTADMIN_SIG_PREFIX : DUMMY_SIG_PREFIX;
+        String[] out = new String[envelopes.length];
+        for (int i = 0; i < envelopes.length; i++) {
+            out[i] = stubSign(prefix, envelopes[i]);
+        }
+        return out;
+    }
+
+    /**
      * Real single-unit firstAdmin VVK ceremony over an arbitrary producer envelope,
      * reusing {@link #signUnitsWithFirstAdminVvk} (the batch signer). Fail-closed.
      *
@@ -4660,6 +4766,34 @@ public class TideAttestor implements IgaAttestor {
             String sig = signProducerEnvelope(session, realm, mode, env);
             em.createQuery("UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig).setParameter("id", client.getId()).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    /**
+     * firstAdmin-lane CREATE_CLIENT stamp: sign + stamp the client's FULL owned unit
+     * family (the shared {@link #clientOwnedUnits} enumeration, WITH the folded per-mapper
+     * units) instead of only the {@code client_config} node. Envelopes are the SAME
+     * {@link RealmAttestationExporter} builder bytes the login read replays; the batch is
+     * signed in ONE VVK ceremony round-trip via {@link #signProducerEnvelopes} (per-unit
+     * byte-identical to a {@link #signProducerEnvelope} call), and each sig is stamped
+     * through {@link UnitColumnMapping} exactly like the multiAdmin distribution and the
+     * ADOPT stampers. Same fail-closed wrapping as the other stampers.
+     */
+    private void stampCreateClientUnitFamily(KeycloakSession session, RealmModel realm, String mode,
+                                             EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            ClientModel client = resolveClientForStamp(realm, cr);
+            if (client == null) return;
+            List<AttestationUnit> units = clientOwnedUnits(session, client, realm.getId(),
+                    /* includeOwnedMappers */ true);
+            byte[][] envelopes = new byte[units.size()][];
+            for (int i = 0; i < units.size(); i++) {
+                envelopes[i] = units.get(i).serialize();
+            }
+            String[] sigs = signProducerEnvelopes(session, realm, mode, envelopes);
+            for (int i = 0; i < units.size(); i++) {
+                UnitColumnMapping.stamp(em, units.get(i), sigs[i]);
+            }
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
 
@@ -4975,16 +5109,14 @@ public class TideAttestor implements IgaAttestor {
             ClientModel client = realm.getClientById(clientUuid);
             if (client == null) return;
             // client_config (1), client_scope_assignment_set (11), client_mapper_set (12),
-            // scope_role_allowlist_set/client (14).
-            signAndStampUnit(session, realm, mode, em,
-                    RealmAttestationExporter.clientConfig(session, client, realm.getId()));
-            signAndStampUnit(session, realm, mode, em,
-                    RealmAttestationExporter.clientScopeAssignmentSet(client, realm.getId()));
-            signAndStampUnit(session, realm, mode, em,
-                    RealmAttestationExporter.clientMapperSet(client, realm.getId()));
-            signAndStampUnit(session, realm, mode, em,
-                    RealmAttestationExporter.scopeRoleAllowlistSet(
-                            ParentType.client, client.getId(), client, realm.getId()));
+            // scope_role_allowlist_set/client (14): the shared clientOwnedUnits family,
+            // WITHOUT the per-mapper units: a pre-existing client's mappers get their own
+            // ADOPT_PROTOCOL_MAPPER edge CRs (see stampAdoptProtocolMapper), unlike the
+            // folded mappers of a governed CREATE_CLIENT.
+            for (AttestationUnit unit : clientOwnedUnits(session, client, realm.getId(),
+                    /* includeOwnedMappers */ false)) {
+                signAndStampUnit(session, realm, mode, em, unit);
+            }
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
 
