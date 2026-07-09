@@ -18,8 +18,12 @@ import org.keycloak.models.RoleModel;
 /**
  * ★ MF2 (HIGH) — the benign default-role composite guard. The whole
  * accept-unattested self-reg model trusts {@code default-roles-<realm>} confers
- * only benign baseline; this guard validates it by walking the composite
- * transitively and fail-closing on any privileged child.
+ * no realm-escalation privilege; this guard validates it by walking the
+ * composite transitively and fail-closing on any PRIVILEGED child
+ * (realm-management client roles + tide-realm-admin + bare admin realm-role
+ * names). NON-privileged application roles ({@code appUser}, the self-scoped
+ * {@code _tide_*} E2EE roles, custom app roles) are benign — they are exactly
+ * the default baseline every user is meant to hold.
  */
 class DefaultRoleCompositeGuardTest {
 
@@ -27,7 +31,7 @@ class DefaultRoleCompositeGuardTest {
     private static final String DEFAULT_ROLES = "default-roles-" + REALM;
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Pure leaf classifier
+    // Pure leaf classifier — BENIGN cases
     // ─────────────────────────────────────────────────────────────────────────
 
     @Test
@@ -49,24 +53,62 @@ class DefaultRoleCompositeGuardTest {
     }
 
     @Test
+    void leaf_applicationRealmRole_isBenign() {
+        // appUser — the operator's application baseline realm role. It is NOT a
+        // realm-escalation role, so it is benign. (Under the earlier allow-list this
+        // was WRONGLY tainted, which created ROLELESS self-registrants — the bug.)
+        assertTrue(DefaultRoleCompositeGuard.isBenignChild(false, "appUser", null, DEFAULT_ROLES));
+        assertTrue(DefaultRoleCompositeGuard.isBenignChild(false, "some-custom-role", null, DEFAULT_ROLES));
+    }
+
+    @Test
+    void leaf_tideSelfScopedE2EERoles_areBenign() {
+        // _tide_dob.selfencrypt / .selfdecrypt — self-scoped E2EE roles, modelled either
+        // as realm roles or as client roles under a non-realm-management client. Either
+        // shape is NON-privileged and therefore benign.
+        assertTrue(DefaultRoleCompositeGuard.isBenignChild(false, "_tide_dob.selfencrypt", null, DEFAULT_ROLES));
+        assertTrue(DefaultRoleCompositeGuard.isBenignChild(false, "_tide_dob.selfdecrypt", null, DEFAULT_ROLES));
+        assertTrue(DefaultRoleCompositeGuard.isBenignChild(true, "selfencrypt", "_tide_dob", DEFAULT_ROLES));
+    }
+
+    @Test
+    void leaf_customAppClientRole_isBenign() {
+        // A role under any client OTHER than realm-management is application-scoped, not
+        // realm escalation — benign under the denylist. Even a role NAMED like an admin
+        // action but owned by an application client is app-scoped, not realm control.
+        assertTrue(DefaultRoleCompositeGuard.isBenignChild(true, "do-stuff", "my-app", DEFAULT_ROLES));
+        assertTrue(DefaultRoleCompositeGuard.isBenignChild(true, "manage-account", "my-app", DEFAULT_ROLES));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pure leaf classifier — PRIVILEGED (tainted) cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Test
     void leaf_realmManagementRoles_areTainted() {
+        // The ENTIRE realm-management client surface is privileged.
         assertFalse(DefaultRoleCompositeGuard.isBenignChild(true, "manage-users", "realm-management", DEFAULT_ROLES));
+        assertFalse(DefaultRoleCompositeGuard.isBenignChild(true, "manage-realm", "realm-management", DEFAULT_ROLES));
         assertFalse(DefaultRoleCompositeGuard.isBenignChild(true, "realm-admin", "realm-management", DEFAULT_ROLES));
+        assertFalse(DefaultRoleCompositeGuard.isBenignChild(true, "view-users", "realm-management", DEFAULT_ROLES));
+        assertFalse(DefaultRoleCompositeGuard.isBenignChild(true, "impersonation", "realm-management", DEFAULT_ROLES));
+    }
+
+    @Test
+    void leaf_tideRealmAdmin_isTaintedByName_anyContainer() {
+        // tide-realm-admin is privileged wherever it lives (defense-in-depth): on
+        // realm-management (its real home), on any other client, or as a realm role.
         assertFalse(DefaultRoleCompositeGuard.isBenignChild(true, "tide-realm-admin", "realm-management", DEFAULT_ROLES));
+        assertFalse(DefaultRoleCompositeGuard.isBenignChild(true, "tide-realm-admin", "some-other-client", DEFAULT_ROLES));
+        assertFalse(DefaultRoleCompositeGuard.isBenignChild(false, "tide-realm-admin", null, DEFAULT_ROLES));
     }
 
     @Test
-    void leaf_unknownRealmRole_isTainted() {
-        // Allow-list: an operator-authored realm role we cannot classify is NOT benign.
+    void leaf_privilegedRealmRoleNames_areTainted() {
+        // Bare realm-role names that denote realm administration (defense-in-depth).
         assertFalse(DefaultRoleCompositeGuard.isBenignChild(false, "admin", null, DEFAULT_ROLES));
-        assertFalse(DefaultRoleCompositeGuard.isBenignChild(false, "some-custom-role", null, DEFAULT_ROLES));
-    }
-
-    @Test
-    void leaf_accountNamedRoleUnderNonAccountClient_isTainted() {
-        // A role NAMED like an account baseline role but owned by another client is tainted.
-        assertFalse(DefaultRoleCompositeGuard.isBenignChild(true, "manage-account", "my-app", DEFAULT_ROLES));
-        assertFalse(DefaultRoleCompositeGuard.isBenignChild(true, "view-profile", null, DEFAULT_ROLES));
+        assertFalse(DefaultRoleCompositeGuard.isBenignChild(false, "realm-admin", null, DEFAULT_ROLES));
+        assertFalse(DefaultRoleCompositeGuard.isBenignChild(false, "create-realm", null, DEFAULT_ROLES));
     }
 
     @Test
@@ -92,7 +134,7 @@ class DefaultRoleCompositeGuardTest {
     }
 
     @Test
-    void benignComposite_passes() {
+    void benignComposite_stockOnly_passes() {
         RealmModel realm = mock(RealmModel.class);
         when(realm.getName()).thenReturn(REALM);
 
@@ -111,6 +153,41 @@ class DefaultRoleCompositeGuardTest {
         assertTrue(DefaultRoleCompositeGuard.isBenignDefaultRoleComposite(realm),
                 "a default-role composite of only offline_access/uma + account baseline "
                         + "roles must be benign — accept-unattested self-reg stays eligible");
+    }
+
+    /**
+     * The exact staging default-role composite that the earlier allow-list wrongly
+     * refused — { appUser, manage-account, view-profile, offline_access,
+     * uma_authorization, _tide_dob.selfencrypt, _tide_dob.selfdecrypt } — must now be
+     * BENIGN so the Tide self-registrant receives default-roles at creation.
+     */
+    @Test
+    void reportedStagingDefaultComposite_isGrantable() {
+        RealmModel realm = mock(RealmModel.class);
+        when(realm.getName()).thenReturn(REALM);
+
+        ClientModel account = clientMock("account");
+        when(realm.getClientById("account-uuid")).thenReturn(account);
+        ClientModel tideDob = clientMock("_tide_dob");
+        when(realm.getClientById("tidedob-uuid")).thenReturn(tideDob);
+
+        RoleModel appUser = realmRole("appUser");
+        RoleModel manageAccount = clientRole("manage-account", "account-uuid");
+        RoleModel viewProfile = clientRole("view-profile", "account-uuid");
+        RoleModel offlineAccess = realmRole("offline_access");
+        RoleModel uma = realmRole("uma_authorization");
+        RoleModel selfEncrypt = clientRole("selfencrypt", "tidedob-uuid");
+        RoleModel selfDecrypt = clientRole("selfdecrypt", "tidedob-uuid");
+
+        RoleModel defaultRole = composite(DEFAULT_ROLES, false, null,
+                appUser, manageAccount, viewProfile, offlineAccess, uma, selfEncrypt, selfDecrypt);
+        when(realm.getDefaultRole()).thenReturn(defaultRole);
+
+        assertTrue(DefaultRoleCompositeGuard.isBenignDefaultRoleComposite(realm),
+                "the standard staging default-role composite (appUser + account baseline + "
+                        + "offline/uma + self-scoped _tide_* E2EE roles) contains NO "
+                        + "realm-escalation role, so it must be grantable to a Tide "
+                        + "self-registrant — the fix for the ROLELESS self-reg bug");
     }
 
     @Test
@@ -135,6 +212,34 @@ class DefaultRoleCompositeGuardTest {
                         + "to the D1b user_role_mapping_set unit)");
     }
 
+    /**
+     * The staging-shape composite but TAINTED with a realm-management child — proves the
+     * guard still refuses escalation even amid a legitimate benign baseline.
+     */
+    @Test
+    void taintedComposite_stagingShapePlusTideRealmAdmin_failsClosed() {
+        RealmModel realm = mock(RealmModel.class);
+        when(realm.getName()).thenReturn(REALM);
+
+        ClientModel account = clientMock("account");
+        when(realm.getClientById("account-uuid")).thenReturn(account);
+        ClientModel realmMgmt = clientMock("realm-management");
+        when(realm.getClientById("rm-uuid")).thenReturn(realmMgmt);
+
+        RoleModel appUser = realmRole("appUser");
+        RoleModel offlineAccess = realmRole("offline_access");
+        RoleModel manageAccount = clientRole("manage-account", "account-uuid");
+        RoleModel tideRealmAdmin = clientRole("tide-realm-admin", "rm-uuid"); // PRIVILEGED child
+
+        RoleModel defaultRole = composite(DEFAULT_ROLES, false, null,
+                appUser, offlineAccess, manageAccount, tideRealmAdmin);
+        when(realm.getDefaultRole()).thenReturn(defaultRole);
+
+        assertFalse(DefaultRoleCompositeGuard.isBenignDefaultRoleComposite(realm),
+                "a tide-realm-admin child on an otherwise-benign default-role composite must "
+                        + "still fail closed — the escalation vector stays shut");
+    }
+
     @Test
     void taintedComposite_nestedPrivilegedChild_failsClosedTransitively() {
         // default-roles → benign-grouping (realm role) → realm-management:realm-admin
@@ -145,30 +250,32 @@ class DefaultRoleCompositeGuardTest {
         when(realm.getClientById("rm-uuid")).thenReturn(realmMgmt);
 
         RoleModel realmAdmin = clientRole("realm-admin", "rm-uuid"); // PRIVILEGED leaf
-        // a nested realm role named like the default-roles root would be benign, but here
-        // the nested grouping is offline_access (benign) which itself composites the
-        // privileged leaf — proving the walk is transitive, not depth-1.
-        RoleModel nested = composite("offline_access", false, null, realmAdmin);
+        // a nested benignly-named grouping role that itself composites the privileged leaf —
+        // proving the walk is transitive, not depth-1.
+        RoleModel nested = composite("appUser", false, null, realmAdmin);
         RoleModel defaultRole = composite(DEFAULT_ROLES, false, null, nested);
         when(realm.getDefaultRole()).thenReturn(defaultRole);
 
         assertFalse(DefaultRoleCompositeGuard.isBenignDefaultRoleComposite(realm),
-                "a privileged role nested DEEP in the composite (not a direct child) must "
-                        + "still be caught — the walk is transitive");
+                "a privileged role nested DEEP in the composite (hidden under a benignly-named "
+                        + "grouping role) must still be caught — the walk is transitive");
     }
 
     @Test
-    void taintedComposite_unknownCustomRealmRole_failsClosed() {
+    void benignComposite_unknownCustomRealmRole_passes() {
+        // Policy flip vs the old allow-list: an unknown, NON-privileged operator-authored
+        // realm role is now BENIGN (it confers no realm escalation). This is what lets the
+        // operator's appUser / custom baseline roles ride the default composite.
         RealmModel realm = mock(RealmModel.class);
         when(realm.getName()).thenReturn(REALM);
 
-        RoleModel custom = realmRole("ops-superuser"); // not on the allowlist
+        RoleModel custom = realmRole("ops-report-viewer"); // non-privileged custom role
         RoleModel defaultRole = composite(DEFAULT_ROLES, false, null, custom);
         when(realm.getDefaultRole()).thenReturn(defaultRole);
 
-        assertFalse(DefaultRoleCompositeGuard.isBenignDefaultRoleComposite(realm),
-                "an unknown operator-authored realm role on the default-role composite is "
-                        + "tainted under the allow-list — we cannot positively classify it benign");
+        assertTrue(DefaultRoleCompositeGuard.isBenignDefaultRoleComposite(realm),
+                "an unknown NON-privileged operator realm role on the default composite is "
+                        + "benign under the denylist — only the realm-escalation surface is refused");
     }
 
     @Test
