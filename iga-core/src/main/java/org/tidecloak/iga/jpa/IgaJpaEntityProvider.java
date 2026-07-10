@@ -12,6 +12,7 @@ import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 import org.tidecloak.iga.entities.IgaToggleJobEntity;
 import org.tidecloak.iga.entities.IgaUnsignedEntityEntity;
+import org.tidecloak.iga.entities.TidePolicyEntity;
 
 import java.util.List;
 
@@ -30,7 +31,8 @@ public class IgaJpaEntityProvider implements JpaEntityProvider {
                 IgaLicensingDraftEntity.class,
                 IgaLicenseHistoryEntity.class,
                 IgaUnsignedEntityEntity.class,
-                IgaToggleJobEntity.class
+                IgaToggleJobEntity.class,
+                TidePolicyEntity.class
         );
     }
 

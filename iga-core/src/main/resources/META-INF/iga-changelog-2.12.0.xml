@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!-- 1: Create TIDEPOLICY table (backs TidePolicyEntity) -->
+    <changeSet id="iga-2.12.0-1" author="tidecloak-iga">
+        <createTable tableName="TIDEPOLICY">
+            <column name="ID" type="VARCHAR(255)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="REALM_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="DATA" type="VARCHAR(2000)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="NOTES" type="TEXT"/>
+        </createTable>
+    </changeSet>
+
+    <!-- 2: Index on TIDEPOLICY for the TidePolicy.findByRealm lookup -->
+    <changeSet id="iga-2.12.0-2" author="tidecloak-iga">
+        <createIndex tableName="TIDEPOLICY" indexName="IDX_TIDEPOLICY_REALM">
+            <column name="REALM_ID"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>

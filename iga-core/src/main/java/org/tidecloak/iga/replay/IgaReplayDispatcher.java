@@ -13,6 +13,7 @@ import org.keycloak.models.RoleModel;
 import org.keycloak.services.managers.ClientManager;
 import org.keycloak.services.managers.RealmManager;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.providers.TidePolicyService;
 
 import jakarta.persistence.EntityManager;
 import java.util.List;
@@ -303,6 +304,7 @@ public class IgaReplayDispatcher {
             case "ORG_INVITE_MEMBER", "ORG_RESEND_INVITE" -> replayOrgInviteMember(session, realm, rows);
             case "ORG_ADD_IDP" -> replayOrgAddIdp(session, realm, rows);
             case "ORG_REMOVE_IDP" -> replayOrgRemoveIdp(session, realm, rows);
+            case "CREATE_TIDE_POLICY" -> replayCreateTidePolicy(session, realm, rows);
 
             default -> throw new IllegalArgumentException("Unknown IGA action: " + cr.getActionType());
         }
@@ -1209,6 +1211,42 @@ public class IgaReplayDispatcher {
                 continue;
             }
             orgs.removeIdentityProvider(model, idp);
+        }
+    }
+
+    private static void replayCreateTidePolicy(KeycloakSession session, RealmModel realm,
+                                               List<Map<String, Object>> rows) {
+        TidePolicyService svc = new TidePolicyService(session);
+        for (Map<String, Object> row : rows) {
+            String id = str(row, "ID");
+            String repJson = str(row, "REP_JSON");
+
+            // REP_JSON is the full CREATE snapshot ({id, realmId, data, notes}) —
+            // the authoritative source, mirroring rebuildCreateUserFromRow. `notes`
+            // exists ONLY here (not a top-level row key), so we must read it out.
+            String data;
+            String notes;
+            if (repJson != null && !repJson.isEmpty()) {
+                try {
+                    Map<String, Object> rep =
+                            MAPPER.readValue(repJson, new TypeReference<Map<String, Object>>() {});
+                    data = rep.get("data") != null ? rep.get("data").toString() : null;
+                    notes = rep.get("notes") != null ? rep.get("notes").toString() : null;
+                } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                    throw new RuntimeException(
+                            "Failed to deserialize REP_JSON for CREATE_TIDE_POLICY replay (row id=" + id + ")", e);
+                }
+            } else {
+                // Bare-create net (non-REST programmatic callers): fall back to the
+                // top-level DATA row key; notes unavailable without REP_JSON.
+                data = str(row, "DATA");
+                notes = null;
+            }
+
+            // Re-drive the real write. `realm` comes from doReplay (resolved from
+            // cr.getRealmId()), NOT from the row — the captured REALM_ID row value
+            // is unreliable (the service stored the RealmModel object, not its id).
+            svc.writePolicy(realm, id, data, notes);
         }
     }
 
