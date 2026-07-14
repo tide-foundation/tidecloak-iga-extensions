@@ -136,6 +136,44 @@ import java.util.Map;
  * {@code IgaReplayDispatcher.replay(...)} — so replay rebuilds pass straight
  * through to {@code super} without re-interception, exactly like every other
  * Iga* provider.
+ *
+ * <h2>KC 26.7.0 organization-groups surface — NOT modelled by IGA</h2>
+ * Keycloak 26.7.0 adds seven methods to the {@code OrganizationProvider} SPI
+ * ({@code createGroup}, {@code getTopLevelGroups}, {@code searchGroupsByName},
+ * {@code searchGroupsByAttributes}, two {@code getOrganizationGroupsByMember}
+ * overloads and {@code getOrganizationGroup}), letting an admin create
+ * arbitrary nested groups INSIDE an organization. We inherit
+ * {@code InfinispanOrganizationProvider}'s implementations and deliberately do
+ * NOT override them. Consequences, established by reading the 26.7.0 source:
+ *
+ * <ul>
+ *   <li><b>Creation IS governed.</b>
+ *       {@code JpaOrganizationProvider.createGroup} binds
+ *       {@code groupProvider = session.groups()} and terminates in
+ *       {@code groupProvider.createGroup(realm, id, Type.ORGANIZATION, name,
+ *       parent)} — the 5-arg terminal that every {@code GroupProvider.createGroup}
+ *       default overload funnels into. {@code session.groups()} resolves to
+ *       {@link IgaRealmProvider} (GroupProviderFactory, order 2), whose
+ *       {@code createGroup} override intercepts it. So an org-group create still
+ *       raises a {@code CREATE_GROUP} change request. This path does NOT fail
+ *       open.</li>
+ *   <li><b>Attestation / ADOPT do NOT cover them.</b> Org-backed groups carry
+ *       {@code GroupModel.Type.ORGANIZATION} ({@code KEYCLOAK_GROUP.TYPE = 1}).
+ *       {@code IgaUnsignedRowScanner} filters {@code g.type = 0} and
+ *       {@code RealmAttestationExporter} skips {@code Type.ORGANIZATION} groups,
+ *       both by design — on 26.5.5 the only type-1 row was the single internal
+ *       org-backing group, which is not admin-authored. On 26.7.0 that
+ *       assumption no longer holds: admin-authored org groups are also type-1,
+ *       so they are governed on create but never enter the attested closure and
+ *       are never surfaced by the toggle-on ADOPT scan.</li>
+ * </ul>
+ *
+ * <p>Blast radius is limited to realms with the {@code ORGANIZATION} feature
+ * enabled ({@link IgaOrganizationProviderFactory#isSupported} delegates to KC's
+ * gate). Closing the asymmetry means teaching the scanner/exporter to
+ * distinguish the internal org-backing group from admin-authored org groups; it
+ * is intentionally out of scope for the 26.7.0 port and is left as a known gap
+ * rather than half-modelled. Do not assume org groups are attested.</p>
  */
 public class IgaOrganizationProvider extends InfinispanOrganizationProvider {
 
