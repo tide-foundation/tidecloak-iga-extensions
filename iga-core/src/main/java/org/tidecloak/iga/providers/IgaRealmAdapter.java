@@ -453,20 +453,48 @@ public class IgaRealmAdapter extends RealmAdapter {
      * default-scope setup, where the realm's default-default / default-optional
      * scope templates are auto-created and must NOT be live-governed (they are
      * attested via the toggle-on ADOPT scan instead)? Matches if ANY of the
-     * bootstrap frames is present on the current stack (KC 26.5.5):
+     * bootstrap frames is present on the current stack.
+     *
+     * <p>Re-verified frame-by-frame against the upstream Keycloak 26.7.0 tag.
+     * The load-bearing frame is {@code DefaultClientScopes}: KC funnels EVERY
+     * protocol factory's default-scope creation through
+     * {@code DefaultClientScopes.createDefaultClientScopes}, which does
+     * {@code getProviderFactoriesStream(LoginProtocol.class).forEach(lpf ->
+     * lpf.createDefaultClientScopes(realm, ...))}. That frame therefore sits
+     * below OIDC/SAML/OID4VC alike and alone suffices; the per-factory frames
+     * below are defence in depth.</p>
+     *
      * <ul>
      *   <li>{@code OIDCLoginProtocolFactory.createDefaultClientScopesImpl} —
      *       profile/email/address/phone/roles/web-origins/microprofile-jwt/acr/
-     *       basic/organization.</li>
+     *       basic/organization, plus {@code delegation} as of 26.7.0. Extends
+     *       {@code AbstractLoginProtocolFactory}, hence the {@code ...Impl}
+     *       method name.</li>
      *   <li>{@code SamlProtocolFactory.createDefaultClientScopesImpl} —
-     *       role_list / saml_organization.</li>
-     *   <li>{@code OID4VCLoginProtocolFactory.createDefaultClientScopesImpl} —
-     *       oid4vc_natural_person.</li>
+     *       role_list / saml_organization, plus {@code AuthnContextClassRef} as
+     *       of 26.7.0. Also extends {@code AbstractLoginProtocolFactory}.</li>
+     *   <li>{@code OID4VCLoginProtocolFactory.createDefaultClientScopes} —
+     *       oid4vc_natural_person{_jwt,_sd}. NOTE: this factory implements
+     *       {@code LoginProtocolFactory} DIRECTLY (it does not extend
+     *       {@code AbstractLoginProtocolFactory}), so its method is
+     *       {@code createDefaultClientScopes} with NO {@code Impl} suffix.
+     *       This has been true since at least 26.5.5; the predicate previously
+     *       demanded {@code createDefaultClientScopesImpl} for this class,
+     *       which never matched, making the OID4VC arm dead code. Suppression
+     *       still worked via the {@code DefaultClientScopes} frame, so this is
+     *       a latent-hole fix, not a live-bug fix — but the arm is now correct
+     *       so it actually contributes its intended defence in depth.</li>
      *   <li>{@code DefaultClientScopes.createOfflineAccessClientScope} /
      *       {@code createDefaultClientScopes} — offline_access (server-spi-private
      *       {@code models.utils.DefaultClientScopes}).</li>
      *   <li>{@code RealmManager.createDefaultClientScopes} — the services-layer
-     *       entry point (covers any future factory).</li>
+     *       entry point (covers any future factory). It wraps the call in
+     *       {@code EntityManagers.runInBatch(session, () -> ...)}; the lambda
+     *       frame is {@code lambda$createDefaultClientScopes$N} and does NOT
+     *       match, but {@code runInBatch} executes synchronously so the real
+     *       {@code createDefaultClientScopes} frame remains on the stack below
+     *       it and DOES match. (This wrapper is present on 26.5.5 too — not a
+     *       26.7.0 regression.)</li>
      * </ul>
      * The governed admin route ({@code RealmAdminResource.addDefaultClientScope}
      * on an already-existing realm) carries NONE of these frames, so it is
@@ -479,9 +507,15 @@ public class IgaRealmAdapter extends RealmAdapter {
                     String cn = f.getDeclaringClass().getName();
                     String mn = f.getMethodName();
                     if (cn.startsWith("org.keycloak.protocol.oidc.OIDCLoginProtocolFactory")
-                            || cn.startsWith("org.keycloak.protocol.saml.SamlProtocolFactory")
-                            || cn.startsWith("org.keycloak.protocol.oid4vc.OID4VCLoginProtocolFactory")) {
+                            || cn.startsWith("org.keycloak.protocol.saml.SamlProtocolFactory")) {
                         return "createDefaultClientScopesImpl".equals(mn);
+                    }
+                    // OID4VC implements LoginProtocolFactory directly -> no `Impl`
+                    // suffix. Accept both spellings so this arm keeps matching if
+                    // the factory is ever reparented onto AbstractLoginProtocolFactory.
+                    if (cn.startsWith("org.keycloak.protocol.oid4vc.OID4VCLoginProtocolFactory")) {
+                        return "createDefaultClientScopes".equals(mn)
+                                || "createDefaultClientScopesImpl".equals(mn);
                     }
                     if ("org.keycloak.models.utils.DefaultClientScopes".equals(cn)) {
                         return true;
