@@ -2,6 +2,7 @@ package org.tidecloak.iga.providers;
 
 import org.keycloak.common.enums.SslRequired;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.tidecloak.iga.services.IgaMigrationContext;
 import org.keycloak.models.AuthenticationFlowModel;
 import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.GroupModel;
@@ -75,6 +76,10 @@ public class IgaRealmAdapter extends RealmAdapter {
         // (each of which gates on isIgaActive() before recording). Inert when the
         // flag is absent — ongoing admin edits stay governed.
         if (service.isVendorProvisioning()) return false;
+        // TIDECLOAK: Keycloak's own model migration must apply directly — never
+        // captured as a governance CR (would 409 on a realm with a pending CR
+        // and abort boot). See IgaMigrationContext.
+        if (IgaMigrationContext.isOnKeycloakMigrationPath()) return false;
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }
