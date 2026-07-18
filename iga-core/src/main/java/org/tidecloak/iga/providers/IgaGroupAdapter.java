@@ -2,6 +2,7 @@ package org.tidecloak.iga.providers;
 
 import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.tidecloak.iga.services.IgaMigrationContext;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
@@ -208,6 +209,10 @@ public class IgaGroupAdapter extends GroupAdapter {
         // Scoped vendor/system provisioning bypass (see
         // IgaChangeRequestService.IGA_VENDOR_PROVISIONING): apply directly, no capture.
         if (service.isVendorProvisioning()) return false;
+        // TIDECLOAK: Keycloak's own model migration must apply directly — never
+        // captured as a governance CR (would 409 on a realm with a pending CR
+        // and abort boot). See IgaMigrationContext.
+        if (IgaMigrationContext.isOnKeycloakMigrationPath()) return false;
         Object replay = session.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }
