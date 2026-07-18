@@ -11,6 +11,7 @@ import org.keycloak.models.jpa.entities.ClientEntity;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.ModelToRepresentation;
 import org.keycloak.representations.idm.ClientRepresentation;
+import org.tidecloak.iga.services.IgaMigrationContext;
 import org.tidecloak.iga.services.IgaQuarantineCache;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -149,6 +150,10 @@ public class IgaClientAdapter extends ClientAdapter {
         // Scoped vendor/system provisioning bypass (see
         // IgaChangeRequestService.IGA_VENDOR_PROVISIONING): apply directly, no capture.
         if (service.isVendorProvisioning()) return false;
+        // TIDECLOAK: Keycloak's own model migration must apply directly — never
+        // captured as a governance CR (would 409 on a realm with a pending CR
+        // and abort boot). See IgaMigrationContext.
+        if (IgaMigrationContext.isOnKeycloakMigrationPath()) return false;
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }

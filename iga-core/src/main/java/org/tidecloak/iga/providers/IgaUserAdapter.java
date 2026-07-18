@@ -12,6 +12,7 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.representations.idm.UserRepresentation;
 import org.tidecloak.iga.attestors.TideAttestor;
 import org.tidecloak.iga.replay.IgaReplayExtension;
+import org.tidecloak.iga.services.IgaMigrationContext;
 import org.tidecloak.iga.services.IgaQuarantineCache;
 import org.tidecloak.iga.services.IgaUnsignedEntityService;
 import org.tidecloak.iga.services.TideRealmAdminGuard;
@@ -372,6 +373,10 @@ public class IgaUserAdapter extends UserAdapter {
         // Scoped vendor/system provisioning bypass (see
         // IgaChangeRequestService.IGA_VENDOR_PROVISIONING): apply directly, no capture.
         if (service.isVendorProvisioning()) return false;
+        // TIDECLOAK: Keycloak's own model migration must apply directly — never
+        // captured as a governance CR (would 409 on a realm with a pending CR
+        // and abort boot). See IgaMigrationContext.
+        if (IgaMigrationContext.isOnKeycloakMigrationPath()) return false;
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }
