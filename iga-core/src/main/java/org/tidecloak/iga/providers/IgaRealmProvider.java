@@ -299,6 +299,14 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public RoleModel addRealmRole(RealmModel realm, String id, String name) {
+        // TIDECLOAK: Keycloak's own model migration on an IGA-on realm must NOT apply
+        // this create directly (it would land un-attested and fail the login closure)
+        // nor throw through the REST capture seam (uncaught at boot). Capture it as a
+        // pending CREATE_ROLE CR and return a non-persisting phantom handle. See
+        // IgaMigrationRoleCapture.
+        if (IgaMigrationRoleCapture.isActive(igaSession, realm)) {
+            return new IgaMigrationRoleCapture(igaSession).captureRealmRole(realm, id, name);
+        }
         // partialImport batch governance for REALM ROLE. Same gap
         // class as createGroup: under POST /partialImport, KC's
         // RolesPartialImport.doImport → RepresentationToModel.importRoles →
@@ -384,6 +392,11 @@ public class IgaRealmProvider extends JpaRealmProvider {
     @Override
     public RoleModel addClientRole(ClientModel client, String id, String name) {
         RealmModel realm = client.getRealm();
+        // TIDECLOAK: migration-capture (see addRealmRole / IgaMigrationRoleCapture). The
+        // 26.7.0 org-admin roles (view-/manage-/query-organizations) are created here.
+        if (IgaMigrationRoleCapture.isActive(igaSession, realm)) {
+            return new IgaMigrationRoleCapture(igaSession).captureClientRole(realm, client, id, name);
+        }
         // partialImport batch governance for CLIENT ROLE. Same gap
         // class as addRealmRole: under POST /partialImport, KC's
         // RolesPartialImport.doImport → RepresentationToModel.importRoles
@@ -447,6 +460,40 @@ public class IgaRealmProvider extends JpaRealmProvider {
         RoleEntity entity = em.find(RoleEntity.class, id);
         if (entity == null) return base;
         return new IgaRoleAdapter(igaSession, realm, em, entity);
+    }
+
+    // -------------------------------------------------------------------------
+    // Role-by-NAME lookups — normally left to JpaRealmProvider (returning a plain
+    // RoleAdapter). During a Keycloak model migration ONLY, wrap the result in an
+    // IgaRoleAdapter so a composite-add the migrator performs on an EXISTING role
+    // (MigrationUtils.addAdminRole: realm.getRole("admin")/client.getRole("realm-admin")
+    // .addCompositeRole(newOrgRole)) is intercepted at IgaRoleAdapter.addCompositeRole
+    // and captured as an ADD_COMPOSITE CR — instead of a plain RoleAdapter persisting a
+    // CompositeRoleEntity that references the not-yet-committed phantom child (FK-fail at
+    // the outer flush) UNSIGNED. The StackWalker gate keeps ordinary runtime lookups
+    // (token issuance, admin edits) on the unwrapped fast path. Phantom (not-yet-committed)
+    // roles are never wrapped here: super.get*Role queries the DB and returns null for
+    // them, so core's null-guarded addQueryCompositeRoles still skips cleanly.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public RoleModel getRealmRole(RealmModel realm, String name) {
+        RoleModel base = super.getRealmRole(realm, name);
+        if (base != null && IgaMigrationContext.isOnKeycloakMigrationPath()) {
+            RoleEntity entity = em.find(RoleEntity.class, base.getId());
+            if (entity != null) return new IgaRoleAdapter(igaSession, realm, em, entity);
+        }
+        return base;
+    }
+
+    @Override
+    public RoleModel getClientRole(ClientModel client, String name) {
+        RoleModel base = super.getClientRole(client, name);
+        if (base != null && IgaMigrationContext.isOnKeycloakMigrationPath()) {
+            RoleEntity entity = em.find(RoleEntity.class, base.getId());
+            if (entity != null) return new IgaRoleAdapter(igaSession, client.getRealm(), em, entity);
+        }
+        return base;
     }
 
     // -------------------------------------------------------------------------

@@ -428,6 +428,16 @@ public class IgaRoleAdapter extends RoleAdapter {
             super.addCompositeRole(role);
             return;
         }
+        // TIDECLOAK: Keycloak's own model migration adding a composite to an EXISTING
+        // role (e.g. realm-admin/admin ⊃ a new org-admin role). The child is a
+        // not-yet-committed migration-capture phantom, so super.addCompositeRole would
+        // FK-fail at the outer flush, and applying the edge directly would leave an
+        // un-attested CompositeRoleEntity that fails the login closure. Capture it as a
+        // dependent ADD_COMPOSITE CR instead. See IgaMigrationRoleCapture.
+        if (IgaMigrationContext.isOnKeycloakMigrationPath() && getService().isIgaEnabled(realm)) {
+            new IgaMigrationRoleCapture(session).captureComposite(realm, this, role);
+            return;
+        }
         if (!isIgaActive()) {
             super.addCompositeRole(role);
             return;
