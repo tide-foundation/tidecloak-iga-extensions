@@ -1,0 +1,2 @@
+org.tidecloak.iga.attestors.SimpleNameAttestorFactory
+org.tidecloak.iga.attestors.TideAttestorFactory

@@ -1,0 +1,379 @@
+package org.tidecloak.iga.services;
+
+import org.keycloak.models.RealmModel;
+import org.tidecloak.iga.replay.IgaReplayExtension;
+
+import java.util.Set;
+
+/**
+ * System-entity skip rules for the toggle-on ADOPT scan.
+ *
+ * <p>The toggle-on scan ({@link IgaAdoptScan}) walks every unattested row in
+ * the realm and (by default) emits a per-entity ADOPT_X change request. Two
+ * categories of entities must NOT be quarantined under default settings,
+ * because doing so locks the realm out of its own bootstrap:</p>
+ * <ol>
+ *   <li><b>Hard-pinned skips</b> — entities the scan MUST NEVER quarantine
+ *       even with {@code iga.adopt.includeSystem=true}: the realm composite
+ *       role {@code default-roles-&lt;realm&gt;} and the bookkeeping client
+ *       {@code default-roles-&lt;realm&gt;} that backs it. Any user created in
+ *       the realm receives the composite automatically — pending-quarantining
+ *       it would freeze every subsequent login/create.</li>
+ *   <li><b>Soft skips</b> (default on, can be opted out of with
+ *       {@code iga.adopt.includeSystem=true}) — three sets:
+ *     <ul>
+ *       <li>KC's built-in per-realm admin clients
+ *           ({@code realm-management}, {@code account},
+ *           {@code account-console}, {@code security-admin-console},
+ *           {@code broker}, {@code admin-cli}) plus the Tide-realm default
+ *           {@code tide-admin-console} (auto-created at Tide enablement),
+ *           AND every client-role under them. Avoids quarantining the very
+ *           surface used to commit change requests.</li>
+ *       <li>KC's default client-scopes
+ *           ({@link #DEFAULT_CLIENT_SCOPE_NAMES} — profile, email, roles,
+ *           role_list, …). Avoids quarantining the token-issuance plumbing
+ *           every fresh realm starts with.</li>
+ *       <li>KC's default realm roles
+ *           ({@link #DEFAULT_REALM_ROLE_NAMES} — offline_access,
+ *           uma_authorization). NOT the composite
+ *           default-roles-&lt;realm&gt; (that is hard-pinned above).</li>
+ *     </ul>
+ *     All three can be brought under governance by an operator that
+ *     explicitly wants to (set {@code iga.adopt.includeSystem=true}), but the
+ *     default keeps the realm's bootstrap surface ungoverned.</li>
+ * </ol>
+ *
+ * <p>The {@code master} realm is filtered earlier — at the toggle handler —
+ * because Tide's master-realm escape hatch must remain unconditionally usable
+ * for recovery. This class does NOT need to re-filter master: the toggle
+ * handler refuses to enable IGA on master at all.</p>
+ *
+ * <p>Stateless utility. Lookups are cheap (string compare against a small
+ * constant set); the scan invokes one call per row.</p>
+ */
+public final class IgaSystemEntityFilter {
+
+    /**
+     * KC's per-realm built-in clients. Mirrors
+     * {@code org.keycloak.models.Constants#defaultClients} / the master-realm
+     * setup in stock KC 26.7.x — these clients are auto-created at realm
+     * creation and back the admin/account/CLI surfaces.
+     *
+     * <p>Re-verified against the upstream 26.7.0 tag. {@code Constants
+     * .defaultClients} GREW in 26.7.0 (it was {account, admin-cli, broker,
+     * realm-management, security-admin-console}) and now additionally carries
+     * {@code account-console}, {@code admin-permissions}
+     * ({@code ADMIN_PERMISSIONS_CLIENT_ID}, the FGAPv2 admin-permissions
+     * client) and {@code _system}
+     * ({@code SystemClientUtil.SYSTEM_CLIENT_ID}). The latter two are new to
+     * this set — without them a 26.7.0 realm would surface them on toggle-on
+     * as admin-authored ADOPT_CLIENTs and quarantine them.</p>
+     */
+    public static final Set<String> BUILTIN_CLIENT_IDS = Set.of(
+            "realm-management",
+            "account",
+            "account-console",
+            "security-admin-console",
+            "broker",
+            "admin-cli",
+            // KC 26.7.0: FGAPv2's admin-permissions client. Present as a
+            // Constants constant on 26.5.5 but only promoted into
+            // Constants.defaultClients in 26.7.0.
+            "admin-permissions",
+            // KC 26.7.0: SystemClientUtil.SYSTEM_CLIENT_ID. Lazily created
+            // (realm.addClient("_system")) for system operations when the
+            // `account` client is unavailable. Promoted into
+            // Constants.defaultClients in 26.7.0.
+            "_system",
+            // Tide-realm default: the KC-hosted Tide admin console, auto-created
+            // (create-if-absent) for every Tide-enabled realm by
+            // VendorResource.setupTideAdminConsole (called from SignIdpSettings),
+            // via KeycloakModelUtils.createPublicClient — i.e. created IGA-OFF and
+            // surfaced on toggle-on as an ADOPT_CLIENT. It is a realm DEFAULT, not
+            // an admin-authored client, so it is treated exactly like KC's built-in
+            // admin/account consoles: attestation-only ADOPT (signed on commit, no
+            // quarantine sidecar) + its client-roles soft-skip with it. Without
+            // this, its ADOPT_CLIENT CR would lack the ATTESTATION_ONLY marker and
+            // stay MANUAL under the narrowed firstAdmin auto-commit scope.
+            "tide-admin-console"
+    );
+
+    /**
+     * KC's per-realm default client-scopes, created automatically on realm
+     * creation by the OIDC + SAML + (when enabled) ORGANIZATION protocol
+     * factories and {@code RealmManager.setupOfflineTokens}. None of these are
+     * admin-authored — bringing them under governance by default would
+     * quarantine the entire token-issuance surface of a fresh realm. They are
+     * soft-skipped (lifted by {@code iga.adopt.includeSystem=true}) so an
+     * operator can still opt them in if needed.
+     *
+     * <p>Sources (re-verified against the upstream Keycloak 26.7.0 tag):
+     * <ul>
+     *   <li>{@code org.keycloak.protocol.oidc.OIDCLoginProtocolFactory
+     *       #createDefaultClientScopesImpl}: profile, email, address, phone,
+     *       roles, web-origins, microprofile-jwt, basic, service_account
+     *       (always); acr (Profile.Feature.STEP_UP_AUTHENTICATION); organization
+     *       (Profile.Feature.ORGANIZATION); <b>delegation</b>
+     *       (Profile.Feature.TOKEN_EXCHANGE_DELEGATION) — NEW in 26.7.0.</li>
+     *   <li>{@code org.keycloak.services.managers.RealmManager
+     *       #setupOfflineTokens} → {@code DefaultClientScopes
+     *       .createOfflineAccessClientScope}: offline_access.</li>
+     *   <li>{@code org.keycloak.protocol.saml.SamlProtocolFactory
+     *       #createDefaultClientScopesImpl}: role_list (always);
+     *       saml_organization (Profile.Feature.ORGANIZATION);
+     *       <b>AuthnContextClassRef</b>
+     *       (Profile.Feature.STEP_UP_AUTHENTICATION_SAML, created by
+     *       {@code addSamlAuthnContextClassRefClientScope}) — NEW in
+     *       26.7.0.</li>
+     *   <li>{@code org.keycloak.protocol.oid4vc.OID4VCLoginProtocolFactory
+     *       #createDefaultClientScopes} (note: this factory implements
+     *       {@code LoginProtocolFactory} directly, so the method is
+     *       {@code createDefaultClientScopes}, NOT the
+     *       {@code ...Impl} variant used by the OIDC/SAML factories, which
+     *       extend {@code AbstractLoginProtocolFactory}): in 26.7.0 this loops
+     *       {@code VCFormat.SUPPORTED_FORMATS} and creates ONE scope per
+     *       format — {@code oid4vc_natural_person_jwt} (JWT_VC) and
+     *       {@code oid4vc_natural_person_sd} (SD_JWT_VC). On 26.5.5 it created
+     *       exactly one, {@code oid4vc_natural_person}.</li>
+     * </ul>
+     * </p>
+     *
+     * <p>{@code oid4vc_natural_person} (the 26.5.5 name) is RETAINED alongside
+     * the two 26.7.0 names: a realm provisioned on 26.5.5 and migrated forward
+     * still carries a row under the old name, and dropping it here would make
+     * the toggle-on ADOPT scan quarantine it as admin-authored.</p>
+     *
+     * <p>We list every name unconditionally (feature flags vary per
+     * deployment); a missing scope just means the realm never had it and the
+     * filter never sees a row to skip — no harm.</p>
+     */
+    public static final Set<String> DEFAULT_CLIENT_SCOPE_NAMES = Set.of(
+            "profile",
+            "email",
+            "address",
+            "phone",
+            "offline_access",
+            "roles",
+            "web-origins",
+            "microprofile-jwt",
+            "acr",
+            "basic",
+            "service_account",
+            "organization",
+            "role_list",
+            "saml_organization",
+            // KC 26.7.0: OIDC, gated on Profile.Feature.TOKEN_EXCHANGE_DELEGATION.
+            "delegation",
+            // KC 26.7.0: SAML, gated on Profile.Feature.STEP_UP_AUTHENTICATION_SAML.
+            "AuthnContextClassRef",
+            // OID4VC. 26.5.5 created a single "oid4vc_natural_person"; 26.7.0
+            // creates one scope per VCFormat.SUPPORTED_FORMATS instead. All
+            // three are listed so both fresh-26.7.0 and migrated-from-26.5.5
+            // realms are covered.
+            "oid4vc_natural_person",
+            "oid4vc_natural_person_jwt",
+            "oid4vc_natural_person_sd"
+    );
+
+    /**
+     * KC's per-realm default realm roles, created automatically on realm
+     * creation. Constants from {@code org.keycloak.models.Constants}:
+     * <ul>
+     *   <li>{@code OFFLINE_ACCESS_ROLE} ({@code "offline_access"}) — added by
+     *       {@code KeycloakModelUtils.setupOfflineRole} from
+     *       {@code RealmManager.setupOfflineTokens}.</li>
+     *   <li>{@code AUTHZ_UMA_AUTHORIZATION} ({@code "uma_authorization"}) —
+     *       added by {@code KeycloakModelUtils.setupAuthorizationServices} as
+     *       part of {@code AUTHZ_DEFAULT_AUTHORIZATION_ROLES}.</li>
+     * </ul>
+     *
+     * <p>Neither is the realm-composite-default-role
+     * ({@code default-roles-&lt;realm&gt;}, hard-pinned above) — these two are
+     * regular realm roles that the composite references, and they are
+     * soft-skipped (lifted by {@code iga.adopt.includeSystem=true}).</p>
+     */
+    public static final Set<String> DEFAULT_REALM_ROLE_NAMES = Set.of(
+            "offline_access",
+            "uma_authorization"
+    );
+
+    /**
+     * The Tide-identity client scope ({@code tide-claims}). It carries the
+     * {@code tideuserkey} / {@code vuid} / {@code t.uho} protocol mappers that
+     * every Tide-signed login token MUST contain — the ORK {@code Validate}
+     * step rejects a token with no {@code tideuserkey} ("Tide user key missing
+     * from token").
+     *
+     * <p>Like KC's built-in default scopes (profile/email/...), this scope must
+     * NEVER be quarantined: if the toggle-on ADOPT scan wrote an
+     * {@code IGA_UNSIGNED_ENTITY} sidecar row for it, then — until its
+     * {@code ADOPT_CLIENT_SCOPE} CR committed —
+     * {@link org.tidecloak.iga.providers.IgaClientScopeAdapter#getProtocolMappersStream()}
+     * would return {@code Stream.empty()} for it, STRIPPING the
+     * {@code tideuserkey} mapper from the issued token and breaking Tide login.
+     * The same strip would also empty the producer's
+     * {@code client_scope_mapper_set} unit (the producer reads the live
+     * {@code getProtocolMappersStream()}), so the signed unit would mismatch
+     * the (un-quarantined) login emission and replay would fail-close.</p>
+     *
+     * <p>Treating it as a hard-pinned system entity here makes the scan emit an
+     * <em>attestation-only</em> ADOPT CR for it (its producer column is still
+     * signed/governed) WITHOUT a quarantine sidecar — so its mappers are always
+     * present at token-mint and at producer sign time. Unlike the soft skips,
+     * this is NOT lifted by {@code iga.adopt.includeSystem=true}: quarantining
+     * the Tide-identity scope would brick every Tide login.</p>
+     *
+     * <p>Matched by the well-known canonical scope name (kept in sync with
+     * {@code IgaSystemProvisioner.TIDE_CLAIMS_SCOPE_NAME}). Only this scope is
+     * exempted — all other operator-authored custom scopes still quarantine.</p>
+     */
+    public static final String TIDE_CLAIMS_SCOPE_NAME = "tide-claims";
+
+    private IgaSystemEntityFilter() {
+    }
+
+    /**
+     * @param realm        the realm being scanned (its name supplies the
+     *                     {@code default-roles-&lt;realm&gt;} hard-pin string).
+     * @param entityType   USER | ROLE | GROUP | CLIENT | CLIENT_SCOPE (the
+     *                     five scan targets).
+     * @param entityId     the entity's own UUID (unused today but kept on the
+     *                     surface so future rules can pivot on it without
+     *                     re-threading callers).
+     * @param entityName   the entity's human-readable name (USERNAME for
+     *                     USER, ROLE name, GROUP name, CLIENT_SCOPE name); for
+     *                     CLIENT this is the {@code clientId} string. May be
+     *                     {@code null} when the scanner cannot resolve it.
+     * @param parentClientId for client-roles, the {@code clientId} string of
+     *                     the role's owning client (used to soft-skip every
+     *                     role under a built-in client when {@code
+     *                     includeSystem=false}). {@code null} for realm roles
+     *                     and non-ROLE entity types.
+     * @param includeSystem if {@code true}, soft-skip rules are LIFTED.
+     *                     Hard-pinned skips remain.
+     * @return {@code true} when this entity must be skipped by the scan.
+     */
+    public static boolean shouldSkip(RealmModel realm,
+                                      String entityType,
+                                      String entityId,
+                                      String entityName,
+                                      String parentClientId,
+                                      boolean includeSystem) {
+        if (realm == null || entityType == null) {
+            return false;
+        }
+        String defaultRolesName = "default-roles-" + realm.getName();
+
+        // -------------------------------------------------------------------
+        // HARD-PINNED skips — regardless of includeSystem.
+        // -------------------------------------------------------------------
+        if (IgaReplayExtension.ENTITY_TYPE_ROLE.equals(entityType)) {
+            // The realm composite role default-roles-<realm>. KC binds every
+            // new user to this composite at create-time, so quarantining it
+            // would brick the realm. Pin even when the operator asks to
+            // include system entities.
+            if (defaultRolesName.equals(entityName)) {
+                return true;
+            }
+        }
+        if (IgaReplayExtension.ENTITY_TYPE_CLIENT.equals(entityType)) {
+            // The bookkeeping client default-roles-<realm> exists alongside
+            // the role and is similarly pinned.
+            if (defaultRolesName.equals(entityName)) {
+                return true;
+            }
+        }
+        if (IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE.equals(entityType)) {
+            // The Tide-identity scope tide-claims. Its tideuserkey/vuid/t.uho
+            // mappers must NEVER be stripped from a login token (and the
+            // producer must read them when signing the client_scope_mapper_set
+            // unit), so it must never be quarantined. Hard-pinned: not lifted
+            // by includeSystem=true. It STILL gets an attestation-only ADOPT CR
+            // (signed, no quarantine sidecar). See TIDE_CLAIMS_SCOPE_NAME.
+            if (TIDE_CLAIMS_SCOPE_NAME.equals(entityName)) {
+                return true;
+            }
+        }
+
+        // -------------------------------------------------------------------
+        // SOFT skips — lifted when includeSystem=true.
+        // -------------------------------------------------------------------
+        if (includeSystem) {
+            return false;
+        }
+        if (IgaReplayExtension.ENTITY_TYPE_CLIENT.equals(entityType)) {
+            return entityName != null && BUILTIN_CLIENT_IDS.contains(entityName);
+        }
+        if (IgaReplayExtension.ENTITY_TYPE_ROLE.equals(entityType)) {
+            // Client-roles whose parent client is built-in: skip them as a
+            // unit with their parent.
+            if (parentClientId != null) {
+                return BUILTIN_CLIENT_IDS.contains(parentClientId);
+            }
+            // Realm roles auto-created by the realm bootstrap
+            // (offline_access, uma_authorization). The realm composite
+            // default-roles-<realm> is hard-pinned above and is not part of
+            // this soft set.
+            return entityName != null && DEFAULT_REALM_ROLE_NAMES.contains(entityName);
+        }
+        if (IgaReplayExtension.ENTITY_TYPE_CLIENT_SCOPE.equals(entityType)) {
+            // Default client-scopes auto-created by OIDC/SAML/OID4VC protocol
+            // factories + RealmManager.setupOfflineTokens. Operator-authored
+            // scopes (e.g. the e2e p6b-scope) fall through and ARE quarantined.
+            return entityName != null && DEFAULT_CLIENT_SCOPE_NAMES.contains(entityName);
+        }
+        return false;
+    }
+
+    /**
+     * EDGE built-in classification (commit 2 — edge ADOPT coverage). An edge
+     * (composite-role link, scope↔client attach, scope→role mapping,
+     * protocol-mapper) is built-in when the NODE that owns/anchors it is
+     * built-in. We do NOT invent a parallel edge filter: we reuse the EXACT
+     * node rules in {@link #shouldSkip} by classifying the edge through its
+     * owning node's (type, name).
+     *
+     * <ul>
+     *   <li>COMPOSITE_ROLE → owner = the PARENT role. Skip when the parent is
+     *       the hard-pinned {@code default-roles-<realm>} composite, a default
+     *       realm role, OR — crucially — a CLIENT-ROLE of a built-in admin
+     *       client (e.g. {@code realm-management}'s {@code admin} /
+     *       {@code realm-admin} composites, {@code account}'s
+     *       {@code manage-account}). Those built-in admin clients ship dozens
+     *       of composite client-roles; they MUST soft-skip exactly as their
+     *       parent client does — hence {@code ownerParentClientId} is threaded
+     *       through to {@link #shouldSkip}'s {@code parentClientId} lane.</li>
+     *   <li>CLIENT_SCOPE_CLIENT / CLIENT_SCOPE_ROLE / scope-owned
+     *       PROTOCOL_MAPPER → owner = the client-SCOPE. Skip when the scope is
+     *       a KC default scope (profile/email/roles/...).</li>
+     *   <li>client-owned PROTOCOL_MAPPER → owner = the CLIENT. Skip when the
+     *       client is a built-in admin client (realm-management/account/...).</li>
+     * </ul>
+     *
+     * @param realm          the realm being scanned.
+     * @param ownerNodeType  the owning node's entity-type
+     *                       (ROLE | CLIENT_SCOPE | CLIENT).
+     * @param ownerNodeName  the owning node's human name (role name / scope
+     *                       name / client {@code clientId}).
+     * @param ownerParentClientId  for a COMPOSITE_ROLE whose PARENT is a
+     *                       client-role, the owning client's {@code clientId}
+     *                       (so a built-in admin client's composites soft-skip
+     *                       as a unit); {@code null} for realm-role parents and
+     *                       non-ROLE owners.
+     * @param includeSystem  if {@code true}, soft-skip rules are lifted; the
+     *                       {@code default-roles-<realm>} hard-pin is preserved.
+     * @return {@code true} when the edge must be skipped by the scan.
+     */
+    public static boolean shouldSkipEdge(RealmModel realm,
+                                         String ownerNodeType,
+                                         String ownerNodeName,
+                                         String ownerParentClientId,
+                                         boolean includeSystem) {
+        // Delegate to the node classifier so edge built-in status tracks node
+        // built-in status with zero rule duplication. For a client-role parent
+        // we pass its owning clientId so the parentClientId soft-skip lane
+        // catches built-in admin clients' composite client-roles.
+        return shouldSkip(realm, ownerNodeType, /*entityId*/ null,
+                ownerNodeName, ownerParentClientId, includeSystem);
+    }
+}

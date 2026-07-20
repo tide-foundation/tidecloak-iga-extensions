@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!-- 1: Create IGA_AUTHORIZER table -->
+    <changeSet id="iga-1.2.0-1" author="tidecloak-iga">
+        <createTable tableName="IGA_AUTHORIZER">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="REALM_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="PROVIDER_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="TYPE" type="VARCHAR(64)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="AUTHORIZER" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="AUTHORIZER_CERTIFICATE" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+
+    <!-- 2: Index on (REALM_ID, TYPE) for the common lookup -->
+    <changeSet id="iga-1.2.0-2" author="tidecloak-iga">
+        <createIndex tableName="IGA_AUTHORIZER" indexName="IDX_IGA_AUTHORIZER_REALM_TYPE">
+            <column name="REALM_ID"/>
+            <column name="TYPE"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>

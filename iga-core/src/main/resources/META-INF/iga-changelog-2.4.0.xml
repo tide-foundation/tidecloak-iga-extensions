@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.4.0: Add an ATTESTATION column to ORG.
+
+      ORG rows are the stock KC 26.5.5 organization table (OrganizationEntity).
+      Until now orgs were the one IGA-governed entity WITHOUT a per-row
+      attestation column — governance was tracked purely by the CR row +
+      sidecar. This reverses that "no attestation by design" decision: the
+      organization is now a first-class NODE in the attested set, stamped
+      per-entity on commit exactly like USER/ROLE/GROUP/CLIENT/CLIENT_SCOPE.
+
+      Design calls (LOCKED):
+        (a) the org is a NODE → per-entity stamp (no TideSetResolver change);
+        (b) org DOMAINS are covered by the org-node attestation (no separate
+            ORG_DOMAIN attestation column);
+        (c) org MEMBERSHIP stays governed by the existing
+            user_group_membership edge (member add/remove does NOT re-stamp
+            the org node);
+        (d) this changelog version is 2.4.0.
+
+      The matching `attestation` field on OrganizationEntity is added in
+      tidecloak-override separately; the replay/scan JPQL `e.attestation`
+      resolves against it at runtime. Mirrors the ATTESTATION column carried
+      by SCOPE_MAPPING (2.3.1) / DEFAULT_CLIENT_SCOPE (2.3.0), VARCHAR(2048).
+    -->
+
+    <changeSet id="iga-2.4.0-1" author="tidecloak-iga">
+        <addColumn tableName="ORG">
+            <column name="ATTESTATION" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>

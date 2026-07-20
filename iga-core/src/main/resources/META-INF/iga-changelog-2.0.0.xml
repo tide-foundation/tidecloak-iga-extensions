@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.0.0: Add ATTESTATION column to CLIENT_SCOPE so client-scope create
+      writes can be attested through the IGA replay path.
+
+      Note: The list-collection tables WEB_ORIGINS, REDIRECT_URIS and
+      REALM_DEFAULT_GROUPS intentionally do NOT receive an ATTESTATION column.
+      They have no entity class for the per-row attestation to attach to and
+      adding one is too disruptive. Coverage for those write paths is provided
+      via change requests; the snapshot in rows_json is the audit trail.
+
+      Author: tidecloak-iga
+    -->
+
+    <!-- 1: CLIENT_SCOPE.ATTESTATION -->
+    <changeSet id="iga-2.0.0-1" author="tidecloak-iga">
+        <addColumn tableName="CLIENT_SCOPE">
+            <column name="ATTESTATION" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>

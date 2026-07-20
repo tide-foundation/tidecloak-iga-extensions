@@ -1,0 +1,263 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.2.0: Drop OLD tide-jpa-providers schema.
+
+      These tables are no longer used by tidecloak-iga-extensions; this migration
+      cleans up deployments upgrading from the predecessor codebase. Each
+      changeSet is guarded by a tableExists precondition (onFail=MARK_RAN) so the
+      file is safe on fresh installs that never had the OLD schema, and equally
+      safe on partial deployments where only some tables exist.
+
+      No data migration is performed: the OLD schema is treated as dead. Tables
+      are dropped child-before-parent (Group A) even though cascadeConstraints
+      is set, as a belt-and-braces measure against any database that ignores or
+      restricts cascade. Group B covers three orphan @Table classes
+      (KEYCLOAK_GROUP_DRAFT, SIGNATURE_ENTRY, CLIENT_SCOPE_CLIENT_DRAFT) that
+      may exist in some deployments but never had a managed lifecycle.
+
+      Author: tidecloak-iga
+    -->
+
+    <!-- Group A: OLD-created tables, child-before-parent -->
+
+    <!-- 1: ADMIN_AUTHORIZATIONS (FKs into CHANGESET_REQUEST) -->
+    <changeSet id="iga-2.2.0-1" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="ADMIN_AUTHORIZATIONS"/>
+        </preConditions>
+        <dropTable tableName="ADMIN_AUTHORIZATIONS" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 2: SSH_POLICY (FKs into FORSETI_CONTRACT) -->
+    <changeSet id="iga-2.2.0-2" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="SSH_POLICY"/>
+        </preConditions>
+        <dropTable tableName="SSH_POLICY" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 3: AUTHORIZER_SIGNATURES -->
+    <changeSet id="iga-2.2.0-3" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="AUTHORIZER_SIGNATURES"/>
+        </preConditions>
+        <dropTable tableName="AUTHORIZER_SIGNATURES" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 4: ACCESS_PROOF_DETAIL_DEPENDENCY -->
+    <changeSet id="iga-2.2.0-4" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="ACCESS_PROOF_DETAIL_DEPENDENCY"/>
+        </preConditions>
+        <dropTable tableName="ACCESS_PROOF_DETAIL_DEPENDENCY" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 5: ACCESS_PROOF_DETAIL -->
+    <changeSet id="iga-2.2.0-5" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="ACCESS_PROOF_DETAIL"/>
+        </preConditions>
+        <dropTable tableName="ACCESS_PROOF_DETAIL" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 6: USER_CLIENT_ACCESS_PROOF -->
+    <changeSet id="iga-2.2.0-6" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="USER_CLIENT_ACCESS_PROOF"/>
+        </preConditions>
+        <dropTable tableName="USER_CLIENT_ACCESS_PROOF" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 7: USER_ROLE_MAPPING_DRAFT -->
+    <changeSet id="iga-2.2.0-7" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="USER_ROLE_MAPPING_DRAFT"/>
+        </preConditions>
+        <dropTable tableName="USER_ROLE_MAPPING_DRAFT" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 8: COMPOSITE_ROLE_MAPPING_DRAFT -->
+    <changeSet id="iga-2.2.0-8" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="COMPOSITE_ROLE_MAPPING_DRAFT"/>
+        </preConditions>
+        <dropTable tableName="COMPOSITE_ROLE_MAPPING_DRAFT" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 9: COMPOSITE_ROLE_DRAFT -->
+    <changeSet id="iga-2.2.0-9" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="COMPOSITE_ROLE_DRAFT"/>
+        </preConditions>
+        <dropTable tableName="COMPOSITE_ROLE_DRAFT" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 10: USER_GROUP_MEMBERSHIP_DRAFT -->
+    <changeSet id="iga-2.2.0-10" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="USER_GROUP_MEMBERSHIP_DRAFT"/>
+        </preConditions>
+        <dropTable tableName="USER_GROUP_MEMBERSHIP_DRAFT" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 11: GROUP_ROLE_MAPPING_DRAFT -->
+    <changeSet id="iga-2.2.0-11" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="GROUP_ROLE_MAPPING_DRAFT"/>
+        </preConditions>
+        <dropTable tableName="GROUP_ROLE_MAPPING_DRAFT" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 12: GROUP_MOVE_DRAFT -->
+    <changeSet id="iga-2.2.0-12" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="GROUP_MOVE_DRAFT"/>
+        </preConditions>
+        <dropTable tableName="GROUP_MOVE_DRAFT" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 13: USER_ENTITY_DRAFT -->
+    <changeSet id="iga-2.2.0-13" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="USER_ENTITY_DRAFT"/>
+        </preConditions>
+        <dropTable tableName="USER_ENTITY_DRAFT" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 14: ROLE_DRAFT -->
+    <changeSet id="iga-2.2.0-14" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="ROLE_DRAFT"/>
+        </preConditions>
+        <dropTable tableName="ROLE_DRAFT" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 15: CLIENT_DRAFT -->
+    <changeSet id="iga-2.2.0-15" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="CLIENT_DRAFT"/>
+        </preConditions>
+        <dropTable tableName="CLIENT_DRAFT" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 16: ROLE_INITIALIZER_CERTIFICATE -->
+    <changeSet id="iga-2.2.0-16" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="ROLE_INITIALIZER_CERTIFICATE"/>
+        </preConditions>
+        <dropTable tableName="ROLE_INITIALIZER_CERTIFICATE" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 17: CHANGESET_COMMENTS -->
+    <changeSet id="iga-2.2.0-17" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="CHANGESET_COMMENTS"/>
+        </preConditions>
+        <dropTable tableName="CHANGESET_COMMENTS" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 18: CHANGESET_REQUEST -->
+    <changeSet id="iga-2.2.0-18" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="CHANGESET_REQUEST"/>
+        </preConditions>
+        <dropTable tableName="CHANGESET_REQUEST" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 19: AUTHORIZER -->
+    <changeSet id="iga-2.2.0-19" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="AUTHORIZER"/>
+        </preConditions>
+        <dropTable tableName="AUTHORIZER" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 20: LICENSE_HISTORY -->
+    <changeSet id="iga-2.2.0-20" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="LICENSE_HISTORY"/>
+        </preConditions>
+        <dropTable tableName="LICENSE_HISTORY" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 21: POLICY -->
+    <changeSet id="iga-2.2.0-21" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="POLICY"/>
+        </preConditions>
+        <dropTable tableName="POLICY" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 22: POLICY_TEMPLATE -->
+    <changeSet id="iga-2.2.0-22" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="POLICY_TEMPLATE"/>
+        </preConditions>
+        <dropTable tableName="POLICY_TEMPLATE" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 23: FORSETI_CONTRACT -->
+    <changeSet id="iga-2.2.0-23" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="FORSETI_CONTRACT"/>
+        </preConditions>
+        <dropTable tableName="FORSETI_CONTRACT" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 24: SERVER_CERT_DRAFT -->
+    <changeSet id="iga-2.2.0-24" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="SERVER_CERT_DRAFT"/>
+        </preConditions>
+        <dropTable tableName="SERVER_CERT_DRAFT" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 25: LICENSING_DRAFT -->
+    <changeSet id="iga-2.2.0-25" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="LICENSING_DRAFT"/>
+        </preConditions>
+        <dropTable tableName="LICENSING_DRAFT" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 26: DRAFT_SIGNATURES (defensive — was dropped inside OLD's own
+         lifecycle but may exist in deployments that never ran 0.0.1) -->
+    <changeSet id="iga-2.2.0-26" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="DRAFT_SIGNATURES"/>
+        </preConditions>
+        <dropTable tableName="DRAFT_SIGNATURES" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- Group B: orphan @Table classes (defensive, may not exist in any DB) -->
+
+    <!-- 27: KEYCLOAK_GROUP_DRAFT -->
+    <changeSet id="iga-2.2.0-27" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="KEYCLOAK_GROUP_DRAFT"/>
+        </preConditions>
+        <dropTable tableName="KEYCLOAK_GROUP_DRAFT" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 28: SIGNATURE_ENTRY -->
+    <changeSet id="iga-2.2.0-28" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="SIGNATURE_ENTRY"/>
+        </preConditions>
+        <dropTable tableName="SIGNATURE_ENTRY" cascadeConstraints="true"/>
+    </changeSet>
+
+    <!-- 29: CLIENT_SCOPE_CLIENT_DRAFT -->
+    <changeSet id="iga-2.2.0-29" author="tidecloak-iga">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="CLIENT_SCOPE_CLIENT_DRAFT"/>
+        </preConditions>
+        <dropTable tableName="CLIENT_SCOPE_CLIENT_DRAFT" cascadeConstraints="true"/>
+    </changeSet>
+
+</databaseChangeLog>

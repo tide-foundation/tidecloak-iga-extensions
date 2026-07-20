@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      Realm-level named policy records: drop the per-role keying (REALM_ID, ROLE_ID)
+      in favour of (REALM_ID, NAME). Every existing IGA_ROLE_POLICY row is a
+      tide-realm-admin (M0) admin-quorum policy, so all existing rows are backfilled
+      to the reserved name 'tide-realm-admin'. The backfill runs BEFORE the ROLE_ID
+      column / old unique constraint are dropped so live realms keep a valid M0 row
+      across the migration. The table is physically kept as IGA_ROLE_POLICY so the
+      FK from CONTRACT_ID to IGA_FORSETI_CONTRACT is preserved.
+    -->
+
+    <!-- 1: Add NAME column (nullable first so the backfill can populate it). -->
+    <changeSet id="iga-2.11.0-1" author="tidecloak-iga">
+        <addColumn tableName="IGA_ROLE_POLICY">
+            <column name="NAME" type="VARCHAR(255)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 2: Backfill NAME='tide-realm-admin' for every existing row (all existing
+         rows are the tide-realm-admin M0 policy per the data model). -->
+    <changeSet id="iga-2.11.0-2" author="tidecloak-iga">
+        <update tableName="IGA_ROLE_POLICY">
+            <column name="NAME" value="tide-realm-admin"/>
+            <where>NAME IS NULL</where>
+        </update>
+    </changeSet>
+
+    <!-- 3: Drop the old (REALM_ID, ROLE_ID) unique constraint (must go before
+         the ROLE_ID column can be dropped). -->
+    <changeSet id="iga-2.11.0-3" author="tidecloak-iga">
+        <dropUniqueConstraint tableName="IGA_ROLE_POLICY"
+                              constraintName="UQ_IGA_ROLE_POLICY_REALM_ROLE"/>
+    </changeSet>
+
+    <!-- 4: Drop the now-unused ROLE_ID column. -->
+    <changeSet id="iga-2.11.0-4" author="tidecloak-iga">
+        <dropColumn tableName="IGA_ROLE_POLICY" columnName="ROLE_ID"/>
+    </changeSet>
+
+    <!-- 5: NAME is now populated everywhere; make it NOT NULL. -->
+    <changeSet id="iga-2.11.0-5" author="tidecloak-iga">
+        <addNotNullConstraint tableName="IGA_ROLE_POLICY"
+                              columnName="NAME"
+                              columnDataType="VARCHAR(255)"/>
+    </changeSet>
+
+    <!-- 6: New unique constraint on (REALM_ID, NAME). -->
+    <changeSet id="iga-2.11.0-6" author="tidecloak-iga">
+        <addUniqueConstraint tableName="IGA_ROLE_POLICY"
+                             columnNames="REALM_ID, NAME"
+                             constraintName="UQ_IGA_REALM_POLICY_REALM_NAME"/>
+    </changeSet>
+
+</databaseChangeLog>

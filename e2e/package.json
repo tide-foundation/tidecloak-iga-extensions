@@ -1,0 +1,13 @@
+{
+  "name": "tidecloak-iga-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright API-test E2E harness for the Tidecloak IGA approval workflow (Phase 1+).",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "playwright": "^1.60.0"
+  }
+}

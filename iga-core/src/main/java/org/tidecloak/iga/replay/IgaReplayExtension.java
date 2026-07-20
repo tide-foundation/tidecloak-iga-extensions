@@ -1,0 +1,988 @@
+package org.tidecloak.iga.replay;
+
+import jakarta.persistence.EntityManager;
+import org.jboss.logging.Logger;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.ClientModel;
+import org.keycloak.models.ClientScopeModel;
+import org.keycloak.models.GroupModel;
+import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.OrganizationModel;
+import org.keycloak.models.RealmModel;
+import org.keycloak.models.RoleModel;
+import org.keycloak.models.UserModel;
+import org.keycloak.models.cache.CacheRealmProvider;
+import org.keycloak.models.cache.UserCache;
+import org.keycloak.organization.OrganizationProvider;
+import org.keycloak.storage.UserStorageUtil;
+import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.services.IgaUnsignedEntityService;
+
+/**
+ * Replay extension for the capture-then-veto ADOPT workflow.
+ *
+ * <p>Unlike the existing CREATE_* actions (which create the entity at commit),
+ * ADOPT_* actions are about retroactively attesting an entity that ALREADY
+ * exists. Replay therefore:
+ * <ol>
+ *   <li>Verifies the underlying entity still exists. If it was deleted
+ *       out-of-band between ADOPT create and ADOPT commit we throw
+ *       {@link EntityVanishedException} so the commit endpoint can translate
+ *       it into a clean {@code 404 ENTITY_VANISHED} response rather than a
+ *       misleading 204/200 on a vanished entity (or, worse, a generic 500
+ *       with a full stack trace at ERROR severity).</li>
+ *   <li>Performs no entity-model write — that is the whole point of ADOPT
+ *       semantics.</li>
+ *   <li>Stamps the final attestation onto the entity's {@code ATTESTATION}
+ *       column via a JPQL {@code UPDATE} keyed on
+ *       {@code WHERE e.id = :id AND e.attestation IS NULL} — borrowing the
+ *       same per-table idiom the BASELINE_APPROVAL stamping step uses today
+ *       (the BASELINE codepath is being deleted in the same commit; the idiom
+ *       lives on as the per-entity ADOPT stamp).</li>
+ *   <li>Deletes the matching sidecar row from {@code IGA_UNSIGNED_ENTITY}
+ *       (one row per ADOPT_CR_ID — see {@link IgaUnsignedEntityService}).</li>
+ *   <li>Marks the change request {@code APPROVED} + sets {@code resolvedAt} —
+ *       mirroring the tail-end of {@link IgaReplayDispatcher#replay} for every
+ *       other action type, so the commit endpoint's "managed.status =
+ *       APPROVED" expectation holds.</li>
+ * </ol>
+ *
+ * <p>Wired into {@link org.tidecloak.iga.rest.IgaAdminResource#commit} via a
+ * thin two-line guard BEFORE the existing {@code IgaReplayDispatcher.replay}
+ * call: when {@link #tryReplay} returns {@code true} the extension has fully
+ * handled the CR; otherwise the dispatcher's switch handles it as before.</p>
+ *
+ * <p>The dispatcher itself is intentionally NOT touched for ADOPT_* — keeping
+ * the new action types out of the giant switch keeps the dispatcher diff to
+ * the BASELINE-delete only, and the routing layer becomes the single point of
+ * truth for "does the extension own this action type or not".</p>
+ */
+public final class IgaReplayExtension {
+
+    private static final Logger log = Logger.getLogger(IgaReplayExtension.class);
+
+    public static final String ACTION_ADOPT_USER = "ADOPT_USER";
+    public static final String ACTION_ADOPT_ROLE = "ADOPT_ROLE";
+    public static final String ACTION_ADOPT_GROUP = "ADOPT_GROUP";
+    public static final String ACTION_ADOPT_CLIENT = "ADOPT_CLIENT";
+    public static final String ACTION_ADOPT_CLIENT_SCOPE = "ADOPT_CLIENT_SCOPE";
+    /**
+     * Retroactive ADOPT for KC organizations.
+     *
+     * <p>Orgs reuse the existing {@code IGA_UNSIGNED_ENTITY} table with
+     * {@code entity_type='ORGANIZATION'} for the toggle-on sidecar onramp, AND
+     * the organization is a first-class NODE in the attested set:
+     * {@code OrganizationEntity} carries an {@code attestation} column (ORG
+     * table, added by iga-changelog-2.4.0 + the matching field in
+     * tidecloak-override). Replay stamps the org node per-entity (keyed on the
+     * org id, {@code attestation IS NULL} guard) exactly like the other five
+     * node ADOPTs, AND deletes the sidecar row + flips the CR to
+     * {@code status=APPROVED}.</p>
+     */
+    public static final String ACTION_ADOPT_ORGANIZATION = "ADOPT_ORGANIZATION";
+
+    // -------------------------------------------------------------------------
+    // Commit 2 — EDGE ADOPT actions. These attest admin-configured pre-existing
+    // EDGE rows (not nodes) on the toggle-on scan. Unlike the node ADOPTs, the
+    // stamp is keyed by the edge's composite keys (carried in rowsJson), not by
+    // a single entityId. They share the SAME threshold/approver bypass and the
+    // SAME no-model-write semantics as the node ADOPTs.
+    // -------------------------------------------------------------------------
+    public static final String ACTION_ADOPT_COMPOSITE_ROLE = "ADOPT_COMPOSITE_ROLE";
+    public static final String ACTION_ADOPT_CLIENT_SCOPE_CLIENT = "ADOPT_CLIENT_SCOPE_CLIENT";
+    public static final String ACTION_ADOPT_CLIENT_SCOPE_ROLE = "ADOPT_CLIENT_SCOPE_ROLE";
+    public static final String ACTION_ADOPT_PROTOCOL_MAPPER = "ADOPT_PROTOCOL_MAPPER";
+    /**
+     * Commit 3 — retroactive ADOPT for realm default-default / default-optional
+     * client-scope assignments ({@code DEFAULT_CLIENT_SCOPE} rows). An edge
+     * keyed (realmId, scopeId), stamped on the {@code ATTESTATION} column added
+     * by iga-changelog-2.3.0. Built-in default-scope rows (those pointing at a
+     * KC default scope — profile/email/roles/...) are SKIPPED by the scan's
+     * owning-SCOPE built-in classification; only admin-authored custom scopes
+     * set as realm defaults are adopted.
+     */
+    public static final String ACTION_ADOPT_DEFAULT_CLIENT_SCOPE = "ADOPT_DEFAULT_CLIENT_SCOPE";
+    /**
+     * Commit 4 — retroactive ADOPT for a CLIENT's scope->role allowlist
+     * ({@code SCOPE_MAPPING} rows, keyed CLIENT_ID + ROLE_ID). When the client
+     * has fullScopeAllowed=false this allowlist bounds which roles land in the
+     * issued token, so it is a token-shaping input. An edge keyed
+     * (clientUuid, roleId), stamped on the {@code ATTESTATION} column added by
+     * iga-changelog-2.3.1. The owning CLIENT decides built-in status: rows on
+     * KC's bootstrap clients (account/broker/realm-management/...) are SKIPPED
+     * by the scan; only admin-authored custom clients are adopted.
+     */
+    public static final String ACTION_ADOPT_SCOPE_MAPPING = "ADOPT_SCOPE_MAPPING";
+
+    /**
+     * Manual-signing redesign (2026-06-06) — retroactive ADOPT for the REALM NODE
+     * itself. The login closure emits two realm-scoped producer units (realm_config #0,
+     * realm_default_groups_set #15) keyed on the realmId; neither had any ADOPT path
+     * before, so their dedicated columns (RealmEntity.realmConfigAttestation /
+     * realmDefaultGroupsAttestation) stayed NULL after toggle-on and the uniform login
+     * read fail-closed. This is an ATTESTATION-ONLY node (no sidecar, no quarantine —
+     * the realm is never a quarantineable entity): commit stamps the two realm columns
+     * via TideAttestor.stampProducerUnitColumns and flips the CR APPROVED. No model write
+     * and no legacy single-attestation column (the realm has none).
+     */
+    public static final String ACTION_ADOPT_REALM = "ADOPT_REALM";
+
+    public static final String ENTITY_TYPE_USER = "USER";
+    public static final String ENTITY_TYPE_REALM = "REALM";
+    public static final String ENTITY_TYPE_ROLE = "ROLE";
+    public static final String ENTITY_TYPE_GROUP = "GROUP";
+    public static final String ENTITY_TYPE_CLIENT = "CLIENT";
+    public static final String ENTITY_TYPE_CLIENT_SCOPE = "CLIENT_SCOPE";
+    public static final String ENTITY_TYPE_ORGANIZATION = "ORGANIZATION";
+
+    // Commit 2 — edge entity types (sidecar entity_type + CR entityType).
+    public static final String ENTITY_TYPE_COMPOSITE_ROLE = "COMPOSITE_ROLE";
+    public static final String ENTITY_TYPE_CLIENT_SCOPE_CLIENT = "CLIENT_SCOPE_CLIENT";
+    public static final String ENTITY_TYPE_CLIENT_SCOPE_ROLE = "CLIENT_SCOPE_ROLE";
+    public static final String ENTITY_TYPE_PROTOCOL_MAPPER = "PROTOCOL_MAPPER";
+    // Commit 3 — realm default-scope edge (DEFAULT_CLIENT_SCOPE row, keyed
+    // realmId+scopeId; owning node is the client-SCOPE for built-in skip).
+    public static final String ENTITY_TYPE_REALM_DEFAULT_SCOPE = "REALM_DEFAULT_SCOPE";
+    // Commit 4 — client scope-mapping edge (SCOPE_MAPPING row, keyed
+    // clientUuid+roleId; owning node is the CLIENT for built-in skip).
+    public static final String ENTITY_TYPE_SCOPE_MAPPING = "SCOPE_MAPPING";
+
+    private IgaReplayExtension() {
+    }
+
+    /**
+     * Single source of truth for "is this action type one of the five ADOPT_*
+     * variants owned by the extension router". Used by the
+     * {@link org.tidecloak.iga.rest.IgaAdminResource} resume-from-CANCELLED
+     * lane and by {@link org.tidecloak.iga.attestors.IgaScopeResolver} to
+     * short-circuit the threshold + approver-role gates: ADOPT_* CRs are a
+     * system-bootstrap onramp (the entity already exists in production
+     * pre-IGA), so applying the realm's governance threshold + approver-role
+     * gate to them creates a chicken-and-egg deadlock where high-threshold
+     * realms with pre-IGA admins can't bootstrap. Any caller with
+     * {@code manage-realm} (already enforced by
+     * {@code IgaAdminResource.authorize}/{@code commit}) can authorize + commit
+     * an ADOPT_* in one signature.
+     */
+    /**
+     * The complete set of ADOPT_* action types (node, edge, and realm), in one
+     * place so callers that need to query the pending-ADOPT closure (e.g. the
+     * post-commit full-closure convergence in
+     * {@link org.tidecloak.iga.services.IgaToggleOnBackfill}) stay in lock-step
+     * with {@link #isAdoptAction}.
+     */
+    public static final java.util.List<String> ALL_ADOPT_ACTION_TYPES = java.util.List.of(
+            ACTION_ADOPT_USER,
+            ACTION_ADOPT_ROLE,
+            ACTION_ADOPT_GROUP,
+            ACTION_ADOPT_CLIENT,
+            ACTION_ADOPT_CLIENT_SCOPE,
+            ACTION_ADOPT_ORGANIZATION,
+            ACTION_ADOPT_COMPOSITE_ROLE,
+            ACTION_ADOPT_CLIENT_SCOPE_CLIENT,
+            ACTION_ADOPT_CLIENT_SCOPE_ROLE,
+            ACTION_ADOPT_PROTOCOL_MAPPER,
+            ACTION_ADOPT_DEFAULT_CLIENT_SCOPE,
+            ACTION_ADOPT_SCOPE_MAPPING,
+            ACTION_ADOPT_REALM);
+
+    public static boolean isAdoptAction(String actionType) {
+        if (actionType == null) return false;
+        return ACTION_ADOPT_USER.equals(actionType)
+                || ACTION_ADOPT_ROLE.equals(actionType)
+                || ACTION_ADOPT_GROUP.equals(actionType)
+                || ACTION_ADOPT_CLIENT.equals(actionType)
+                || ACTION_ADOPT_CLIENT_SCOPE.equals(actionType)
+                || ACTION_ADOPT_ORGANIZATION.equals(actionType)
+                // Commit 2 — edge ADOPTs share the same bootstrap-onramp
+                // bypass: an edge admin-configured pre-IGA cannot be subjected
+                // to the realm threshold/approver gate without the same
+                // chicken-and-egg deadlock the node ADOPTs avoid.
+                || ACTION_ADOPT_COMPOSITE_ROLE.equals(actionType)
+                || ACTION_ADOPT_CLIENT_SCOPE_CLIENT.equals(actionType)
+                || ACTION_ADOPT_CLIENT_SCOPE_ROLE.equals(actionType)
+                || ACTION_ADOPT_PROTOCOL_MAPPER.equals(actionType)
+                || ACTION_ADOPT_DEFAULT_CLIENT_SCOPE.equals(actionType)
+                || ACTION_ADOPT_SCOPE_MAPPING.equals(actionType)
+                // Manual-signing redesign — the realm-node ADOPT shares the same
+                // bootstrap-onramp bypass (threshold=1, no approver-role gate).
+                || ACTION_ADOPT_REALM.equals(actionType);
+    }
+
+    /**
+     * Attempt to replay a CR via the extension. Returns {@code true}
+     * iff the extension fully handled the CR (caller skips the dispatcher).
+     * Returns {@code false} for any action type the extension does not own.
+     */
+    public static boolean tryReplay(KeycloakSession session, IgaChangeRequestEntity cr, String finalAttestation) {
+        // Back-compat overload: defaults to per-edge stamping (simple attestor).
+        return tryReplay(session, cr, finalAttestation, false);
+    }
+
+    /**
+     * {@code setSigned}-aware variant. When {@code setSigned} is {@code true}
+     * (the {@code tide} set-signing attestor) an edge ADOPT replay set-signs the
+     * owner's WHOLE current set — converging with the live edge path — instead
+     * of stamping the single adopted edge. When {@code false} (the {@code simple}
+     * attestor) the edge ADOPT keeps the EXACT per-edge composite-key stamp
+     * (byte-identical to today). Node ADOPTs are unaffected by the flag.
+     */
+    public static boolean tryReplay(KeycloakSession session, IgaChangeRequestEntity cr, String finalAttestation,
+                                    boolean setSigned) {
+        if (cr == null || cr.getActionType() == null) return false;
+        switch (cr.getActionType()) {
+            case ACTION_ADOPT_USER:
+            case ACTION_ADOPT_ROLE:
+            case ACTION_ADOPT_GROUP:
+            case ACTION_ADOPT_CLIENT:
+            case ACTION_ADOPT_CLIENT_SCOPE:
+            case ACTION_ADOPT_ORGANIZATION:
+                session.setAttribute("IGA_REPLAY_ACTIVE", "true");
+                try {
+                    replayAdopt(session, cr, finalAttestation);
+                } finally {
+                    session.removeAttribute("IGA_REPLAY_ACTIVE");
+                }
+                return true;
+            case ACTION_ADOPT_COMPOSITE_ROLE:
+            case ACTION_ADOPT_CLIENT_SCOPE_CLIENT:
+            case ACTION_ADOPT_CLIENT_SCOPE_ROLE:
+            case ACTION_ADOPT_PROTOCOL_MAPPER:
+            case ACTION_ADOPT_DEFAULT_CLIENT_SCOPE:
+            case ACTION_ADOPT_SCOPE_MAPPING:
+                session.setAttribute("IGA_REPLAY_ACTIVE", "true");
+                try {
+                    replayAdoptEdge(session, cr, finalAttestation, setSigned);
+                } finally {
+                    session.removeAttribute("IGA_REPLAY_ACTIVE");
+                }
+                return true;
+            case ACTION_ADOPT_REALM:
+                // The realm node has NO legacy single-attestation column and NO model
+                // write — the two realm producer columns (realm_config /
+                // realm_default_groups_set) are stamped by
+                // TideAttestor.stampProducerUnitColumns (the ADOPT_REALM case) which
+                // IgaAdminResource.commit invokes right after tryReplay. Here we only
+                // flip the CR APPROVED (attestation-only: no sidecar to clear).
+                session.setAttribute("IGA_REPLAY_ACTIVE", "true");
+                try {
+                    replayAdoptRealm(session, cr);
+                } finally {
+                    session.removeAttribute("IGA_REPLAY_ACTIVE");
+                }
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Replay an ADOPT_<type> change request: verify the entity still exists,
+     * stamp the attestation on its row, clear the sidecar, then mark the CR
+     * APPROVED.
+     */
+    private static void replayAdopt(KeycloakSession session, IgaChangeRequestEntity cr,
+                                     String finalAttestation) {
+        RealmModel realm = session.realms().getRealm(cr.getRealmId());
+        if (realm == null) {
+            throw new IllegalStateException(
+                    "ADOPT replay: realm " + cr.getRealmId() + " no longer exists");
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        String entityType = cr.getEntityType();
+        String entityId = cr.getEntityId();
+        String actionType = cr.getActionType();
+
+        // 1. Verify the entity still exists at replay time. We resolve through
+        // KC's own model APIs (not raw JPA) so the existence check honours
+        // user-storage federation, client-scope resolution, etc. — anything
+        // visible to a stock admin tool. This must NOT silently no-op: a
+        // missing entity here means it was deleted out-of-band between ADOPT
+        // create and ADOPT commit, and the operator deserves a real error.
+        assertEntityExists(session, realm, entityType, entityId, actionType);
+
+        // 2. No entity-model write — that's the whole point of ADOPT.
+
+        // 3. Stamp the attestation onto the entity's row via JPQL UPDATE.
+        // Borrowing the per-table idiom from the BASELINE_APPROVAL stamping
+        // step (which is being deleted in the same commit; the idiom lives on
+        // here as the per-entity ADOPT stamp).
+        //
+        // ADOPT_ORGANIZATION stamps here like every other node
+        // ADOPT: OrganizationEntity now carries an `attestation` column (ORG
+        // table, iga-changelog-2.4.0 + the matching field in tidecloak-
+        // override), so the org node is stamped per-entity (keyed on the org
+        // id) in addition to the sidecar delete (step 4) + APPROVED status
+        // (step 6). The org is a first-class node in the attested set.
+        if (finalAttestation != null && !finalAttestation.isEmpty()) {
+            String jpql = stampJpqlFor(actionType);
+            int updated = em.createQuery(jpql)
+                    .setParameter("sig", finalAttestation)
+                    .setParameter("id", entityId)
+                    .executeUpdate();
+            log.debugf("ADOPT replay: stamped %d row(s) in %s for entity %s/%s",
+                    updated, actionType, entityType, entityId);
+        }
+
+        // 4. Delete the sidecar row(s) for this CR.
+        IgaUnsignedEntityService.clearByAdoptCr(em, cr.getId());
+
+        // 5. Evict KC's cache entry for the just-attested entity so the next
+        // read goes through the IGA provider chain and sees the post-ADOPT
+        // state (attestation set, sidecar cleared, quarantine satisfied).
+        //
+        // Without this, a request that previously failed the quarantine check
+        // (e.g. a direct-grant against an unsigned user)
+        // leaves KC's UserCacheSession holding a snapshot with enabled=false.
+        // The post-toggle realm-wide UserCache eviction in
+        // TideAdminCompatResource only clears the cache once at toggle time;
+        // any read between toggle and ADOPT-commit can re-populate it with
+        // the stale "disabled" snapshot. We must evict per-entity here so
+        // that snapshot is replaced on the next lookup.
+        //
+        // Best-effort: per-entity API where one exists, RuntimeException
+        // swallowed and logged at WARN. The CR has been stamped + sidecar
+        // cleared by this point; a cache-eviction failure must not abort the
+        // replay (caches expire on their own and the post-condition will
+        // converge — we just lose a brief window of stale reads).
+        evictCacheForAdopt(session, realm, actionType, entityId);
+
+        // 6. Mark APPROVED + resolvedAt on the managed CR — same tail as
+        // IgaReplayDispatcher.doReplay.
+        IgaChangeRequestEntity managed = em.find(IgaChangeRequestEntity.class, cr.getId());
+        if (managed != null) {
+            managed.setStatus("APPROVED");
+            managed.setResolvedAt(System.currentTimeMillis());
+        }
+    }
+
+    /**
+     * Replay an ADOPT_REALM CR (manual-signing redesign). Attestation-only: no model
+     * write, no legacy attestation column (the realm has none), no sidecar. The two
+     * realm producer columns are stamped by the POST-replay
+     * {@code TideAttestor.stampProducerUnitColumns} (ADOPT_REALM case) in the same JPA
+     * transaction. Here we just flip the CR APPROVED + resolvedAt.
+     */
+    private static void replayAdoptRealm(KeycloakSession session, IgaChangeRequestEntity cr) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaChangeRequestEntity managed = em.find(IgaChangeRequestEntity.class, cr.getId());
+        if (managed != null) {
+            managed.setStatus("APPROVED");
+            managed.setResolvedAt(System.currentTimeMillis());
+        }
+    }
+
+    /**
+     * Replay an edge ADOPT (commit 2). Like {@link #replayAdopt} this performs
+     * NO model write — the edge already exists. It stamps the attestation onto
+     * the edge row(s) via JPQL keyed on the edge's COMPOSITE keys (carried in
+     * the CR's rowsJson, NOT the single entityId), then clears the sidecar and
+     * marks the CR APPROVED. The stamp JPQL mirrors the existing edge stamps in
+     * {@link IgaReplayDispatcher} exactly:
+     * <ul>
+     *   <li>COMPOSITE_ROLE keyed (parent, child) — like ADD_COMPOSITE;</li>
+     *   <li>CLIENT_SCOPE_CLIENT keyed (client, scope) — like ASSIGN_SCOPE;</li>
+     *   <li>CLIENT_SCOPE_ROLE_MAPPING keyed (scope, role) — like SCOPE_ADD_ROLE;</li>
+     *   <li>PROTOCOL_MAPPER keyed (id) — like ADD_PROTOCOL_MAPPER's stamp.</li>
+     * </ul>
+     * Each row carries an {@code AND e.attestation IS NULL} guard so a re-toggle
+     * never re-stamps an already-attested edge.
+     */
+    private static void replayAdoptEdge(KeycloakSession session, IgaChangeRequestEntity cr,
+                                        String finalAttestation, boolean setSigned) {
+        RealmModel realm = session.realms().getRealm(cr.getRealmId());
+        if (realm == null) {
+            throw new IllegalStateException(
+                    "ADOPT edge replay: realm " + cr.getRealmId() + " no longer exists");
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        String actionType = cr.getActionType();
+        java.util.List<java.util.Map<String, Object>> rows = parseRows(cr.getRowsJson());
+
+        if (finalAttestation != null && !finalAttestation.isEmpty()) {
+            if (setSigned) {
+                // SET-SIGNING (tide attestor): the adopted edge already exists in
+                // the DB at toggle-on, so its owner's COMPLETE current set is
+                // present. Instead of stamping just this edge with the CR's
+                // per-edge node-canonical attestation, recompute the owner's
+                // whole-set signature — the SAME (table, owner, members)
+                // canonical the LIVE path signs (TideAttestor.signSet) — and fan
+                // it out across every row of the owner's set. This makes the
+                // adopted set BYTE-IDENTICAL to what the live edge path produces
+                // for the same membership, so adopted and live converge.
+                //
+                // Idempotent across the per-owner ADOPT-edge CRs: the FIRST CR
+                // for an owner already sees the complete set and set-signs it;
+                // each remaining CR for that owner recomputes the identical set
+                // and re-stamps the identical sig (harmless convergence). NO
+                // `attestation IS NULL` guard here — set-signing intentionally
+                // (re-)stamps the WHOLE owner set on every change, exactly as
+                // the live fan-out does.
+                for (java.util.Map<String, Object> row : rows) {
+                    int updated = setSignEdgeOwner(session, em, actionType, row);
+                    log.debugf("ADOPT edge replay (set-signed): re-signed %d owner-set row(s) in %s (row=%s)",
+                            updated, actionType, row);
+                }
+            } else {
+                for (java.util.Map<String, Object> row : rows) {
+                    int updated = stampEdgeRow(em, actionType, row, finalAttestation);
+                    log.debugf("ADOPT edge replay: stamped %d row(s) in %s (row=%s)",
+                            updated, actionType, row);
+                }
+            }
+        }
+
+        // Clear the sidecar row(s) for this CR and mark APPROVED — identical
+        // tail to replayAdopt. No per-edge cache eviction: edge attestation is
+        // not part of the node-quarantine isEnabled snapshot (the node ADOPTs
+        // own that), and KC's edge-backed caches (scope/role mapping sets)
+        // converge on their own TTL — matching the best-effort eviction policy
+        // for the auxiliary entries in the node path.
+        IgaUnsignedEntityService.clearByAdoptCr(em, cr.getId());
+
+        IgaChangeRequestEntity managed = em.find(IgaChangeRequestEntity.class, cr.getId());
+        if (managed != null) {
+            managed.setStatus("APPROVED");
+            managed.setResolvedAt(System.currentTimeMillis());
+        }
+    }
+
+    /**
+     * Stamp a single edge row's attestation by its composite keys. Returns the
+     * number of rows updated (0 if the edge vanished out-of-band between ADOPT
+     * create and commit — logged at WARN by the caller's debug line; we do NOT
+     * throw, mirroring the node path's tolerance plus the IS NULL guard).
+     */
+    private static int stampEdgeRow(EntityManager em, String actionType,
+                                    java.util.Map<String, Object> row, String sig) {
+        switch (actionType) {
+            case ACTION_ADOPT_COMPOSITE_ROLE: {
+                String parentId = str(row, "COMPOSITE");
+                String childId = str(row, "CHILD_ROLE");
+                if (parentId == null || childId == null) return 0;
+                return em.createQuery(
+                        "UPDATE CompositeRoleEntity e SET e.attestation = :sig " +
+                                "WHERE e.parentRole.id = :k1 AND e.childRole.id = :k2 " +
+                                "AND e.attestation IS NULL")
+                        .setParameter("sig", sig)
+                        .setParameter("k1", parentId)
+                        .setParameter("k2", childId)
+                        .executeUpdate();
+            }
+            case ACTION_ADOPT_CLIENT_SCOPE_CLIENT: {
+                String clientUuid = str(row, "CLIENT_UUID");
+                String scopeId = str(row, "SCOPE_ID");
+                if (clientUuid == null || scopeId == null) return 0;
+                return em.createQuery(
+                        "UPDATE ClientScopeClientMappingEntity e SET e.attestation = :sig " +
+                                "WHERE e.clientId = :k1 AND e.clientScopeId = :k2 " +
+                                "AND e.attestation IS NULL")
+                        .setParameter("sig", sig)
+                        .setParameter("k1", clientUuid)
+                        .setParameter("k2", scopeId)
+                        .executeUpdate();
+            }
+            case ACTION_ADOPT_CLIENT_SCOPE_ROLE: {
+                String scopeId = str(row, "SCOPE_ID");
+                String roleId = str(row, "ROLE_ID");
+                if (scopeId == null || roleId == null) return 0;
+                return em.createQuery(
+                        "UPDATE ClientScopeRoleMappingEntity e SET e.attestation = :sig " +
+                                "WHERE e.clientScope.id = :k1 AND e.role.id = :k2 " +
+                                "AND e.attestation IS NULL")
+                        .setParameter("sig", sig)
+                        .setParameter("k1", scopeId)
+                        .setParameter("k2", roleId)
+                        .executeUpdate();
+            }
+            case ACTION_ADOPT_PROTOCOL_MAPPER: {
+                String mapperId = str(row, "ID");
+                if (mapperId == null) return 0;
+                return em.createQuery(
+                        "UPDATE ProtocolMapperEntity e SET e.attestation = :sig " +
+                                "WHERE e.id = :id AND e.attestation IS NULL")
+                        .setParameter("sig", sig)
+                        .setParameter("id", mapperId)
+                        .executeUpdate();
+            }
+            case ACTION_ADOPT_DEFAULT_CLIENT_SCOPE: {
+                // DEFAULT_CLIENT_SCOPE row keyed (REALM_ID, SCOPE_ID). The entity
+                // fields are DefaultClientScopeRealmMappingEntity.realm
+                // (RealmEntity, column REALM_ID) and .clientScopeId (String,
+                // column SCOPE_ID) — NOT a clientScope association.
+                String realmId = str(row, "REALM_ID");
+                String scopeId = str(row, "SCOPE_ID");
+                if (realmId == null || scopeId == null) return 0;
+                return em.createQuery(
+                        "UPDATE DefaultClientScopeRealmMappingEntity e SET e.attestation = :sig " +
+                                "WHERE e.realm.id = :k1 AND e.clientScopeId = :k2 " +
+                                "AND e.attestation IS NULL")
+                        .setParameter("sig", sig)
+                        .setParameter("k1", realmId)
+                        .setParameter("k2", scopeId)
+                        .executeUpdate();
+            }
+            case ACTION_ADOPT_SCOPE_MAPPING: {
+                // SCOPE_MAPPING row keyed (CLIENT_ID, ROLE_ID). The CR row's
+                // CLIENT_UUID holds the client's UUID == SCOPE_MAPPING.CLIENT_ID.
+                // Stamp the ATTESTATION column on the standalone ScopeMappingEntity
+                // (e.clientId, e.roleId) — both raw VARCHAR columns, no assoc.
+                String clientUuid = str(row, "CLIENT_UUID");
+                String roleId = str(row, "ROLE_ID");
+                if (clientUuid == null || roleId == null) return 0;
+                return em.createQuery(
+                        "UPDATE ScopeMappingEntity e SET e.attestation = :sig " +
+                                "WHERE e.clientId = :k1 AND e.roleId = :k2 " +
+                                "AND e.attestation IS NULL")
+                        .setParameter("sig", sig)
+                        .setParameter("k1", clientUuid)
+                        .setParameter("k2", roleId)
+                        .executeUpdate();
+            }
+            default:
+                throw new IllegalStateException("ADOPT edge replay: no stamp JPQL for action " + actionType);
+        }
+    }
+
+    /**
+     * SET-SIGNING counterpart of {@link #stampEdgeRow} for the {@code tide}
+     * attestor. Resolves the edge's {@code (table, owner)} via the SAME linkage
+     * descriptor the LIVE edge path uses
+     * ({@link org.tidecloak.iga.attestors.TideSetResolver#linkageForAdopt}),
+     * reads the owner's COMPLETE current member set straight off the DB (the
+     * adopted edges already exist at toggle-on), computes the whole-set signature
+     * via the SAME reusable helper the live path and the node-create nested-child
+     * path use ({@link org.tidecloak.iga.attestors.TideAttestor#signSet}), and
+     * fans it out across EVERY row of the owner's set (owner-keyed UPDATE, no
+     * member predicate, no IS NULL guard).
+     *
+     * <p>The membership definition is identical to the live path: the COMPLETE
+     * current DB set for the owner ({@code SELECT memberField WHERE ownerField =
+     * owner}). So for the same set, the adopted signature is BYTE-IDENTICAL to
+     * the live signature.
+     *
+     * <p>protocol_mapper owners can be a client OR a client_scope. The CR row
+     * carries only the mapper {@code ID} and {@code OWNER_NODE_ID} (the owner
+     * value) — not the owner TYPE — so we resolve the owner field by reading the
+     * persisted ProtocolMapperEntity's own parent association (client.id vs
+     * clientScope.id), then group/fan-out on that field. This mirrors the live
+     * {@code stampOwnerSetFanOut} owner resolution.
+     *
+     * @return the number of owner-set rows re-stamped (0 if the owner/member key
+     *         couldn't be resolved or the owner's set is empty — e.g. the edge
+     *         vanished out-of-band).
+     */
+    private static int setSignEdgeOwner(KeycloakSession session, EntityManager em,
+                                        String actionType, java.util.Map<String, Object> row) {
+        org.tidecloak.iga.attestors.TideSetResolver.Linkage linkage =
+                org.tidecloak.iga.attestors.TideSetResolver.linkageForAdopt(actionType);
+        if (linkage == null) {
+            throw new IllegalStateException(
+                    "ADOPT edge set-sign: no linkage mapping for action " + actionType);
+        }
+
+        // Resolve the owner VALUE + owner JPA FIELD for this edge row.
+        String owner;
+        String ownerField;
+        if (ACTION_ADOPT_PROTOCOL_MAPPER.equals(actionType)) {
+            // The protocol_mapper CR row carries ID (mapper id) + OWNER_NODE_ID
+            // (the owning client.id OR clientScope.id). The owner field depends
+            // on which parent the mapper actually has; resolve it off the
+            // persisted entity by its own id.
+            String mapperId = str(row, "ID");
+            if (mapperId == null) return 0;
+            Object[] parents = resolveProtocolMapperOwner(em, mapperId);
+            if (parents == null) return 0; // mapper vanished
+            owner = (String) parents[0];
+            ownerField = (String) parents[1];
+            if (owner == null) return 0;
+        } else {
+            owner = str(row, linkage.ownerRowKey());
+            ownerField = linkage.ownerField();
+            if (owner == null) return 0;
+        }
+
+        // Read the owner's COMPLETE current member set off the DB — identical
+        // membership definition to the live path (SELECT memberField WHERE
+        // ownerField = owner). No filtering: whatever rows exist for this owner
+        // are the set, exactly as combineFinal / signNestedChildSet see them.
+        @SuppressWarnings("unchecked")
+        java.util.List<Object> members = em.createQuery(
+                        "SELECT e." + linkage.memberField() + " FROM " + linkage.entityName()
+                                + " e WHERE e." + ownerField + " = :owner")
+                .setParameter("owner", owner)
+                .getResultList();
+        if (members == null || members.isEmpty()) return 0;
+
+        java.util.List<String> memberIds = new java.util.ArrayList<>();
+        for (Object m : members) {
+            if (m != null) memberIds.add(m.toString());
+        }
+        if (memberIds.isEmpty()) return 0;
+
+        // Compute the whole-set signature over the EXACT (table, owner, members)
+        // canonical the live path signs — single crypto swap-point in TideAttestor.
+        org.tidecloak.iga.attestors.TideAttestor attestor =
+                new org.tidecloak.iga.attestors.TideAttestor(session);
+        String setSig = attestor.signSet(session, linkage.table(), owner, memberIds);
+
+        // Fan the set sig out across the WHOLE owner set (owner-keyed only).
+        return em.createQuery("UPDATE " + linkage.entityName() + " e SET e.attestation = :sig WHERE e."
+                        + ownerField + " = :owner")
+                .setParameter("sig", setSig)
+                .setParameter("owner", owner)
+                .executeUpdate();
+    }
+
+    /**
+     * Resolve a protocol mapper's owner (value + JPA owner field) by reading the
+     * persisted ProtocolMapperEntity by its own id. A mapper is owned by EITHER
+     * a client (client.id) OR a client_scope (clientScope.id) — exactly one is
+     * non-null. Returns {@code [ownerValue, ownerField]} or {@code null} if the
+     * mapper row no longer exists.
+     */
+    private static Object[] resolveProtocolMapperOwner(EntityManager em, String mapperId) {
+        @SuppressWarnings("unchecked")
+        java.util.List<Object[]> rows = em.createQuery(
+                        "SELECT e.client.id, e.clientScope.id FROM ProtocolMapperEntity e WHERE e.id = :id")
+                .setParameter("id", mapperId)
+                .getResultList();
+        if (rows == null || rows.isEmpty()) return null;
+        Object[] r = rows.get(0);
+        String clientId = r[0] != null ? r[0].toString() : null;
+        String scopeId = r[1] != null ? r[1].toString() : null;
+        if (clientId != null) {
+            return new Object[]{clientId, "client.id"};
+        }
+        if (scopeId != null) {
+            return new Object[]{scopeId,
+                    org.tidecloak.iga.attestors.TideSetResolver.PROTOCOL_MAPPER_SCOPE_OWNER_FIELD};
+        }
+        return null;
+    }
+
+    private static final com.fasterxml.jackson.databind.ObjectMapper EDGE_MAPPER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
+    private static final com.fasterxml.jackson.core.type.TypeReference<
+            java.util.List<java.util.Map<String, Object>>> EDGE_LIST_MAP_REF =
+            new com.fasterxml.jackson.core.type.TypeReference<>() {};
+
+    private static java.util.List<java.util.Map<String, Object>> parseRows(String rowsJson) {
+        try {
+            return EDGE_MAPPER.readValue(rowsJson, EDGE_LIST_MAP_REF);
+        } catch (Exception e) {
+            throw new RuntimeException("ADOPT edge replay: failed to parse rowsJson", e);
+        }
+    }
+
+    private static String str(java.util.Map<String, Object> row, String key) {
+        Object v = row.get(key);
+        return v != null ? v.toString() : null;
+    }
+
+    /**
+     * Best-effort per-entity cache eviction for the just-attested ADOPT
+     * target. Per-action mapping:
+     *
+     * <ul>
+     *   <li>{@code ADOPT_USER}: {@link UserCache#evict(RealmModel, UserModel)}.
+     *       The per-user variant (not the realm-wide {@code evict(RealmModel)})
+     *       so a single ADOPT commit doesn't blow the entire realm's user
+     *       cache.</li>
+     *   <li>{@code ADOPT_CLIENT}: {@link CacheRealmProvider#registerClientInvalidation}
+     *       — invalidates the cached client adapter + sends a cluster
+     *       invalidation event.</li>
+     *   <li>{@code ADOPT_GROUP}: {@link CacheRealmProvider#registerGroupInvalidation}.</li>
+     *   <li>{@code ADOPT_ROLE}: {@link CacheRealmProvider#registerRoleInvalidation}.
+     *       Requires the role name and container id, which we resolve via the
+     *       model API (same lookup the assertEntityExists path uses).</li>
+     *   <li>{@code ADOPT_CLIENT_SCOPE}:
+     *       {@link CacheRealmProvider#registerClientScopeInvalidation}.</li>
+     * </ul>
+     *
+     * <p>If either cache provider isn't installed (deployments without the
+     * infinispan model — {@code session.getProvider(...)} returns {@code null})
+     * we log a WARN and continue. The CR is still APPROVED; the cache will
+     * converge as entries expire on their own.</p>
+     *
+     * <p>Wraps the whole body in a try/catch on {@link RuntimeException}: the
+     * eviction is a post-commit convenience, not a correctness requirement
+     * for the attestation itself (the JPQL stamp + sidecar delete have
+     * already committed by this point on the same JPA transaction). A failure
+     * here must not abort the replay or leave the CR PENDING.</p>
+     */
+    private static void evictCacheForAdopt(KeycloakSession session, RealmModel realm,
+                                            String actionType, String entityId) {
+        try {
+            switch (actionType) {
+                case ACTION_ADOPT_USER: {
+                    UserCache userCache = UserStorageUtil.userCache(session);
+                    if (userCache == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=USER id=%s realm=%s — UserCache provider not installed (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    UserModel u = session.users().getUserById(realm, entityId);
+                    if (u == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=USER id=%s realm=%s — user vanished between stamp and evict (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    userCache.evict(realm, u);
+                    log.infof("IGA ADOPT cache eviction: type=USER id=%s realm=%s — evicted",
+                            entityId, realm.getId());
+                    return;
+                }
+                case ACTION_ADOPT_CLIENT: {
+                    CacheRealmProvider realmCache = session.getProvider(CacheRealmProvider.class);
+                    if (realmCache == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=CLIENT id=%s realm=%s — CacheRealmProvider not installed (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    ClientModel c = session.clients().getClientById(realm, entityId);
+                    String clientId = (c != null ? c.getClientId() : entityId);
+                    realmCache.registerClientInvalidation(entityId, clientId, realm.getId());
+                    log.infof("IGA ADOPT cache eviction: type=CLIENT id=%s realm=%s — evicted",
+                            entityId, realm.getId());
+                    return;
+                }
+                case ACTION_ADOPT_GROUP: {
+                    CacheRealmProvider realmCache = session.getProvider(CacheRealmProvider.class);
+                    if (realmCache == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=GROUP id=%s realm=%s — CacheRealmProvider not installed (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    realmCache.registerGroupInvalidation(entityId);
+                    // ADOPT_GROUP may unblock users currently quarantined via
+                    // group-membership fan-out (IgaUserAdapter.getGroupsStream
+                    // silent-strip). The user-cache snapshots each user's
+                    // group set + isEnabled() at load time, so realm-wide
+                    // user-cache eviction is required for the change to be
+                    // observable on the next direct-grant. No cheap per-user
+                    // evict exists (KC offers no group→user reverse index in
+                    // the cache APIs).
+                    evictRealmUserCacheFallback(session, realm, "ADOPT_GROUP", entityId);
+                    log.infof("IGA ADOPT cache eviction: type=GROUP id=%s realm=%s — evicted",
+                            entityId, realm.getId());
+                    return;
+                }
+                case ACTION_ADOPT_ROLE: {
+                    CacheRealmProvider realmCache = session.getProvider(CacheRealmProvider.class);
+                    if (realmCache == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=ROLE id=%s realm=%s — CacheRealmProvider not installed (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    RoleModel r = session.roles().getRoleById(realm, entityId);
+                    if (r == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=ROLE id=%s realm=%s — role vanished between stamp and evict (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    String roleName = r.getName();
+                    String containerId = (r.getContainerId() != null ? r.getContainerId() : realm.getId());
+                    realmCache.registerRoleInvalidation(entityId, roleName, containerId);
+                    // ADOPT_ROLE unblocks every user mapped to this role
+                    // (IgaQuarantineCache.isUserUnsignedWithRoles role
+                    // fan-out). UserCacheSession holds each user's isEnabled()
+                    // snapshot computed when the role was still unsigned; per-
+                    // user evict isn't feasible (no role→user reverse index
+                    // cheaper than walking all role members), so we fall back
+                    // to a realm-wide user-cache eviction — the same lever
+                    // the toggle-on path uses (TideAdminCompatResource
+                    // .evictRealmUserCache).
+                    evictRealmUserCacheFallback(session, realm, "ADOPT_ROLE", entityId);
+                    log.infof("IGA ADOPT cache eviction: type=ROLE id=%s realm=%s — evicted",
+                            entityId, realm.getId());
+                    return;
+                }
+                case ACTION_ADOPT_CLIENT_SCOPE: {
+                    CacheRealmProvider realmCache = session.getProvider(CacheRealmProvider.class);
+                    if (realmCache == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=CLIENT_SCOPE id=%s realm=%s — CacheRealmProvider not installed (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    realmCache.registerClientScopeInvalidation(entityId, realm.getId());
+                    log.infof("IGA ADOPT cache eviction: type=CLIENT_SCOPE id=%s realm=%s — evicted",
+                            entityId, realm.getId());
+                    return;
+                }
+                case ACTION_ADOPT_ORGANIZATION: {
+                    // Per-org cache eviction. KC's
+                    // CacheRealmProvider has no public registerOrgInvalidation
+                    // primitive (the InfinispanOrganizationProvider's
+                    // registerOrganizationInvalidation is package-private), but
+                    // InfinispanOrganizationProvider.getById keys the cached
+                    // CachedOrganization on the org id alone
+                    // ({@code realmCache.getCache().get(id, CachedOrganization.class)}),
+                    // and {@code registerOrganizationInvalidation}
+                    // invalidates that key via the public
+                    // {@code CacheRealmProvider.registerInvalidation(id)}
+                    // method. Calling that public method here drops the
+                    // CachedOrganization for this org so the next getById
+                    // re-loads through the IGA provider chain and observes
+                    // the post-ADOPT sidecar absence — i.e. the (future)
+                    // IgaOrganizationModel.isEnabled quarantine
+                    // override sees the just-cleared sidecar on the very next
+                    // request.
+                    //
+                    // We deliberately do NOT iterate the org's domains or
+                    // member-related cache keys here: those are populated by
+                    // CREATE/UPDATE replay paths and not by ADOPT (which does
+                    // not mutate the org). Dropping the primary id-keyed
+                    // entry is sufficient for the per-org isEnabled signal,
+                    // and the auxiliary domain/member entries converge on
+                    // their own as their TTLs expire — matching the
+                    // best-effort policy of every other ADOPT eviction
+                    // branch in this file.
+                    CacheRealmProvider realmCache = session.getProvider(CacheRealmProvider.class);
+                    if (realmCache == null) {
+                        log.warnf("IGA ADOPT cache eviction: type=ORGANIZATION id=%s realm=%s — CacheRealmProvider not installed (skipped)",
+                                entityId, realm.getId());
+                        return;
+                    }
+                    realmCache.registerInvalidation(entityId);
+                    log.infof("IGA ADOPT cache eviction: type=ORGANIZATION id=%s realm=%s — evicted",
+                            entityId, realm.getId());
+                    return;
+                }
+                default:
+                    log.warnf("IGA ADOPT cache eviction: unknown action type %s — no eviction performed",
+                            actionType);
+            }
+        } catch (RuntimeException ex) {
+            // Best-effort. CR is already stamped + sidecar cleared on this
+            // transaction; the next admin write or natural TTL will refresh
+            // the cache. Log and move on — do not propagate.
+            log.warnf(ex, "IGA ADOPT cache eviction FAILED: action=%s id=%s realm=%s — stale read window until cache entry expires",
+                    actionType, entityId, realm.getId());
+        }
+    }
+
+    /**
+     * Realm-wide user-cache eviction lever shared by ADOPT_ROLE / ADOPT_GROUP.
+     * The user's quarantine verdict
+     * ({@link org.tidecloak.iga.providers.IgaUserAdapter#isEnabled}) depends
+     * on the signed status of every role/group the user holds (the role/group
+     * fan-out branch of {@link org.tidecloak.iga.services.IgaQuarantineCache
+     * #isUserUnsignedWithRoles}). When a role/group just transitioned from
+     * unsigned to signed, every user mapped to it has a stale
+     * {@code enabled=false} snapshot in KC's UserCacheSession. Per-user evict
+     * isn't reachable from here (KC offers no cheap role→user / group→user
+     * reverse index — walking all members would defeat the point of caching)
+     * so we evict the realm-wide user cache, the same lever
+     * {@link org.tidecloak.iga.rest.TideAdminCompatResource} uses on the
+     * OFF→ON toggle path. Best-effort: catches all RuntimeExceptions and
+     * logs at WARN — eviction failure must not abort the replay.
+     */
+    private static void evictRealmUserCacheFallback(KeycloakSession session, RealmModel realm,
+                                                     String actionType, String entityId) {
+        try {
+            UserCache userCache = UserStorageUtil.userCache(session);
+            if (userCache == null) {
+                log.warnf("IGA ADOPT realm-user-cache fallback: action=%s id=%s realm=%s — UserCache provider not installed (skipped)",
+                        actionType, entityId, realm.getId());
+                return;
+            }
+            userCache.evict(realm);
+            log.infof("IGA ADOPT realm-user-cache fallback: action=%s id=%s realm=%s — realm user cache evicted (role/group fan-out)",
+                    actionType, entityId, realm.getId());
+        } catch (RuntimeException ex) {
+            log.warnf(ex, "IGA ADOPT realm-user-cache fallback FAILED: action=%s id=%s realm=%s",
+                    actionType, entityId, realm.getId());
+        }
+    }
+
+    /**
+     * Resolve the entity through KC's model APIs. Throws
+     * {@link EntityVanishedException} when missing — the commit endpoint
+     * catches it and returns a structured {@code 404 ENTITY_VANISHED}
+     * response with a single INFO log line, far preferable to either a silent
+     * no-op (leaving a stale APPROVED CR pointing at a vanished entity) or a
+     * generic 500 with a full stack trace at ERROR severity (which is what a
+     * raw {@code IllegalStateException} would produce via KC's catch-all
+     * uncaught-exception handler).
+     */
+    private static void assertEntityExists(KeycloakSession session, RealmModel realm,
+                                            String entityType, String entityId, String actionType) {
+        boolean exists;
+        switch (actionType) {
+            case ACTION_ADOPT_USER: {
+                UserModel u = session.users().getUserById(realm, entityId);
+                exists = u != null;
+                break;
+            }
+            case ACTION_ADOPT_ROLE: {
+                RoleModel r = session.roles().getRoleById(realm, entityId);
+                exists = r != null;
+                break;
+            }
+            case ACTION_ADOPT_GROUP: {
+                GroupModel g = session.groups().getGroupById(realm, entityId);
+                exists = g != null;
+                break;
+            }
+            case ACTION_ADOPT_CLIENT: {
+                ClientModel c = session.clients().getClientById(realm, entityId);
+                exists = c != null;
+                break;
+            }
+            case ACTION_ADOPT_CLIENT_SCOPE: {
+                ClientScopeModel cs = session.clientScopes().getClientScopeById(realm, entityId);
+                exists = cs != null;
+                break;
+            }
+            case ACTION_ADOPT_ORGANIZATION: {
+                // Resolve through KC's OrganizationProvider SPI so
+                // federation / cache layers are honoured (same idiom as the
+                // other ADOPT existence probes). If the OrganizationProvider
+                // factory isn't installed (deployment without the orgs
+                // feature) getProvider returns null — treat as vanished so
+                // the commit endpoint surfaces 404 ENTITY_VANISHED.
+                OrganizationProvider orgs = session.getProvider(OrganizationProvider.class);
+                if (orgs == null) {
+                    log.warnf("ADOPT_ORGANIZATION replay: OrganizationProvider not installed (id=%s realm=%s) — treating as vanished",
+                            entityId, realm.getId());
+                    exists = false;
+                } else {
+                    OrganizationModel o = orgs.getById(entityId);
+                    exists = o != null;
+                }
+                break;
+            }
+            default:
+                throw new IllegalStateException("ADOPT replay: unknown action type " + actionType);
+        }
+        if (!exists) {
+            throw new EntityVanishedException(entityType, entityId, realm.getId());
+        }
+    }
+
+    /**
+     * Per-action JPQL stamp template. Same shape used today by every CREATE_*
+     * replay (and previously by replayBaselineApproval) — UPDATE
+     * &lt;entity&gt; e SET e.attestation = :sig WHERE e.id = :id AND
+     * e.attestation IS NULL.
+     */
+    private static String stampJpqlFor(String actionType) {
+        switch (actionType) {
+            case ACTION_ADOPT_USER:
+                return "UPDATE UserEntity e SET e.attestation = :sig WHERE e.id = :id AND e.attestation IS NULL";
+            case ACTION_ADOPT_ROLE:
+                return "UPDATE RoleEntity e SET e.attestation = :sig WHERE e.id = :id AND e.attestation IS NULL";
+            case ACTION_ADOPT_GROUP:
+                return "UPDATE GroupEntity e SET e.attestation = :sig WHERE e.id = :id AND e.attestation IS NULL";
+            case ACTION_ADOPT_CLIENT:
+                return "UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id = :id AND e.attestation IS NULL";
+            case ACTION_ADOPT_CLIENT_SCOPE:
+                return "UPDATE ClientScopeEntity e SET e.attestation = :sig WHERE e.id = :id AND e.attestation IS NULL";
+            case ACTION_ADOPT_ORGANIZATION:
+                return "UPDATE OrganizationEntity e SET e.attestation = :sig WHERE e.id = :id AND e.attestation IS NULL";
+            default:
+                throw new IllegalStateException("ADOPT replay: no stamp JPQL for action " + actionType);
+        }
+    }
+}

@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!-- 1: Create IGA_CHANGE_REQUEST table -->
+    <changeSet id="iga-1.0.0-1" author="tidecloak-iga">
+        <createTable tableName="IGA_CHANGE_REQUEST">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="REALM_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ENTITY_TYPE" type="VARCHAR(50)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ENTITY_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ACTION_TYPE" type="VARCHAR(50)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ROWS_JSON" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="STATUS" type="VARCHAR(20)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="REQUESTED_BY" type="VARCHAR(36)"/>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="RESOLVED_AT" type="BIGINT"/>
+            <column name="RESOLVED_BY" type="VARCHAR(36)"/>
+        </createTable>
+    </changeSet>
+
+    <!-- 2: Create IGA_AUTHORIZATION table -->
+    <changeSet id="iga-1.0.0-2" author="tidecloak-iga">
+        <createTable tableName="IGA_AUTHORIZATION">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="CHANGE_REQUEST_ID" type="VARCHAR(36)">
+                <constraints nullable="false"
+                             foreignKeyName="FK_IGA_AUTH_CR"
+                             references="IGA_CHANGE_REQUEST(ID)"/>
+            </column>
+            <column name="AUTHORIZED_BY" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="PARTIAL_SIG" type="TEXT"/>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+
+    <!-- 3: Index on IGA_CHANGE_REQUEST for common lookup -->
+    <changeSet id="iga-1.0.0-3" author="tidecloak-iga">
+        <createIndex tableName="IGA_CHANGE_REQUEST" indexName="IDX_IGA_CR_REALM_ENTITY_STATUS">
+            <column name="REALM_ID"/>
+            <column name="ENTITY_TYPE"/>
+            <column name="ENTITY_ID"/>
+            <column name="STATUS"/>
+        </createIndex>
+    </changeSet>
+
+    <!-- 4: Add SIGNATURE column to USER_ENTITY -->
+    <changeSet id="iga-1.0.0-4" author="tidecloak-iga">
+        <addColumn tableName="USER_ENTITY">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 5: Add SIGNATURE column to KEYCLOAK_ROLE -->
+    <changeSet id="iga-1.0.0-5" author="tidecloak-iga">
+        <addColumn tableName="KEYCLOAK_ROLE">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 6: Add SIGNATURE column to KEYCLOAK_GROUP -->
+    <changeSet id="iga-1.0.0-6" author="tidecloak-iga">
+        <addColumn tableName="KEYCLOAK_GROUP">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 7: Add SIGNATURE column to CLIENT -->
+    <changeSet id="iga-1.0.0-7" author="tidecloak-iga">
+        <addColumn tableName="CLIENT">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 8: Add SIGNATURE column to PROTOCOL_MAPPER -->
+    <changeSet id="iga-1.0.0-8" author="tidecloak-iga">
+        <addColumn tableName="PROTOCOL_MAPPER">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 9: Add SIGNATURE column to USER_ROLE_MAPPING -->
+    <changeSet id="iga-1.0.0-9" author="tidecloak-iga">
+        <addColumn tableName="USER_ROLE_MAPPING">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 10: Add SIGNATURE column to USER_GROUP_MEMBERSHIP -->
+    <changeSet id="iga-1.0.0-10" author="tidecloak-iga">
+        <addColumn tableName="USER_GROUP_MEMBERSHIP">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 11: Add SIGNATURE column to GROUP_ROLE_MAPPING -->
+    <changeSet id="iga-1.0.0-11" author="tidecloak-iga">
+        <addColumn tableName="GROUP_ROLE_MAPPING">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 12: Add SIGNATURE column to COMPOSITE_ROLE -->
+    <changeSet id="iga-1.0.0-12" author="tidecloak-iga">
+        <addColumn tableName="COMPOSITE_ROLE">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 13: Add SIGNATURE column to CLIENT_SCOPE_CLIENT -->
+    <changeSet id="iga-1.0.0-13" author="tidecloak-iga">
+        <addColumn tableName="CLIENT_SCOPE_CLIENT">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 14: Add SIGNATURE column to CLIENT_SCOPE_ROLE_MAPPING -->
+    <changeSet id="iga-1.0.0-14" author="tidecloak-iga">
+        <addColumn tableName="CLIENT_SCOPE_ROLE_MAPPING">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>

@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      Add a SIGNATURE column to every attribute table that participates in the
+      IGA approval workflow. The 6 "intercepted" tables (USER_ATTRIBUTE,
+      CLIENT_ATTRIBUTES, CLIENT_SCOPE_ATTRIBUTES, GROUP_ATTRIBUTE,
+      ROLE_ATTRIBUTE, REALM_ATTRIBUTE) are written exclusively through the
+      change-request workflow and the column is populated on replay. The two
+      remaining attribute tables (FED_USER_ATTRIBUTE, RESOURCE_ATTRIBUTE) get
+      the column for completeness — federation/auth-services have separate
+      concerns and are NOT routed through IGA today.
+    -->
+
+    <!-- 1: USER_ATTRIBUTE.SIGNATURE -->
+    <changeSet id="iga-1.8.0-1" author="tidecloak-iga">
+        <addColumn tableName="USER_ATTRIBUTE">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 2: CLIENT_ATTRIBUTES.SIGNATURE -->
+    <changeSet id="iga-1.8.0-2" author="tidecloak-iga">
+        <addColumn tableName="CLIENT_ATTRIBUTES">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 3: CLIENT_SCOPE_ATTRIBUTES.SIGNATURE -->
+    <changeSet id="iga-1.8.0-3" author="tidecloak-iga">
+        <addColumn tableName="CLIENT_SCOPE_ATTRIBUTES">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 4: GROUP_ATTRIBUTE.SIGNATURE -->
+    <changeSet id="iga-1.8.0-4" author="tidecloak-iga">
+        <addColumn tableName="GROUP_ATTRIBUTE">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 5: ROLE_ATTRIBUTE.SIGNATURE -->
+    <changeSet id="iga-1.8.0-5" author="tidecloak-iga">
+        <addColumn tableName="ROLE_ATTRIBUTE">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 6: REALM_ATTRIBUTE.SIGNATURE -->
+    <changeSet id="iga-1.8.0-6" author="tidecloak-iga">
+        <addColumn tableName="REALM_ATTRIBUTE">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 7: FED_USER_ATTRIBUTE.SIGNATURE — column only, no interception -->
+    <changeSet id="iga-1.8.0-7" author="tidecloak-iga">
+        <addColumn tableName="FED_USER_ATTRIBUTE">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 8: RESOURCE_ATTRIBUTE.SIGNATURE — column only, no interception -->
+    <changeSet id="iga-1.8.0-8" author="tidecloak-iga">
+        <addColumn tableName="RESOURCE_ATTRIBUTE">
+            <column name="SIGNATURE" type="VARCHAR(2048)"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>

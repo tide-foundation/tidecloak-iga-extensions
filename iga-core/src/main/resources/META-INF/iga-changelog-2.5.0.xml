@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.5.0: Add a MODE column to IGA_AUTHORIZER.
+
+      Two values today: "firstAdmin" (single-signer bootstrap that signs the
+      realm's initial tide-realm-admin policy) and "multiAdmin" (T-of-N
+      steady-state signer). The column is read per-call by TideAttestor.resolveMode
+      to branch its signing/threshold behaviour (firstadmin-multiadmin-port-plan.md
+      §3.1, §4).
+
+      Default for existing rows is "multiAdmin" so already-established realms
+      (rows created via POST /iga/authorizers before this column existed) do NOT
+      retro-trigger the firstAdmin bootstrap signing path on their next CR commit
+      (port plan §4.2 / §9.2). Lazily-seeded rows (port plan §9.3) are inserted
+      explicitly with mode="firstAdmin" and never see this backfill default.
+    -->
+
+    <changeSet id="iga-2.5.0-1" author="tidecloak-iga">
+        <addColumn tableName="IGA_AUTHORIZER">
+            <column name="MODE" type="VARCHAR(32)" defaultValue="multiAdmin"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>
