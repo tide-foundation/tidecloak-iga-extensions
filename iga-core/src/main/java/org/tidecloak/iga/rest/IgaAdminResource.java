@@ -17,6 +17,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -41,6 +42,7 @@ import org.tidecloak.iga.providers.IgaLicenseHistoryService;
 import org.tidecloak.iga.providers.IgaLicensingDraftService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
+import org.tidecloak.iga.providers.IgaServerCertEnrollmentTokenService;
 import org.tidecloak.iga.replay.EntityVanishedException;
 import org.tidecloak.iga.replay.IgaMapperConflictException;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
@@ -102,6 +104,39 @@ public class IgaAdminResource {
 
     private IgaServerCertDraftService getServerCertDraftService() {
         return new IgaServerCertDraftService(getEm(), getService());
+    }
+
+    /**
+     * The three REQUEST_SERVER_CERT carrier keys in the order the leaf-first accept must run
+     * (leaf records the approver toward threshold; ca + pk dedup as the same admin and only
+     * persist their carrier). Used by the multi-carrier /approve batch (phase 1 build + phase 2
+     * accept). leaf -> cr.requestModel, ca -> draft.caRequestModel, pk -> draft.pkRequestModel.
+     */
+    private static final List<String> SERVER_CERT_CARRIER_KEYS = List.of(
+            TideAttestor.SERVER_CERT_CARRIER_LEAF,
+            TideAttestor.SERVER_CERT_CARRIER_CA,
+            TideAttestor.SERVER_CERT_CARRIER_PK);
+
+    /**
+     * Parse the phase-2 {@code requestModels:[{key,requestModel},...]} array into a key -> dokened
+     * carrier map. Tolerates the entries in any order; ignores unknown keys.
+     */
+    private static Map<String, String> parseServerCertDokenedCarriers(List<?> requestModels) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (requestModels == null) return out;
+        for (Object o : requestModels) {
+            if (!(o instanceof Map<?, ?> m)) continue;
+            Object k = m.get("key");
+            Object rm = m.get("requestModel");
+            if (k instanceof String key && rm instanceof String carrier) {
+                out.put(key, carrier);
+            }
+        }
+        return out;
+    }
+
+    private IgaServerCertEnrollmentTokenService getEnrollmentTokenService() {
+        return new IgaServerCertEnrollmentTokenService(getEm());
     }
 
     private IgaLicensingDraftService getLicensingDraftService() {
@@ -1138,17 +1173,39 @@ public class IgaAdminResource {
         if (multiAdmin) {
             TideAttestor tide = (TideAttestor) attestor;
             String requestModel = body != null ? (String) body.get("requestModel") : null;
+            // ServerCert is the ONE multi-carrier action: ONE enclave popup signs all THREE
+            // carriers (leaf / CA / PK) in a single batch. Phase 1 returns them as an array
+            // (requestModels:[{key,requestModel},...]); phase 2 posts all three dokened carriers
+            // back in one body (requestModels:[...]). Every other CR type keeps the single-carrier
+            // requestModel string shape. Branch on actionType.
+            boolean isServerCert = TideAttestor.ACTION_REQUEST_SERVER_CERT.equals(cr.getActionType());
+            List<?> requestModels = body != null && body.get("requestModels") instanceof List<?> l ? l : null;
+            boolean phase2 = (requestModel != null && !requestModel.isBlank())
+                    || (requestModels != null && !requestModels.isEmpty());
 
-            if (requestModel == null || requestModel.isBlank()) {
-                // Phase 1: build + persist the Policy:1 carrier for the enclave.
+            if (!phase2) {
+                // Phase 1: build + persist the Policy:1 carrier(s) for the enclave.
                 try {
-                    String serializedModel = tide.buildMultiAdminApprovalModel(session, realm, cr);
                     int threshold = tide.getThreshold(session, realm, cr);
                     Map<String, Object> resp = new LinkedHashMap<>();
                     resp.put("mode", "needs-approval");
                     resp.put("changeRequestId", cr.getId());
                     resp.put("actionType", cr.getActionType());
-                    resp.put("requestModel", serializedModel);
+                    if (isServerCert) {
+                        // Build all three carriers; return them as a keyed array. Each carrier is
+                        // signed by the enclave under id = `${crId}#${key}`.
+                        List<Map<String, Object>> models = new java.util.ArrayList<>();
+                        for (String key : SERVER_CERT_CARRIER_KEYS) {
+                            String carrier = tide.buildMultiAdminApprovalModel(session, realm, cr, key);
+                            Map<String, Object> m = new LinkedHashMap<>();
+                            m.put("key", key);
+                            m.put("requestModel", carrier);
+                            models.add(m);
+                        }
+                        resp.put("requestModels", models);
+                    } else {
+                        resp.put("requestModel", tide.buildMultiAdminApprovalModel(session, realm, cr));
+                    }
                     resp.put("authCount", authCount(em, cr));
                     resp.put("threshold", threshold);
                     return Response.ok(resp).build();
@@ -1161,7 +1218,7 @@ public class IgaAdminResource {
                 }
             }
 
-            // Phase 2: record the signed doken toward threshold, then AUTO-COMMIT if
+            // Phase 2: record the signed doken(s) toward threshold, then AUTO-COMMIT if
             // the quorum is now met (the "Authorize" button = approve AND commit). The
             // doken is persisted on the CR's authorization entities and, once the
             // quorum is collected, commitIfReady drives the per-unit-doken -> VVK
@@ -1170,7 +1227,36 @@ public class IgaAdminResource {
             // returns false), but still falls through to commitIfReady so a final
             // approver re-hitting Authorize on a now-at-quorum CR applies it.
             try {
-                tide.acceptMultiAdminApprovalModel(session, realm, cr, requestModel, admin);
+                if (isServerCert) {
+                    // ALL THREE dokened carriers MUST be present in one phase-2 body — otherwise a
+                    // partial post that crosses quorum would commit with an un-dokened CA/PK carrier
+                    // and the ORK PolicyAuthorizationFlow rejects ("Must pass at least 1 doken").
+                    Map<String, String> byKey = parseServerCertDokenedCarriers(requestModels);
+                    for (String key : SERVER_CERT_CARRIER_KEYS) {
+                        String dokened = byKey.get(key);
+                        if (dokened == null || dokened.isBlank()) {
+                            return Response.status(Response.Status.BAD_REQUEST)
+                                    .entity(Map.of("error", "SERVER_CERT_CARRIERS_INCOMPLETE",
+                                            "message", "REQUEST_SERVER_CERT phase 2 requires all three "
+                                                    + "dokened carriers (leaf, ca, pk) in requestModels; missing '"
+                                                    + key + "'"))
+                                    .build();
+                        }
+                    }
+                    // Persist all three; record the approver toward threshold exactly ONCE (the
+                    // leaf accept does record(); ca + pk dedup as the same admin, persisting only).
+                    tide.acceptMultiAdminApprovalModel(session, realm, cr,
+                            byKey.get(TideAttestor.SERVER_CERT_CARRIER_LEAF), admin,
+                            TideAttestor.SERVER_CERT_CARRIER_LEAF);
+                    tide.acceptMultiAdminApprovalModel(session, realm, cr,
+                            byKey.get(TideAttestor.SERVER_CERT_CARRIER_CA), admin,
+                            TideAttestor.SERVER_CERT_CARRIER_CA);
+                    tide.acceptMultiAdminApprovalModel(session, realm, cr,
+                            byKey.get(TideAttestor.SERVER_CERT_CARRIER_PK), admin,
+                            TideAttestor.SERVER_CERT_CARRIER_PK);
+                } else {
+                    tide.acceptMultiAdminApprovalModel(session, realm, cr, requestModel, admin);
+                }
             } catch (ForbiddenException fe) {
                 return Response.status(Response.Status.FORBIDDEN)
                         .entity(Map.of("error", "FORBIDDEN_APPROVER_ROLE",
@@ -2563,6 +2649,20 @@ public class IgaAdminResource {
         return Response.ok(toServerCertDraftRepresentation(updated)).build();
     }
 
+    /**
+     * Revoke ALL server-cert rows for an instanceId (source-branch parity with
+     * {@code server-cert/revoke}). Every non-revoked draft for the (realm, instance)
+     * pair is marked revoked and surfaces on the public CRL endpoint.
+     */
+    @POST
+    @Path("server-certs/instance/{instanceId}/revoke")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response revokeServerCertsByInstance(@PathParam("instanceId") String instanceId) {
+        auth.realm().requireManageRealm();
+        int revoked = getServerCertDraftService().revokeByInstance(realm.getId(), instanceId);
+        return Response.ok(Map.of("instanceId", instanceId, "revoked", revoked)).build();
+    }
+
     @DELETE
     @Path("server-certs/{id}")
     public Response deleteServerCert(@PathParam("id") String id) {
@@ -2575,6 +2675,69 @@ public class IgaAdminResource {
         }
         service.deleteById(id);
         return Response.noContent().build();
+    }
+
+    /**
+     * Mint a ONE-TIME enrollment token for a client's server-identity flow. The plaintext is
+     * returned ONCE and never stored (only its SHA-256 hash is persisted). The workload then
+     * presents the plaintext as an {@code Authorization: Bearer} header on the public
+     * {@code /realms/{realm}/tide-server-identity/request} call.
+     *
+     * <p>Body: {@code {clientId (required), ttlSeconds (optional, default 86400, clamp 60..604800)}}.
+     * Minting also sets {@code tide.server-identity.enabled=true} on the client (idempotent) and
+     * SUPERSEDES (invalidates) any prior unconsumed token for the client.
+     */
+    @POST
+    @Path("server-certs/enrollment-token")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response mintEnrollmentToken(Map<String, Object> body) {
+        auth.realm().requireManageRealm();
+
+        String clientId = body != null ? (String) body.get("clientId") : null;
+        if (clientId == null || clientId.isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "clientId is required"))
+                    .build();
+        }
+
+        // ttlSeconds: default 86400 (24h), clamp 60..604800 (7d).
+        long ttlSeconds = 86400L;
+        if (body != null && body.get("ttlSeconds") != null) {
+            Object raw = body.get("ttlSeconds");
+            if (raw instanceof Number) {
+                ttlSeconds = ((Number) raw).longValue();
+            } else {
+                try {
+                    ttlSeconds = Long.parseLong(raw.toString().trim());
+                } catch (NumberFormatException e) {
+                    return Response.status(Response.Status.BAD_REQUEST)
+                            .entity(Map.of("error", "ttlSeconds must be an integer"))
+                            .build();
+                }
+            }
+        }
+        ttlSeconds = Math.max(60L, Math.min(604800L, ttlSeconds));
+
+        // Validate the client exists in this realm (mirror requestServerCert).
+        ClientModel client = realm.getClientByClientId(clientId);
+        if (client == null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "Client '" + clientId + "' not found in realm"))
+                    .build();
+        }
+
+        // Mark the client as server-identity enabled (idempotent gate for the request endpoint).
+        client.setAttribute("tide.server-identity.enabled", "true");
+
+        IgaServerCertEnrollmentTokenService.MintResult result =
+                getEnrollmentTokenService().mint(realm.getId(), clientId, ttlSeconds, currentUserId());
+
+        LinkedHashMap<String, Object> resp = new LinkedHashMap<>();
+        resp.put("token", result.plaintext);
+        resp.put("clientId", clientId);
+        resp.put("expiresAt", result.expiresAt);
+        return Response.status(Response.Status.CREATED).entity(resp).build();
     }
 
     // -------------------------------------------------------------------------

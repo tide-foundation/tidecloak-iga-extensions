@@ -39,6 +39,7 @@ import org.tidecloak.iga.producer.units.UserRoleMappingSetUnit;
 import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
@@ -137,6 +138,13 @@ public class TideAttestor implements IgaAttestor {
      * {@code IgaReplayDispatcher}.
      */
     public static final String ACTION_OFFBOARD_REALM = "OFFBOARD_REALM";
+
+    /**
+     * Workload server-identity cert request (public {@code tide-server-identity} endpoint).
+     * Non-producer: signs three opaque ServerCert:1 blobs (leaf TBS / VVK-CA TBS / public key)
+     * via {@link org.tidecloak.iga.crypto.ServerCertSigner}, NOT a re-derivable AttestationUnit.
+     */
+    public static final String ACTION_REQUEST_SERVER_CERT = "REQUEST_SERVER_CERT";
 
     /**
      * Realm attribute overriding the minimum distinct-admin approvals required to
@@ -1995,6 +2003,33 @@ public class TideAttestor implements IgaAttestor {
      */
     public String buildMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
                                                IgaChangeRequestEntity cr) {
+        return buildMultiAdminApprovalModel(session, realm, cr, SERVER_CERT_CARRIER_LEAF);
+    }
+
+    /** Carrier selector tokens for the multi-carrier REQUEST_SERVER_CERT approval ceremony. */
+    public static final String SERVER_CERT_CARRIER_LEAF = "leaf";
+    public static final String SERVER_CERT_CARRIER_CA = "ca";
+    public static final String SERVER_CERT_CARRIER_PK = "pk";
+
+    /**
+     * Carrier-selector overload. For every action EXCEPT {@link #ACTION_REQUEST_SERVER_CERT}
+     * the {@code carrierSel} is ignored and the single per-CR carrier on
+     * {@code cr.getRequestModel()} is built/returned (back-compat: the 3-arg overload passes
+     * {@link #SERVER_CERT_CARRIER_LEAF}). REQUEST_SERVER_CERT is the ONE multi-carrier action:
+     * it has THREE independent {@code ServerCert:1} carriers (leaf / CA / PK), each enclave-dokened
+     * separately and stored in its own column (leaf -> {@code cr.requestModel}, CA ->
+     * {@code draft.caRequestModel}, PK -> {@code draft.pkRequestModel}). The admin-UI drives the
+     * enclave once PER carrier (3 GET + 3 POST round-trips), mirroring the source branch's
+     * {@code <csId>} / {@code <csId>-ca} / {@code <csId>-pk} sibling-item protocol.
+     */
+    public String buildMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
+                                               IgaChangeRequestEntity cr, String carrierSel) {
+        // ---------------------------------------------------------------------
+        // REQUEST_SERVER_CERT — MULTI-CARRIER (leaf / CA / PK), each dokened separately.
+        // ---------------------------------------------------------------------
+        if (ACTION_REQUEST_SERVER_CERT.equals(cr.getActionType())) {
+            return buildServerCertApprovalCarrier(session, realm, cr, carrierSel);
+        }
         // ACCUMULATION SHORT-CIRCUIT (covers BOTH the producer-unit and REGEN_ADMIN_POLICY
         // paths — this is the ONE place both flow through). The build is invoked once
         // per admin who opens the approval popup. The enclave APPENDS its doken onto whatever
@@ -2106,6 +2141,10 @@ public class TideAttestor implements IgaAttestor {
         if (ACTION_REGEN_ADMIN_POLICY.equals(cr.getActionType())) {
             return buildPolicyResignApprovalModel(session, realm, cr);
         }
+
+        // REQUEST_SERVER_CERT is multi-carrier and is handled up-front by
+        // buildServerCertApprovalCarrier (routed at the top of this method via the
+        // carrier-selector overload) — it never reaches this single-carrier body.
 
         // The M0 admin Policy bytes to embed — the genuine VVK-signed threshold Policy.
         byte[] adminPolicyBytes = readM0AdminPolicyBytes(session, realm);
@@ -2400,6 +2439,25 @@ public class TideAttestor implements IgaAttestor {
     public boolean acceptMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
                                                  IgaChangeRequestEntity cr,
                                                  String dokenEmbeddedModelB64, UserModel admin) {
+        return acceptMultiAdminApprovalModel(session, realm, cr, dokenEmbeddedModelB64, admin,
+                SERVER_CERT_CARRIER_LEAF);
+    }
+
+    /**
+     * Carrier-selector overload. For every action EXCEPT {@link #ACTION_REQUEST_SERVER_CERT} the
+     * {@code carrierSel} is ignored and the dokened carrier is persisted on {@code cr.requestModel}
+     * (back-compat). For REQUEST_SERVER_CERT the dokened carrier is persisted on the column the
+     * selector names: {@code leaf} -> {@code cr.requestModel}, {@code ca} ->
+     * {@code draft.caRequestModel}, {@code pk} -> {@code draft.pkRequestModel}. The per-admin
+     * approval is recorded toward threshold ONCE per admin across all three carriers (the
+     * once-per-admin dedup below: the first of the admin's three POSTs records the approval; the
+     * other two persist their carrier without double-counting), so a single admin approving all
+     * three ServerCert items still counts as one approval.
+     */
+    public boolean acceptMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
+                                                 IgaChangeRequestEntity cr,
+                                                 String dokenEmbeddedModelB64, UserModel admin,
+                                                 String carrierSel) {
         if (dokenEmbeddedModelB64 == null || dokenEmbeddedModelB64.isBlank()) {
             throw new RuntimeException("IGA multiAdmin approval (phase 2): empty doken-embedded model "
                     + "for CR " + cr.getId());
@@ -2419,9 +2477,13 @@ public class TideAttestor implements IgaAttestor {
                     + cr.getId() + " is not a valid ModelRequest: " + e.getMessage(), e);
         }
 
-        // (2) Persist the doken-embedded model back on the carrier. NO re-SetPolicy —
+        // (2) Persist the doken-embedded model back on the SELECTED carrier. NO re-SetPolicy —
         // that would invalidate the embedded doken (gold reference MultiAdmin.commit).
-        cr.setRequestModel(dokenEmbeddedModelB64);
+        if (ACTION_REQUEST_SERVER_CERT.equals(cr.getActionType())) {
+            persistServerCertDokenedCarrier(session, cr, carrierSel, dokenEmbeddedModelB64);
+        } else {
+            cr.setRequestModel(dokenEmbeddedModelB64);
+        }
 
         // (3) Once-per-admin dedup, then record toward threshold.
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
@@ -2444,6 +2506,102 @@ public class TideAttestor implements IgaAttestor {
         log.infof("IGA multiAdmin approval (phase 2): recorded approval by %s for CR %s "
                 + "(doken-embedded model persisted).", admin.getUsername(), cr.getId());
         return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // REQUEST_SERVER_CERT multi-carrier (leaf / CA / PK) doken collection
+    // -------------------------------------------------------------------------
+
+    /** Load the single IGA_SERVER_CERT_DRAFT sidecar for a REQUEST_SERVER_CERT CR (throws if absent). */
+    private static IgaServerCertDraftEntity loadServerCertDraft(KeycloakSession session,
+                                                                IgaChangeRequestEntity cr) {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<IgaServerCertDraftEntity> drafts = em.createNamedQuery(
+                        "IgaServerCertDraft.findByChangeRequestId", IgaServerCertDraftEntity.class)
+                .setParameter("crId", cr.getId())
+                .getResultList();
+        if (drafts.isEmpty()) {
+            throw new RuntimeException("IGA server-cert approval: CR " + cr.getId()
+                    + " has no IGA_SERVER_CERT_DRAFT sidecar — cannot build/persist the ServerCert:1 models");
+        }
+        return drafts.get(0);
+    }
+
+    /** Read the currently-stored carrier for a given ServerCert selector. */
+    private static String readServerCertCarrier(IgaChangeRequestEntity cr,
+                                                IgaServerCertDraftEntity draft, String carrierSel) {
+        if (SERVER_CERT_CARRIER_CA.equals(carrierSel)) return draft.getCaRequestModel();
+        if (SERVER_CERT_CARRIER_PK.equals(carrierSel)) return draft.getPkRequestModel();
+        return cr.getRequestModel(); // leaf (default)
+    }
+
+    /**
+     * <b>Phase 1</b> for a REQUEST_SERVER_CERT carrier. On the FIRST open of ANY of the three
+     * selectors (0 recorded approvals) build ALL THREE {@code ServerCert:1} carriers in one shot
+     * ({@link org.tidecloak.iga.crypto.ServerCertSigner#buildApprovalModels}, which persists leaf
+     * on {@code cr.requestModel}, CA on {@code draft.caRequestModel}, PK on
+     * {@code draft.pkRequestModel}), then return the one the selector names. On a 2nd..Nth open
+     * (>=1 recorded approval) return the ALREADY-ACCUMULATED carrier for that selector verbatim so
+     * the enclave appends the next doken onto the prior ones (NOT a fresh 0-doken rebuild — that
+     * is the same accumulation invariant the single-carrier path enforces). Mirrors the source
+     * branch's per-item {@code <csId>} / {@code <csId>-ca} / {@code <csId>-pk} enclave protocol.
+     */
+    private String buildServerCertApprovalCarrier(KeycloakSession session, RealmModel realm,
+                                                  IgaChangeRequestEntity cr, String carrierSel) {
+        String sel = (carrierSel == null || carrierSel.isBlank()) ? SERVER_CERT_CARRIER_LEAF : carrierSel;
+        if (!SERVER_CERT_CARRIER_LEAF.equals(sel) && !SERVER_CERT_CARRIER_CA.equals(sel)
+                && !SERVER_CERT_CARRIER_PK.equals(sel)) {
+            throw new RuntimeException("IGA server-cert approval: unknown carrier selector '" + sel
+                    + "' for CR " + cr.getId() + " (expected leaf|ca|pk)");
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaServerCertDraftEntity draft = loadServerCertDraft(session, cr);
+
+        // ACCUMULATION SHORT-CIRCUIT (per selector): once >=1 admin has approved, return the
+        // already-accumulated carrier for THIS selector verbatim so the enclave stacks dokens.
+        String existing = readServerCertCarrier(cr, draft, sel);
+        if (existing != null && !existing.isBlank() && countRecordedApprovals(session, cr) >= 1) {
+            log.infof("IGA server-cert approval (phase 1): CR %s carrier=%s already has %d recorded "
+                            + "approval(s) — returning the ACCUMULATED carrier verbatim (enclave appends "
+                            + "the next doken).", cr.getId(), sel, countRecordedApprovals(session, cr));
+            return existing;
+        }
+
+        // FIRST open: build all three fresh (vendor-initialized, 0 dokens) and persist each to its
+        // store, then return the requested one. Building all three on the first selector keeps the
+        // three carriers' creation-auth + draft timestamps consistent (they are signed/assembled as
+        // a set at commit) and is idempotent across re-opens before any approval is recorded.
+        byte[] adminPolicy = readM0AdminPolicyBytes(session, realm);
+        String leafCarrier = org.tidecloak.iga.crypto.ServerCertSigner.buildApprovalModels(
+                realm, draft, adminPolicy); // persists CA + PK onto the draft, returns the leaf
+        cr.setRequestModel(leafCarrier);
+        em.merge(draft);
+        em.flush();
+        log.infof("IGA server-cert approval (phase 1): built ServerCert:1 leaf/CA/PK models for CR %s "
+                + "(instance %s, realm %s); returning carrier=%s.",
+                cr.getId(), draft.getInstanceId(), realm.getName(), sel);
+        return readServerCertCarrier(cr, draft, sel);
+    }
+
+    /** <b>Phase 2</b> persistence: store the dokened carrier on the column the selector names. */
+    private void persistServerCertDokenedCarrier(KeycloakSession session, IgaChangeRequestEntity cr,
+                                                 String carrierSel, String dokenEmbeddedModelB64) {
+        String sel = (carrierSel == null || carrierSel.isBlank()) ? SERVER_CERT_CARRIER_LEAF : carrierSel;
+        if (SERVER_CERT_CARRIER_LEAF.equals(sel)) {
+            cr.setRequestModel(dokenEmbeddedModelB64);
+            return;
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaServerCertDraftEntity draft = loadServerCertDraft(session, cr);
+        if (SERVER_CERT_CARRIER_CA.equals(sel)) {
+            draft.setCaRequestModel(dokenEmbeddedModelB64);
+        } else if (SERVER_CERT_CARRIER_PK.equals(sel)) {
+            draft.setPkRequestModel(dokenEmbeddedModelB64);
+        } else {
+            throw new RuntimeException("IGA server-cert approval (phase 2): unknown carrier selector '"
+                    + sel + "' for CR " + cr.getId() + " (expected leaf|ca|pk)");
+        }
+        em.merge(draft);
     }
 
     /**
@@ -3945,7 +4103,39 @@ public class TideAttestor implements IgaAttestor {
                  "UPDATE_CLIENT_REDIRECT_URIS", "UPDATE_CLIENT_PROPERTY" -> {
                 ClientModel c = resolveClientForStamp(realm, cr);
                 if (c != null) {
-                    units.add(RealmAttestationExporter.clientConfig(session, c, realmId));
+                    if ("CREATE_CLIENT".equals(action)) {
+                        // Frame the FULL client-owned derived closure a newly-created client
+                        // folds in — client_config (1), client_mapper_set (12),
+                        // client_scope_assignment_set (11), scope_role_allowlist_set (14) and a
+                        // protocol_mapper (3) per client-owned mapper — the SAME per-client set
+                        // RealmAttestationExporter.exportRealmMetadata and the login read emit
+                        // (clientOwnedUnits). Post-flip the multiAdmin carrier is the ONLY signer
+                        // of these (convergeAfterCommit is a firstAdmin-only backstop, a no-op
+                        // here since the firstAdmin pack is burned), so EVERY client-owned unit
+                        // the login reads MUST be framed here or its column stays NULL and
+                        // fail-closes the login (unit 11 was framed before; scope_role_allowlist_set
+                        // / client_mapper_set / client protocol_mappers were not). A freshly-created
+                        // client materializes all of these at create time via RepresentationToModel
+                        // .createClient (config, default+optional scopes, protocol mappers, full-scope
+                        // / scope-mappings), which the phase-1 scratch replay runs identically, so the
+                        // framed bytes equal the live post-commit bytes the login reads and the
+                        // distribution stamps (byte-identity by construction, same invariant as unit 11).
+                        // Sorted by (unit-type wire value, target id) for a DETERMINISTIC carrier
+                        // order so phase-1 framing and phase-2 distribution enumerate the same units
+                        // in the same order (index alignment); client_config has the lowest wire value
+                        // so it stays at index 0. The login read + the firstAdmin stamper key by
+                        // column, so the sort is login-neutral.
+                        List<AttestationUnit> owned =
+                                new RealmAttestationExporter().clientOwnedUnits(session, c, realmId);
+                        owned.sort(java.util.Comparator
+                                .comparingInt((AttestationUnit u) -> u.type().wireValue())
+                                .thenComparing(AttestationUnit::targetId));
+                        units.addAll(owned);
+                    } else {
+                        // SET_/UPDATE_ client CRs do NOT touch the derived sets — frame only the
+                        // client_config node (the derived units are already real by then).
+                        units.add(RealmAttestationExporter.clientConfig(session, c, realmId));
+                    }
                     // Part C: post-flip the multiAdmin carrier is the ONLY signer of the SA user's
                     // user_identity, so frame its per-user units alongside the clientConfig node.
                     // Mirrors the CREATE_ORGANIZATION backing-group precedent below. perUserUnits
@@ -4032,7 +4222,38 @@ public class TideAttestor implements IgaAttestor {
                 ClientModel c = clientUuid == null ? null : realm.getClientById(clientUuid);
                 if (c != null) units.add(RealmAttestationExporter.clientScopeAssignmentSet(c, realmId));
             }
-            case "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER", "REMOVE_PROTOCOL_MAPPER" -> {
+            case "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER" -> {
+                // Frame the owner's FULL mapper closure — the mapper-set unit (12 client / 13
+                // scope) AND a protocol_mapper unit (3) per owned mapper — not just the set.
+                // The changed/added mapper's INDIVIDUAL ProtocolMapperEntity.attestation column
+                // is what login reads (unit 3, keyed on mapper id); the replay leaves it on the
+                // set fan-out's TIDE-DUMMY (ADD fans that stub across EVERY sibling mapper), and
+                // the multiAdmin carrier is the only signer, so every owned mapper's unit 3 must
+                // be framed here or its column stays DUMMY and fail-closes the login. Sorted by
+                // (unit-type wire value, target id) for a deterministic carrier order so phase-1
+                // framing and phase-2 distribution align. Byte-match holds — the mapper config is
+                // final at commit (the stampProducerUnitColumns invalidation refreshes it).
+                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+                String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
+                List<AttestationUnit> closure = null;
+                if (clientUuid != null) {
+                    ClientModel c = realm.getClientById(clientUuid);
+                    if (c != null) closure = new RealmAttestationExporter().clientMapperUnits(c, realmId);
+                } else if (scopeId != null) {
+                    ClientScopeModel s = realm.getClientScopeById(scopeId);
+                    if (s != null) closure = new RealmAttestationExporter().clientScopeMapperUnits(s, realmId);
+                }
+                if (closure != null) {
+                    closure.sort(java.util.Comparator
+                            .comparingInt((AttestationUnit u) -> u.type().wireValue())
+                            .thenComparing(AttestationUnit::targetId));
+                    units.addAll(closure);
+                }
+            }
+            case "REMOVE_PROTOCOL_MAPPER" -> {
+                // The removed mapper's row (and its unit-3 column) is deleted, and REMOVE does NOT
+                // fan-out a stub onto the survivors (replayRemoveProtocolMapper writes no
+                // attestation), so only the owner's mapper-SET unit changed — frame just that.
                 String clientUuid = firstRowKey(cr, "CLIENT_UUID");
                 String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
                 if (clientUuid != null) {
@@ -4340,6 +4561,56 @@ public class TideAttestor implements IgaAttestor {
             return;
         }
 
+        // CREATE_CLIENT mapper-visibility realignment. RepresentationToModel.createClient
+        // (run by the replay above, in THIS commit tx) reads the client's protocol-mapper
+        // stream to strip the built-in defaults BEFORE adding the CR's own mappers, so a
+        // cached ClientAdapter in this session can still report ZERO protocol mappers. That
+        // makes BOTH the multiAdmin phase-2 distribution (buildAllCrUnits over the live model)
+        // and the firstAdmin clientOwnedUnits stamp below enumerate the client WITHOUT its
+        // protocol_mapper units — diverging from the phase-1 SCRATCH carrier (a fresh nested
+        // session that DID see the mappers and framed them). The fallout: the protocol_mapper
+        // columns keep the DUMMY the replay's signNestedChildSet wrote, and (multiAdmin) the
+        // shorter live list index-misaligns against the longer carrier. Invalidate the client
+        // so every live read in this commit session (this method's stampers AND the trailing
+        // convergeAfterCommit) re-reads its protocol mappers from the DB, where the replay
+        // persisted them — realigning phase-2 with the phase-1 carrier. No-op on a non-cached
+        // realm (the JPA model is already fresh).
+        if ("CREATE_CLIENT".equals(action)) {
+            org.keycloak.models.cache.CacheRealmProvider clientCache =
+                    session.getProvider(org.keycloak.models.cache.CacheRealmProvider.class);
+            if (clientCache != null) {
+                ClientModel created = resolveClientForStamp(realm, cr);
+                if (created != null) {
+                    clientCache.registerClientInvalidation(
+                            created.getId(), created.getClientId(), realm.getId());
+                }
+            }
+        }
+
+        // Same visibility realignment for the protocol-mapper CRs: the replay added/updated/
+        // removed a mapper on the owner (client OR client_scope) in THIS commit tx, but a cached
+        // owner adapter can report the STALE mapper set/config. Invalidate the owner so the live
+        // stamp/distribution below (and the phase-2 enumeration) re-reads the current mappers
+        // from the DB — matching the fresh phase-1 scratch carrier. No-op on a non-cached realm.
+        if ("ADD_PROTOCOL_MAPPER".equals(action) || "UPDATE_PROTOCOL_MAPPER".equals(action)
+                || "REMOVE_PROTOCOL_MAPPER".equals(action)) {
+            org.keycloak.models.cache.CacheRealmProvider ownerCache =
+                    session.getProvider(org.keycloak.models.cache.CacheRealmProvider.class);
+            if (ownerCache != null) {
+                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+                String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
+                if (clientUuid != null) {
+                    ClientModel owner = realm.getClientById(clientUuid);
+                    if (owner != null) {
+                        ownerCache.registerClientInvalidation(
+                                owner.getId(), owner.getClientId(), realm.getId());
+                    }
+                } else if (scopeId != null) {
+                    ownerCache.registerClientScopeInvalidation(scopeId, realm.getId());
+                }
+            }
+        }
+
         // multiAdmin distribution. Post-flip the firstAdmin pack is burned, so the
         // node/derived/realm/org stampers below would only stub (signProducerEnvelope's
         // multiAdmin branch → DUMMY_SIG_PREFIX). Instead, on a real-signing-capable
@@ -4366,7 +4637,39 @@ public class TideAttestor implements IgaAttestor {
         try {
             switch (action) {
                 // ---- NODE units: re-stamp the owner's node column with the real envelope ----
-                case "CREATE_CLIENT", "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
+                case "CREATE_CLIENT" -> {
+                        // Stamp the FULL client-owned derived closure a newly-created client
+                        // folds in at create time — client_config (1), client_mapper_set (12),
+                        // client_scope_assignment_set (11), scope_role_allowlist_set (14) and a
+                        // protocol_mapper (3) per client-owned mapper — the EXACT set the login
+                        // reads (RealmAttestationExporter.clientOwnedUnits, the shared per-client
+                        // emission of exportRealmMetadata). Before this, only client_config (+
+                        // unit 11) were stamped, so scope_role_allowlist_set / client_mapper_set /
+                        // client protocol_mappers stayed NULL and the fail-closed login TVE
+                        // producer 500'd the mint on whichever was read first. Reuse the
+                        // producer's own enumeration so we never drift from what login emits.
+                        // Signed per-unit via signProducerEnvelope (real firstAdmin VVK when
+                        // capable, else stub) + stamped by column key (order-independent), the
+                        // SAME path the dedicated node/derived stampers use. Pre-toggle clients
+                        // get this set via ADOPT_CLIENT (stampAdoptClient); later scope/mapper
+                        // changes re-stamp the affected unit via ASSIGN_SCOPE / SCOPE_MAPPING_* /
+                        // ADD_PROTOCOL_MAPPER.
+                        ClientModel newClient = resolveClientForStamp(realm, cr);
+                        if (newClient != null) {
+                            try {
+                                for (AttestationUnit u : new RealmAttestationExporter()
+                                        .clientOwnedUnits(session, newClient, realm.getId())) {
+                                    UnitColumnMapping.stamp(em, u,
+                                            signProducerEnvelope(session, realm, mode, u.serialize()));
+                                }
+                            } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+                        }
+                        // Part B3: also stamp the SA user's user_identity when the client has
+                        // serviceAccountsEnabled. Self-gates (no-op for non-SA clients / SA-less
+                        // UPDATE rows), so safe to call unconditionally for every client CR.
+                        stampServiceAccountUserIfPresent(session, realm, mode, em, cr);
+                }
+                case "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
                      "UPDATE_CLIENT_REDIRECT_URIS", "UPDATE_CLIENT_PROPERTY" -> {
                         stampClientConfig(session, realm, mode, em, cr);
                         // Part B3: also stamp the SA user's user_identity when the client has
@@ -4389,7 +4692,9 @@ public class TideAttestor implements IgaAttestor {
                 // ---- DERIVED sets: re-sign the owner's set into the owner's set column ----
                 case "ASSIGN_SCOPE", "REMOVE_SCOPE" ->
                         stampClientScopeAssignmentSet(session, realm, mode, em, cr);
-                case "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER", "REMOVE_PROTOCOL_MAPPER" ->
+                case "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER" ->
+                        stampMapperClosure(session, realm, mode, em, cr);
+                case "REMOVE_PROTOCOL_MAPPER" ->
                         stampMapperSet(session, realm, mode, em, cr);
                 case "SCOPE_MAPPING_ADD", "SCOPE_MAPPING_REMOVE" ->
                         stampScopeRoleAllowlistClient(session, realm, mode, em, cr);
@@ -4487,10 +4792,20 @@ public class TideAttestor implements IgaAttestor {
             return;
         }
         List<String> sigs = signMultiAdminUnitsViaPolicy(session, realm, cr);
-        if (sigs.size() < units.size()) {
+        // Fail-closed on ANY count mismatch, not just sigs < units. The carrier framed at
+        // approval (phase-1 scratch) and the live commit enumeration (phase-2) MUST produce
+        // the identical unit set/order (the "cannot drift by construction" contract). If the
+        // carrier has MORE sigs than the live model enumerates — e.g. a CREATE_CLIENT whose
+        // freshly-created protocol mappers the phase-1 fresh session saw but a stale cached
+        // client at commit does not (now realigned by the invalidation above) — stamping the
+        // shorter live prefix index-MISALIGNS sigs onto the wrong columns AND drops the
+        // trailing units' columns on their replay stub. A sigs>units drift is therefore just
+        // as corrupting as sigs<units and must fail loud, not silently mis-stamp.
+        if (sigs.size() != units.size()) {
             throw new RuntimeException("IGA multiAdmin distribute: Policy:1 ceremony returned "
-                    + sigs.size() + " sig(s) for CR " + cr.getId() + " but the carrier framed "
-                    + units.size() + " unit(s) — cannot stamp all per-unit columns (fail-closed)");
+                    + sigs.size() + " sig(s) for CR " + cr.getId() + " but the live commit enumerated "
+                    + units.size() + " unit(s) — phase-1/phase-2 framing drift, cannot align per-unit "
+                    + "columns (fail-closed)");
         }
         for (int i = 0; i < units.size(); i++) {
             int rows = UnitColumnMapping.stamp(em, units.get(i), sigs.get(i));
@@ -4754,15 +5069,28 @@ public class TideAttestor implements IgaAttestor {
 
     private void stampClientScopeAssignmentSet(KeycloakSession session, RealmModel realm, String mode,
                                                EntityManager em, IgaChangeRequestEntity cr) {
+        // ASSIGN_SCOPE / REMOVE_SCOPE carry the owner under CLIENT_UUID.
+        String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+        if (clientUuid == null) return;
+        stampClientScopeAssignmentSetForClient(session, realm, mode, em, realm.getClientById(clientUuid));
+    }
+
+    /**
+     * Sign + stamp a client's {@code client_scope_assignment_set} (unit 11) onto its
+     * {@code ClientEntity.clientScopeAssignmentAttestation} column, resolving the scope
+     * set from the live model. Split from {@link #stampClientScopeAssignmentSet} so the
+     * CREATE_CLIENT commit (whose CR carries the owner under {@code ID}, not
+     * {@code CLIENT_UUID}) can stamp unit 11 from an already-resolved client, reusing the
+     * exact same sign+stamp path as ASSIGN_SCOPE/REMOVE_SCOPE. No-op on a null client.
+     */
+    private void stampClientScopeAssignmentSetForClient(KeycloakSession session, RealmModel realm,
+                                                        String mode, EntityManager em, ClientModel client) {
+        if (client == null) return;
         try {
-            String clientUuid = firstRowKey(cr, "CLIENT_UUID");
-            if (clientUuid == null) return;
-            ClientModel client = realm.getClientById(clientUuid);
-            if (client == null) return;
             byte[] env = RealmAttestationExporter.clientScopeAssignmentSet(client, realm.getId()).serialize();
             String sig = signProducerEnvelope(session, realm, mode, env);
             em.createQuery("UPDATE ClientEntity e SET e.clientScopeAssignmentAttestation = :sig WHERE e.id = :id")
-                    .setParameter("sig", sig).setParameter("id", clientUuid).executeUpdate();
+                    .setParameter("sig", sig).setParameter("id", client.getId()).executeUpdate();
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
 
@@ -4786,6 +5114,41 @@ public class TideAttestor implements IgaAttestor {
                 String sig = signProducerEnvelope(session, realm, mode, env);
                 em.createQuery("UPDATE ClientScopeEntity e SET e.clientScopeMapperSetAttestation = :sig WHERE e.id = :id")
                         .setParameter("sig", sig).setParameter("id", scopeId).executeUpdate();
+            }
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    /**
+     * ADD/UPDATE_PROTOCOL_MAPPER stamp: re-sign the owner's FULL mapper closure — the
+     * mapper-SET unit (12 client / 13 scope) AND every owned mapper's INDIVIDUAL
+     * {@code protocol_mapper} unit (3, column {@code ProtocolMapperEntity.attestation}) — not
+     * just the changed mapper. The replay leaves each owned mapper's individual column on the
+     * set fan-out's stub (an ADD fans that stub across EVERY sibling via
+     * {@code stampOwnerSetFanOut}), and login reads each mapper's unit-3 column, so re-stamping
+     * only the SET (the previous behaviour) left the individual columns on TIDE-DUMMY and
+     * fail-closed the login. Real per-unit VVK sign (firstAdmin capable) / stub otherwise, the
+     * SAME signProducerEnvelope + column-keyed stamp the other derived stampers use.
+     */
+    private void stampMapperClosure(KeycloakSession session, RealmModel realm, String mode,
+                                    EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+            String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
+            List<AttestationUnit> closure = null;
+            if (clientUuid != null) {
+                ClientModel client = realm.getClientById(clientUuid);
+                if (client != null) {
+                    closure = new RealmAttestationExporter().clientMapperUnits(client, realm.getId());
+                }
+            } else if (scopeId != null) {
+                ClientScopeModel scope = realm.getClientScopeById(scopeId);
+                if (scope != null) {
+                    closure = new RealmAttestationExporter().clientScopeMapperUnits(scope, realm.getId());
+                }
+            }
+            if (closure == null) return;
+            for (AttestationUnit u : closure) {
+                UnitColumnMapping.stamp(em, u, signProducerEnvelope(session, realm, mode, u.serialize()));
             }
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }

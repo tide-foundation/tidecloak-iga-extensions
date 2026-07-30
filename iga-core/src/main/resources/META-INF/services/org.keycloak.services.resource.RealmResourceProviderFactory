@@ -1,1 +1,2 @@
 org.tidecloak.iga.rest.TidePolicyResourceProvider
+org.tidecloak.iga.rest.ServerIdentityResourceProviderFactory

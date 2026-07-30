@@ -124,6 +124,29 @@ public class IgaServerCertDraftService {
     }
 
     /**
+     * Revoke EVERY draft row for a (realm, instance) pair. Mirrors the source branch's
+     * {@code server-cert/revoke} (revoke ALL rows for an instanceId) so a re-issued
+     * instance's prior certificates are all marked revoked (and surface on the CRL).
+     *
+     * @return the number of rows revoked.
+     */
+    public int revokeByInstance(String realmId, String instanceId) {
+        List<IgaServerCertDraftEntity> rows = findByRealmAndInstance(realmId, instanceId);
+        long now = System.currentTimeMillis();
+        int count = 0;
+        for (IgaServerCertDraftEntity entity : rows) {
+            if (!entity.isRevoked()) {
+                entity.setRevoked(true);
+                entity.setRevokedAt(now);
+                entity.setUpdatedAt(now);
+                count++;
+            }
+        }
+        em.flush();
+        return count;
+    }
+
+    /**
      * Find a draft by id. Returns null if not found.
      */
     public IgaServerCertDraftEntity findById(String id) {

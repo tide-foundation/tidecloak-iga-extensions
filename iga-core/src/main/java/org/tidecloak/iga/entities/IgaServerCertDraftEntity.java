@@ -78,6 +78,24 @@ public class IgaServerCertDraftEntity {
     @Column(name = "SIGNED_POLICY", columnDefinition = "TEXT")
     private String signedPolicy;
 
+    /**
+     * Base64 {@code ModelRequest.Encode()} of the enclave-approved {@code ServerCert:1}
+     * VVK-CA sub-model (the source branch's {@code <csId>-ca} sibling carrier). Built at
+     * sign time, re-signed at commit. Null for the firstAdmin path (CA signed locally
+     * with the VRK fallback).
+     */
+    @Column(name = "CA_REQUEST_MODEL", columnDefinition = "TEXT")
+    private String caRequestModel;
+
+    /**
+     * Base64 {@code ModelRequest.Encode()} of the enclave-approved {@code ServerCert:1}
+     * public-key sub-model (the source branch's {@code <csId>-pk} sibling carrier). Built
+     * at sign time, re-signed at commit to produce the signed public key stored in
+     * {@code signedPolicy}.
+     */
+    @Column(name = "PK_REQUEST_MODEL", columnDefinition = "TEXT")
+    private String pkRequestModel;
+
     @Column(name = "REVOKED", nullable = false)
     private boolean revoked = false;
 
@@ -125,6 +143,12 @@ public class IgaServerCertDraftEntity {
 
     public String getSignedPolicy() { return signedPolicy; }
     public void setSignedPolicy(String signedPolicy) { this.signedPolicy = signedPolicy; }
+
+    public String getCaRequestModel() { return caRequestModel; }
+    public void setCaRequestModel(String caRequestModel) { this.caRequestModel = caRequestModel; }
+
+    public String getPkRequestModel() { return pkRequestModel; }
+    public void setPkRequestModel(String pkRequestModel) { this.pkRequestModel = pkRequestModel; }
 
     public boolean isRevoked() { return revoked; }
     public void setRevoked(boolean revoked) { this.revoked = revoked; }
