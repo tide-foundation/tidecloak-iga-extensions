@@ -289,6 +289,8 @@ public class TideAttestor implements IgaAttestor {
 
     /** The action type whose firstAdmin sign is upgraded to the real VRK ceremony. */
     private static final String ACTION_GRANT_ROLES = "GRANT_ROLES";
+    /** The role-REMOVAL twin of {@link #ACTION_GRANT_ROLES}; signs the same shrunken user_role_mapping_set unit. */
+    private static final String ACTION_REVOKE_ROLES = "REVOKE_ROLES";
 
     // -------------------------------------------------------------------------
     // Threshold-policy re-sign CR (steady-state multiAdmin admin-policy regen)
@@ -3529,8 +3531,8 @@ public class TideAttestor implements IgaAttestor {
                     new byte[][]{ unitCbor }, settings, firstAdminAuthorizer, firstAdminAuthorizerCert,
                     realm.getName());
 
-            log.infof("IGA firstAdmin GRANT_ROLES signed via Midgard VVK unit ceremony (realm %s).",
-                    realm.getName());
+            log.infof("IGA firstAdmin %s signed via Midgard VVK unit ceremony (realm %s).",
+                    cr.getActionType(), realm.getName());
             // Preserve the firstAdmin stamp shape: prefix + the real ORK signature
             // (the VVK signature over unit[0]'s CBOR), Base64 of the bare sig bytes.
             return FIRSTADMIN_SIG_PREFIX + java.util.Base64.getEncoder().encodeToString(sigs[0]);
@@ -3701,12 +3703,15 @@ public class TideAttestor implements IgaAttestor {
     private UserRoleMappingSetUnit buildUserRoleMappingSetUnit(KeycloakSession session, RealmModel realm,
                                                    IgaChangeRequestEntity cr) {
         List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
+        // ADD on GRANT_ROLES, SUBTRACT on REVOKE_ROLES — the same shrunken/grown
+        // user_role_mapping_set unit, mirroring the JOIN/LEAVE + GROUP_GRANT/REVOKE builders.
+        boolean addAction = ACTION_GRANT_ROLES.equals(cr.getActionType());
 
-        // Resolve the affected user: prefer the CR's entityId (the grant subject —
-        // IgaUserAdapter.grantRole sets entityId = userId), fall back to the first
-        // row's USER_ID. Collect every pending grant role-id for that user.
+        // Resolve the affected user: prefer the CR's entityId (the grant/revoke subject —
+        // IgaUserAdapter.grantRole/revokeRole sets entityId = userId), fall back to the first
+        // row's USER_ID. Collect every pending role-id delta for that user.
         String userId = cr.getEntityId();
-        LinkedHashSet<String> grantedRoleIds = new LinkedHashSet<>();
+        LinkedHashSet<String> deltaRoleIds = new LinkedHashSet<>();
         for (Map<String, Object> row : rows) {
             String rowUser = str(row, ROW_USER_ID);
             if (userId == null) {
@@ -3715,12 +3720,12 @@ public class TideAttestor implements IgaAttestor {
             if (rowUser != null && rowUser.equals(userId)) {
                 String roleId = str(row, ROW_ROLE_ID);
                 if (roleId != null) {
-                    grantedRoleIds.add(roleId);
+                    deltaRoleIds.add(roleId);
                 }
             }
         }
         if (userId == null) {
-            throw new RuntimeException("IGA firstAdmin sign: GRANT_ROLES CR " + cr.getId()
+            throw new RuntimeException("IGA firstAdmin sign: " + cr.getActionType() + " CR " + cr.getId()
                     + " carries no resolvable USER_ID for the user_role_mapping_set unit");
         }
 
@@ -3730,7 +3735,7 @@ public class TideAttestor implements IgaAttestor {
         // realm_default_roles_set (unit 18) authority + universal-inherit covers them, so the
         // per-user default-role edge is NOT signed. The two queries MUST produce byte-identical
         // sets or the VVK verify breaks: applied to BOTH the PRE-set query AND the pending
-        // grant union below.
+        // grant/revoke delta below.
         String defaultRoleId = (realm.getDefaultRole() == null) ? null : realm.getDefaultRole().getId();
 
         // PRE-change RAW stored role-id set for the user, in producer JPA order
@@ -3749,23 +3754,21 @@ public class TideAttestor implements IgaAttestor {
         }
         @SuppressWarnings("unchecked")
         List<String> roleIds = new ArrayList<>(preQuery.getResultList());
-        // Apply the pending grant delta: add each granted id not already present, EXCLUDING the
-        // default-role id (so the union never re-introduces what the PRE-set query excluded —
-        // keeping byte-identity with the producer helper).
-        for (String roleId : grantedRoleIds) {
-            if (defaultRoleId != null && defaultRoleId.equals(roleId)) {
-                continue;
-            }
-            if (!roleIds.contains(roleId)) {
-                roleIds.add(roleId);
-            }
+        // EXCLUDE the realm default-role id from the delta so the ADD path never re-introduces
+        // what the PRE-set query excluded (byte-identity with the producer helper). The REMOVE
+        // path is unaffected — the pre-set never contains the default-role id, so subtracting it
+        // is a no-op.
+        if (defaultRoleId != null) {
+            deltaRoleIds.remove(defaultRoleId);
         }
-        // Deterministic role-id ordering. The VVK sig is verified over the LITERAL
-        // envelope bytes (no re-canonicalization), so role_ids ORDER is load-bearing.
-        // Sort the assembled set ascending so it byte-matches the producer's emitted
-        // unit (RealmAttestationExporter#userRoleMappingSet, ORDER BY urm.roleId):
-        // signer = sorted(pre-set ∪ granted) == producer = sorted(committed set).
-        roleIds.sort(Comparator.naturalOrder());
+        // Apply the delta symmetrically (ADD on grant / SUBTRACT on revoke) over BOTH the
+        // phase-1 PRE-change pre-set and the commit POST-change pre-set — idempotent, since an
+        // already-present add or already-absent remove is a no-op, so framing == distribution.
+        // applyMemberDelta sorts ascending. The VVK sig is verified over the LITERAL envelope
+        // bytes (no re-canonicalization), so role_ids ORDER is load-bearing: the sorted assembled
+        // set byte-matches the producer's emitted unit (RealmAttestationExporter#userRoleMappingSet,
+        // ORDER BY urm.roleId): signer = sorted(pre-set ± delta) == producer = sorted(committed set).
+        roleIds = applyMemberDelta(roleIds, deltaRoleIds, addAction);
 
         return new UserRoleMappingSetUnit(realm.getId(), userId, roleIds);
     }
@@ -3790,7 +3793,8 @@ public class TideAttestor implements IgaAttestor {
             return false;
         }
         switch (actionType) {
-            case ACTION_GRANT_ROLES:            // user_role_mapping_set (template)
+            case ACTION_GRANT_ROLES:            // user_role_mapping_set (add)
+            case ACTION_REVOKE_ROLES:           // user_role_mapping_set (remove)
             case ACTION_JOIN_GROUPS:            // user_group_membership_set (add)
             case ACTION_LEAVE_GROUPS:           // user_group_membership_set (remove)
             case ACTION_GROUP_GRANT_ROLES:      // group_role_mapping_set (add)
@@ -3825,6 +3829,7 @@ public class TideAttestor implements IgaAttestor {
         String actionType = cr.getActionType();
         switch (actionType) {
             case ACTION_GRANT_ROLES:
+            case ACTION_REVOKE_ROLES:
                 return buildUserRoleMappingSetUnit(session, realm, cr);
             case ACTION_JOIN_GROUPS:
             case ACTION_LEAVE_GROUPS:
