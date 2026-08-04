@@ -1,6 +1,7 @@
 package org.tidecloak.iga.services;
 
-import org.keycloak.models.RealmModel;
+import jakarta.persistence.EntityManager;
+import org.tidecloak.iga.entities.IgaVapidKeyEntity;
 
 import java.security.KeyFactory;
 import java.security.KeyPair;
@@ -22,24 +23,21 @@ import java.util.Base64;
  * signed with these keys is ever trusted by the approval path - an approval is
  * still a session-key signature produced in the enclave, exactly as before.</p>
  *
- * <p><b>Why realm attributes.</b> Storing them as realm attributes makes them
- * readable by anyone who can view the realm, which is a deliberate trade
- * against introducing a component SPI for a sender credential of this value.
- * If that trade stops being acceptable - for instance if VAPID keys later
- * authenticate something that matters - the fix is a {@code ComponentModel}
- * with a secret config field, the way {@code tide-vendor-key} stores its
- * material, and only this class needs to change.</p>
+ * <p><b>Why they are not realm attributes.</b> That was the first design and it
+ * does not work: realm attributes are governed state, so under IGA the write is
+ * captured as a {@code SET_REALM_ATTRIBUTE} change request rather than applied.
+ * The generated pair is handed out and then forgotten, the realm accumulates a
+ * change request nobody asked for, and the next call fails against that pending
+ * CR. Operational data that no approval depends on must not enter the approval
+ * pipeline - hence {@link IgaVapidKeyEntity}, its own table, where writes simply
+ * apply. It also keeps the private key out of the realm representation, which
+ * anyone who can view the realm can read.</p>
  *
  * <p>Keys are generated on first use and then reused, because the public half
  * is baked into every subscription a browser has already created: rotating it
  * silently invalidates every existing subscription.</p>
  */
 public final class IgaVapidKeys {
-
-    /** Base64url (unpadded) of the uncompressed P-256 point, 65 bytes. */
-    public static final String PUBLIC_KEY_ATTR = "iga.push.vapid.publicKey";
-    /** Base64 of the PKCS#8 encoding. */
-    private static final String PRIVATE_KEY_ATTR = "iga.push.vapid.privateKey";
 
     private final String publicKey;
     private final PrivateKey privateKey;
@@ -61,31 +59,35 @@ public final class IgaVapidKeys {
     /**
      * The realm's existing key pair, or {@code null} if it has none yet.
      *
-     * <p>Read-only, so it is safe on a request that must not write - the
-     * subscribe endpoint uses {@link #getOrCreate} instead.</p>
+     * <p>Read-only, so it is safe on the send path - a realm nobody has ever
+     * subscribed in has nobody to notify, and generating a key there would be
+     * work done for no one.</p>
      */
-    public static IgaVapidKeys find(RealmModel realm) {
-        String pub = realm.getAttribute(PUBLIC_KEY_ATTR);
-        String priv = realm.getAttribute(PRIVATE_KEY_ATTR);
-        if (pub == null || pub.isBlank() || priv == null || priv.isBlank()) {
+    public static IgaVapidKeys find(EntityManager em, String realmId) {
+        IgaVapidKeyEntity row = em.find(IgaVapidKeyEntity.class, realmId);
+        if (row == null) {
             return null;
         }
-        return new IgaVapidKeys(pub, decodePrivate(priv));
+        return new IgaVapidKeys(row.getPublicKey(), decodePrivate(row.getPrivateKey()));
     }
 
     /** The realm's key pair, generating and storing one the first time. */
-    public static IgaVapidKeys getOrCreate(RealmModel realm) {
-        IgaVapidKeys existing = find(realm);
+    public static IgaVapidKeys getOrCreate(EntityManager em, String realmId) {
+        IgaVapidKeys existing = find(em, realmId);
         if (existing != null) {
             return existing;
         }
 
         KeyPair pair = generate();
         String pub = encodePublic((ECPublicKey) pair.getPublic());
-        String priv = Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded());
 
-        realm.setAttribute(PUBLIC_KEY_ATTR, pub);
-        realm.setAttribute(PRIVATE_KEY_ATTR, priv);
+        IgaVapidKeyEntity row = new IgaVapidKeyEntity();
+        row.setRealmId(realmId);
+        row.setPublicKey(pub);
+        row.setPrivateKey(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
+        row.setCreatedAt(System.currentTimeMillis());
+        em.persist(row);
+        em.flush();
 
         return new IgaVapidKeys(pub, pair.getPrivate());
     }

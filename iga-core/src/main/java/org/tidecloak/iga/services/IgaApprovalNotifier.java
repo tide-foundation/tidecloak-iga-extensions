@@ -1,5 +1,6 @@
 package org.tidecloak.iga.services;
 
+import jakarta.persistence.EntityManager;
 import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.ClientModel;
@@ -98,7 +99,9 @@ public final class IgaApprovalNotifier {
                 // and throws "Session not bound to a realm" without it.
                 session.getContext().setRealm(realm);
 
-                IgaVapidKeys keys = IgaVapidKeys.find(realm);
+                EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+                IgaVapidKeys keys = IgaVapidKeys.find(em, realmId);
                 if (keys == null) {
                     // No device has ever subscribed in this realm, so there is
                     // nobody to tell and no reason to generate keys here.
@@ -110,8 +113,7 @@ public final class IgaApprovalNotifier {
                     return;
                 }
 
-                IgaPushSubscriptionService subscriptions = new IgaPushSubscriptionService(
-                        session.getProvider(JpaConnectionProvider.class).getEntityManager());
+                IgaPushSubscriptionService subscriptions = new IgaPushSubscriptionService(em);
 
                 List<IgaPushSubscriptionEntity> devices = subscriptions.findForUsers(realmId, approvers);
                 if (devices.isEmpty()) {

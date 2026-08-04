@@ -58,4 +58,30 @@
         </createIndex>
     </changeSet>
 
+    <!--
+      VAPID key pair storage.
+
+      Not a realm attribute: realm attributes are governed state, so under IGA a
+      write is captured as a SET_REALM_ATTRIBUTE change request rather than
+      applied - the key pair never lands and the realm collects a change request
+      nobody asked for. These keys authenticate the server to a push service and
+      no approval depends on them, so they belong outside the approval pipeline.
+    -->
+    <changeSet id="iga-2.12.0-4" author="tidecloak-iga">
+        <createTable tableName="IGA_PUSH_VAPID">
+            <column name="REALM_ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="PUBLIC_KEY" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="PRIVATE_KEY" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+
 </databaseChangeLog>

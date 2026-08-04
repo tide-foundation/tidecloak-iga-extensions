@@ -75,9 +75,22 @@ authenticated session and can only add or remove that user's own devices. Demand
 Set the realm attribute `iga.push.disabled=true`. `iga.push.subject` overrides the
 RFC 8292 `sub` claim (default `mailto:admin@tide.org`).
 
-VAPID keys are generated lazily on first subscribe and stored as realm attributes —
-readable by anyone who can view the realm. That is a deliberate trade: VAPID keys
-authenticate the *sender*, protect no governance decision, and holding one only lets
-you push to endpoints you already know. If that stops being acceptable, move them to
-a `ComponentModel` with a secret config field the way `tide-vendor-key` does; only
-`IgaVapidKeys` changes.
+## VAPID keys live in a table, not a realm attribute
+
+Two strings keyed by realm look exactly like a `realm.setAttribute` job. That does not
+work here, and fails in a way worth remembering: **realm attributes are governed
+state**. Under IGA the write is captured as a `SET_REALM_ATTRIBUTE` change request
+instead of being applied, so
+
+- the generated pair is handed to the caller and then forgotten,
+- the realm accumulates a change request nobody asked for, and
+- the next call fails outright against that now-pending CR.
+
+The rule this illustrates: operational data that no approval depends on must not enter
+the approval pipeline. VAPID keys authenticate the *sender*, protect no governance
+decision, and holding one only lets you push to endpoints you already know — so they
+belong in `IGA_PUSH_VAPID`, where writes simply apply. That also keeps the private key
+out of the realm representation, which anyone who can view the realm can read.
+
+Keys are generated on first subscribe and never rotated in place: the public half is
+baked into every subscription a browser has already made.

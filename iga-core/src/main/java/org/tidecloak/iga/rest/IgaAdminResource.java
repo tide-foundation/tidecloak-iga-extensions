@@ -3161,7 +3161,7 @@ public class IgaAdminResource {
             throw new ForbiddenException("Not an authenticated admin");
         }
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("publicKey", IgaVapidKeys.getOrCreate(realm).getPublicKey());
+        out.put("publicKey", IgaVapidKeys.getOrCreate(getEm(), realm.getId()).getPublicKey());
         out.put("enabled", !Boolean.parseBoolean(realm.getAttribute(IgaApprovalNotifier.DISABLED_ATTR)));
         return Response.ok(out).build();
     }
@@ -3200,7 +3200,7 @@ public class IgaAdminResource {
 
         // Ensure the realm has keys, so a device can never register against a
         // realm that has no way to send to it.
-        IgaVapidKeys.getOrCreate(realm);
+        IgaVapidKeys.getOrCreate(getEm(), realm.getId());
         new IgaPushSubscriptionService(getEm()).upsert(realm.getId(), user.getId(), endpoint);
 
         log.debugf("Registered a push subscription for user %s in realm %s", user.getId(), realm.getName());
