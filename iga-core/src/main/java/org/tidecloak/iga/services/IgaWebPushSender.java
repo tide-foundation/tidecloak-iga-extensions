@@ -3,6 +3,7 @@ package org.tidecloak.iga.services;
 import org.jboss.logging.Logger;
 import org.tidecloak.iga.entities.IgaPushSubscriptionEntity;
 
+import java.io.IOException;
 import java.math.BigInteger;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -97,9 +98,12 @@ public final class IgaWebPushSender {
             HttpRequest request = HttpRequest.newBuilder(uri)
                     .timeout(TIMEOUT)
                     .header("TTL", String.valueOf(TTL_SECONDS))
-                    // No body, so no Content-Encoding: an empty push is a valid
+                    // No Content-Length here, even though RFC 8030 wants one on a
+                    // bodyless push: HttpClient treats it as a restricted header
+                    // and throws IllegalArgumentException from .header() rather
+                    // than at send time. BodyPublishers.noBody() sets it to 0
+                    // itself. Nor any Content-Encoding: an empty push is a valid
                     // RFC 8030 message and needs no encryption headers.
-                    .header("Content-Length", "0")
                     .header("Urgency", "normal")
                     .header("Authorization", "vapid t=" + token + ", k=" + keys.getPublicKey())
                     .POST(HttpRequest.BodyPublishers.noBody())
@@ -120,8 +124,19 @@ public final class IgaWebPushSender {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return Result.FAILED;
-        } catch (Exception e) {
+        } catch (IOException e) {
+            // The push service was unreachable or hung up. Environmental and
+            // transient, so debug: it will be retried on the next change request.
             log.debugf(e, "Web push to %s failed", hostOf(endpoint));
+            return Result.FAILED;
+        } catch (Exception e) {
+            // Anything else reaching here is a defect in how the request was
+            // built, not a network condition - it will fail identically forever.
+            // WARN because the alternative is what happened with the restricted
+            // Content-Length header: every notification silently dropped, with
+            // the only evidence below the default log level.
+            log.warnf(e, "Web push to %s could not be sent - this will not recover on its own",
+                    hostOf(endpoint));
             return Result.FAILED;
         }
     }
