@@ -4023,12 +4023,44 @@ public class TideAttestor implements IgaAttestor {
                  "UPDATE_CLIENT_SCOPE_PROPERTY" -> {
                 String scopeId = firstRowKeyOr(cr, "SCOPE_ID", "ID");
                 ClientScopeModel s = scopeId == null ? null : realm.getClientScopeById(scopeId);
-                if (s != null) units.add(RealmAttestationExporter.clientScopeConfig(s, realmId));
+                if (s != null) {
+                    if ("CREATE_CLIENT_SCOPE".equals(action)) {
+                        // COMPLETE BY CONSTRUCTION (mirrors the CREATE_CLIENT branch above): a scope
+                        // created WITH inline protocol mappers FOLDS them into THIS CR — no separate
+                        // ADD_PROTOCOL_MAPPER CR ever fires — so this commit is their ONLY signer. The
+                        // dispatcher stamps those mapper rows with the DUMMY set stub at replay
+                        // (signNestedChildSet) and there is NO multiAdmin convergence backstop, so
+                        // framing only client_scope_config left client_scope_mapper_set + each
+                        // protocol_mapper as TIDE-DUMMY-v1 and the first login whose active scopes
+                        // include this one fail-closed in replayOrFailClosed. Frame the whole family.
+                        units.addAll(clientScopeOwnedUnits(s, realmId, /* includeOwnedMappers */ true));
+                    } else {
+                        // SET_/UPDATE_: only the client_scope_config node changed; the derived
+                        // mapper set/units are already real (signed at create / their own CRs).
+                        units.add(RealmAttestationExporter.clientScopeConfig(s, realmId));
+                    }
+                }
             }
             case "CREATE_ROLE", "SET_ROLE_ATTRIBUTE" -> {
                 String roleId = firstRowKeyOr(cr, "ROLE_ID", "ID");
                 RoleModel r = roleId == null ? null : realm.getRoleById(roleId);
-                if (r != null) units.add(RealmAttestationExporter.roleDefinition(r, realmId));
+                if (r != null) {
+                    if ("CREATE_ROLE".equals(action)) {
+                        // COMPLETE BY CONSTRUCTION (mirrors the CREATE_CLIENT branch above): a role
+                        // created WITH inline composites FOLDS them into THIS CR — no separate
+                        // ADD_COMPOSITE CR ever fires — so this commit is their ONLY signer. The
+                        // dispatcher stamps the composite_role rows with the DUMMY set stub at replay
+                        // (signNestedChildSet) and there is NO multiAdmin convergence backstop, so
+                        // framing only role_definition left role_composite_children_set as
+                        // TIDE-DUMMY-v1 and every login whose closure expands this role (e.g. once it
+                        // is added to default-roles-<realm>) fail-closed in replayOrFailClosed.
+                        units.addAll(roleOwnedUnits(r, realmId));
+                    } else {
+                        // SET_ROLE_ATTRIBUTE: only the role_definition node changed; composites are
+                        // governed by their own ADD/REMOVE_COMPOSITE CRs (framed as the edge-set unit).
+                        units.add(RealmAttestationExporter.roleDefinition(r, realmId));
+                    }
+                }
             }
             case "CREATE_GROUP", "SET_GROUP_ATTRIBUTE" -> {
                 String groupId = firstRowKeyOr(cr, "GROUP_ID", "ID");
@@ -4234,6 +4266,61 @@ public class TideAttestor implements IgaAttestor {
                     units.add(RealmAttestationExporter.protocolMapperUnit(
                             pm, ParentType.client, client.getId(), realmId));
                 }
+            }
+        }
+        return units;
+    }
+
+    /**
+     * A role's OWN producer units — the CREATE_ROLE parallel of {@link #clientOwnedUnits}.
+     * {@code role_definition} (unit 4) ALWAYS + {@code role_composite_children_set} (unit 10)
+     * LEAF-GATED: emitted only when the role is a real composite with ≥1 child, so we never frame
+     * an orphan set unit with no {@code composite_role} row to stamp (byte-identical to the login
+     * gate {@code RealmAttestationExporter#emitRoleCompositeChildrenSet}). A role created WITH
+     * inline composites folds them into ONE CREATE_ROLE CR, so this commit is their ONLY signer;
+     * framing this family is what lets the uniform login read replay the composite-children set.
+     */
+    private static List<AttestationUnit> roleOwnedUnits(RoleModel role, String realmId) {
+        List<AttestationUnit> units = new ArrayList<>();
+        units.add(RealmAttestationExporter.roleDefinition(role, realmId));
+        RoleCompositeChildrenSetUnit children =
+                RealmAttestationExporter.roleCompositeChildrenSet(role, realmId);
+        if (!children.childRoleIds().isEmpty()) {
+            units.add(children);
+        }
+        return units;
+    }
+
+    /**
+     * A client scope's OWN producer units — the CREATE_CLIENT_SCOPE parallel of
+     * {@link #clientOwnedUnits}. {@code client_scope_config} (unit 2) ALWAYS + (when
+     * {@code includeOwnedMappers}) each JWT-relevant {@code protocol_mapper} (unit 3) and the
+     * {@code client_scope_mapper_set} (unit 13). The mapper-set is LEAF-GATED to a non-empty
+     * mapper list, byte-identical to the login gate {@code RealmAttestationExporter
+     * #emitAllActiveMappers} (which emits it only when the scope has ≥1 JWT-relevant mapper). A
+     * scope created WITH inline mappers folds them into ONE CREATE_CLIENT_SCOPE CR, so this commit
+     * is their ONLY signer; framing this family is what lets the login read replay them.
+     */
+    private static List<AttestationUnit> clientScopeOwnedUnits(ClientScopeModel scope, String realmId,
+                                                               boolean includeOwnedMappers) {
+        List<AttestationUnit> units = new ArrayList<>();
+        units.add(RealmAttestationExporter.clientScopeConfig(scope, realmId));
+        if (includeOwnedMappers) {
+            // jwtRelevantMapperIds applies the login's JWT_BODY_IRRELEVANT_FACTORIES filter AND
+            // sorts ascending, so the per-mapper unit order is deterministic across the phase-1
+            // scratch framing and the commit-time distribution (mapper ids are pinned in the CR's
+            // REP_JSON, so both replays materialize identical mapper rows).
+            List<String> mapperIds = RealmAttestationExporter.jwtRelevantMapperIds(
+                    scope.getProtocolMappersStream());
+            for (String mapperId : mapperIds) {
+                org.keycloak.models.ProtocolMapperModel pm = scope.getProtocolMapperById(mapperId);
+                if (pm != null) {
+                    units.add(RealmAttestationExporter.protocolMapperUnit(
+                            pm, ParentType.client_scope, scope.getId(), realmId));
+                }
+            }
+            if (!mapperIds.isEmpty()) {
+                units.add(RealmAttestationExporter.clientScopeMapperSet(scope, realmId));
             }
         }
         return units;
@@ -4496,10 +4583,13 @@ public class TideAttestor implements IgaAttestor {
                         // UPDATE rows), so safe to call unconditionally for every client CR.
                         stampServiceAccountUserIfPresent(session, realm, mode, em, cr);
                 }
-                case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE",
-                     "UPDATE_CLIENT_SCOPE_PROPERTY" ->
+                case "CREATE_CLIENT_SCOPE" ->
+                        stampCreateClientScopeUnitFamily(session, realm, mode, em, cr);
+                case "SET_CLIENT_SCOPE_ATTRIBUTE", "UPDATE_CLIENT_SCOPE_PROPERTY" ->
                         stampClientScopeConfig(session, realm, mode, em, cr);
-                case "CREATE_ROLE", "SET_ROLE_ATTRIBUTE" ->
+                case "CREATE_ROLE" ->
+                        stampCreateRoleUnitFamily(session, realm, mode, em, cr);
+                case "SET_ROLE_ATTRIBUTE" ->
                         stampRoleDefinition(session, realm, mode, em, cr);
                 case "CREATE_GROUP", "SET_GROUP_ATTRIBUTE" ->
                         stampGroupDefinition(session, realm, mode, em, cr);
@@ -4790,6 +4880,64 @@ public class TideAttestor implements IgaAttestor {
             ClientModel client = resolveClientForStamp(realm, cr);
             if (client == null) return;
             List<AttestationUnit> units = clientOwnedUnits(session, client, realm.getId(),
+                    /* includeOwnedMappers */ true);
+            byte[][] envelopes = new byte[units.size()][];
+            for (int i = 0; i < units.size(); i++) {
+                envelopes[i] = units.get(i).serialize();
+            }
+            String[] sigs = signProducerEnvelopes(session, realm, mode, envelopes);
+            for (int i = 0; i < units.size(); i++) {
+                UnitColumnMapping.stamp(em, units.get(i), sigs[i]);
+            }
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    /**
+     * firstAdmin per-CR stamp for CREATE_ROLE — the role-family parallel of
+     * {@link #stampCreateClientUnitFamily}. CREATE_ROLE folds inline composites into ONE CR, so
+     * this commit is the ONLY per-CR signer of {@code role_composite_children_set}; stamping only
+     * {@code role_definition} (the old {@code stampRoleDefinition}) left the composite-children
+     * column a DUMMY stub that relied on the {@code convergeAfterCommit} backstop. Sign + stamp
+     * the whole {@link #roleOwnedUnits} family (leaf-gated, so a non-composite role stamps only its
+     * node). Defense-in-depth: the multiAdmin fix is the {@code enumerateLiveCrUnits} framing.
+     */
+    private void stampCreateRoleUnitFamily(KeycloakSession session, RealmModel realm, String mode,
+                                           EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String roleId = firstRowKeyOr(cr, "ROLE_ID", "ID");
+            if (roleId == null) return;
+            RoleModel role = realm.getRoleById(roleId);
+            if (role == null) return;
+            List<AttestationUnit> units = roleOwnedUnits(role, realm.getId());
+            byte[][] envelopes = new byte[units.size()][];
+            for (int i = 0; i < units.size(); i++) {
+                envelopes[i] = units.get(i).serialize();
+            }
+            String[] sigs = signProducerEnvelopes(session, realm, mode, envelopes);
+            for (int i = 0; i < units.size(); i++) {
+                UnitColumnMapping.stamp(em, units.get(i), sigs[i]);
+            }
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    /**
+     * firstAdmin per-CR stamp for CREATE_CLIENT_SCOPE — the scope-family parallel of
+     * {@link #stampCreateClientUnitFamily}. CREATE_CLIENT_SCOPE folds inline protocol mappers into
+     * ONE CR, so this commit is the ONLY per-CR signer of the scope's {@code client_scope_mapper_set}
+     * + each {@code protocol_mapper}; stamping only {@code client_scope_config} (the old
+     * {@code stampClientScopeConfig}) left those mapper columns a DUMMY stub that relied on the
+     * {@code convergeAfterCommit} backstop. Sign + stamp the whole {@link #clientScopeOwnedUnits}
+     * family (mapper-set leaf-gated). Defense-in-depth: the multiAdmin fix is the
+     * {@code enumerateLiveCrUnits} framing.
+     */
+    private void stampCreateClientScopeUnitFamily(KeycloakSession session, RealmModel realm, String mode,
+                                                  EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String scopeId = firstRowKeyOr(cr, "SCOPE_ID", "ID");
+            if (scopeId == null) return;
+            ClientScopeModel scope = realm.getClientScopeById(scopeId);
+            if (scope == null) return;
+            List<AttestationUnit> units = clientScopeOwnedUnits(scope, realm.getId(),
                     /* includeOwnedMappers */ true);
             byte[][] envelopes = new byte[units.size()][];
             for (int i = 0; i < units.size(); i++) {
