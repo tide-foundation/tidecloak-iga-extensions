@@ -18,5 +18,7 @@ TideCloak IGA (Identity Governance & Administration) core module. Java / Maven.
   `AuthRequest.User` not the KC `userId`) that are expensive to re-derive.
 
 ## Other docs
+- `docs/approval-push-notifications.md` — Web Push for approvals: why the trigger lives in
+  TideCloak rather than the ORKs, and why the messages deliberately carry no payload.
 - `docs/IGA.md`, `docs/EXTENDING-IGA.md` — general IGA architecture & extension guide.
 - `docs/tideless-iga-walkthrough.md` — Tideless-mode IGA walkthrough.

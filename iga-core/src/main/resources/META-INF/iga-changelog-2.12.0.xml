@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      Web Push subscriptions for approval notifications.
+
+      One row per browser per admin per realm. The realm is part of the key
+      because the approver role is per realm: losing it in one realm must stop
+      that realm's notifications without touching the others.
+
+      ENDPOINT is a push-service URL and can be several hundred characters, too
+      long to index on every supported database, so uniqueness and lookups use
+      ENDPOINT_HASH (SHA-256, hex) instead.
+    -->
+
+    <changeSet id="iga-2.12.0-1" author="tidecloak-iga">
+        <createTable tableName="IGA_PUSH_SUBSCRIPTION">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="REALM_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="USER_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ENDPOINT" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ENDPOINT_HASH" type="VARCHAR(64)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="LAST_FAILURE_AT" type="BIGINT"/>
+        </createTable>
+    </changeSet>
+
+    <!-- Re-subscribing the same browser must replace, not duplicate. -->
+    <changeSet id="iga-2.12.0-2" author="tidecloak-iga">
+        <addUniqueConstraint tableName="IGA_PUSH_SUBSCRIPTION"
+                             columnNames="REALM_ID, USER_ID, ENDPOINT_HASH"
+                             constraintName="UQ_IGA_PUSH_SUB_REALM_USER_EP"/>
+    </changeSet>
+
+    <!-- The send path fans out by realm+user; the delete-on-410 path by hash. -->
+    <changeSet id="iga-2.12.0-3" author="tidecloak-iga">
+        <createIndex tableName="IGA_PUSH_SUBSCRIPTION" indexName="IDX_IGA_PUSH_SUB_REALM_USER">
+            <column name="REALM_ID"/>
+            <column name="USER_ID"/>
+        </createIndex>
+        <createIndex tableName="IGA_PUSH_SUBSCRIPTION" indexName="IDX_IGA_PUSH_SUB_HASH">
+            <column name="ENDPOINT_HASH"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>
