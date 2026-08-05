@@ -17,6 +17,7 @@ import org.tidecloak.iga.entities.IgaAuthorizationEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaCommentEntity;
 import org.tidecloak.iga.replay.IgaReplayExtension;
+import org.tidecloak.iga.services.IgaApprovalNotifier;
 import org.tidecloak.iga.services.IgaUnsignedEntityService;
 
 import jakarta.persistence.EntityManager;
@@ -194,6 +195,13 @@ public class IgaChangeRequestService {
         entity.setDependsOnList(dependsOn);
         em.persist(entity);
         em.flush();
+
+        // Tell the realm's approvers, once this transaction actually commits.
+        // Every action type funnels through here, so hooking the create is what
+        // makes the notification complete rather than per-action. Best effort by
+        // construction: a failed send never affects the change request.
+        IgaApprovalNotifier.notifyAfterCommit(session, realm);
+
         return entity;
     }
 

@@ -34,6 +34,7 @@ import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
+import org.tidecloak.iga.providers.IgaPushSubscriptionService;
 import org.tidecloak.iga.providers.IgaConflictException;
 import org.tidecloak.iga.providers.IgaFirstAdminSignPreviewService;
 import org.tidecloak.iga.providers.IgaForsetiContractService;
@@ -45,6 +46,8 @@ import org.tidecloak.iga.replay.EntityVanishedException;
 import org.tidecloak.iga.replay.IgaMapperConflictException;
 import org.tidecloak.iga.replay.IgaReplayDispatcher;
 import org.tidecloak.iga.replay.IgaReplayExtension;
+import org.tidecloak.iga.services.IgaApprovalNotifier;
+import org.tidecloak.iga.services.IgaVapidKeys;
 import org.tidecloak.iga.attestors.IgaAttestor;
 import org.tidecloak.iga.attestors.IgaAttestors;
 import org.tidecloak.iga.attestors.IgaScopeResolver;
@@ -3126,5 +3129,95 @@ public class IgaAdminResource {
             }
         }
         return new BlockState(false, null);
+    }
+
+    // -------------------------------------------------------------------------
+    // Web Push registration for approval notifications
+    //
+    // These are scoped to the CALLING admin and nothing else: every operation
+    // reads its user id from the authenticated session and can only add or
+    // remove that user's own devices. That is why they do not call
+    // requireManageRealm() the way the change-request endpoints do - the Tide
+    // approver role (tide-realm-admin) does not imply manage-realm, and those
+    // admins are exactly the people who need to be notified. Demanding
+    // manage-realm here would lock out the majority of approvers from being
+    // told about the work they are the ones expected to do.
+    // -------------------------------------------------------------------------
+
+    /**
+     * The realm's VAPID public key, for {@code pushManager.subscribe()}.
+     *
+     * <p>Generates the realm's key pair on first call and returns the same key
+     * forever after. Lazily rather than at realm setup because the public half
+     * is baked into every subscription a browser has already made - a realm that
+     * never uses notifications should never acquire a key it might later rotate
+     * out from under those subscriptions.</p>
+     */
+    @GET
+    @Path("push/vapid-key")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getVapidKey() {
+        if (currentUser() == null) {
+            throw new ForbiddenException("Not an authenticated admin");
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("publicKey", IgaVapidKeys.getOrCreate(getEm(), realm.getId()).getPublicKey());
+        out.put("enabled", !Boolean.parseBoolean(realm.getAttribute(IgaApprovalNotifier.DISABLED_ATTR)));
+        return Response.ok(out).build();
+    }
+
+    /**
+     * Register one browser to be notified about this realm's change requests.
+     *
+     * <p>Body is the browser's {@code PushSubscription}; only {@code endpoint} is
+     * read. The RFC 8291 payload keys ({@code p256dh}, {@code auth}) are
+     * deliberately not stored, because these notifications carry no payload -
+     * see {@code IgaWebPushSender} for why.</p>
+     */
+    @POST
+    @Path("push/subscriptions")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response subscribePush(Map<String, Object> body) {
+        UserModel user = currentUser();
+        if (user == null) {
+            throw new ForbiddenException("Not an authenticated admin");
+        }
+
+        String endpoint = body == null ? null : String.valueOf(body.get("endpoint"));
+        if (endpoint == null || endpoint.isBlank() || "null".equals(endpoint)) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "endpoint is required"))
+                    .build();
+        }
+        if (!endpoint.startsWith("https://")) {
+            // Push endpoints are always https. Rejecting anything else keeps this
+            // from being used to make the server POST at arbitrary hosts.
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "endpoint must be https"))
+                    .build();
+        }
+
+        // Ensure the realm has keys, so a device can never register against a
+        // realm that has no way to send to it.
+        IgaVapidKeys.getOrCreate(getEm(), realm.getId());
+        new IgaPushSubscriptionService(getEm()).upsert(realm.getId(), user.getId(), endpoint);
+
+        log.debugf("Registered a push subscription for user %s in realm %s", user.getId(), realm.getName());
+        return Response.ok(Map.of("subscribed", true)).build();
+    }
+
+    /** Stop notifying this admin in this realm, on every device they registered. */
+    @DELETE
+    @Path("push/subscriptions")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response unsubscribePush() {
+        UserModel user = currentUser();
+        if (user == null) {
+            throw new ForbiddenException("Not an authenticated admin");
+        }
+        int removed = new IgaPushSubscriptionService(getEm())
+                .deleteForUser(realm.getId(), user.getId());
+        return Response.ok(Map.of("removed", removed)).build();
     }
 }
