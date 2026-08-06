@@ -1227,8 +1227,7 @@ public class TideAttestor implements IgaAttestor {
             // it be approved/signed in the SAME enclave session as the assignments (no grey-out, no 412).
             // We CLEAR any stale dependsOn left by an older CR so a folded carrier is unblocked too.
             pending.setRowsJson(serializeRows(rows));
-            pending.setRequestModel(null);
-            clearAuthorizations(em, pending);
+            clearFramingCarrier(em, pending);
             pending.setDependsOnList(new ArrayList<>());
             em.flush();
             log.infof("IGA threshold-policy CR RE-PINNED at enclave open (signed content CHANGED): "
@@ -2156,11 +2155,36 @@ public class TideAttestor implements IgaAttestor {
         // Frame the plain canonical carrier DIRECTLY (the SAME non-unit carrier the 0-unit fallback
         // below builds), skipping the scratch replay — mirrors how OFFBOARD_REALM returns its own
         // carrier before ever reaching buildAllCrUnitCbor.
+        //
+        // FRAMING BATCH: a carrier freezes the bytes it frames, so framing a change request
+        // against the model as it stands right now is only correct while it is the ONLY pending
+        // change request perturbing its owner set. Frame instead over the state after EVERY
+        // currently-approvable PENDING change request that perturbs the same owner set, replayed
+        // in the deterministic bulk commit order, so two change requests against one owner frame
+        // BYTE-IDENTICAL units for it, and the group can be committed in one operation without
+        // either of them signing a partial set. resolveFramingBatch returns the change request
+        // alone when nothing contends, which is the framing this path always did.
+        List<IgaChangeRequestEntity> framingBatch = List.of(cr);
         byte[][] unitCbors;
         if (ACTION_DELETE_REALM.equals(cr.getActionType())) {
             unitCbors = new byte[][]{ canonicalForRegularCr(session, cr) };
         } else {
-            unitCbors = buildAllCrUnitCbor(session, realm, cr);
+            framingBatch = resolveFramingBatch(session, realm, cr);
+            unitCbors = buildAllCrUnitCbor(session, realm, cr, framingBatch);
+        }
+        // The digest the commit re-derives. Recorded ONLY for a carrier that actually frames
+        // typed producer units: the non-unit canonical fallbacks below carry no unit for the
+        // commit to rebuild, so there is nothing to compare and a recorded digest could only
+        // ever fail closed on a change request that frames none.
+        String framedUnitsDigest = unitCbors.length > 0 && !ACTION_DELETE_REALM.equals(cr.getActionType())
+                ? framedUnitsHash(unitCbors)
+                : null;
+        if (framingBatch.size() > 1) {
+            log.infof("IGA multiAdmin approval (phase 1): CR %s framed over batch %s of %d change "
+                            + "request(s) sharing its owner set (%s). Every member frames identical "
+                            + "bytes for that owner and the group commits in one operation.",
+                    cr.getId(), framingBatchId(realm.getId(), framingBatchIds(framingBatch)),
+                    framingBatch.size(), framingBatchIds(framingBatch));
         }
         // A producer CR (CREATE_USER / GRANT_ROLES / etc.) MUST frame ≥1 typed
         // AttestationUnit. unitCbors.length==0 means the scratch-replay enumeration found no
@@ -2224,6 +2248,10 @@ public class TideAttestor implements IgaAttestor {
 
         String encoded = java.util.Base64.getEncoder().encodeToString(req.Encode());
         cr.setRequestModel(encoded);
+        // The provenance the commit reads back: WHICH change requests these frozen bytes assume
+        // have applied, and WHAT the framed unit CBOR hashes to.
+        cr.setRequestBatchList(framingBatchIds(framingBatch));
+        cr.setRequestUnitsHash(framedUnitsDigest);
         session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
         log.infof("IGA multiAdmin approval (phase 1): built Policy:1 ModelRequest for CR %s "
                 + "(action=%s, realm=%s, creation-auth=%s).", cr.getId(), cr.getActionType(),
@@ -3944,6 +3972,26 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
+     * Phase-1 framing over a whole {@link #resolveFramingBatch framing batch}: reach the
+     * post-BATCH model by scratch-replaying every member in the given order, then enumerate
+     * {@code cr}'s units over it.
+     *
+     * <p>For a single-member batch this is exactly {@link #buildAllCrUnits(KeycloakSession,
+     * RealmModel, IgaChangeRequestEntity)}. For a batch that shares an owner set it is what
+     * makes every member frame BYTE-IDENTICAL bytes for that owner, which a per-request
+     * frame cannot do once the carrier freezes them.
+     */
+    List<AttestationUnit> buildAllCrUnits(KeycloakSession session, RealmModel realm,
+                                          IgaChangeRequestEntity cr,
+                                          List<IgaChangeRequestEntity> framingBatch) {
+        if (framingBatch == null || framingBatch.size() <= 1) {
+            return buildAllCrUnits(session, realm, cr);
+        }
+        return IgaScratchUnitBuilder.unitsFromBatchScratchReplay(session, realm, framingBatch, cr,
+                this::enumerateLiveCrUnits);
+    }
+
+    /**
      * The single shared affected-units enumerator. Given a model that is ALREADY
      * POST-change (the live committed model at commit, or the scratch model after a scratch
      * replay at phase-1), build EVERY producer {@link AttestationUnit} the CR's actionType
@@ -4263,7 +4311,14 @@ public class TideAttestor implements IgaAttestor {
      */
     byte[][] buildAllCrUnitCbor(KeycloakSession session, RealmModel realm,
                                 IgaChangeRequestEntity cr) {
-        List<AttestationUnit> units = buildAllCrUnits(session, realm, cr);
+        return buildAllCrUnitCbor(session, realm, cr, null);
+    }
+
+    /** {@link #buildAllCrUnitCbor} framed over a whole {@link #resolveFramingBatch} batch. */
+    byte[][] buildAllCrUnitCbor(KeycloakSession session, RealmModel realm,
+                                IgaChangeRequestEntity cr,
+                                List<IgaChangeRequestEntity> framingBatch) {
+        List<AttestationUnit> units = buildAllCrUnits(session, realm, cr, framingBatch);
         byte[][] out = new byte[units.size()][];
         for (int i = 0; i < units.size(); i++) {
             out[i] = units.get(i).serialize();
@@ -4642,7 +4697,7 @@ public class TideAttestor implements IgaAttestor {
 
         if (!isAuthoritativeSetSigner(realm, mode)) {
             auditStampedSetUnits(em, realm, owners, unitByOwner, crByOwner);
-            invalidateStaleSetUnitCarriers(session, realm, em, owners);
+            invalidateStaleSetUnitCarriers(session, realm, em, owners, framingBatchIds(crs));
             return;
         }
 
@@ -4765,6 +4820,269 @@ public class TideAttestor implements IgaAttestor {
         return contested;
     }
 
+    // -------------------------------------------------------------------------
+    // Framing batches: the approval-time answer to the frozen-carrier hazard
+    // -------------------------------------------------------------------------
+
+    /**
+     * The deterministic order a batch of change requests commits in: DELETE_REALM strictly
+     * last, REGEN_ADMIN_POLICY last among the rest, every other change request keeping its
+     * selection order (a STABLE sort). This is the order the bulk drain applies, and phase-1
+     * framing replays the batch in the SAME order so the framed bytes are the bytes the
+     * commit produces.
+     */
+    public static final Comparator<IgaChangeRequestEntity> BULK_COMMIT_ORDER =
+            Comparator.comparingInt(c -> {
+                String at = c.getActionType();
+                if (ACTION_DELETE_REALM.equals(at)) return 2;
+                if (ACTION_REGEN_ADMIN_POLICY.equals(at)) return 1;
+                return 0;
+            });
+
+    /**
+     * The change requests whose replay a phase-1 carrier for {@code cr} must assume: every
+     * currently-approvable PENDING change request that perturbs the SAME per-(unit type,
+     * owner) set, {@code cr} included, in {@link #BULK_COMMIT_ORDER}.
+     *
+     * <p>Each edge change request perturbs exactly ONE owner set, so "shares an owner with"
+     * partitions the pending pool into disjoint groups and the group of {@code cr} is simply
+     * everything sharing its owner key, with no transitive closure to walk. Framing over the whole
+     * group is what makes two change requests against one owner frame byte-identical units for
+     * it; per-request framing cannot, because the carrier freezes what it framed.
+     *
+     * <p>Returns a single-element list for a change request that perturbs no owner set or has
+     * no siblings, so the uncontested path frames exactly as before.
+     */
+    public List<IgaChangeRequestEntity> resolveFramingBatch(KeycloakSession session, RealmModel realm,
+                                                            IgaChangeRequestEntity cr) {
+        String owner = setUnitOwnerKey(session, realm, cr);
+        if (owner == null) {
+            return List.of(cr);
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<IgaChangeRequestEntity> pending = new IgaChangeRequestService(em, session)
+                .listPendingByActionTypeIn(realm.getId(), EDGE_SET_ACTION_TYPES, null, CARRIER_SWEEP_LIMIT);
+        List<IgaChangeRequestEntity> batch = new ArrayList<>();
+        boolean selfIncluded = false;
+        for (IgaChangeRequestEntity other : pending) {
+            if (!owner.equals(setUnitOwnerKey(session, realm, other))) {
+                continue;
+            }
+            batch.add(other);
+            selfIncluded |= cr.getId().equals(other.getId());
+        }
+        if (!selfIncluded) {
+            batch.add(cr);
+        }
+        if (batch.size() <= 1) {
+            return List.of(cr);
+        }
+        batch.sort(BULK_COMMIT_ORDER);
+        return batch;
+    }
+
+    /** The ordered member ids of a framing batch. */
+    public static List<String> framingBatchIds(List<IgaChangeRequestEntity> batch) {
+        List<String> ids = new ArrayList<>(batch.size());
+        for (IgaChangeRequestEntity member : batch) {
+            if (member != null && !ids.contains(member.getId())) {
+                ids.add(member.getId());
+            }
+        }
+        return ids;
+    }
+
+    /**
+     * The identity of a framing batch: a name-based UUID over the realm and the SORTED member
+     * ids. Deterministic in the member set, so two carriers framed against the same group carry
+     * the same id with no cross-change-request write, and a group whose membership moved is
+     * immediately distinguishable. Used for logs, error payloads and the group-equality check;
+     * the authoritative membership is the persisted ordered list.
+     */
+    public static String framingBatchId(String realmId, List<String> memberIds) {
+        if (memberIds == null || memberIds.isEmpty()) {
+            return null;
+        }
+        List<String> sorted = new ArrayList<>(new TreeSet<>(memberIds));
+        return UUID.nameUUIDFromBytes(("iga-framing-batch|" + realmId + "|" + String.join(",", sorted))
+                .getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
+    /** {@link #framingBatchId} of the batch a change request's carrier was framed with. */
+    public static String framingBatchIdOf(IgaChangeRequestEntity cr) {
+        return framingBatchId(cr.getRealmId(), cr.getRequestBatchList());
+    }
+
+    /**
+     * Base64 SHA-256 over the ORDERED unit CBOR a carrier framed: the byte-provenance the
+     * commit re-derives. Length-prefixed per unit so a different split of the same
+     * concatenation cannot collide.
+     */
+    public static String framedUnitsHash(byte[][] unitCbors) {
+        if (unitCbors == null || unitCbors.length == 0) {
+            return null;
+        }
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            for (byte[] unit : unitCbors) {
+                int len = unit == null ? 0 : unit.length;
+                digest.update(new byte[]{
+                        (byte) (len >>> 24), (byte) (len >>> 16), (byte) (len >>> 8), (byte) len});
+                if (unit != null) {
+                    digest.update(unit);
+                }
+            }
+            return java.util.Base64.getEncoder().encodeToString(digest.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+    }
+
+    /**
+     * STRICT byte-provenance for the multiAdmin lane: re-derive {@code cr}'s producer units
+     * from the FINAL committed model, hash them, and require the digest the phase-1 carrier
+     * recorded. A match proves the frozen bytes the ork just signed are the bytes the login
+     * read will re-derive; a mismatch means they are not, and stamping that quorum signature
+     * would leave the owner set unverifiable at the next token mint.
+     *
+     * <p>Costs no key material and no extra ork round-trip. Runs AFTER every member of the
+     * framing batch has replayed, which is the state the carrier was framed over. Fail-closed:
+     * throws {@link FramingBatchException}, so the commit transaction rolls back.
+     *
+     * <p>No-op for a carrier with no recorded digest (a legacy carrier, or a change request
+     * that framed no producer unit) and on any lane this class signs itself, where the
+     * signature is computed from committed state rather than frozen.
+     */
+    public void verifyFramedUnitHash(KeycloakSession session, RealmModel realm,
+                                     IgaChangeRequestEntity cr) {
+        String framed = cr.getRequestUnitsHash();
+        if (framed == null || framed.isBlank()
+                || !usesFrozenApprovalCarrier(realm, resolveMode(session, realm))) {
+            return;
+        }
+        session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
+        byte[][] committed;
+        try {
+            List<AttestationUnit> units =
+                    buildAllCrUnits(session, realm, cr, /* modelAlreadyPostChange */ true);
+            committed = new byte[units.size()][];
+            for (int i = 0; i < units.size(); i++) {
+                committed[i] = units.get(i).serialize();
+            }
+        } catch (RuntimeException unbuildable) {
+            throw new FramingBatchException(FramingBatchException.CODE_UNIT_HASH_MISMATCH,
+                    framingBatchIdOf(cr), cr.getId(),
+                    "the committed model does not re-derive this change request's producer units ("
+                            + unbuildable.getMessage() + ")");
+        }
+        requireFramedUnitHash(cr, framed, committed);
+    }
+
+    /**
+     * The comparison half of {@link #verifyFramedUnitHash}, independent of the realm
+     * capability gate: the units re-derived from the committed model must hash to what the
+     * carrier framed. Throws {@link FramingBatchException} otherwise.
+     */
+    public static void requireFramedUnitHash(IgaChangeRequestEntity cr, String framed,
+                                             byte[][] committed) {
+        String actual = framedUnitsHash(committed);
+        if (!framed.equals(actual)) {
+            throw new FramingBatchException(FramingBatchException.CODE_UNIT_HASH_MISMATCH,
+                    framingBatchIdOf(cr), cr.getId(),
+                    "the approval carrier framed unit bytes hashing to " + framed
+                            + " but the committed model re-derives " + actual
+                            + ". The quorum signature would not verify against the committed set");
+        }
+    }
+
+    /** {@link #verifyFramedUnitHash} for every change request an operation committed. */
+    public void verifyFramedUnitHashes(KeycloakSession session, RealmModel realm,
+                                       List<IgaChangeRequestEntity> crs) {
+        if (crs == null) {
+            return;
+        }
+        for (IgaChangeRequestEntity cr : crs) {
+            if (cr != null) {
+                verifyFramedUnitHash(session, realm, cr);
+            }
+        }
+    }
+
+    /**
+     * Clear a change request's frozen approval carrier and everything derived from it, so the
+     * next commit attempt fails closed on the missing carrier instead of stamping a signature
+     * over bytes that no longer describe the model. The admin re-approves, which re-frames
+     * against current state.
+     */
+    public static void clearFramingCarrier(EntityManager em, IgaChangeRequestEntity cr) {
+        cr.setRequestModel(null);
+        cr.setRequestBatch(null);
+        cr.setRequestUnitsHash(null);
+        clearAuthorizations(em, cr);
+    }
+
+    /**
+     * Invalidate every PENDING change request whose framing batch contains {@code crId}: the
+     * group whose carriers were framed assuming that change request would apply.
+     *
+     * <p>Called when a change request leaves the approvable pool (denied or blocked) and when a
+     * commit refuses on a broken batch. Without it the survivors keep a quorum signature over a
+     * projected set that will never exist; with it they simply need re-approval, which re-frames
+     * them over the survivors alone. Returns how many carriers were cleared.
+     */
+    public int invalidateFramingBatchOf(KeycloakSession session, RealmModel realm,
+                                        EntityManager em, String crId) {
+        List<IgaChangeRequestEntity> pending = em.createNamedQuery(
+                        "IgaChangeRequest.findPendingWithRequestBatch", IgaChangeRequestEntity.class)
+                .setParameter("realmId", realm.getId())
+                .setMaxResults(CARRIER_SWEEP_LIMIT)
+                .getResultList();
+        int invalidated = 0;
+        for (IgaChangeRequestEntity other : pending) {
+            if (crId.equals(other.getId()) || !other.getRequestBatchList().contains(crId)) {
+                continue;
+            }
+            log.warnf("IGA framing batch invalidated: PENDING change request %s (action %s, batch %s) "
+                            + "was framed assuming change request %s would apply in the same operation, "
+                            + "which it no longer will. Its carrier is cleared; re-approve it to re-frame "
+                            + "against the current state of realm %s.",
+                    other.getId(), other.getActionType(), framingBatchIdOf(other), crId, realm.getName());
+            clearFramingCarrier(em, other);
+            invalidated++;
+        }
+        if (invalidated > 0) {
+            em.flush();
+        }
+        return invalidated;
+    }
+
+    /**
+     * Invalidate the carriers of an ENTIRE framing batch, including the change request that
+     * refused. Used when the batch is found broken at commit: every member's bytes assumed a
+     * group that no longer exists, so none of them may be committed as framed.
+     */
+    public int invalidateFramingBatch(KeycloakSession session, RealmModel realm,
+                                      EntityManager em, IgaChangeRequestEntity cr) {
+        int invalidated = 0;
+        for (String memberId : cr.getRequestBatchList()) {
+            IgaChangeRequestEntity member = em.find(IgaChangeRequestEntity.class, memberId);
+            if (member == null || !"PENDING".equals(member.getStatus())) {
+                continue;
+            }
+            clearFramingCarrier(em, member);
+            invalidated++;
+        }
+        if (!cr.getRequestBatchList().contains(cr.getId()) && "PENDING".equals(cr.getStatus())) {
+            clearFramingCarrier(em, cr);
+            invalidated++;
+        }
+        em.flush();
+        log.warnf("IGA framing batch %s invalidated in realm %s (%d carrier(s)) after change request %s "
+                        + "refused: the group the carriers were framed with is no longer intact.",
+                framingBatchIdOf(cr), realm.getName(), invalidated, cr.getId());
+        return invalidated;
+    }
+
     /**
      * Invalidate the frozen approval carrier of every OTHER still-PENDING change request that
      * shares an owner set this commit just changed, so it cannot later stamp a quorum signature
@@ -4782,7 +5100,8 @@ public class TideAttestor implements IgaAttestor {
      * batch. Only runs on a {@link #usesFrozenApprovalCarrier} realm.
      */
     private void invalidateStaleSetUnitCarriers(KeycloakSession session, RealmModel realm,
-                                                EntityManager em, List<String> owners) {
+                                                EntityManager em, List<String> owners,
+                                                List<String> committedCrIds) {
         Set<String> committedOwners = new HashSet<>(owners);
         List<IgaChangeRequestEntity> pending = new IgaChangeRequestService(em, session)
                 .listPendingByActionTypeIn(realm.getId(), EDGE_SET_ACTION_TYPES, null, CARRIER_SWEEP_LIMIT);
@@ -4796,8 +5115,13 @@ public class TideAttestor implements IgaAttestor {
             if (owner == null || !committedOwners.contains(owner)) {
                 continue;
             }
-            other.setRequestModel(null);
-            clearAuthorizations(em, other);
+            // A carrier framed over a batch that ALREADY contains everything this operation
+            // committed is not stale: its frozen bytes assumed exactly these applications, and
+            // they just happened. Clearing it would force a re-approval that changes nothing.
+            if (other.getRequestBatchList().containsAll(committedCrIds)) {
+                continue;
+            }
+            clearFramingCarrier(em, other);
             invalidated++;
             log.warnf("IGA set-unit carrier invalidated: PENDING change request %s (action %s) shares "
                     + "owner set %s with a change request just committed in realm %s. Its approval "

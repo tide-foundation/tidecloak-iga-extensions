@@ -53,6 +53,7 @@ import org.tidecloak.iga.attestors.TideAttestor;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -707,7 +708,13 @@ public class IgaAdminResource {
      */
     private Response commitResolved(IgaChangeRequestEntity cr, EntityManager em, String id) {
         IgaBulkLock.Result<Response> lockResult = IgaBulkLock.runIfNotRunning(
-                session, realm.getId(), () -> commitResolvedLocked(cr, em, id));
+                session, realm.getId(), () -> {
+                    try {
+                        return commitResolvedLocked(cr, em, id);
+                    } catch (org.tidecloak.iga.attestors.FramingBatchException fbe) {
+                        return framingBatchRefusal(fbe);
+                    }
+                });
         if (!lockResult.isHeld()) {
             return Response.status(429)
                     .entity(Map.of("error",
@@ -718,8 +725,21 @@ public class IgaAdminResource {
         return lockResult.getValue();
     }
 
+    /** Set while {@link #commitFramingBatch} is applying a framed group member by member. */
+    private boolean framingBatchDriveActive;
+
     /** The commit pipeline body; always invoked under the per-realm mutex above. */
     private Response commitResolvedLocked(IgaChangeRequestEntity cr, EntityManager em, String id) {
+        // A carrier framed over a batch describes the state after EVERY member of that batch
+        // has applied, so a member cannot be committed on its own. Drive the whole group here,
+        // in one transaction, before the single-CR body runs.
+        if (!framingBatchDriveActive) {
+            Response batched = commitFramingBatch(cr, em, id);
+            if (batched != null) {
+                return batched;
+            }
+        }
+
         // Fail-closed dependency gate: refuse to commit a CR whose dependsOn
         // set contains any CR not yet APPROVED. This makes the silent-no-op of
         // a dependent replay (REALM_DEFAULT_SCOPE_ADD / ASSIGN_SCOPE applied
@@ -872,6 +892,12 @@ public class IgaAdminResource {
         if (attestor instanceof org.tidecloak.iga.attestors.TideAttestor tideAttestor
                 && !org.tidecloak.iga.attestors.TideAttestor.ACTION_DELETE_REALM.equals(cr.getActionType())) {
             tideAttestor.stampProducerUnitColumns(session, realm, cr);
+            // STRICT byte-provenance for the frozen-carrier lane: the units re-derived from
+            // the model as it now stands must hash to what this CR's approval carrier framed.
+            // Checked HERE, immediately after this CR's own replay, because that is the state
+            // its framing batch projected. A later member of the same batch will move the
+            // owner set again and carries its own digest for that state. Fail-closed.
+            tideAttestor.verifyFramedUnitHash(session, realm, cr);
             // Coalesced SET-unit stamp: the IDENTICAL call the bulk lane makes after its
             // batch drains, here over the single CR this commit applied. Re-derives the
             // owner's set from the committed model, signs it once, stamps it as the LAST
@@ -942,6 +968,288 @@ public class IgaAdminResource {
         IgaChangeRequestService service = getService();
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
         return Response.ok(toRepresentation(updated, service)).build();
+    }
+
+    // -------------------------------------------------------------------------
+    // Framing batches: committing a group whose carriers were framed together
+    // -------------------------------------------------------------------------
+
+    /**
+     * Apply the whole framing batch {@code cr} belongs to, in one transaction, or refuse.
+     * Returns {@code null} when {@code cr} carries no multi-member batch, in which case the
+     * caller runs the ordinary single-CR pipeline.
+     *
+     * <p>A multiAdmin approval carrier freezes the unit bytes the enclave framed, and phase 1
+     * frames them over the state after EVERY currently-approvable PENDING change request that
+     * perturbs the same owner set. That is what lets two change requests against one owner
+     * carry identical bytes for it, but it also means a member's bytes describe the
+     * post-batch model, so committing one on its own would leave the owner set signed for a
+     * state the database does not hold. The group therefore applies together:
+     *
+     * <ul>
+     *   <li>a member that is already APPROVED has applied, which is what the framing assumed;</li>
+     *   <li>a member that is DENIED / CANCELLED / gone means the framing describes a state that
+     *       will never exist: refuse fail-closed and invalidate the group's carriers so the
+     *       admin re-approves the survivors, which re-frames them correctly;</li>
+     *   <li>a member that is PENDING but short of quorum or dependency-blocked is a WAIT, not a
+     *       corruption: refuse with 412 and leave every carrier intact so the collected dokens
+     *       are not thrown away.</li>
+     * </ul>
+     *
+     * <p>Members are applied in the persisted (deterministic bulk commit) order, each through
+     * the ordinary single-CR pipeline, so every existing gate still runs per member. Each
+     * member's own byte-provenance check runs immediately after its own replay, which is the
+     * state its framing projected.
+     */
+    private Response commitFramingBatch(IgaChangeRequestEntity cr, EntityManager em, String id) {
+        List<String> closure = framingBatchClosure(em, cr);
+        if (closure.size() <= 1) {
+            return null;
+        }
+        String batchId = TideAttestor.framingBatchId(realm.getId(), closure);
+
+        List<IgaChangeRequestEntity> toCommit = new ArrayList<>();
+        List<String> broken = new ArrayList<>();
+        List<Map<String, Object>> notReady = new ArrayList<>();
+        IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
+        for (String memberId : closure) {
+            IgaChangeRequestEntity member = em.find(IgaChangeRequestEntity.class, memberId);
+            if (member == null || !realm.getId().equals(member.getRealmId())) {
+                broken.add(memberId);
+                continue;
+            }
+            if ("APPROVED".equals(member.getStatus())) {
+                continue;
+            }
+            if (!"PENDING".equals(member.getStatus())) {
+                broken.add(memberId);
+                continue;
+            }
+            BlockState memberBlock = computeBlockState(member.getDependsOnList());
+            int memberThreshold = attestor.getThreshold(session, realm, member);
+            int memberAuthCount = authCount(em, member);
+            if (memberBlock.blocked || memberAuthCount < memberThreshold) {
+                Map<String, Object> pendingMember = new LinkedHashMap<>();
+                pendingMember.put("crId", memberId);
+                pendingMember.put("actionType", member.getActionType());
+                pendingMember.put("authCount", memberAuthCount);
+                pendingMember.put("threshold", memberThreshold);
+                if (memberBlock.blocked) {
+                    pendingMember.put("blocked", memberBlock.reason);
+                }
+                notReady.add(pendingMember);
+                continue;
+            }
+            toCommit.add(member);
+        }
+
+        if (!broken.isEmpty()) {
+            log.warnf("IGA framing batch %s in realm %s is broken: member(s) %s are no longer "
+                            + "approvable, so every carrier framed with them describes a state that "
+                            + "will never exist. Invalidating the group; the survivors must be "
+                            + "re-approved.", batchId, realm.getName(), broken);
+            new TideAttestor(session).invalidateFramingBatch(session, realm, em, cr);
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of(
+                            "error", org.tidecloak.iga.attestors.FramingBatchException.CODE_BATCH_BROKEN,
+                            "message", "Another change request approved alongside this one is no longer "
+                                    + "approvable, so the approvals no longer describe the change being "
+                                    + "made. The approvals have been cleared. Re-approve the remaining "
+                                    + "change requests.",
+                            "batchId", batchId,
+                            "batch", closure,
+                            "brokenMembers", broken))
+                    .build();
+        }
+        if (!notReady.isEmpty()) {
+            return Response.status(Response.Status.PRECONDITION_FAILED)
+                    .entity(Map.of(
+                            "error", "FRAMING_BATCH_NOT_READY",
+                            "message", "This change request was approved together with other change "
+                                    + "requests against the same membership set; they all apply at once. "
+                                    + "Approve the remaining change request(s) first.",
+                            "batchId", batchId,
+                            "batch", closure,
+                            "pendingMembers", notReady))
+                    .build();
+        }
+
+        framingBatchDriveActive = true;
+        try {
+            for (IgaChangeRequestEntity member : toCommit) {
+                Response memberResp = commitResolvedLocked(member, em, member.getId());
+                if (memberResp.getStatus() != Response.Status.OK.getStatusCode()) {
+                    // A member's own gate refused after earlier members already applied in this
+                    // transaction. Roll the whole group back rather than leave it half applied,
+                    // and surface that member's error verbatim.
+                    session.getTransactionManager().setRollbackOnly();
+                    log.warnf("IGA framing batch %s in realm %s aborted: member %s refused with %d.",
+                            batchId, realm.getName(), member.getId(), memberResp.getStatus());
+                    return memberResp;
+                }
+            }
+        } finally {
+            framingBatchDriveActive = false;
+        }
+
+        log.infof("IGA framing batch %s committed as one operation in realm %s (%d member(s): %s).",
+                batchId, realm.getName(), toCommit.size(), closure);
+        IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
+        return Response.ok(toRepresentation(updated, getService())).build();
+    }
+
+    /**
+     * The transitive closure of {@code cr}'s framing batch, in the deterministic bulk commit
+     * order: {@code cr}'s own persisted member list, plus the member list of every PENDING
+     * member reachable from it.
+     *
+     * <p>The closure is needed because framing batches nest rather than partition. A change
+     * request framed while it was alone carries a one-member batch; one filed against the same
+     * owner afterwards frames over both. Committing the later one must therefore apply the
+     * earlier one first, and it is the closure (not either list alone) that names everything
+     * the resulting model state depends on.
+     */
+    private List<String> framingBatchClosure(EntityManager em, IgaChangeRequestEntity cr) {
+        List<String> closure = new ArrayList<>(cr.getRequestBatchList());
+        if (closure.isEmpty()) {
+            return closure;
+        }
+        if (!closure.contains(cr.getId())) {
+            closure.add(cr.getId());
+        }
+        List<IgaChangeRequestEntity> resolved = new ArrayList<>();
+        for (int i = 0; i < closure.size() && i < FRAMING_BATCH_CLOSURE_LIMIT; i++) {
+            IgaChangeRequestEntity member = em.find(IgaChangeRequestEntity.class, closure.get(i));
+            if (member == null || !realm.getId().equals(member.getRealmId())) {
+                continue;
+            }
+            resolved.add(member);
+            for (String reachable : member.getRequestBatchList()) {
+                if (!closure.contains(reachable)) {
+                    closure.add(reachable);
+                }
+            }
+        }
+        // Order the closure the way the batch was framed and the way a bulk drain applies:
+        // oldest first, DELETE_REALM strictly last, REGEN_ADMIN_POLICY last among the rest.
+        // Ids that no longer resolve keep their discovery position; the caller reports them as
+        // broken members rather than silently dropping them.
+        resolved.sort(Comparator.comparing(IgaChangeRequestEntity::getCreatedAt,
+                Comparator.nullsLast(Comparator.<Long>naturalOrder())));
+        resolved.sort(TideAttestor.BULK_COMMIT_ORDER);
+        List<String> ordered = new ArrayList<>(TideAttestor.framingBatchIds(resolved));
+        for (String memberId : closure) {
+            if (!ordered.contains(memberId)) {
+                ordered.add(memberId);
+            }
+        }
+        return ordered;
+    }
+
+    /** Upper bound on the framing-batch closure walk. */
+    private static final int FRAMING_BATCH_CLOSURE_LIMIT = 200;
+
+    /**
+     * Bulk-lane counterpart of {@link #commitFramingBatch}: record a refusal for every
+     * candidate whose framed group would not apply IN FULL in this drain.
+     *
+     * <p>A framed group's members carry bytes describing the model after all of them, so a
+     * drain that would commit only part of the group must commit none of it. A member counts
+     * as covered when it is already APPROVED (it has applied) or is itself a candidate that is
+     * unblocked and at quorum. Anything else refuses the whole group, before any replay, so
+     * nothing is half applied. Carriers are NOT invalidated here: the group is intact, it just
+     * is not all present, and throwing away collected dokens would make the admin re-run the
+     * enclave for nothing.
+     */
+    private void refuseIncompleteFramingBatches(List<IgaChangeRequestEntity> candidates,
+                                                Map<String, Map<String, Object>> refusals) {
+        EntityManager em = getEm();
+        IgaAttestor attestor = IgaAttestors.resolveAttestor(session, realm);
+        Map<String, IgaChangeRequestEntity> candidateById = new LinkedHashMap<>();
+        for (IgaChangeRequestEntity candidate : candidates) {
+            candidateById.put(candidate.getId(), candidate);
+        }
+        for (IgaChangeRequestEntity candidate : candidates) {
+            if (candidate.getRequestBatchList().isEmpty() || refusals.containsKey(candidate.getId())) {
+                continue;
+            }
+            List<String> closure = framingBatchClosure(em, candidate);
+            if (closure.size() <= 1) {
+                continue;
+            }
+            List<String> uncovered = new ArrayList<>();
+            for (String memberId : closure) {
+                IgaChangeRequestEntity member = em.find(IgaChangeRequestEntity.class, memberId);
+                if (member != null && "APPROVED".equals(member.getStatus())) {
+                    continue;
+                }
+                if (member == null || !"PENDING".equals(member.getStatus())
+                        || !candidateById.containsKey(memberId)
+                        || computeBlockState(member.getDependsOnList()).blocked
+                        || authCount(em, member) < attestor.getThreshold(session, realm, member)) {
+                    uncovered.add(memberId);
+                }
+            }
+            if (uncovered.isEmpty()) {
+                continue;
+            }
+            String batchId = TideAttestor.framingBatchId(realm.getId(), closure);
+            for (String memberId : closure) {
+                if (!candidateById.containsKey(memberId)) {
+                    continue;
+                }
+                Map<String, Object> refusal = new LinkedHashMap<>();
+                refusal.put("error", "FRAMING_BATCH_INCOMPLETE");
+                refusal.put("message", "This change request was approved together with other change "
+                        + "requests against the same membership set; they all apply at once. Approve "
+                        + "the remaining change request(s), then commit them together.");
+                refusal.put("batchId", batchId);
+                refusal.put("batch", closure);
+                refusal.put("uncoveredMembers", uncovered);
+                refusals.put(memberId, refusal);
+            }
+        }
+    }
+
+    /**
+     * Convert a fail-closed framing-batch refusal into a 409, roll the commit back, and clear
+     * the group's carriers OUT OF BAND so the invalidation survives that rollback (the same
+     * separate-transaction device the capture path uses to persist a change request through
+     * its own rollback). The admin re-approves, which re-frames against current state.
+     */
+    private Response framingBatchRefusal(org.tidecloak.iga.attestors.FramingBatchException fbe) {
+        session.getTransactionManager().setRollbackOnly();
+        log.warnf(fbe, "IGA commit refused (framing batch %s, change request %s): %s",
+                fbe.getBatchId(), fbe.getChangeRequestId(), fbe.getMessage());
+        invalidateFramingBatchOutOfBand(fbe.getChangeRequestId());
+        return Response.status(Response.Status.CONFLICT)
+                .entity(Map.of(
+                        "error", fbe.getCode(),
+                        "message", "The approvals collected for this change request no longer describe "
+                                + "the change being made, so committing them would leave the affected "
+                                + "membership unverifiable. The approvals have been cleared. Re-approve "
+                                + "to sign the current state.",
+                        "batchId", String.valueOf(fbe.getBatchId()),
+                        "changeRequestId", fbe.getChangeRequestId(),
+                        "detail", String.valueOf(fbe.getMessage())))
+                .build();
+    }
+
+    /** {@link TideAttestor#invalidateFramingBatch} on a fresh transaction. */
+    private void invalidateFramingBatchOutOfBand(String crId) {
+        KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(), job -> {
+            RealmModel jobRealm = job.realms().getRealm(realm.getId());
+            if (jobRealm == null) {
+                return;
+            }
+            job.getContext().setRealm(jobRealm);
+            EntityManager jobEm = job.getProvider(JpaConnectionProvider.class).getEntityManager();
+            IgaChangeRequestEntity jobCr = jobEm.find(IgaChangeRequestEntity.class, crId);
+            if (jobCr == null) {
+                return;
+            }
+            new TideAttestor(job).invalidateFramingBatch(job, jobRealm, jobEm, jobCr);
+        });
     }
 
     // -------------------------------------------------------------------------
@@ -1313,16 +1621,19 @@ public class IgaAdminResource {
         String crStatus = pre != null ? pre.getStatus() : cr.getStatus();
         if (authCount >= threshold) {
             Response commitResp = commitResolved(cr, em, id);
-            if (commitResp.getStatus() != Response.Status.OK.getStatusCode()) {
+            if (commitResp.getStatus() != Response.Status.OK.getStatusCode()
+                    && !isFramingBatchWait(commitResp)) {
                 // A commit gate refused (dependency / REGEN-ordering / approver-role /
                 // threshold / ENTITY_VANISHED). Surface that error verbatim: the
                 // authorization was recorded, but the change is not yet applied.
                 return commitResp;
             }
-            committed = true;
-            IgaChangeRequestEntity post = em.find(IgaChangeRequestEntity.class, id);
-            crStatus = post != null ? post.getStatus() : "APPROVED";
-            // authCount is unchanged by commit; threshold likewise.
+            if (commitResp.getStatus() == Response.Status.OK.getStatusCode()) {
+                committed = true;
+                IgaChangeRequestEntity post = em.find(IgaChangeRequestEntity.class, id);
+                crStatus = post != null ? post.getStatus() : "APPROVED";
+                // authCount is unchanged by commit; threshold likewise.
+            }
         }
 
         Map<String, Object> resp = new LinkedHashMap<>();
@@ -1334,6 +1645,19 @@ public class IgaAdminResource {
         resp.put("readyToCommit", authCount >= threshold);
         resp.put("status", crStatus);
         return Response.ok(resp).build();
+    }
+
+    /**
+     * Is this commit refusal the "the rest of the framed group is not approved yet" wait
+     * state? That is not an error for the approve lane: the caller's approval WAS recorded,
+     * and the group applies once its last member reaches quorum. Reporting it as
+     * {@code committed:false} keeps the Authorize button behaving as it does for any other
+     * sub-quorum approval, instead of surfacing a failure for every member but the last.
+     */
+    private static boolean isFramingBatchWait(Response commitResp) {
+        return commitResp.getStatus() == Response.Status.PRECONDITION_FAILED.getStatusCode()
+                && commitResp.getEntity() instanceof Map<?, ?> body
+                && "FRAMING_BATCH_NOT_READY".equals(body.get("error"));
     }
 
     /** All authorization rows currently recorded against a CR. */
@@ -1619,12 +1943,7 @@ public class IgaAdminResource {
                     // (rank 1) for the threshold-ordering reason below. The stable sort keeps
                     // every other CR's relative order.
                     candidates = new ArrayList<>(candidates);
-                    candidates.sort(java.util.Comparator.comparingInt(c -> {
-                        String at = c.getActionType();
-                        if ("DELETE_REALM".equals(at)) return 2;
-                        if ("REGEN_ADMIN_POLICY".equals(at)) return 1;
-                        return 0;
-                    }));
+                    candidates.sort(TideAttestor.BULK_COMMIT_ORDER);
 
                     // Track whether ANY committed CR in this batch changed client
                     // settings that feed the signed IdP-settings bundle, so the re-sign
@@ -1639,51 +1958,62 @@ public class IgaAdminResource {
                     // commits to a set the DB no longer holds.
                     List<IgaChangeRequestEntity> committedCrs = new ArrayList<>();
 
-                    // INTERIM SAFETY VALVE (see the class note on frozen approval carriers).
-                    // On a realm whose edge sets are signed from a doken-bound approval carrier,
-                    // the unit bytes are FROZEN when the enclave frames them, as
-                    // pre-set + THAT CR's own delta. Two change requests against ONE owner set
-                    // therefore each carry a quorum signature over a set that excludes the
-                    // other's delta, and whichever commits second stamps a signature the ork
-                    // cannot verify against the committed set. Nothing at commit can repair it:
-                    // the signed bytes are not an input here, only the destination column is
-                    // recomputed. Refuse those change requests BEFORE any replay so the batch
-                    // half-applies nothing, and name the owner and contributors so the admin can
-                    // commit one and re-approve the rest. The real fix is to frame the carrier
-                    // over the projected post-batch set at approval time; that is a product
-                    // decision (it also requires the batch to commit atomically).
-                    java.util.Set<String> contestedCrIds = new java.util.HashSet<>();
-                    Map<String, List<String>> contestedOwners = java.util.Map.of();
-                    if (IgaAttestors.resolveAttestor(session, realm) instanceof TideAttestor contestAttestor
+                    // Pre-replay gate for a realm whose edge sets are signed from a doken-bound
+                    // approval carrier, where the unit bytes are FROZEN when the enclave frames
+                    // them. Two change requests against ONE owner set are handled at APPROVAL
+                    // time now: phase 1 frames both over the state after the whole group, so
+                    // they carry identical bytes for that owner and the group is committable,
+                    // provided every member of the group is in this drain and ready. What is
+                    // refused here, before any replay, so the batch half-applies nothing:
+                    //
+                    //   FRAMING_BATCH_INCOMPLETE: a member of a framed group is missing from
+                    //     this drain, not at quorum, blocked, or already resolved. The group's
+                    //     bytes describe the post-group model, so no member may apply alone.
+                    //   CONTESTED_SET_OWNER: the legacy backstop, now scoped to carriers that
+                    //     predate the framing batch (no member list persisted). Those really
+                    //     were framed as pre-set + own delta and cannot be reconciled.
+                    Map<String, Map<String, Object>> refusals = new LinkedHashMap<>();
+                    if (IgaAttestors.resolveAttestor(session, realm) instanceof TideAttestor frozenAttestor
                             && TideAttestor.usesFrozenApprovalCarrier(session, realm)) {
-                        contestedOwners = contestAttestor.findContestedSetOwners(session, realm, candidates);
-                        for (List<String> crIds : contestedOwners.values()) {
-                            contestedCrIds.addAll(crIds);
+                        refuseIncompleteFramingBatches(candidates, refusals);
+                        List<IgaChangeRequestEntity> legacyCarriers = new ArrayList<>();
+                        for (IgaChangeRequestEntity candidate : candidates) {
+                            if (candidate.getRequestBatchList().isEmpty()
+                                    && !refusals.containsKey(candidate.getId())) {
+                                legacyCarriers.add(candidate);
+                            }
                         }
-                        if (!contestedCrIds.isEmpty()) {
-                            log.warnf("IGA bulk-authorize: refusing %d change request(s) in realm %s that "
-                                    + "share %d owner set(s) with another change request in the same batch "
-                                    + "(%s). Their approval carriers each froze the pre-batch member set.",
-                                    contestedCrIds.size(), realm.getName(), contestedOwners.size(),
-                                    contestedOwners);
+                        Map<String, List<String>> contestedOwners =
+                                frozenAttestor.findContestedSetOwners(session, realm, legacyCarriers);
+                        for (List<String> crIds : contestedOwners.values()) {
+                            for (String contestedId : crIds) {
+                                Map<String, Object> refusal = new LinkedHashMap<>();
+                                refusal.put("error", "CONTESTED_SET_OWNER");
+                                refusal.put("message", "Another change request in this batch changes the "
+                                        + "same membership set, and this one was approved before the "
+                                        + "approval covered the whole group. Re-approve it, then commit.");
+                                refusal.put("contestedOwners", contestedOwners);
+                                refusals.put(contestedId, refusal);
+                            }
+                        }
+                        if (!refusals.isEmpty()) {
+                            log.warnf("IGA bulk-authorize: refusing %d change request(s) in realm %s whose "
+                                            + "approval carriers do not describe the state this drain would "
+                                            + "produce: %s", refusals.size(), realm.getName(), refusals.keySet());
                         }
                     }
 
                     for (IgaChangeRequestEntity candidate : candidates) {
                         String crId = candidate.getId();
-                        if (contestedCrIds.contains(crId)) {
+                        Map<String, Object> refusal = refusals.get(crId);
+                        if (refusal != null) {
                             Map<String, Object> refused = new LinkedHashMap<>();
                             refused.put("crId", crId);
                             refused.put("actionType", candidate.getActionType());
                             refused.put("entityType", candidate.getEntityType());
                             refused.put("entityId", candidate.getEntityId());
                             refused.put("status", "REJECTED");
-                            refused.put("error", "CONTESTED_SET_OWNER");
-                            refused.put("message", "Another change request in this batch changes the same "
-                                    + "membership set. Each approval signed the set as it stood before the "
-                                    + "batch, so committing both would leave a signature the token service "
-                                    + "cannot verify. Commit one, then re-approve the rest.");
-                            refused.put("contestedOwners", contestedOwners);
+                            refused.putAll(refusal);
                             results.add(refused);
                             rejected++;
                             continue;
@@ -1967,6 +2297,9 @@ public class IgaAdminResource {
             if (attestor instanceof org.tidecloak.iga.attestors.TideAttestor tideAttestor
                     && !org.tidecloak.iga.attestors.TideAttestor.ACTION_DELETE_REALM.equals(cr.getActionType())) {
                 tideAttestor.stampProducerUnitColumns(session, realm, cr);
+                // Same strict byte-provenance check the single-CR commit tail runs, in the
+                // same position (right after this CR's own replay).
+                tideAttestor.verifyFramedUnitHash(session, realm, cr);
             }
 
             // Re-sign Tide IdP settings if this CR changed a signed VendorSettings
@@ -1988,6 +2321,12 @@ public class IgaAdminResource {
             String msg = fe.getMessage();
             if (msg != null) outcome.put("message", msg);
             return outcome;
+        } catch (org.tidecloak.iga.attestors.FramingBatchException fbe) {
+            // NOT a per-CR outcome. The carrier's frozen bytes do not describe the state this
+            // batch is committing, and earlier members of the batch are already applied in this
+            // transaction, and converting this to a REJECTED row would leave the batch half
+            // applied. Propagate so the whole bulk transaction rolls back.
+            throw fbe;
         } catch (RuntimeException rex) {
             outcome.put("status", "REJECTED");
             outcome.put("error", "COMMIT_FAILED");
@@ -2048,6 +2387,11 @@ public class IgaAdminResource {
 
         IgaChangeRequestService service = getService();
         service.updateRows(id, newRows);
+        // The rows changed, so this change request's own carrier is void (updateRows already
+        // drops its authorizations) AND so is every carrier framed on the assumption that the
+        // OLD rows would apply.
+        TideAttestor.clearFramingCarrier(em, cr);
+        invalidateFramingBatchMembers(em, id);
 
         IgaChangeRequestEntity updated = em.find(IgaChangeRequestEntity.class, id);
         return Response.ok(toRepresentation(updated, service)).build();
@@ -2070,7 +2414,25 @@ public class IgaAdminResource {
 
         IgaChangeRequestService service = getService();
         service.deny(id, currentUserId());
+        // Any carrier framed on the assumption that this change request would apply now
+        // describes a state that will never exist. Clear the group so the survivors are
+        // re-approved and re-framed over what is actually left, rather than discovering it at
+        // commit. Only touches carriers that name this change request in their framing batch.
+        invalidateFramingBatchMembers(em, id);
         return Response.noContent().build();
+    }
+
+    /**
+     * Clear the carriers of every PENDING change request whose framing batch contains
+     * {@code crId}, after that change request has left the approvable pool. No-op on a realm
+     * that does not use frozen approval carriers, and no-op when nothing was framed with it.
+     */
+    private void invalidateFramingBatchMembers(EntityManager em, String crId) {
+        if (!(IgaAttestors.resolveAttestor(session, realm) instanceof TideAttestor tide)
+                || !TideAttestor.usesFrozenApprovalCarrier(session, realm)) {
+            return;
+        }
+        tide.invalidateFramingBatchOf(session, realm, em, crId);
     }
 
     // -------------------------------------------------------------------------

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.12.0: Framing-batch provenance for the multiAdmin approval carrier.
+
+      REQUEST_BATCH      - the ordered comma-separated change-request ids the
+                          REQUEST_MODEL carrier's unit bytes assume, in the
+                          deterministic bulk commit order. Phase 1 frames a
+                          change request's set units over the state after EVERY
+                          currently-approvable PENDING change request that
+                          perturbs the same owner set, so the carrier is only
+                          valid while that group is intact and applies in one
+                          operation, in order. Same comma-separated TEXT idiom
+                          as DEPENDS_ON (fixed-shape UUIDs, small list); the
+                          batch IDENTITY is the name-based UUID derived from
+                          this list, so no second column is needed.
+
+      REQUEST_UNITS_HASH - Base64 SHA-256 over the ordered unit CBOR that
+                          carrier framed. At commit the units are re-derived
+                          from the final committed model and re-hashed; a
+                          mismatch fails the commit closed rather than stamping
+                          a quorum signature over bytes the ork cannot
+                          re-derive. VARCHAR(64) holds the 44-char Base64 of a
+                          32-byte digest.
+
+      Both nullable; existing rows backfill to NULL, which is the correct legacy
+      semantic - a pre-2.12.0 carrier was framed against a single change request
+      and is handled by the legacy contested-owner refusal instead.
+    -->
+
+    <changeSet id="iga-2.12.0-1" author="tidecloak-iga">
+        <addColumn tableName="IGA_CHANGE_REQUEST">
+            <column name="REQUEST_BATCH" type="TEXT"/>
+            <column name="REQUEST_UNITS_HASH" type="VARCHAR(64)"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>
