@@ -23,8 +23,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -309,6 +311,126 @@ class TideAttestorFramingBatchTest {
         assertNull(TideAttestor.framedUnitsHash(new byte[0][]));
     }
 
+    // -------------------------------------------------------------------------
+    // WHEN the digest is verified. This is the regression guard for the placement
+    // bug that blocked a dev realm: verifying a member right after its OWN replay
+    // compares against pre + that member's delta, while its carrier described
+    // pre + EVERY member's delta, so it mismatched by construction for every
+    // member of a group except the one that replayed last.
+    // -------------------------------------------------------------------------
+
+    /**
+     * The production verification pass with the realm CAPABILITY gate removed, which a unit
+     * test cannot satisfy. Same predicate ({@link TideAttestor#hasAppliedFramingBasis}) and
+     * same per-member action ({@link TideAttestor#requireFramedUnitHash}) as
+     * {@code verifyFramedUnitsWithAppliedBasis}, so a placement regression fails here.
+     */
+    private void verifyPass(Set<String> verified, IgaChangeRequestEntity... members) {
+        for (IgaChangeRequestEntity member : members) {
+            if (verified.contains(member.getId())
+                    || !TideAttestor.hasAppliedFramingBasis(em, member)) {
+                continue;
+            }
+            TideAttestor.requireFramedUnitHash(member, member.getRequestUnitsHash(),
+                    framedCbor(member));
+            verified.add(member.getId());
+        }
+    }
+
+    private void frameOverCurrentModel(IgaChangeRequestEntity cr, List<String> batch) {
+        cr.setRequestBatchList(batch);
+        cr.setRequestModel("carrier-" + cr.getId());
+        cr.setRequestUnitsHash(TideAttestor.framedUnitsHash(framedCbor(cr)));
+    }
+
+    @Test
+    void groupMemberDigest_isVerifiedOnlyAfterTheWHOLEGroupHasReplayed() {
+        // Phase 1: both members framed over the post-batch model (pre + d1 + d2).
+        committedParent(PARENT_ID, PRE_CHILD, CR1_CHILD, CR2_CHILD);
+        IgaChangeRequestEntity cr1 = addComposite("cr-1", 1L, PARENT_ID, CR1_CHILD);
+        IgaChangeRequestEntity cr2 = addComposite("cr-2", 2L, PARENT_ID, CR2_CHILD);
+        frameOverCurrentModel(cr1, List.of("cr-1", "cr-2"));
+        frameOverCurrentModel(cr2, List.of("cr-1", "cr-2"));
+
+        // The drive begins against the pre-batch model.
+        committedChildren.put(PARENT_ID, List.of(PRE_CHILD));
+        Set<String> verified = new LinkedHashSet<>();
+
+        // Step 1: cr-1 replays. The model is pre + d1, which is NOT what either carrier framed.
+        committedChildren.put(PARENT_ID, List.of(PRE_CHILD, CR1_CHILD));
+        cr1.setStatus("APPROVED");
+        assertFalse(TideAttestor.hasAppliedFramingBasis(em, cr1),
+                "cr-2 has not replayed, so the state cr-1's carrier describes is not reached yet");
+        attestor.verifyFramedUnitsWithAppliedBasis(session, realm, List.of(cr1, cr2), verified);
+        assertTrue(verified.isEmpty(),
+                "nothing may be verified here: this is the placement that mismatched by "
+                        + "construction and blocked every commit");
+        assertThrows(FramingBatchException.class,
+                () -> TideAttestor.requireFramedUnitHash(cr1, cr1.getRequestUnitsHash(),
+                        framedCbor(cr1)),
+                "verifying cr-1 after its OWN replay would fail, which is the bug this pins");
+
+        // Step 2: cr-2 replays. The model is now pre + d1 + d2, exactly what both framed.
+        committedChildren.put(PARENT_ID, List.of(PRE_CHILD, CR1_CHILD, CR2_CHILD));
+        cr2.setStatus("APPROVED");
+        verifyPass(verified, cr1, cr2);
+
+        assertEquals(List.of("cr-1", "cr-2"), new ArrayList<>(verified),
+                "both members verify against the post-group model, and both PASS");
+        attestor.requireAllFramedUnitsVerified(List.of(cr1, cr2), verified);
+    }
+
+    @Test
+    void memberFramedBeforeTheGroupGrew_isVerifiedAtItsOwnEarlierBasis() {
+        // cr-1 was framed while it was alone and its batch was frozen by its first approval;
+        // cr-2 arrived later and framed over both. Verifying everything at the END of the drive
+        // would be past cr-1's basis, so the check must fire per member.
+        committedParent(PARENT_ID, PRE_CHILD, CR1_CHILD);
+        IgaChangeRequestEntity cr1 = addComposite("cr-1", 1L, PARENT_ID, CR1_CHILD);
+        frameOverCurrentModel(cr1, List.of("cr-1"));
+
+        committedParent(PARENT_ID, PRE_CHILD, CR1_CHILD, CR2_CHILD);
+        IgaChangeRequestEntity cr2 = addComposite("cr-2", 2L, PARENT_ID, CR2_CHILD);
+        frameOverCurrentModel(cr2, List.of("cr-1", "cr-2"));
+
+        committedChildren.put(PARENT_ID, List.of(PRE_CHILD));
+        Set<String> verified = new LinkedHashSet<>();
+
+        // cr-1 replays: its basis is itself alone, so it verifies NOW and passes.
+        committedChildren.put(PARENT_ID, List.of(PRE_CHILD, CR1_CHILD));
+        cr1.setStatus("APPROVED");
+        verifyPass(verified, cr1, cr2);
+        assertEquals(List.of("cr-1"), new ArrayList<>(verified));
+
+        // cr-2 replays: the model moves past cr-1's basis, and cr-2 verifies against it.
+        committedChildren.put(PARENT_ID, List.of(PRE_CHILD, CR1_CHILD, CR2_CHILD));
+        cr2.setStatus("APPROVED");
+        verifyPass(verified, cr1, cr2);
+        assertEquals(List.of("cr-1", "cr-2"), new ArrayList<>(verified));
+
+        assertThrows(FramingBatchException.class,
+                () -> TideAttestor.requireFramedUnitHash(cr1, cr1.getRequestUnitsHash(),
+                        framedCbor(cr1)),
+                "deferring cr-1 to the end of the drive would compare it against a model that "
+                        + "has moved past what it framed");
+    }
+
+    @Test
+    void aMemberThatNeverReachedItsBasis_failsClosedRatherThanCommittingUnverified() {
+        committedParent(PARENT_ID, PRE_CHILD, CR1_CHILD, CR2_CHILD);
+        IgaChangeRequestEntity cr1 = addComposite("cr-1", 1L, PARENT_ID, CR1_CHILD);
+        IgaChangeRequestEntity cr2 = addComposite("cr-2", 2L, PARENT_ID, CR2_CHILD);
+        frameOverCurrentModel(cr1, List.of("cr-1", "cr-2"));
+        cr1.setStatus("APPROVED");
+
+        FramingBatchException ex = assertThrows(FramingBatchException.class,
+                () -> attestor.requireAllFramedUnitsVerified(List.of(cr1), new LinkedHashSet<>()));
+
+        assertEquals(FramingBatchException.CODE_BATCH_BROKEN, ex.getCode());
+        assertEquals("cr-1", ex.getChangeRequestId());
+        assertEquals("PENDING", cr2.getStatus(), "cr-2 never applied, which is why cr-1 is unverifiable");
+    }
+
     @Test
     void framedUnitHash_matchesWhenTheCommittedModelIsTheModelThatWasFramed() {
         committedParent(PARENT_ID, PRE_CHILD, CR1_CHILD, CR2_CHILD);
@@ -358,6 +480,59 @@ class TideAttestorFramingBatchTest {
         assertNull(cr2.getRequestModel(), "the survivor must be re-approved, not committed as framed");
         assertNull(cr2.getRequestBatch());
         assertNull(cr2.getRequestUnitsHash());
+    }
+
+    // -------------------------------------------------------------------------
+    // A frozen carrier whose basis has become unreachable, detected at APPROVAL
+    // -------------------------------------------------------------------------
+
+    @Test
+    void accumulatedCarrier_isSoundWhileEveryMemberIsStillPendingOrApplied() {
+        committedParent(PARENT_ID, PRE_CHILD, CR1_CHILD, CR2_CHILD);
+        IgaChangeRequestEntity cr1 = addComposite("cr-1", 1L, PARENT_ID, CR1_CHILD);
+        IgaChangeRequestEntity cr2 = addComposite("cr-2", 2L, PARENT_ID, CR2_CHILD);
+        cr1.setRequestBatchList(List.of("cr-1", "cr-2"));
+
+        assertTrue(attestor.unreachableFramingBasis(session, realm, cr1).isEmpty(),
+                "both members are still pending, so the framed state is still reachable");
+
+        cr2.setStatus("APPROVED");
+        assertTrue(attestor.unreachableFramingBasis(session, realm, cr1).isEmpty(),
+                "a member that has already applied is exactly what the framing assumed");
+    }
+
+    @Test
+    void accumulatedCarrier_whoseMemberLeftThePool_isReportedUnreachable() {
+        committedParent(PARENT_ID, PRE_CHILD, CR1_CHILD, CR2_CHILD);
+        IgaChangeRequestEntity cr1 = addComposite("cr-1", 1L, PARENT_ID, CR1_CHILD);
+        IgaChangeRequestEntity cr2 = addComposite("cr-2", 2L, PARENT_ID, CR2_CHILD);
+        cr1.setRequestBatchList(List.of("cr-1", "cr-2"));
+        cr2.setStatus("DENIED");
+
+        assertEquals(List.of("cr-2"), attestor.unreachableFramingBasis(session, realm, cr1),
+                "the denied member's delta will never apply, so the accumulated carrier can "
+                        + "never satisfy its own digest and must be rebuilt while the enclave "
+                        + "is open rather than failing at commit");
+    }
+
+    @Test
+    void newcomerOnTheSameOwner_doesNotMakeAnApprovedCarrierUnreachable() {
+        // The frozen-membership rule: a change request filed after the group was approved forms
+        // its own superset batch and waits. It must NOT invalidate the approved carriers, which
+        // would throw away the dokens the enclave already collected.
+        committedParent(PARENT_ID, PRE_CHILD, CR1_CHILD, CR2_CHILD);
+        IgaChangeRequestEntity cr1 = addComposite("cr-1", 1L, PARENT_ID, CR1_CHILD);
+        IgaChangeRequestEntity cr2 = addComposite("cr-2", 2L, PARENT_ID, CR2_CHILD);
+        cr1.setRequestBatchList(List.of("cr-1", "cr-2"));
+        cr2.setRequestBatchList(List.of("cr-1", "cr-2"));
+
+        IgaChangeRequestEntity cr3 = addComposite("cr-3", 3L, PARENT_ID, "c-ddd");
+
+        assertTrue(attestor.unreachableFramingBasis(session, realm, cr1).isEmpty());
+        assertEquals(List.of("cr-1", "cr-2", "cr-3"),
+                TideAttestor.framingBatchIds(attestor.resolveFramingBatch(session, realm, cr3)),
+                "the newcomer frames over the whole owner, including the members that commit "
+                        + "before it");
     }
 
     @Test

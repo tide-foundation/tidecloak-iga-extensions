@@ -2038,14 +2038,38 @@ public class TideAttestor implements IgaAttestor {
         // Expiry edge: if the existing carrier's creation-auth has lapsed, returning it verbatim
         // is still correct — the embedded dokens cover their own signed bytes; re-initializing
         // would change those bytes and invalidate every prior doken. So it is returned untouched.
+        //
+        // FRAMING BATCH INTERACTION: this path must NOT re-frame, so a carrier's framing batch
+        // is FROZEN by its first recorded approval. That is the sound rule, not a limitation:
+        // re-framing would change the bytes the first admin's doken covers and invalidate it.
+        // A change request filed later against the same owner therefore does NOT join this
+        // batch; it forms its own (superset) batch and waits for this group to apply first,
+        // which is what the commit-time ordering already expresses. What is NOT sound is
+        // returning a carrier whose batch names a change request that has left the pool, since
+        // its projection can then never be reproduced. Detect that HERE, while the admin has
+        // the enclave open, and invalidate so they re-approve now instead of discovering it at
+        // commit.
         String existingCarrier = cr.getRequestModel();
         if (existingCarrier != null && !existingCarrier.isBlank()
                 && countRecordedApprovals(session, cr) >= 1) {
-            log.infof("IGA multiAdmin approval (phase 1): CR %s (action=%s) already has %d recorded "
-                            + "approval(s) + a non-blank carrier — returning the ACCUMULATED carrier "
-                            + "verbatim (the enclave appends the next doken) instead of rebuilding fresh.",
-                    cr.getId(), cr.getActionType(), countRecordedApprovals(session, cr));
-            return existingCarrier;
+            List<String> unreachable = unreachableFramingBasis(session, realm, cr);
+            if (unreachable.isEmpty()) {
+                log.infof("IGA multiAdmin approval (phase 1): CR %s (action=%s) already has %d recorded "
+                                + "approval(s) + a non-blank carrier (framing batch %s) - returning the "
+                                + "ACCUMULATED carrier verbatim (the enclave appends the next doken) "
+                                + "instead of rebuilding fresh.",
+                        cr.getId(), cr.getActionType(), countRecordedApprovals(session, cr),
+                        framingBatchIdOf(cr));
+                return existingCarrier;
+            }
+            log.warnf("IGA multiAdmin approval (phase 1): CR %s carries an accumulated carrier framed "
+                            + "over batch %s, but member(s) %s have left the approvable pool, so the "
+                            + "state it was framed over can never be reached. Invalidating the group "
+                            + "and re-framing against the current state; the collected approvals no "
+                            + "longer describe this change and are cleared.",
+                    cr.getId(), cr.getRequestBatchList(), unreachable);
+            EntityManager batchEm = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            invalidateFramingBatch(session, realm, batchEm, cr);
         }
 
         // OFFBOARD_REALM is NON-producer (its own CR attestation stub-signs — no AttestationUnit
@@ -4881,6 +4905,37 @@ public class TideAttestor implements IgaAttestor {
         return batch;
     }
 
+    /**
+     * Members of {@code cr}'s recorded framing batch whose replay can never happen, so the
+     * model state its carrier was framed over is unreachable: a member that no longer exists,
+     * belongs to another realm, or was denied or cancelled. A member that is still PENDING or
+     * already APPROVED is reachable (it will apply, or has).
+     *
+     * <p>Empty for a carrier with no framing batch, and empty in the ordinary case where a
+     * change request filed later merely joined the owner: that newcomer frames its OWN
+     * superset batch and waits, it does not move this one.
+     */
+    public List<String> unreachableFramingBasis(KeycloakSession session, RealmModel realm,
+                                                IgaChangeRequestEntity cr) {
+        List<String> memberIds = cr.getRequestBatchList();
+        if (memberIds.isEmpty()) {
+            return List.of();
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<String> unreachable = new ArrayList<>();
+        for (String memberId : memberIds) {
+            IgaChangeRequestEntity member = em.find(IgaChangeRequestEntity.class, memberId);
+            if (member == null || !realm.getId().equals(member.getRealmId())
+                    || !("PENDING".equals(member.getStatus()) || "APPROVED".equals(member.getStatus()))) {
+                unreachable.add(memberId);
+            }
+        }
+        if (!memberIds.contains(cr.getId())) {
+            unreachable.add(cr.getId());
+        }
+        return unreachable;
+    }
+
     /** The ordered member ids of a framing batch. */
     public static List<String> framingBatchIds(List<IgaChangeRequestEntity> batch) {
         List<String> ids = new ArrayList<>(batch.size());
@@ -4945,9 +5000,17 @@ public class TideAttestor implements IgaAttestor {
      * read will re-derive; a mismatch means they are not, and stamping that quorum signature
      * would leave the owner set unverifiable at the next token mint.
      *
-     * <p>Costs no key material and no extra ork round-trip. Runs AFTER every member of the
-     * framing batch has replayed, which is the state the carrier was framed over. Fail-closed:
-     * throws {@link FramingBatchException}, so the commit transaction rolls back.
+     * <p><b>When to call this.</b> A carrier is framed over the state after EVERY member of
+     * its framing batch has applied, so this is only meaningful at the moment that basis is
+     * EXACTLY applied. Calling it right after the change request's OWN replay is wrong for
+     * every member of a multi-member batch except the one that replays last: the model is then
+     * {@code pre + that member's delta} while the carrier described {@code pre + all deltas},
+     * and the digest mismatches BY CONSTRUCTION. Callers must drive this through
+     * {@link #verifyFramedUnitsWithAppliedBasis}, which fires each member exactly when
+     * {@link #hasAppliedFramingBasis} first holds for it.
+     *
+     * <p>Costs no key material and no extra ork round-trip. Fail-closed: throws
+     * {@link FramingBatchException}, so the commit transaction rolls back.
      *
      * <p>No-op for a carrier with no recorded digest (a legacy carrier, or a change request
      * that framed no producer unit) and on any lane this class signs itself, where the
@@ -4995,17 +5058,87 @@ public class TideAttestor implements IgaAttestor {
         }
     }
 
-    /** {@link #verifyFramedUnitHash} for every change request an operation committed. */
-    public void verifyFramedUnitHashes(KeycloakSession session, RealmModel realm,
-                                       List<IgaChangeRequestEntity> crs) {
-        if (crs == null) {
-            return;
-        }
-        for (IgaChangeRequestEntity cr : crs) {
-            if (cr != null) {
-                verifyFramedUnitHash(session, realm, cr);
+    /**
+     * Has the model reached the state {@code cr}'s carrier was framed over, i.e. has EVERY
+     * member of its framing batch applied?
+     *
+     * <p>A member counts as applied once its change request is APPROVED, which the replay sets
+     * before the transaction completes, so this reads true for members applied earlier in the
+     * SAME operation as well as for members committed in an earlier one. An empty framing
+     * batch (a legacy carrier) is trivially satisfied.
+     */
+    public static boolean hasAppliedFramingBasis(EntityManager em, IgaChangeRequestEntity cr) {
+        for (String memberId : cr.getRequestBatchList()) {
+            IgaChangeRequestEntity member = em.find(IgaChangeRequestEntity.class, memberId);
+            if (member == null || !"APPROVED".equals(member.getStatus())) {
+                return false;
             }
         }
+        return true;
+    }
+
+    /**
+     * Verify every not-yet-verified change request in {@code members} whose framing basis has
+     * just become fully applied, recording the ones checked in {@code verified}.
+     *
+     * <p>Call this after EACH member of an operation replays, not once at the end. The
+     * verification point is per member: a carrier framed over {@code {A, B}} may only be
+     * checked once both have applied, while one framed over {@code {A}} alone (filed before B
+     * existed, then frozen by its first approval) must be checked as soon as A applies, since
+     * a later replay of B moves the owner set past what that carrier described. Firing each
+     * member at the moment its own basis is first satisfied is the only rule that is correct
+     * for both.
+     */
+    public void verifyFramedUnitsWithAppliedBasis(KeycloakSession session, RealmModel realm,
+                                                  List<IgaChangeRequestEntity> members,
+                                                  Set<String> verified) {
+        if (members == null || members.isEmpty()) {
+            return;
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        for (IgaChangeRequestEntity member : members) {
+            if (member == null || verified.contains(member.getId())
+                    || !hasAppliedFramingBasis(em, member)) {
+                continue;
+            }
+            verifyFramedUnitHash(session, realm, member);
+            verified.add(member.getId());
+        }
+    }
+
+    /**
+     * Fail closed on any committed change request whose framing basis this operation never
+     * reached, so a carrier can never slip through unverified because the group it was framed
+     * with did not fully apply.
+     */
+    public void requireAllFramedUnitsVerified(List<IgaChangeRequestEntity> members,
+                                              Set<String> verified) {
+        if (members == null) {
+            return;
+        }
+        for (IgaChangeRequestEntity member : members) {
+            if (member == null || verified.contains(member.getId())) {
+                continue;
+            }
+            throw new FramingBatchException(FramingBatchException.CODE_BATCH_BROKEN,
+                    framingBatchIdOf(member), member.getId(),
+                    "this operation committed the change request without ever reaching the model "
+                            + "state its carrier was framed over (framing batch "
+                            + member.getRequestBatchList() + " did not all apply)");
+        }
+    }
+
+    /**
+     * Single-change-request form for the lane that commits one at a time: verify now, and fail
+     * closed if the basis is not applied (which for a one-member batch it always is, since the
+     * change request has just replayed).
+     */
+    public void verifyFramedUnitHashWhenBasisApplied(KeycloakSession session, RealmModel realm,
+                                                     IgaChangeRequestEntity cr) {
+        List<IgaChangeRequestEntity> one = List.of(cr);
+        Set<String> verified = new HashSet<>();
+        verifyFramedUnitsWithAppliedBasis(session, realm, one, verified);
+        requireAllFramedUnitsVerified(one, verified);
     }
 
     /**

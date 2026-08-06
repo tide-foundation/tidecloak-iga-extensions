@@ -893,11 +893,14 @@ public class IgaAdminResource {
                 && !org.tidecloak.iga.attestors.TideAttestor.ACTION_DELETE_REALM.equals(cr.getActionType())) {
             tideAttestor.stampProducerUnitColumns(session, realm, cr);
             // STRICT byte-provenance for the frozen-carrier lane: the units re-derived from
-            // the model as it now stands must hash to what this CR's approval carrier framed.
-            // Checked HERE, immediately after this CR's own replay, because that is the state
-            // its framing batch projected. A later member of the same batch will move the
-            // owner set again and carries its own digest for that state. Fail-closed.
-            tideAttestor.verifyFramedUnitHash(session, realm, cr);
+            // the model must hash to what this CR's approval carrier framed. Only correct at
+            // the moment the carrier's whole framing basis has applied, which for the lane
+            // that reaches here (a one-member batch, or a legacy carrier) is now. When a
+            // multi-member group is being driven, the driver owns the verification and fires
+            // each member at ITS OWN basis point instead. Fail-closed.
+            if (!framingBatchDriveActive) {
+                tideAttestor.verifyFramedUnitHashWhenBasisApplied(session, realm, cr);
+            }
             // Coalesced SET-unit stamp: the IDENTICAL call the bulk lane makes after its
             // batch drains, here over the single CR this commit applied. Re-derives the
             // owner's set from the committed model, signs it once, stamps it as the LAST
@@ -1074,6 +1077,14 @@ public class IgaAdminResource {
                     .build();
         }
 
+        // Byte-provenance for the group. A member's carrier describes the model after its
+        // WHOLE framing batch has applied, so verifying it right after its own replay would
+        // compare against pre + that member's delta and mismatch by construction for every
+        // member but the last. Each member is instead verified at the point its own basis
+        // first becomes fully applied, which the pass below re-evaluates after every replay,
+        // and the final requireAll refuses to let any member through unverified.
+        TideAttestor batchAttestor = attestor instanceof TideAttestor tide ? tide : null;
+        java.util.Set<String> verified = new java.util.LinkedHashSet<>();
         framingBatchDriveActive = true;
         try {
             for (IgaChangeRequestEntity member : toCommit) {
@@ -1087,6 +1098,12 @@ public class IgaAdminResource {
                             batchId, realm.getName(), member.getId(), memberResp.getStatus());
                     return memberResp;
                 }
+                if (batchAttestor != null) {
+                    batchAttestor.verifyFramedUnitsWithAppliedBasis(session, realm, toCommit, verified);
+                }
+            }
+            if (batchAttestor != null) {
+                batchAttestor.requireAllFramedUnitsVerified(toCommit, verified);
             }
         } finally {
             framingBatchDriveActive = false;
@@ -1816,9 +1833,16 @@ public class IgaAdminResource {
                     .build();
         }
 
-        IgaBulkLock.Result<Map<String, Object>> lockResult =
-                runBulkLocked(admin, byId, crIdIn, actionTypes, olderThan, limit,
-                        /*deferConverge*/ false);
+        IgaBulkLock.Result<Map<String, Object>> lockResult;
+        try {
+            lockResult = runBulkLocked(admin, byId, crIdIn, actionTypes, olderThan, limit,
+                    /*deferConverge*/ false);
+        } catch (org.tidecloak.iga.attestors.FramingBatchException fbe) {
+            // A framed group's carrier does not describe what this drain produced. It is not a
+            // per-CR outcome (earlier members are already applied in this transaction), so the
+            // whole drain rolls back and the group is invalidated out of band.
+            return framingBatchRefusal(fbe);
+        }
 
         if (!lockResult.isHeld()) {
             // Preserve the existing 429 response shape so the existing
@@ -1973,8 +1997,14 @@ public class IgaAdminResource {
                     //     predate the framing batch (no member list persisted). Those really
                     //     were framed as pre-set + own delta and cannot be reconciled.
                     Map<String, Map<String, Object>> refusals = new LinkedHashMap<>();
+                    // Byte-provenance state for this drain: the attestor that owns the check
+                    // (null on a lane with no frozen carriers) and the change requests already
+                    // checked, so each is verified exactly once, at its own basis point.
+                    TideAttestor framedUnitVerifier = null;
+                    java.util.Set<String> framedUnitsVerified = new java.util.LinkedHashSet<>();
                     if (IgaAttestors.resolveAttestor(session, realm) instanceof TideAttestor frozenAttestor
                             && TideAttestor.usesFrozenApprovalCarrier(session, realm)) {
+                        framedUnitVerifier = frozenAttestor;
                         refuseIncompleteFramingBatches(candidates, refusals);
                         List<IgaChangeRequestEntity> legacyCarriers = new ArrayList<>();
                         for (IgaChangeRequestEntity candidate : candidates) {
@@ -2027,9 +2057,23 @@ public class IgaAdminResource {
                             if (org.tidecloak.iga.signing.IgaIdpSettingsResign.changesClientSignedSetting(candidate)) {
                                 anyClientReSign = true;
                             }
+                            // Byte-provenance, re-evaluated after EVERY replay. A carrier
+                            // describes the model after its whole framing batch has applied,
+                            // so each committed change request is checked at the point its own
+                            // basis first becomes fully applied, never after its own replay
+                            // alone (which for a group member is a projection nothing ever
+                            // framed) and never only at the end (which is past the basis of a
+                            // member framed before the group grew).
+                            if (framedUnitVerifier != null) {
+                                framedUnitVerifier.verifyFramedUnitsWithAppliedBasis(
+                                        session, realm, committedCrs, framedUnitsVerified);
+                            }
                         }
                         else if ("REJECTED".equals(status)) rejected++;
                         else skipped++;
+                    }
+                    if (framedUnitVerifier != null) {
+                        framedUnitVerifier.requireAllFramedUnitsVerified(committedCrs, framedUnitsVerified);
                     }
 
                     // Coalesced SET-unit stamp (ONCE per owner set per batch). Every replay
@@ -2297,9 +2341,11 @@ public class IgaAdminResource {
             if (attestor instanceof org.tidecloak.iga.attestors.TideAttestor tideAttestor
                     && !org.tidecloak.iga.attestors.TideAttestor.ACTION_DELETE_REALM.equals(cr.getActionType())) {
                 tideAttestor.stampProducerUnitColumns(session, realm, cr);
-                // Same strict byte-provenance check the single-CR commit tail runs, in the
-                // same position (right after this CR's own replay).
-                tideAttestor.verifyFramedUnitHash(session, realm, cr);
+                // NO byte-provenance check here. This lane commits a framed group one change
+                // request per loop iteration, so at this point only THIS member's delta is in
+                // the model while its carrier described the whole group's. runBulkLocked runs
+                // the check after every iteration instead, firing each member when its own
+                // framing basis is first fully applied.
             }
 
             // Re-sign Tide IdP settings if this CR changed a signed VendorSettings
