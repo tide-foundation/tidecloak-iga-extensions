@@ -93,6 +93,8 @@ class TideAttestorSetUnitCoalescingTest {
     private final Map<String, List<String>> committedChildren = new LinkedHashMap<>();
     /** When set, the column read returns this instead of what was stamped. */
     private String columnReadOverride;
+    /** Rows the fan-out UPDATE reports as affected; 0 means the owner set has no rows left. */
+    private int stampAffectedRows = 1;
 
     private TideAttestor attestor;
 
@@ -136,9 +138,11 @@ class TideAttestorSetUnitCoalescingTest {
             if (jpql.startsWith("UPDATE CompositeRoleEntity")) {
                 when(q.executeUpdate()).thenAnswer(x -> {
                     String owner = (String) params.get("id");
-                    attestationColumn.put(owner, (String) params.get("sig"));
                     stampedOwners.add(owner);
-                    return 1;
+                    if (stampAffectedRows > 0) {
+                        attestationColumn.put(owner, (String) params.get("sig"));
+                    }
+                    return stampAffectedRows;
                 });
             } else if (jpql.startsWith("SELECT e.attestation FROM CompositeRoleEntity")) {
                 when(q.getResultList()).thenAnswer(x -> {
@@ -173,10 +177,15 @@ class TideAttestorSetUnitCoalescingTest {
     }
 
     private IgaChangeRequestEntity addComposite(String crId, String parentRoleId, String childId) {
+        return compositeCr(crId, "ADD_COMPOSITE", parentRoleId, childId);
+    }
+
+    private IgaChangeRequestEntity compositeCr(String crId, String actionType, String parentRoleId,
+                                               String childId) {
         IgaChangeRequestEntity cr = mock(IgaChangeRequestEntity.class);
         when(cr.getId()).thenReturn(crId);
         when(cr.getRealmId()).thenReturn(REALM_ID);
-        when(cr.getActionType()).thenReturn("ADD_COMPOSITE");
+        when(cr.getActionType()).thenReturn(actionType);
         when(cr.getEntityId()).thenReturn(parentRoleId);
         when(cr.getRequestModel()).thenReturn(null);
         when(cr.getRowsJson()).thenReturn(
@@ -287,6 +296,22 @@ class TideAttestorSetUnitCoalescingTest {
         assertEquals("role_composite_children_set", ex.getUnitType());
         assertEquals(DEFAULT_ROLE_ID, ex.getTargetId());
         assertTrue(ex.getMessage().contains(REALM_NAME));
+    }
+
+    @Test
+    void emptiedOwnerSet_stampsNoRowsAndDoesNotFailClosed() {
+        // A revoke that removed the owner's last member leaves no row to carry a signature.
+        // The login read emits no unit for that owner either, so a 0-row stamp is a coverage
+        // no-op: verification must be skipped rather than reported as a missing attestation.
+        committedParent(DEFAULT_ROLE_ID);
+        IgaChangeRequestEntity cr1 =
+                compositeCr("cr-1", "REMOVE_COMPOSITE", DEFAULT_ROLE_ID, CR1_CHILD);
+        stampAffectedRows = 0;
+
+        attestor.stampCoalescedSetUnits(session, realm, List.of(cr1));
+
+        assertEquals(List.of(DEFAULT_ROLE_ID), stampedOwners, "the fan-out is still attempted");
+        assertTrue(attestationColumn.isEmpty(), "no row existed to carry the signature");
     }
 
     @Test

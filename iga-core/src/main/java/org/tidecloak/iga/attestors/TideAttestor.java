@@ -4602,12 +4602,18 @@ public class TideAttestor implements IgaAttestor {
      * {@link UnitColumnMapping} (the same owner fan-out the dispatcher and the login read
      * use), then verified via {@link #verifyStampedSetUnit}.
      *
-     * <p>SKIPPED for a real-signing-capable multiAdmin two-phase commit: there the ONLY
-     * signer is the phase-1 collected-doken carrier ({@link #distributeMultiAdminUnitSigs}),
-     * which already re-derives each unit from the post-replay live model; re-signing here
-     * would replace its real Policy:1 VVK signature with the {@link #DUMMY_SIG_PREFIX} stub
-     * {@link #signProducerEnvelopes} returns in that mode. Non-edge action types carry no
-     * owner set and are ignored, so the caller may pass its whole batch.
+     * <p>RE-SIGNS ONLY WHERE {@link #signProducerEnvelopes} IS THE AUTHORITATIVE SIGNER, i.e.
+     * where it takes its REAL branch ({@link #MODE_FIRST_ADMIN} on a
+     * {@link #isRealSigningCapable} realm) or where nothing real exists to overwrite (a
+     * not-capable dev/test realm, where every signer stubs). On a real-signing-capable
+     * multiAdmin realm the authoritative signer for these edge sets is the Policy:1 ceremony
+     * {@link #sign} routes to ({@code signMultiAdminUnitViaPolicy}) and, for a carrier CR,
+     * {@link #distributeMultiAdminUnitSigs}; both produce a real 64-byte VVK signature under
+     * {@link #FIRSTADMIN_SIG_PREFIX}, whereas {@link #signProducerEnvelopes} would return the
+     * {@link #DUMMY_SIG_PREFIX} stub. Re-signing there would DESTROY a valid signature and
+     * break the next token mint, so that lane is audited ({@link #auditStampedSetUnits}) and
+     * left alone. Non-edge action types carry no owner set and are ignored, so the caller may
+     * pass its whole batch.
      */
     public void stampCoalescedSetUnits(KeycloakSession session, RealmModel realm,
                                        List<IgaChangeRequestEntity> crs) {
@@ -4624,9 +4630,6 @@ public class TideAttestor implements IgaAttestor {
             if (cr == null || !isProducerEnvelopeSignedAction(cr.getActionType())) {
                 continue;
             }
-            if (isMultiAdminCarrierCommit(realm, mode, cr)) {
-                continue;
-            }
             AttestationUnit unit = buildEdgeSetUnit(session, realm, cr);
             String owner = unit.unitType() + '|' + unit.targetId();
             crByOwner.put(owner, cr);
@@ -4635,8 +4638,13 @@ public class TideAttestor implements IgaAttestor {
         if (unitByOwner.isEmpty()) {
             return;
         }
-
         List<String> owners = new ArrayList<>(unitByOwner.keySet());
+
+        if (!isAuthoritativeSetSigner(realm, mode)) {
+            auditStampedSetUnits(em, realm, owners, unitByOwner, crByOwner);
+            return;
+        }
+
         byte[][] envelopes = new byte[owners.size()][];
         for (int i = 0; i < owners.size(); i++) {
             envelopes[i] = unitByOwner.get(owners.get(i)).serialize();
@@ -4645,11 +4653,49 @@ public class TideAttestor implements IgaAttestor {
         for (int i = 0; i < owners.size(); i++) {
             String owner = owners.get(i);
             AttestationUnit unit = unitByOwner.get(owner);
-            UnitColumnMapping.stamp(em, unit, sigs[i]);
+            int rows = UnitColumnMapping.stamp(em, unit, sigs[i]);
+            if (rows == 0) {
+                // The owner set has no rows left to carry a signature (e.g. a revoke that
+                // removed the last member). The login read emits no unit for it either, so a
+                // 0-row stamp is a coverage no-op, not an error, and there is nothing to
+                // verify. Matches UnitColumnMapping.stamp's contract and the identical
+                // treatment in distributeMultiAdminUnitSigs.
+                log.debugf("IGA set-unit coalescing: unit %s (target=%s) stamped 0 rows in realm %s",
+                        unit.unitType(), unit.targetId(), realm.getName());
+                continue;
+            }
             verifyStampedSetUnit(session, realm, em, crByOwner.get(owner), envelopes[i], sigs[i]);
         }
         log.debugf("IGA set-unit coalescing: stamped %d owner set(s) from %d change request(s) "
                 + "in realm %s.", owners.size(), crs.size(), realm.getName());
+    }
+
+    /**
+     * Read-only pass for the lane this class does NOT sign (a real-signing-capable multiAdmin
+     * realm, whose edge sets are signed by the Policy:1 ceremony). Re-reads each owner's
+     * column through {@link UnitColumnMapping} and WARNS when it is not a replayable 64-byte
+     * VVK signature, which is what {@code IgaAttestationExporterProvider.replayOrFailClosed}
+     * will reject at the next token mint.
+     *
+     * <p>Deliberately does NOT throw: this commit did not write those values, so a stub there
+     * is a pre-existing coverage gap in another signer (the class of defect fixed for
+     * {@code REVOKE_ROLES} in 6ce18e5), not something this change introduced. Failing the
+     * commit closed on it would block admins on a condition they cannot resolve from here.
+     */
+    private void auditStampedSetUnits(EntityManager em, RealmModel realm, List<String> owners,
+                                      Map<String, AttestationUnit> unitByOwner,
+                                      Map<String, IgaChangeRequestEntity> crByOwner) {
+        for (String owner : owners) {
+            AttestationUnit unit = unitByOwner.get(owner);
+            String stored = UnitColumnMapping.readStored(em, unit);
+            if (stored != null && !isReplayableVvkSig(stored)) {
+                log.warnf("IGA set-unit audit: unit %s target %s in realm %s carries a "
+                        + "non-replayable attestation after commit of change request %s. The "
+                        + "next token mint will reject it in the uniform login replay.",
+                        unit.unitType(), unit.targetId(), realm.getName(),
+                        crByOwner.get(owner).getId());
+            }
+        }
     }
 
     /**
@@ -4697,15 +4743,32 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * Is this CR committed through the real-signing-capable multiAdmin two-phase lane, whose
-     * per-unit signatures come from the phase-1 collected-doken carrier? Mirrors the gate
-     * {@link #stampProducerUnitColumns} takes into {@link #distributeMultiAdminUnitSigs}.
+     * May {@link #stampCoalescedSetUnits} overwrite an edge set's existing attestation on this
+     * realm? Only where {@link #signProducerEnvelopes} is the AUTHORITATIVE signer, which is
+     * exactly where it takes its real branch, plus the case where nothing real can be lost:
+     *
+     * <ul>
+     *   <li>{@link #MODE_FIRST_ADMIN}: {@link #signProducerEnvelopes} runs the real firstAdmin
+     *       VVK ceremony when capable, and the same stub every other signer on that realm would
+     *       produce when not.</li>
+     *   <li>NOT {@link #isRealSigningCapable}: a dev/test realm where every signer stubs, so no
+     *       replayable signature exists to destroy.</li>
+     * </ul>
+     *
+     * <p>Everything else (notably a real-signing-capable multiAdmin realm) is EXCLUDED. There
+     * {@link #sign} routes an edge CR to {@code signMultiAdminUnitViaPolicy}, whose real 64-byte
+     * VVK signature the dispatcher fans across the owner set; {@link #signProducerEnvelopes}
+     * would return the {@link #DUMMY_SIG_PREFIX} stub and replacing a real signature with it
+     * breaks the next token mint.
+     *
+     * <p>Keyed on mode + capability, NOT on whether the CR still carries a phase-1 doken carrier
+     * ({@code getRequestModel}): the multiAdmin signer is selected by {@code realCeremonyEligible
+     * && isRealSigningCapable} in {@link #sign}, and the carrier column is not a reliable proxy
+     * for it (it is cleared on some paths), so a carrier-keyed test misses carrier-less edge CRs
+     * that were nonetheless really signed.
      */
-    private static boolean isMultiAdminCarrierCommit(RealmModel realm, String mode,
-                                                     IgaChangeRequestEntity cr) {
-        return MODE_MULTI_ADMIN.equals(mode) && isRealSigningCapable(realm)
-                && cr.getRequestModel() != null && !cr.getRequestModel().isBlank()
-                && cr.getActionType() != null && !cr.getActionType().startsWith("ADOPT_");
+    private static boolean isAuthoritativeSetSigner(RealmModel realm, String mode) {
+        return MODE_FIRST_ADMIN.equals(mode) || !isRealSigningCapable(realm);
     }
 
     /**
