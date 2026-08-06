@@ -75,6 +75,9 @@ class IgaCommitRegenPolicyOrderingGateTest {
         when(realm.getName()).thenReturn("test-realm");
         when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
         when(jpa.getEntityManager()).thenReturn(em);
+        // commitResolved runs the single-CR pipeline under the per-realm IgaBulkLock, so the
+        // cluster mutex must resolve; run its callable inline.
+        IgaTestClusterLock.stubInlineClusterLock(session);
         resource = new IgaAdminResource(session, realm, auth);
 
         // resolveMode(...) -> multiAdmin via the IgaAuthorizer.findByRealm named query.
