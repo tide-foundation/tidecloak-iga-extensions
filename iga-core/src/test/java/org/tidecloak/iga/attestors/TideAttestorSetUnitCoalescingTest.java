@@ -30,6 +30,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -296,6 +297,53 @@ class TideAttestorSetUnitCoalescingTest {
         assertEquals("role_composite_children_set", ex.getUnitType());
         assertEquals(DEFAULT_ROLE_ID, ex.getTargetId());
         assertTrue(ex.getMessage().contains(REALM_NAME));
+    }
+
+    // -------------------------------------------------------------------------
+    // Contested-owner detection (the frozen-approval-carrier hazard)
+    // -------------------------------------------------------------------------
+
+    /**
+     * The detection is deliberately independent of {@code isRealSigningCapable}, which a unit
+     * test cannot make true (it needs a provisioned tide-vendor-key component AND the
+     * THRESHOLD_T/THRESHOLD_N environment). Only the CAPABILITY gate that consumes this result
+     * is stack-only; the grouping itself is covered here.
+     */
+    @Test
+    void twoCrsOnOneOwner_areReportedAsContested() {
+        committedParent(DEFAULT_ROLE_ID, PRE_CHILD, CR1_CHILD, CR2_CHILD);
+        IgaChangeRequestEntity cr1 = addComposite("cr-1", DEFAULT_ROLE_ID, CR1_CHILD);
+        IgaChangeRequestEntity cr2 = addComposite("cr-2", DEFAULT_ROLE_ID, CR2_CHILD);
+
+        Map<String, List<String>> contested =
+                attestor.findContestedSetOwners(session, realm, List.of(cr1, cr2));
+
+        assertEquals(1, contested.size(), "the shared owner set is contested");
+        assertEquals(List.of("cr-1", "cr-2"),
+                contested.get("role_composite_children_set|" + DEFAULT_ROLE_ID),
+                "both contributors are named so the admin can commit one and re-approve the rest");
+    }
+
+    @Test
+    void crsOnDifferentOwners_areNotContested() {
+        committedParent(DEFAULT_ROLE_ID, PRE_CHILD, CR1_CHILD);
+        committedParent(OTHER_PARENT_ID, CR2_CHILD);
+        IgaChangeRequestEntity cr1 = addComposite("cr-1", DEFAULT_ROLE_ID, CR1_CHILD);
+        IgaChangeRequestEntity cr2 = addComposite("cr-2", OTHER_PARENT_ID, CR2_CHILD);
+
+        assertTrue(attestor.findContestedSetOwners(session, realm, List.of(cr1, cr2)).isEmpty(),
+                "distinct owner sets never contend for one signature");
+    }
+
+    @Test
+    void nonEdgeCrs_haveNoOwnerAndNeverContend() {
+        IgaChangeRequestEntity createRole = mock(IgaChangeRequestEntity.class);
+        when(createRole.getId()).thenReturn("cr-create-role");
+        when(createRole.getActionType()).thenReturn("CREATE_ROLE");
+
+        assertNull(attestor.setUnitOwnerKey(session, realm, createRole));
+        assertTrue(attestor.findContestedSetOwners(session, realm,
+                List.of(createRole, createRole)).isEmpty());
     }
 
     @Test

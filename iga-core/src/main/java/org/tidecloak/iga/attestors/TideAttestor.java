@@ -4642,6 +4642,7 @@ public class TideAttestor implements IgaAttestor {
 
         if (!isAuthoritativeSetSigner(realm, mode)) {
             auditStampedSetUnits(em, realm, owners, unitByOwner, crByOwner);
+            invalidateStaleSetUnitCarriers(session, realm, em, owners);
             return;
         }
 
@@ -4682,6 +4683,136 @@ public class TideAttestor implements IgaAttestor {
      * {@code REVOKE_ROLES} in 6ce18e5), not something this change introduced. Failing the
      * commit closed on it would block admins on a condition they cannot resolve from here.
      */
+    /**
+     * The eight edge actions whose commit signs a per-(table, owner) SET unit. Kept as a list
+     * so the pending-CR lookups below can filter server-side; {@link #isProducerEnvelopeSignedAction}
+     * remains the single predicate.
+     */
+    public static final List<String> EDGE_SET_ACTION_TYPES = List.of(
+            ACTION_GRANT_ROLES, ACTION_REVOKE_ROLES,
+            ACTION_JOIN_GROUPS, ACTION_LEAVE_GROUPS,
+            ACTION_GROUP_GRANT_ROLES, ACTION_GROUP_REVOKE_ROLES,
+            ACTION_ADD_COMPOSITE, ACTION_REMOVE_COMPOSITE);
+
+    /**
+     * Does this realm sign edge sets from a doken-bound approval carrier whose unit bytes are
+     * FROZEN at approval time? True for a real-signing-capable multiAdmin realm, whose
+     * {@code signMultiAdminUnitsViaPolicy} replays {@code ModelRequest.FromBytes(carrier)}
+     * VERBATIM: the ORK signs the bytes the enclave framed, not the bytes the commit re-derives.
+     * A carrier is therefore only valid while the owner's set is still what it was at approval.
+     *
+     * <p>The exact complement of {@link #isAuthoritativeSetSigner}: on every other realm this
+     * class re-signs from committed state, so no approval-time freeze applies.
+     */
+    public static boolean usesFrozenApprovalCarrier(RealmModel realm, String mode) {
+        return !isAuthoritativeSetSigner(realm, mode);
+    }
+
+    /** {@link #usesFrozenApprovalCarrier} for a caller that has not resolved the mode. */
+    public static boolean usesFrozenApprovalCarrier(KeycloakSession session, RealmModel realm) {
+        return usesFrozenApprovalCarrier(realm, resolveMode(session, realm));
+    }
+
+    /**
+     * The {@code (unit type, owner)} key of the edge set a CR perturbs, or {@code null} when it
+     * perturbs none or its owner cannot be resolved. Safe to call BEFORE the replay: the unit
+     * builder is {@code pre-set ± delta}, which yields the same owner either way.
+     */
+    public String setUnitOwnerKey(KeycloakSession session, RealmModel realm,
+                                  IgaChangeRequestEntity cr) {
+        if (cr == null || !isProducerEnvelopeSignedAction(cr.getActionType())) {
+            return null;
+        }
+        try {
+            AttestationUnit unit = buildEdgeSetUnit(session, realm, cr);
+            return unit.unitType() + '|' + unit.targetId();
+        } catch (RuntimeException unresolvable) {
+            // An owner we cannot resolve cannot be contested either; the CR will fail on its
+            // own merits in the commit gate.
+            log.debugf(unresolvable, "IGA set-unit owner unresolvable for CR %s (action %s)",
+                    cr.getId(), cr.getActionType());
+            return null;
+        }
+    }
+
+    /**
+     * Owners that MORE THAN ONE change request in {@code crs} would perturb, as
+     * {@code owner key -> contributing CR ids} in batch order. Empty when every owner has a
+     * single contributor.
+     *
+     * <p>On a {@link #usesFrozenApprovalCarrier} realm a contested owner CANNOT be committed as
+     * a batch: every contributor's carrier froze the owner's set at approval time as
+     * {@code pre + that CR's own delta}, so whichever commits second stamps a quorum signature
+     * over a set the database no longer holds. No re-ordering, no session boundary and no
+     * re-derivation at commit can repair that, because the signed bytes are not an input to the
+     * commit; only a fresh approval over the projected final set can.
+     */
+    public Map<String, List<String>> findContestedSetOwners(KeycloakSession session, RealmModel realm,
+                                                            List<IgaChangeRequestEntity> crs) {
+        Map<String, List<String>> byOwner = new java.util.LinkedHashMap<>();
+        for (IgaChangeRequestEntity cr : crs) {
+            String owner = setUnitOwnerKey(session, realm, cr);
+            if (owner != null) {
+                byOwner.computeIfAbsent(owner, k -> new ArrayList<>()).add(cr.getId());
+            }
+        }
+        Map<String, List<String>> contested = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> e : byOwner.entrySet()) {
+            if (e.getValue().size() > 1) {
+                contested.put(e.getKey(), e.getValue());
+            }
+        }
+        return contested;
+    }
+
+    /**
+     * Invalidate the frozen approval carrier of every OTHER still-PENDING change request that
+     * shares an owner set this commit just changed, so it cannot later stamp a quorum signature
+     * over the pre-commit member set.
+     *
+     * <p>Clears {@code REQUEST_MODEL} and the recorded authorizations, exactly as the
+     * threshold-policy re-pin does when its signed content moves (the old approvals genuinely
+     * signed different bytes). The next commit attempt then fails closed in
+     * {@code signMultiAdminUnitsViaPolicy} with "has no approval-model carrier" instead of
+     * corrupting the column, and re-opening the approval enclave re-frames the carrier against
+     * the now-current set, which is correct by construction.
+     *
+     * <p>This is what closes the CROSS-REQUEST half of the hazard: two CRs approved in one
+     * enclave session and committed one per request are just as stale as two committed in one
+     * batch. Only runs on a {@link #usesFrozenApprovalCarrier} realm.
+     */
+    private void invalidateStaleSetUnitCarriers(KeycloakSession session, RealmModel realm,
+                                                EntityManager em, List<String> owners) {
+        Set<String> committedOwners = new HashSet<>(owners);
+        List<IgaChangeRequestEntity> pending = new IgaChangeRequestService(em, session)
+                .listPendingByActionTypeIn(realm.getId(), EDGE_SET_ACTION_TYPES, null, CARRIER_SWEEP_LIMIT);
+        int invalidated = 0;
+        for (IgaChangeRequestEntity other : pending) {
+            String carrier = other.getRequestModel();
+            if (carrier == null || carrier.isBlank()) {
+                continue;
+            }
+            String owner = setUnitOwnerKey(session, realm, other);
+            if (owner == null || !committedOwners.contains(owner)) {
+                continue;
+            }
+            other.setRequestModel(null);
+            clearAuthorizations(em, other);
+            invalidated++;
+            log.warnf("IGA set-unit carrier invalidated: PENDING change request %s (action %s) shares "
+                    + "owner set %s with a change request just committed in realm %s. Its approval "
+                    + "froze the pre-commit member set, so its quorum signature would no longer match "
+                    + "the committed set. Re-open the approval enclave to re-approve it.",
+                    other.getId(), other.getActionType(), owner, realm.getName());
+        }
+        if (invalidated > 0) {
+            em.flush();
+        }
+    }
+
+    /** Upper bound on the pending-CR scan {@link #invalidateStaleSetUnitCarriers} performs. */
+    private static final int CARRIER_SWEEP_LIMIT = 1000;
+
     private void auditStampedSetUnits(EntityManager em, RealmModel realm, List<String> owners,
                                       Map<String, AttestationUnit> unitByOwner,
                                       Map<String, IgaChangeRequestEntity> crByOwner) {

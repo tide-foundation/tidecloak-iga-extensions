@@ -1638,8 +1638,56 @@ public class IgaAdminResource {
                     // member predicate, so two CRs against one owner leave a signature that
                     // commits to a set the DB no longer holds.
                     List<IgaChangeRequestEntity> committedCrs = new ArrayList<>();
+
+                    // INTERIM SAFETY VALVE (see the class note on frozen approval carriers).
+                    // On a realm whose edge sets are signed from a doken-bound approval carrier,
+                    // the unit bytes are FROZEN when the enclave frames them, as
+                    // pre-set + THAT CR's own delta. Two change requests against ONE owner set
+                    // therefore each carry a quorum signature over a set that excludes the
+                    // other's delta, and whichever commits second stamps a signature the ork
+                    // cannot verify against the committed set. Nothing at commit can repair it:
+                    // the signed bytes are not an input here, only the destination column is
+                    // recomputed. Refuse those change requests BEFORE any replay so the batch
+                    // half-applies nothing, and name the owner and contributors so the admin can
+                    // commit one and re-approve the rest. The real fix is to frame the carrier
+                    // over the projected post-batch set at approval time; that is a product
+                    // decision (it also requires the batch to commit atomically).
+                    java.util.Set<String> contestedCrIds = new java.util.HashSet<>();
+                    Map<String, List<String>> contestedOwners = java.util.Map.of();
+                    if (IgaAttestors.resolveAttestor(session, realm) instanceof TideAttestor contestAttestor
+                            && TideAttestor.usesFrozenApprovalCarrier(session, realm)) {
+                        contestedOwners = contestAttestor.findContestedSetOwners(session, realm, candidates);
+                        for (List<String> crIds : contestedOwners.values()) {
+                            contestedCrIds.addAll(crIds);
+                        }
+                        if (!contestedCrIds.isEmpty()) {
+                            log.warnf("IGA bulk-authorize: refusing %d change request(s) in realm %s that "
+                                    + "share %d owner set(s) with another change request in the same batch "
+                                    + "(%s). Their approval carriers each froze the pre-batch member set.",
+                                    contestedCrIds.size(), realm.getName(), contestedOwners.size(),
+                                    contestedOwners);
+                        }
+                    }
+
                     for (IgaChangeRequestEntity candidate : candidates) {
                         String crId = candidate.getId();
+                        if (contestedCrIds.contains(crId)) {
+                            Map<String, Object> refused = new LinkedHashMap<>();
+                            refused.put("crId", crId);
+                            refused.put("actionType", candidate.getActionType());
+                            refused.put("entityType", candidate.getEntityType());
+                            refused.put("entityId", candidate.getEntityId());
+                            refused.put("status", "REJECTED");
+                            refused.put("error", "CONTESTED_SET_OWNER");
+                            refused.put("message", "Another change request in this batch changes the same "
+                                    + "membership set. Each approval signed the set as it stood before the "
+                                    + "batch, so committing both would leave a signature the token service "
+                                    + "cannot verify. Commit one, then re-approve the rest.");
+                            refused.put("contestedOwners", contestedOwners);
+                            results.add(refused);
+                            rejected++;
+                            continue;
+                        }
                         Map<String, Object> outcome = processOneCr(crId, finalAdmin);
                         results.add(outcome);
                         String status = String.valueOf(outcome.get("status"));
