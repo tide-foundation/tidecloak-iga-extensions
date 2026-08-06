@@ -30,6 +30,10 @@ import java.util.List;
     @NamedQuery(
         name = "IgaChangeRequest.deleteByRealm",
         query = "DELETE FROM IgaChangeRequestEntity cr WHERE cr.realmId = :realmId"
+    ),
+    @NamedQuery(
+        name = "IgaChangeRequest.findPendingWithRequestBatch",
+        query = "SELECT cr FROM IgaChangeRequestEntity cr WHERE cr.realmId = :realmId AND cr.status = 'PENDING' AND cr.requestBatch IS NOT NULL ORDER BY cr.createdAt ASC"
     )
 })
 public class IgaChangeRequestEntity {
@@ -115,6 +119,45 @@ public class IgaChangeRequestEntity {
     @Column(name = "REQUEST_MODEL", columnDefinition = "TEXT")
     private String requestModel;
 
+    /**
+     * The framing batch this CR's {@link #requestModel} carrier was built with: the
+     * ordered, comma-separated ids of every change request whose replay the carrier's
+     * unit bytes assume, in the deterministic bulk commit order (this CR included).
+     *
+     * <p>On a multiAdmin realm whose set units are signed from a doken-bound carrier the
+     * signed unit bytes are FROZEN when the enclave frames them, so a carrier only
+     * describes the model state it was framed over. Phase 1
+     * ({@code TideAttestor.buildMultiAdminApprovalModel}) therefore frames a CR's set
+     * units over the state after EVERY currently-approvable PENDING change request that
+     * perturbs the same owner set, which is what lets two change requests against one
+     * owner frame byte-identical units for it. The commit gate reads this list back: a
+     * member that was denied, blocked or re-framed makes the carrier stale (fail-closed,
+     * carriers invalidated), and a member that is still PENDING must apply in the SAME
+     * operation, before this one.
+     *
+     * <p>Comma-separated TEXT for the same reason as {@link #dependsOn}: the elements
+     * are fixed-shape UUIDs and the list is small. The batch's IDENTITY is the
+     * name-based UUID {@code TideAttestor.framingBatchId} derives from this list, so
+     * every carrier framed against the same group has the same batch id with no cross-CR
+     * write and no separate column. NULL = framed before this column existed (legacy
+     * carrier), or no carrier.
+     */
+    @Column(name = "REQUEST_BATCH", columnDefinition = "TEXT")
+    private String requestBatch;
+
+    /**
+     * Base64 SHA-256 over the ORDERED unit CBOR the phase-1 carrier framed
+     * ({@code TideAttestor.framedUnitsHash}).
+     *
+     * <p>Byte-provenance for the multiAdmin lane: at commit the units are re-derived from
+     * the final committed model and re-hashed, and a mismatch means the carrier's frozen
+     * bytes do not describe the state being committed, so the quorum signature would be
+     * stamped over a set the ork cannot re-derive. Needs no key material and no extra ork
+     * round-trip. {@code VARCHAR(64)} holds the 44 chars of Base64 for a 32-byte digest.
+     */
+    @Column(name = "REQUEST_UNITS_HASH", length = 64)
+    private String requestUnitsHash;
+
     @OneToMany(mappedBy = "changeRequest", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<IgaAuthorizationEntity> authorizations = new ArrayList<>();
 
@@ -156,6 +199,35 @@ public class IgaChangeRequestEntity {
 
     public String getRequestModel() { return requestModel; }
     public void setRequestModel(String requestModel) { this.requestModel = requestModel; }
+
+    public String getRequestBatch() { return requestBatch; }
+    public void setRequestBatch(String requestBatch) { this.requestBatch = requestBatch; }
+
+    /**
+     * Parse {@link #requestBatch} into the ordered framing-batch member ids. Returns an
+     * empty (mutable) list when the carrier carries no framing batch.
+     */
+    public List<String> getRequestBatchList() {
+        List<String> out = new ArrayList<>();
+        if (requestBatch == null || requestBatch.isBlank()) return out;
+        for (String part : requestBatch.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) out.add(trimmed);
+        }
+        return out;
+    }
+
+    /** Set {@link #requestBatch} from an ordered member-id list; null/empty clears it. */
+    public void setRequestBatchList(List<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            this.requestBatch = null;
+            return;
+        }
+        this.requestBatch = String.join(",", ids);
+    }
+
+    public String getRequestUnitsHash() { return requestUnitsHash; }
+    public void setRequestUnitsHash(String requestUnitsHash) { this.requestUnitsHash = requestUnitsHash; }
 
     /**
      * Parse {@link #dependsOn} into a list of prerequisite CR ids. Returns an

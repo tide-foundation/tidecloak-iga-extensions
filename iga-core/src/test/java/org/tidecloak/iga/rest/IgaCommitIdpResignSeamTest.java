@@ -72,6 +72,8 @@ class IgaCommitIdpResignSeamTest {
         when(realm.getId()).thenReturn(REALM_ID);
         when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
         when(jpa.getEntityManager()).thenReturn(em);
+        // The single-CR commit pipeline runs under the per-realm IgaBulkLock; run it inline.
+        IgaTestClusterLock.stubInlineClusterLock(session);
         resource = new IgaAdminResource(session, realm, auth);
 
         // commit()'s legacy-lane multiAdmin guard consults TideAttestor.isMultiAdminMode ->

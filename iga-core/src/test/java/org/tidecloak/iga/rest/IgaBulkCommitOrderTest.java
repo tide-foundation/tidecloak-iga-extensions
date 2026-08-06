@@ -18,6 +18,8 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.tidecloak.iga.attestors.IgaAttestor;
+import org.tidecloak.iga.attestors.SimpleNameAttestor;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 
 import java.util.ArrayList;
@@ -77,6 +79,12 @@ class IgaBulkCommitOrderTest {
         // return a RealmProvider whose getRealm(...) is null → the converge block is skipped.
         org.keycloak.models.RealmProvider realmProvider = mock(org.keycloak.models.RealmProvider.class);
         when(session.realms()).thenReturn(realmProvider);
+        // The bulk drain resolves the realm's attestor up-front (frozen-carrier refusal gate),
+        // so the IgaAttestor SPI must resolve or the resource throws before the sort/loop under
+        // test. This is a Tideless realm: iga.attestor unset -> the "simple" attestor. It is not
+        // a TideAttestor, so the frozen-carrier gate short-circuits and never fires.
+        when(session.getProvider(IgaAttestor.class, SimpleNameAttestor.ID))
+                .thenReturn(new SimpleNameAttestor(session));
         resource = new IgaAdminResource(session, realm, auth);
     }
 
