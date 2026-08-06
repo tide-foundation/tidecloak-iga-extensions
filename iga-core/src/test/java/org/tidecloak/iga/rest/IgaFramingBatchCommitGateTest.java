@@ -122,7 +122,7 @@ class IgaFramingBatchCommitGateTest {
                 eq(IgaAuthorizationEntity.class))).thenReturn(q);
         lenient().when(q.setParameter(anyString(), any())).thenAnswer(inv -> {
             if ("changeRequestId".equals(inv.getArgument(0))) {
-                boundCrId[0] = String.valueOf(inv.getArgument(1));
+                boundCrId[0] = inv.getArgument(1, String.class);
             }
             return q;
         });
