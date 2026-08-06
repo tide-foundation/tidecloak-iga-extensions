@@ -696,8 +696,30 @@ public class IgaAdminResource {
      * replay + producer-column stamp + convergence + idp-settings re-sign tail. Returns the
      * REST {@link Response} (200 with the updated representation on success, or the relevant
      * 4xx error response from one of the gates).
+     *
+     * <p>Runs under the SAME per-realm {@link IgaBulkLock} mutex the bulk lane holds. A commit
+     * signs a per-(table, owner) SET over the owner's post-change member set and fans that one
+     * signature across every row of the owner set, so two commits racing on one owner (two
+     * single-CR commits, or a single-CR commit alongside a bulk drain) can interleave
+     * read-set / sign / stamp and leave a signature over a set the DB no longer holds. Sharing
+     * the bulk task key serialises all three combinations; the loser gets the same 429 contract
+     * the bulk endpoint already returns.
      */
     private Response commitResolved(IgaChangeRequestEntity cr, EntityManager em, String id) {
+        IgaBulkLock.Result<Response> lockResult = IgaBulkLock.runIfNotRunning(
+                session, realm.getId(), () -> commitResolvedLocked(cr, em, id));
+        if (!lockResult.isHeld()) {
+            return Response.status(429)
+                    .entity(Map.of("error",
+                            "Another IGA commit is already running for this realm",
+                            "realm", realm.getName()))
+                    .build();
+        }
+        return lockResult.getValue();
+    }
+
+    /** The commit pipeline body; always invoked under the per-realm mutex above. */
+    private Response commitResolvedLocked(IgaChangeRequestEntity cr, EntityManager em, String id) {
         // Fail-closed dependency gate: refuse to commit a CR whose dependsOn
         // set contains any CR not yet APPROVED. This makes the silent-no-op of
         // a dependent replay (REALM_DEFAULT_SCOPE_ADD / ASSIGN_SCOPE applied
@@ -850,6 +872,13 @@ public class IgaAdminResource {
         if (attestor instanceof org.tidecloak.iga.attestors.TideAttestor tideAttestor
                 && !org.tidecloak.iga.attestors.TideAttestor.ACTION_DELETE_REALM.equals(cr.getActionType())) {
             tideAttestor.stampProducerUnitColumns(session, realm, cr);
+            // Coalesced SET-unit stamp: the IDENTICAL call the bulk lane makes after its
+            // batch drains, here over the single CR this commit applied. Re-derives the
+            // owner's set from the committed model, signs it once, stamps it as the LAST
+            // write for the owner, and runs the fail-closed post-stamp verification, so the
+            // single-CR lane carries the same invariant rather than relying on its
+            // one-CR-per-request session for it. No-op for non-edge action types.
+            tideAttestor.stampCoalescedSetUnits(session, realm, List.of(cr));
         }
 
         // ROOT-cause complete-coverage stamp (uniform Design B). The hand-coded per-CR
@@ -1602,6 +1631,13 @@ public class IgaAdminResource {
                     // ceremony runs ONCE after the whole batch drains (a client save
                     // coalesces into up to 10 per-action CRs — see the post-loop block).
                     boolean anyClientReSign = false;
+                    // Every CR this batch commits, so the per-(unit type, owner) SET units the
+                    // batch perturbs can be signed ONCE after the whole batch drains (see the
+                    // post-loop block). A per-CR set signature is computed PRE-replay over
+                    // pre-set + THAT CR's delta and fanned across the owner's whole set with no
+                    // member predicate, so two CRs against one owner leave a signature that
+                    // commits to a set the DB no longer holds.
+                    List<IgaChangeRequestEntity> committedCrs = new ArrayList<>();
                     for (IgaChangeRequestEntity candidate : candidates) {
                         String crId = candidate.getId();
                         Map<String, Object> outcome = processOneCr(crId, finalAdmin);
@@ -1609,12 +1645,33 @@ public class IgaAdminResource {
                         String status = String.valueOf(outcome.get("status"));
                         if ("COMMITTED".equals(status)) {
                             committed++;
+                            committedCrs.add(candidate);
                             if (org.tidecloak.iga.signing.IgaIdpSettingsResign.changesClientSignedSetting(candidate)) {
                                 anyClientReSign = true;
                             }
                         }
                         else if ("REJECTED".equals(status)) rejected++;
                         else skipped++;
+                    }
+
+                    // Coalesced SET-unit stamp (ONCE per owner set per batch). Every replay
+                    // above is applied, so each owner's set is now at its FINAL post-batch
+                    // state: re-derive it, sign it once, and fan that one signature across the
+                    // owner's rows, the last write for the owner, so no later fan-out can
+                    // replace it with a signature over a stale set. Ordered before the
+                    // convergence stamp below so converge observes the real set signatures.
+                    // Fail-closed: the post-stamp verification throws out of here and rolls the
+                    // batch's commit flips back rather than leaving a set signed over bytes the
+                    // ork will re-derive differently. Re-resolve the live realm in case a batch
+                    // member removed it (mirrors the DELETE_REALM guard below). No-op on simple
+                    // and on batches that touched no owner set.
+                    if (!committedCrs.isEmpty()) {
+                        RealmModel liveRealmForSets = session.realms().getRealm(realm.getId());
+                        if (liveRealmForSets != null
+                                && IgaAttestors.resolveAttestor(session, liveRealmForSets)
+                                        instanceof TideAttestor tideAttestor) {
+                            tideAttestor.stampCoalescedSetUnits(session, liveRealmForSets, committedCrs);
+                        }
                     }
 
                     // ROOT-cause complete-coverage stamp (uniform Design B), once per bulk call

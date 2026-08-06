@@ -82,6 +82,8 @@ class IgaMultiAdminLegacyLaneRefusalTest {
         lenient().when(realm.getName()).thenReturn("multiadmin-realm");
         lenient().when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
         lenient().when(jpa.getEntityManager()).thenReturn(em);
+        // The single-CR commit pipeline runs under the per-realm IgaBulkLock; run it inline.
+        IgaTestClusterLock.stubInlineClusterLock(session);
         resource = new IgaAdminResource(session, realm, auth);
     }
 

@@ -1620,12 +1620,27 @@ public class IgaReplayDispatcher {
         if (group != null && role != null) group.deleteRoleMapping(role);
     }
 
+    /**
+     * A composite edge whose parent or child does not resolve must NOT be skipped: the
+     * caller has already computed (or is about to compute) the owner's set signature over a
+     * member set that INCLUDES this child, so a silent no-op leaves the composite_role rows
+     * signed over an edge the DB never gained: the ork re-derives the smaller committed set
+     * and rejects the unit at token issue. Raise the typed vanished-entity signal instead:
+     * the commit tx rolls back, nothing is applied, and the CR stays PENDING with the
+     * unresolvable role named.
+     */
     private static void addCompositeDirect(KeycloakSession session, RealmModel realm, Map<String, Object> row) {
         String compositeId = str(row, "COMPOSITE");
         String childId = str(row, "CHILD_ROLE");
         RoleModel composite = session.roles().getRoleById(realm, compositeId);
         RoleModel child = session.roles().getRoleById(realm, childId);
-        if (composite != null && child != null) composite.addCompositeRole(child);
+        if (composite == null) {
+            throw new EntityVanishedException("ROLE", compositeId, realm.getId());
+        }
+        if (child == null) {
+            throw new EntityVanishedException("ROLE", childId, realm.getId());
+        }
+        composite.addCompositeRole(child);
     }
 
     private static void removeCompositeDirect(KeycloakSession session, RealmModel realm, Map<String, Object> row) {

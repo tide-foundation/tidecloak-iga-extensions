@@ -4574,6 +4574,156 @@ public class TideAttestor implements IgaAttestor {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Coalesced per-(unit type, owner) SET-unit stamp + post-stamp verification
+    // -------------------------------------------------------------------------
+
+    /**
+     * <b>Coalesced edge-SET stamp.</b> Sign and stamp EXACTLY ONE signature per
+     * {@code (unit type, owner)} over the owner's FINAL committed member set, for a whole
+     * batch of already-replayed change requests.
+     *
+     * <p>The owner-keyed fan-out ({@code IgaReplayDispatcher#stampOwnerSetFanOut}) writes
+     * one signature onto EVERY row sharing the owner key and carries no member predicate,
+     * so a second CR against the same owner replaces the first CR's signature. Each CR's
+     * own {@code combineFinal} signature is computed PRE-replay over {@code pre-set ±
+     * that CR's delta}, so when a batch applies several CRs against one owner inside a
+     * single transaction the surviving column commits to a set the database no longer
+     * holds and the ork rejects the unit at token issue. Signing per-CR is therefore not
+     * expressible for a batch; the set must be signed ONCE, after every replay, over the
+     * post-batch state.
+     *
+     * <p>Runs AFTER the caller's replay loop. The pending writes are flushed first so the
+     * owner-set reads observe every sibling CR's model write, then each CR's edge-set unit
+     * is re-derived from the LIVE (post-batch) model ({@link #buildEdgeSetUnit}'s
+     * {@code pre-set ± delta} is idempotent once the delta is applied) and grouped by
+     * {@code unit.type()}+{@code unit.targetId()}. Every distinct owner set is signed in ONE
+     * batched ceremony ({@link #signProducerEnvelopes}) and stamped through
+     * {@link UnitColumnMapping} (the same owner fan-out the dispatcher and the login read
+     * use), then verified via {@link #verifyStampedSetUnit}.
+     *
+     * <p>SKIPPED for a real-signing-capable multiAdmin two-phase commit: there the ONLY
+     * signer is the phase-1 collected-doken carrier ({@link #distributeMultiAdminUnitSigs}),
+     * which already re-derives each unit from the post-replay live model; re-signing here
+     * would replace its real Policy:1 VVK signature with the {@link #DUMMY_SIG_PREFIX} stub
+     * {@link #signProducerEnvelopes} returns in that mode. Non-edge action types carry no
+     * owner set and are ignored, so the caller may pass its whole batch.
+     */
+    public void stampCoalescedSetUnits(KeycloakSession session, RealmModel realm,
+                                       List<IgaChangeRequestEntity> crs) {
+        if (crs == null || crs.isEmpty()) {
+            return;
+        }
+        String mode = resolveMode(session, realm);
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        em.flush();
+
+        java.util.LinkedHashMap<String, IgaChangeRequestEntity> crByOwner = new java.util.LinkedHashMap<>();
+        java.util.LinkedHashMap<String, AttestationUnit> unitByOwner = new java.util.LinkedHashMap<>();
+        for (IgaChangeRequestEntity cr : crs) {
+            if (cr == null || !isProducerEnvelopeSignedAction(cr.getActionType())) {
+                continue;
+            }
+            if (isMultiAdminCarrierCommit(realm, mode, cr)) {
+                continue;
+            }
+            AttestationUnit unit = buildEdgeSetUnit(session, realm, cr);
+            String owner = unit.unitType() + '|' + unit.targetId();
+            crByOwner.put(owner, cr);
+            unitByOwner.put(owner, unit);
+        }
+        if (unitByOwner.isEmpty()) {
+            return;
+        }
+
+        List<String> owners = new ArrayList<>(unitByOwner.keySet());
+        byte[][] envelopes = new byte[owners.size()][];
+        for (int i = 0; i < owners.size(); i++) {
+            envelopes[i] = unitByOwner.get(owners.get(i)).serialize();
+        }
+        String[] sigs = signProducerEnvelopes(session, realm, mode, envelopes);
+        for (int i = 0; i < owners.size(); i++) {
+            String owner = owners.get(i);
+            AttestationUnit unit = unitByOwner.get(owner);
+            UnitColumnMapping.stamp(em, unit, sigs[i]);
+            verifyStampedSetUnit(session, realm, em, crByOwner.get(owner), envelopes[i], sigs[i]);
+        }
+        log.debugf("IGA set-unit coalescing: stamped %d owner set(s) from %d change request(s) "
+                + "in realm %s.", owners.size(), crs.size(), realm.getName());
+    }
+
+    /**
+     * Post-stamp fail-closed invariant for ONE owner set: the signature now stored in the
+     * owner's attestation column must be the signature this commit computed, and the bytes
+     * it was computed over must still be what the committed model serializes to.
+     *
+     * <p>Re-derives the unit from the live model AFTER the stamp (a second, independent
+     * read) rather than trusting the copy that was signed, so a model write that landed
+     * between the sign and the stamp is caught. Then re-reads the column through
+     * {@link UnitColumnMapping}, the SAME read the login performs, so a fan-out that
+     * overwrote this owner's signature is caught at commit rather than at the next login.
+     * On a real-signing-capable realm the stored value must additionally be a replayable
+     * 64-byte VVK signature, never a stub the login read would reject.
+     */
+    private void verifyStampedSetUnit(KeycloakSession session, RealmModel realm, EntityManager em,
+                                      IgaChangeRequestEntity cr, byte[] signedEnvelope,
+                                      String stampedSig) {
+        em.flush();
+        AttestationUnit reDerived = buildEdgeSetUnit(session, realm, cr);
+        String unitType = reDerived.unitType();
+        String targetId = reDerived.targetId();
+        if (!java.util.Arrays.equals(signedEnvelope, reDerived.serialize())) {
+            throw new SetUnitAttestationException(unitType, targetId, realm.getName(),
+                    "the committed owner set no longer serializes to the envelope that was "
+                            + "signed (change request " + cr.getId() + ")");
+        }
+        String stored = UnitColumnMapping.readStored(em, reDerived);
+        if (stored == null || stored.isBlank()) {
+            throw new SetUnitAttestationException(unitType, targetId, realm.getName(),
+                    "the owner set carries no attestation after the stamp (change request "
+                            + cr.getId() + ")");
+        }
+        if (!stored.equals(stampedSig)) {
+            throw new SetUnitAttestationException(unitType, targetId, realm.getName(),
+                    "the owner set's attestation is not the signature computed over the "
+                            + "committed set; another write overwrote it (change request "
+                            + cr.getId() + ")");
+        }
+        if (isRealSigningCapable(realm) && !isReplayableVvkSig(stored)) {
+            throw new SetUnitAttestationException(unitType, targetId, realm.getName(),
+                    "the owner set carries a stub attestation on a real-signing-capable realm "
+                            + "(change request " + cr.getId() + ")");
+        }
+    }
+
+    /**
+     * Is this CR committed through the real-signing-capable multiAdmin two-phase lane, whose
+     * per-unit signatures come from the phase-1 collected-doken carrier? Mirrors the gate
+     * {@link #stampProducerUnitColumns} takes into {@link #distributeMultiAdminUnitSigs}.
+     */
+    private static boolean isMultiAdminCarrierCommit(RealmModel realm, String mode,
+                                                     IgaChangeRequestEntity cr) {
+        return MODE_MULTI_ADMIN.equals(mode) && isRealSigningCapable(realm)
+                && cr.getRequestModel() != null && !cr.getRequestModel().isBlank()
+                && cr.getActionType() != null && !cr.getActionType().startsWith("ADOPT_");
+    }
+
+    /**
+     * Does a stored attestation carry a replayable bare 64-byte VVK signature (the shape the
+     * login read decodes), as opposed to the {@code base64(sha256(...))} stub?
+     */
+    private static boolean isReplayableVvkSig(String attestation) {
+        if (attestation == null || !attestation.startsWith(FIRSTADMIN_SIG_PREFIX)) {
+            return false;
+        }
+        try {
+            return java.util.Base64.getDecoder()
+                    .decode(attestation.substring(FIRSTADMIN_SIG_PREFIX.length())).length == 64;
+        } catch (IllegalArgumentException notBase64) {
+            return false;
+        }
+    }
+
     /**
      * Commit-time distribution (multiAdmin, real-signing-capable). Sign the
      * phase-1 collected-doken carrier ONCE via {@link #signMultiAdminUnitsViaPolicy}
