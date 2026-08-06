@@ -74,6 +74,9 @@ class IgaCommitDependencyGateTest {
         // is null → the converge block is skipped (avoids an unrelated NPE on the bare mock).
         org.keycloak.models.RealmProvider realmProvider = mock(org.keycloak.models.RealmProvider.class);
         when(session.realms()).thenReturn(realmProvider);
+        // Both the bulk lane and the single-CR commit pipeline run under the per-realm
+        // IgaBulkLock, so the cluster mutex must resolve; run its callable inline.
+        IgaTestClusterLock.stubInlineClusterLock(session);
         // requireManageRealm() is a void no-op on the mock (permission granted).
         resource = new IgaAdminResource(session, realm, auth);
 
