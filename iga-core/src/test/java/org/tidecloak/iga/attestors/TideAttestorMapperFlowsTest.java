@@ -38,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -535,7 +536,112 @@ class TideAttestorMapperFlowsTest {
         }
     }
 
+    // =========================================================================
+    // The carrier unit-count guard (fail loud, never split or truncate)
+    // =========================================================================
+
+    @Test
+    void guard_atTheBound_passes() {
+        TideAttestor.requireCarrierUnitCountWithinBound(
+                clientMapperCr("cr-1", CLIENT_A, "m-1"),
+                TideAttestor.MAX_CARRIER_UNITS, "framing");
+        // No throw: the bound itself is allowed, only strictly more is refused.
+    }
+
+    @Test
+    void guard_overTheBound_isRefused_namingTheChangeRequestAndTheCount() {
+        IgaChangeRequestEntity cr = clientMapperCr("cr-over", CLIENT_A, "m-1");
+        int over = TideAttestor.MAX_CARRIER_UNITS + 1;
+
+        RuntimeException boom = assertThrows(RuntimeException.class, () ->
+                TideAttestor.requireCarrierUnitCountWithinBound(cr, over, "framing"));
+
+        assertTrue(boom.getMessage().contains("cr-over"),
+                "the change request id must be in the message so a field occurrence is "
+                        + "actionable, unlike the ork's IndexOutOfRangeException 500");
+        assertTrue(boom.getMessage().contains(String.valueOf(over)),
+                "the ACTUAL unit count must be named, not just the limit");
+        assertTrue(boom.getMessage().contains("ADD_PROTOCOL_MAPPER"),
+                "the action tells the admin which operation to split");
+        assertTrue(boom.getMessage().contains(String.valueOf(TideAttestor.MAX_CARRIER_UNITS)),
+                "and the limit it exceeded");
+    }
+
+    @Test
+    void guard_boundLeavesHeadroomUnderTheOrkSingleByteLimit() {
+        assertTrue(TideAttestor.MAX_CARRIER_UNITS < 255,
+                "the ork encodes the requested-signature count in one byte, so the bound must "
+                        + "sit strictly under 255 rather than on it");
+    }
+
+    /**
+     * The guard is placed on the shared carrier builder, not on the mapper family, so it covers
+     * every action. CREATE_CLIENT frames 4 owned units plus one per jwt-relevant mapper and was
+     * the LARGEST carrier long before the mapper units existed, so it is the path that actually
+     * matters here.
+     */
+    @Test
+    void guard_coversCreateClient_whichFramesFourUnitsPlusOnePerMapper() {
+        asMultiAdmin();
+        String[] mappers = new String[247];
+        for (int i = 0; i < mappers.length; i++) {
+            mappers[i] = String.format("m-%03d", i);
+        }
+        createClientCapableOf(CLIENT_A, mappers);
+        IgaChangeRequestEntity cr = cr("cr-create", "CREATE_CLIENT",
+                "[{\"ID\":\"" + CLIENT_A + "\"}]");
+
+        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
+
+        assertEquals(4 + mappers.length, units.size(),
+                "CREATE_CLIENT frames client_config, client_scope_assignment_set, "
+                        + "client_mapper_set, scope_role_allowlist_set, plus one protocol_mapper "
+                        + "per jwt-relevant mapper");
+        assertTrue(units.size() > TideAttestor.MAX_CARRIER_UNITS,
+                "this client is over the bound, so the guard must refuse its carrier");
+        assertThrows(RuntimeException.class, () ->
+                TideAttestor.requireCarrierUnitCountWithinBound(cr, units.size(), "framing"));
+    }
+
+    @Test
+    void guard_mapperCarrierCountIsOneOwnerSetPlusOnePerMapper() {
+        asMultiAdmin();
+        String[] mappers = new String[250];
+        for (int i = 0; i < mappers.length; i++) {
+            mappers[i] = String.format("m-%03d", i);
+        }
+        client(CLIENT_A, mappers);
+        IgaChangeRequestEntity cr = clientMapperCr("cr-big", CLIENT_A, mappers);
+
+        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
+
+        assertEquals(1 + mappers.length, units.size(),
+                "a coalesced mapper change request frames its owner set plus one unit per mapper");
+        assertThrows(RuntimeException.class, () ->
+                TideAttestor.requireCarrierUnitCountWithinBound(cr, units.size(), "framing"));
+    }
+
     // ---- helpers ----
+
+    /** A client mock complete enough for the whole CREATE_CLIENT owned-unit family. */
+    private void createClientCapableOf(String clientUuid, String... mapperIds) {
+        parentMappers.put(clientUuid, List.of(mapperIds));
+        ClientModel c = mock(ClientModel.class);
+        when(c.getId()).thenReturn(clientUuid);
+        when(c.getClientId()).thenReturn("client-" + clientUuid);
+        // null web origins keeps clientConfig off the KC WebOriginsUtils static.
+        when(c.getWebOrigins()).thenReturn(null);
+        when(c.getProtocolMappersStream()).thenAnswer(inv ->
+                parentMappers.get(clientUuid).stream().map(this::mapperModel));
+        when(c.getProtocolMapperById(anyString())).thenAnswer(inv -> {
+            String id = inv.getArgument(0, String.class);
+            return parentMappers.get(clientUuid).contains(id) ? mapperModel(id) : null;
+        });
+        when(c.getClientScopes(org.mockito.ArgumentMatchers.anyBoolean()))
+                .thenAnswer(inv -> Map.of());
+        when(c.getScopeMappingsStream()).thenAnswer(inv -> Stream.empty());
+        when(realm.getClientById(eq(clientUuid))).thenReturn(c);
+    }
 
     /** Back the {@code listPendingByActionTypeIn} JPQL the pending lookups issue. */
     private void stubPendingPool(List<IgaChangeRequestEntity> pending) {

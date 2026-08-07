@@ -287,6 +287,33 @@ public class TideAttestor implements IgaAttestor {
      */
     private static final int FIRSTADMIN_SIGN_BATCH_MAX = 100;
 
+    /**
+     * Hard upper bound on the number of producer unit-envelopes ONE approval carrier may frame.
+     *
+     * <p><b>Where 255 comes from.</b> The ork derives one nonce per requested signature and
+     * encodes the count in a SINGLE BYTE, so a request framing more than 255 units overflows
+     * that counter and the ork indexes past the end of its own nonce array. The failure is an
+     * {@code IndexOutOfRangeException} 500 with nothing in it naming the change request, the
+     * realm or the unit count, which makes a field occurrence close to undiagnosable.
+     *
+     * <p><b>Why 250 and not 255.</b> 255 is the exact overflow point, so sitting on it leaves no
+     * margin for a unit the producer may later add to an existing family (the enumerator has
+     * grown twice already: the {@code CREATE_CLIENT} family, then the per-mapper units). Five
+     * units of headroom cost nothing, because the bound is unreachable in practice either way:
+     * an entire default realm closure carries about 39 {@code protocol_mapper} units across ALL
+     * clients and scopes, so reaching even 250 needs roughly 246 jwt-relevant mappers attached
+     * to ONE client in ONE admin request.
+     *
+     * <p><b>Why refuse rather than split or truncate.</b> The quorum's approval commits
+     * {@code SHA512} over the ENTIRE Draft, so a carrier cannot be split across requests and
+     * still verify: each chunk would present a different Draft from the one the admins signed.
+     * Truncating would silently drop units, leaving exactly the unsigned columns this whole
+     * change exists to eliminate. Refusing is the only fail-closed option, and it is raised
+     * BEFORE the request is sent so no doken is ever collected against a carrier that cannot
+     * be signed.
+     */
+    static final int MAX_CARRIER_UNITS = 250;
+
     /** The action type whose firstAdmin sign is upgraded to the real VRK ceremony. */
     private static final String ACTION_GRANT_ROLES = "GRANT_ROLES";
     /** The role-REMOVAL twin of {@link #ACTION_GRANT_ROLES}; signs the same shrunken user_role_mapping_set unit. */
@@ -4605,11 +4632,42 @@ public class TideAttestor implements IgaAttestor {
                                 IgaChangeRequestEntity cr,
                                 List<IgaChangeRequestEntity> framingBatch) {
         List<AttestationUnit> units = buildAllCrUnits(session, realm, cr, framingBatch);
+        // BUILD-time gate. Every carrier, for every action type, is framed through here, so a
+        // change request that could never be signed is refused at the enclave open, before any
+        // admin spends an approval on it.
+        requireCarrierUnitCountWithinBound(cr, units.size(), "framing");
         byte[][] out = new byte[units.size()][];
         for (int i = 0; i < units.size(); i++) {
             out[i] = units.get(i).serialize();
         }
         return out;
+    }
+
+    /**
+     * Refuse a carrier that frames more units than the ork can sign in one request, naming the
+     * change request, its action and the actual count so a field occurrence is immediately
+     * actionable instead of an opaque {@code IndexOutOfRangeException} 500 from the ork.
+     *
+     * <p>Fail-closed by construction: this THROWS rather than truncating or splitting. See
+     * {@link #MAX_CARRIER_UNITS} for why neither of those is available.
+     *
+     * @param phase {@code "framing"} when the carrier is being built, {@code "distribution"}
+     *              when an already-frozen carrier is about to be signed
+     */
+    static void requireCarrierUnitCountWithinBound(IgaChangeRequestEntity cr,
+                                                   int unitCount, String phase) {
+        if (unitCount <= MAX_CARRIER_UNITS) {
+            return;
+        }
+        throw new RuntimeException("IGA approval carrier (" + phase + "): change request "
+                + cr.getId() + " (action " + cr.getActionType() + ") frames " + unitCount
+                + " producer units, over the " + MAX_CARRIER_UNITS + "-unit limit for a single"
+                + " signing request. The ork encodes the requested-signature count in one byte,"
+                + " so a larger request cannot be signed, and the approval commits SHA-512 over"
+                + " the whole draft, so the carrier cannot be split across requests either."
+                + " Refusing rather than signing part of it. Split the underlying admin"
+                + " operation into smaller change requests (for example add the protocol"
+                + " mappers in several requests instead of one).");
     }
 
     /**
@@ -5706,6 +5764,10 @@ public class TideAttestor implements IgaAttestor {
         // double-apply). The SAME enumerateLiveCrUnits the phase-1 scratch path ran is used, so
         // sigs[i] (carrier order) lands on units.get(i)'s column by construction.
         List<AttestationUnit> units = buildAllCrUnits(session, realm, cr, /* modelAlreadyPostChange */ true);
+        // SEND-time gate, for a carrier frozen BEFORE this bound existed (or by an older node
+        // mid-upgrade). Refusing here still beats an ork 500: the commit fails closed with a
+        // message naming the change request instead of half-stamping the columns.
+        requireCarrierUnitCountWithinBound(cr, units.size(), "distribution");
         if (units.isEmpty()) {
             // No producer unit framed at phase-1 for this action — nothing to distribute.
             // (The carrier carried only the regular-canonical carry-through; no per-unit
