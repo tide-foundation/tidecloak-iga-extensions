@@ -3887,6 +3887,12 @@ public class TideAttestor implements IgaAttestor {
             case "ADD_PROTOCOL_MAPPER":         // client_mapper_set / client_scope_mapper_set
             case "UPDATE_PROTOCOL_MAPPER":
             case "REMOVE_PROTOCOL_MAPPER":
+            case "ASSIGN_SCOPE":                // client_scope_assignment_set
+            case "REMOVE_SCOPE":
+            case "SCOPE_MAPPING_ADD":           // scope_role_allowlist_set (parent = client)
+            case "SCOPE_MAPPING_REMOVE":
+            case "SCOPE_ADD_ROLE":              // scope_role_allowlist_set (parent = client_scope)
+            case "SCOPE_REMOVE_ROLE":
                 return true;
             default:
                 return false;
@@ -3961,6 +3967,27 @@ public class TideAttestor implements IgaAttestor {
                             : RealmAttestationExporter.clientScopeMapperSet(s, realmId);
                 }
                 return null;
+            }
+            case "ASSIGN_SCOPE":
+            case "REMOVE_SCOPE": {
+                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+                ClientModel c = clientUuid == null ? null : realm.getClientById(clientUuid);
+                return c == null ? null
+                        : RealmAttestationExporter.clientScopeAssignmentSet(c, realmId);
+            }
+            case "SCOPE_MAPPING_ADD":
+            case "SCOPE_MAPPING_REMOVE": {
+                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+                ClientModel c = clientUuid == null ? null : realm.getClientById(clientUuid);
+                return c == null ? null : RealmAttestationExporter.scopeRoleAllowlistSet(
+                        ParentType.client, c.getId(), c, realmId);
+            }
+            case "SCOPE_ADD_ROLE":
+            case "SCOPE_REMOVE_ROLE": {
+                String scopeId = firstRowKey(cr, "SCOPE_ID");
+                ClientScopeModel s = scopeId == null ? null : realm.getClientScopeById(scopeId);
+                return s == null ? null : RealmAttestationExporter.scopeRoleAllowlistSet(
+                        ParentType.client_scope, s.getId(), s, realmId);
             }
             default:
                 return null;
@@ -4364,11 +4391,11 @@ public class TideAttestor implements IgaAttestor {
             }
 
             // ---- DERIVED owner-sets ----
-            case "ASSIGN_SCOPE", "REMOVE_SCOPE" -> {
-                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
-                ClientModel c = clientUuid == null ? null : realm.getClientById(clientUuid);
-                if (c != null) units.add(RealmAttestationExporter.clientScopeAssignmentSet(c, realmId));
-            }
+            // These derived owner-sets are built by buildDerivedOwnerSetUnit, the same method
+            // setUnitOwnerKey groups on and stampCoalescedSetUnits signs, so the unit framed
+            // here and the unit those two act on cannot drift apart.
+            case "ASSIGN_SCOPE", "REMOVE_SCOPE" ->
+                    addIfPresent(units, buildDerivedOwnerSetUnit(session, realm, cr));
             case "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER", "REMOVE_PROTOCOL_MAPPER" -> {
                 // The owner mapper-set FIRST (it is this action's owner-set unit, the one
                 // setUnitOwnerKey groups on and stampCoalescedSetUnits signs once per batch),
@@ -4378,18 +4405,10 @@ public class TideAttestor implements IgaAttestor {
                 addIfPresent(units, buildDerivedOwnerSetUnit(session, realm, cr));
                 addOwnedMapperUnits(units, realm, cr, action, realmId);
             }
-            case "SCOPE_MAPPING_ADD", "SCOPE_MAPPING_REMOVE" -> {
-                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
-                ClientModel c = clientUuid == null ? null : realm.getClientById(clientUuid);
-                if (c != null) units.add(RealmAttestationExporter.scopeRoleAllowlistSet(
-                        ParentType.client, c.getId(), c, realmId));
-            }
-            case "SCOPE_ADD_ROLE", "SCOPE_REMOVE_ROLE" -> {
-                String scopeId = firstRowKey(cr, "SCOPE_ID");
-                ClientScopeModel s = scopeId == null ? null : realm.getClientScopeById(scopeId);
-                if (s != null) units.add(RealmAttestationExporter.scopeRoleAllowlistSet(
-                        ParentType.client_scope, s.getId(), s, realmId));
-            }
+            case "SCOPE_MAPPING_ADD", "SCOPE_MAPPING_REMOVE" ->
+                    addIfPresent(units, buildDerivedOwnerSetUnit(session, realm, cr));
+            case "SCOPE_ADD_ROLE", "SCOPE_REMOVE_ROLE" ->
+                    addIfPresent(units, buildDerivedOwnerSetUnit(session, realm, cr));
 
             // ---- REALM-scoped units ----
             // REMOVE_REALM_ATTRIBUTE changes the SAME realm node a SET does (the post-change
