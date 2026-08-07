@@ -3860,6 +3860,40 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
+     * Does this actionType perturb a DERIVED owner-set unit — a set keyed on an owner that
+     * already exists, whose members the change request adds to or removes from — WITHOUT being
+     * one of the eight {@link #isProducerEnvelopeSignedAction} edge actions?
+     *
+     * <p>These carry exactly the same frozen-carrier hazard as the edge actions and must be
+     * visible to the same machinery. Two change requests against ONE owner each froze that
+     * owner's set at approval as {@code pre + that change request's own delta}, so whichever
+     * commits second leaves a quorum signature over a set the database no longer holds. The
+     * eight-action predicate above cannot simply be widened to cover them: it ALSO gates
+     * {@code buildEdgeSetUnit} (the index-0 carrier contract) and {@code realCeremonyEligible},
+     * so widening it would change the carrier shape the ork already verifies.
+     *
+     * <p>Consumed by {@link #setUnitOwnerKey} (contested-owner detection, hence the framing
+     * batches) and {@link #stampCoalescedSetUnits} (sign each owner set ONCE per batch). Before
+     * this predicate existed, a bulk approve of two {@code ADD_PROTOCOL_MAPPER} change requests
+     * against one client was invisible to both: neither was refused as contested, neither was
+     * coalesced, and the second commit stamped {@code client_mapper_set} with a signature over
+     * a set missing the sibling's mapper.
+     */
+    static boolean isDerivedOwnerSetAction(String actionType) {
+        if (actionType == null) {
+            return false;
+        }
+        switch (actionType) {
+            case "ADD_PROTOCOL_MAPPER":         // client_mapper_set / client_scope_mapper_set
+            case "UPDATE_PROTOCOL_MAPPER":
+            case "REMOVE_PROTOCOL_MAPPER":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
      * Build the producer unit-envelope CBOR for a producer-envelope-signed CR, reusing
      * the SAME {@link RealmAttestationExporter} builder the login/export path uses so the
      * bytes are byte-identical to the ork-side re-derivation. Dispatched per actionType.
@@ -3896,6 +3930,146 @@ public class TideAttestor implements IgaAttestor {
                 throw new RuntimeException("IGA firstAdmin sign: actionType " + actionType
                         + " has no producer-envelope unit builder (CR " + cr.getId() + ")");
         }
+    }
+
+    /**
+     * The DERIVED owner-set unit an {@link #isDerivedOwnerSetAction} change request perturbs,
+     * built over the owner's CURRENT member set, or {@code null} when the owner cannot be
+     * resolved. The mapper's parent is a client ({@code CLIENT_UUID}) or a client scope
+     * ({@code CLIENT_SCOPE_ID}); exactly one is set on the row.
+     *
+     * <p>Deliberately the SINGLE place this unit is built, so the owner key
+     * {@link #setUnitOwnerKey} groups on, the unit {@link #stampCoalescedSetUnits} signs, and
+     * the unit {@link #enumerateLiveCrUnits} frames are the same unit by construction.
+     */
+    private AttestationUnit buildDerivedOwnerSetUnit(KeycloakSession session, RealmModel realm,
+                                                     IgaChangeRequestEntity cr) {
+        String realmId = realm.getId();
+        switch (cr.getActionType()) {
+            case "ADD_PROTOCOL_MAPPER":
+            case "UPDATE_PROTOCOL_MAPPER":
+            case "REMOVE_PROTOCOL_MAPPER": {
+                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+                if (clientUuid != null) {
+                    ClientModel c = realm.getClientById(clientUuid);
+                    return c == null ? null : RealmAttestationExporter.clientMapperSet(c, realmId);
+                }
+                String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
+                if (scopeId != null) {
+                    ClientScopeModel s = realm.getClientScopeById(scopeId);
+                    return s == null ? null
+                            : RealmAttestationExporter.clientScopeMapperSet(s, realmId);
+                }
+                return null;
+            }
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * The owner-set unit a change request perturbs, edge or derived, or {@code null} when it
+     * perturbs none. The single dispatch point shared by {@link #setUnitOwnerKey},
+     * {@link #stampCoalescedSetUnits} and {@link #verifyStampedSetUnit}, so a new owner-set
+     * action becomes visible to contested-owner detection, per-batch coalescing and the
+     * post-stamp verification together rather than one at a time.
+     */
+    private AttestationUnit buildOwnerSetUnit(KeycloakSession session, RealmModel realm,
+                                              IgaChangeRequestEntity cr) {
+        if (cr == null) {
+            return null;
+        }
+        if (isProducerEnvelopeSignedAction(cr.getActionType())) {
+            return buildEdgeSetUnit(session, realm, cr);
+        }
+        if (isDerivedOwnerSetAction(cr.getActionType())) {
+            return buildDerivedOwnerSetUnit(session, realm, cr);
+        }
+        return null;
+    }
+
+    /**
+     * Frame the per-mapper {@code protocol_mapper} unit (unit 3) for each mapper an
+     * {@code ADD_}/{@code UPDATE_PROTOCOL_MAPPER} change request touches.
+     *
+     * <p>Without this the change request framed ONLY its owner mapper-set, so the mapper's own
+     * {@code ProtocolMapperEntity.attestation} column was never stamped by the commit that
+     * created it. On firstAdmin the toggle-on convergence backfilled it later; on multiAdmin
+     * there is no such backstop and the column stayed NULL or a {@code TIDE-DUMMY-v1} stub,
+     * which the uniform login read rejects fail-closed.
+     *
+     * <p>{@code REMOVE_} frames nothing here: the row is gone from the post-change model, so
+     * there is no column to carry a signature and the owner set alone describes the change.
+     *
+     * <p>Ordering is the ascending mapper-id order of
+     * {@link RealmAttestationExporter#jwtRelevantMapperIds}, intersected with the ids THIS
+     * change request touches. Deterministic and re-derivable identically at commit, which the
+     * carrier contract requires: phase-1 framing and commit-time distribution both call
+     * {@link #enumerateLiveCrUnits} and {@code sigs[i]} is stamped onto {@code units.get(i)}.
+     * Intersecting with the change request's own rows (rather than taking the parent's whole
+     * mapper list) keeps the list stable if an unrelated mapper is added to the same parent
+     * between approval and commit.
+     *
+     * <p>The {@code jwtRelevantMapperIds} filter is what keeps a session-note-only mapper
+     * factory correctly unemitted: the login read emits no unit for it, so framing one would
+     * sign a unit nothing ever verifies.
+     */
+    private static void addOwnedMapperUnits(List<AttestationUnit> units, RealmModel realm,
+                                            IgaChangeRequestEntity cr, String action,
+                                            String realmId) {
+        if (!"ADD_PROTOCOL_MAPPER".equals(action) && !"UPDATE_PROTOCOL_MAPPER".equals(action)) {
+            return;
+        }
+        java.util.Set<String> touched = rowValues(cr, "ID");
+        if (touched.isEmpty()) {
+            return;
+        }
+        org.keycloak.models.ProtocolMapperContainerModel parent;
+        ParentType parentType;
+        String parentId;
+        String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+        if (clientUuid != null) {
+            ClientModel c = realm.getClientById(clientUuid);
+            if (c == null) return;
+            parent = c;
+            parentType = ParentType.client;
+            parentId = c.getId();
+        } else {
+            String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
+            if (scopeId == null) return;
+            ClientScopeModel s = realm.getClientScopeById(scopeId);
+            if (s == null) return;
+            parent = s;
+            parentType = ParentType.client_scope;
+            parentId = s.getId();
+        }
+        for (String mapperId : RealmAttestationExporter.jwtRelevantMapperIds(
+                parent.getProtocolMappersStream())) {
+            if (!touched.contains(mapperId)) {
+                continue;
+            }
+            org.keycloak.models.ProtocolMapperModel pm = parent.getProtocolMapperById(mapperId);
+            if (pm != null) {
+                units.add(RealmAttestationExporter.protocolMapperUnit(
+                        pm, parentType, parentId, realmId));
+            }
+        }
+    }
+
+    /**
+     * EVERY row's value for {@code key}, in row order, skipping rows that do not carry it.
+     * {@link #firstRowKey} is not enough for the mapper actions: {@code coalesceOrCreate} folds
+     * several same-request mapper adds into ONE change request carrying one row per mapper.
+     */
+    private static java.util.Set<String> rowValues(IgaChangeRequestEntity cr, String key) {
+        java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+            String v = str(row, key);
+            if (v != null) {
+                out.add(v);
+            }
+        }
+        return out;
     }
 
     // -------------------------------------------------------------------------
@@ -4196,15 +4370,13 @@ public class TideAttestor implements IgaAttestor {
                 if (c != null) units.add(RealmAttestationExporter.clientScopeAssignmentSet(c, realmId));
             }
             case "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER", "REMOVE_PROTOCOL_MAPPER" -> {
-                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
-                String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
-                if (clientUuid != null) {
-                    ClientModel c = realm.getClientById(clientUuid);
-                    if (c != null) units.add(RealmAttestationExporter.clientMapperSet(c, realmId));
-                } else if (scopeId != null) {
-                    ClientScopeModel s = realm.getClientScopeById(scopeId);
-                    if (s != null) units.add(RealmAttestationExporter.clientScopeMapperSet(s, realmId));
-                }
+                // The owner mapper-set FIRST (it is this action's owner-set unit, the one
+                // setUnitOwnerKey groups on and stampCoalescedSetUnits signs once per batch),
+                // then the per-mapper protocol_mapper unit for each mapper the change request
+                // adds or updates. Framing only the set left each new mapper's own attestation
+                // column unsigned, which the uniform login read rejects fail-closed.
+                addIfPresent(units, buildDerivedOwnerSetUnit(session, realm, cr));
+                addOwnedMapperUnits(units, realm, cr, action, realmId);
             }
             case "SCOPE_MAPPING_ADD", "SCOPE_MAPPING_REMOVE" -> {
                 String clientUuid = firstRowKey(cr, "CLIENT_UUID");
@@ -4796,10 +4968,13 @@ public class TideAttestor implements IgaAttestor {
         java.util.LinkedHashMap<String, IgaChangeRequestEntity> crByOwner = new java.util.LinkedHashMap<>();
         java.util.LinkedHashMap<String, AttestationUnit> unitByOwner = new java.util.LinkedHashMap<>();
         for (IgaChangeRequestEntity cr : crs) {
-            if (cr == null || !isProducerEnvelopeSignedAction(cr.getActionType())) {
+            // Edge sets AND derived owner-sets (the mapper sets): both are owner-keyed fan-outs
+            // with no member predicate, so both must be signed ONCE over the post-batch state
+            // rather than once per contributing change request.
+            AttestationUnit unit = buildOwnerSetUnit(session, realm, cr);
+            if (unit == null) {
                 continue;
             }
-            AttestationUnit unit = buildEdgeSetUnit(session, realm, cr);
             String owner = unit.unitType() + '|' + unit.targetId();
             crByOwner.put(owner, cr);
             unitByOwner.put(owner, unit);
@@ -4889,12 +5064,12 @@ public class TideAttestor implements IgaAttestor {
      */
     public String setUnitOwnerKey(KeycloakSession session, RealmModel realm,
                                   IgaChangeRequestEntity cr) {
-        if (cr == null || !isProducerEnvelopeSignedAction(cr.getActionType())) {
+        if (cr == null) {
             return null;
         }
         try {
-            AttestationUnit unit = buildEdgeSetUnit(session, realm, cr);
-            return unit.unitType() + '|' + unit.targetId();
+            AttestationUnit unit = buildOwnerSetUnit(session, realm, cr);
+            return unit == null ? null : unit.unitType() + '|' + unit.targetId();
         } catch (RuntimeException unresolvable) {
             // An owner we cannot resolve cannot be contested either; the CR will fail on its
             // own merits in the commit gate.
@@ -5393,7 +5568,12 @@ public class TideAttestor implements IgaAttestor {
                                       IgaChangeRequestEntity cr, byte[] signedEnvelope,
                                       String stampedSig) {
         em.flush();
-        AttestationUnit reDerived = buildEdgeSetUnit(session, realm, cr);
+        AttestationUnit reDerived = buildOwnerSetUnit(session, realm, cr);
+        if (reDerived == null) {
+            // The owner vanished between the stamp and this re-read (the caller only reaches
+            // here for a change request that DID build a unit). Nothing to verify against.
+            return;
+        }
         String unitType = reDerived.unitType();
         String targetId = reDerived.targetId();
         if (!java.util.Arrays.equals(signedEnvelope, reDerived.serialize())) {
@@ -5908,6 +6088,16 @@ public class TideAttestor implements IgaAttestor {
                 String sig = signProducerEnvelope(session, realm, mode, env);
                 em.createQuery("UPDATE ClientScopeEntity e SET e.clientScopeMapperSetAttestation = :sig WHERE e.id = :id")
                         .setParameter("sig", sig).setParameter("id", scopeId).executeUpdate();
+            }
+            // MIRRORS the framing enumerator (enumerateLiveCrUnits): each mapper this change
+            // request adds or updates owns a protocol_mapper column of its own that the login
+            // read replays. Stamping only the owner set left that column NULL or stubbed.
+            // Same builder, same jwt-relevance filter, same order as the framing side.
+            List<AttestationUnit> mapperUnits = new ArrayList<>();
+            addOwnedMapperUnits(mapperUnits, realm, cr, cr.getActionType(), realm.getId());
+            for (AttestationUnit unit : mapperUnits) {
+                UnitColumnMapping.stamp(em, unit,
+                        signProducerEnvelope(session, realm, mode, unit.serialize()));
             }
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
