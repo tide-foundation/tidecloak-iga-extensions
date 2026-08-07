@@ -3860,8 +3860,8 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * Does this actionType perturb a DERIVED owner-set unit — a set keyed on an owner that
-     * already exists, whose members the change request adds to or removes from — WITHOUT being
+     * Does this actionType perturb a DERIVED owner-set unit (a set keyed on an owner that
+     * already exists, whose members the change request adds to or removes from) WITHOUT being
      * one of the eight {@link #isProducerEnvelopeSignedAction} edge actions?
      *
      * <p>These carry exactly the same frozen-carrier hazard as the edge actions and must be
@@ -3880,23 +3880,7 @@ public class TideAttestor implements IgaAttestor {
      * a set missing the sibling's mapper.
      */
     static boolean isDerivedOwnerSetAction(String actionType) {
-        if (actionType == null) {
-            return false;
-        }
-        switch (actionType) {
-            case "ADD_PROTOCOL_MAPPER":         // client_mapper_set / client_scope_mapper_set
-            case "UPDATE_PROTOCOL_MAPPER":
-            case "REMOVE_PROTOCOL_MAPPER":
-            case "ASSIGN_SCOPE":                // client_scope_assignment_set
-            case "REMOVE_SCOPE":
-            case "SCOPE_MAPPING_ADD":           // scope_role_allowlist_set (parent = client)
-            case "SCOPE_MAPPING_REMOVE":
-            case "SCOPE_ADD_ROLE":              // scope_role_allowlist_set (parent = client_scope)
-            case "SCOPE_REMOVE_ROLE":
-                return true;
-            default:
-                return false;
-        }
+        return actionType != null && DERIVED_OWNER_SET_ACTION_TYPES.contains(actionType);
     }
 
     /**
@@ -5058,6 +5042,36 @@ public class TideAttestor implements IgaAttestor {
             ACTION_ADD_COMPOSITE, ACTION_REMOVE_COMPOSITE);
 
     /**
+     * The DERIVED owner-set actions: not edge actions, but they perturb an owner-keyed set the
+     * same way, so they carry the same frozen-carrier hazard. THE single source of truth for
+     * {@link #isDerivedOwnerSetAction}, so the predicate and the server-side action-type filter
+     * below cannot drift apart.
+     */
+    public static final List<String> DERIVED_OWNER_SET_ACTION_TYPES = List.of(
+            "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER", "REMOVE_PROTOCOL_MAPPER",
+            "ASSIGN_SCOPE", "REMOVE_SCOPE",
+            "SCOPE_MAPPING_ADD", "SCOPE_MAPPING_REMOVE",
+            "SCOPE_ADD_ROLE", "SCOPE_REMOVE_ROLE");
+
+    /**
+     * EVERY action whose commit perturbs an owner set, edge or derived.
+     *
+     * <p>This is the list the PENDING-change-request lookups must filter on. Both of them
+     * ({@link #resolveFramingBatch}, which decides what a phase-1 carrier is framed over, and
+     * {@link #invalidateStaleSetUnitCarriers}, which clears a sibling's carrier after a commit
+     * moved their shared owner) previously filtered on {@link #EDGE_SET_ACTION_TYPES} alone. A
+     * pending mapper or scope change request was therefore never returned by either query, so
+     * even once {@link #setUnitOwnerKey} resolved its owner it could not be batched with its
+     * siblings and its stale carrier was never invalidated: it would still commit a quorum
+     * signature over a member set the database no longer held.
+     */
+    public static final List<String> OWNER_SET_ACTION_TYPES =
+            java.util.stream.Stream.concat(
+                            EDGE_SET_ACTION_TYPES.stream(),
+                            DERIVED_OWNER_SET_ACTION_TYPES.stream())
+                    .collect(java.util.stream.Collectors.toUnmodifiableList());
+
+    /**
      * Does this realm sign edge sets from a doken-bound approval carrier whose unit bytes are
      * FROZEN at approval time? True for a real-signing-capable multiAdmin realm, whose
      * {@code signMultiAdminUnitsViaPolicy} replays {@code ModelRequest.FromBytes(carrier)}
@@ -5169,7 +5183,7 @@ public class TideAttestor implements IgaAttestor {
         }
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<IgaChangeRequestEntity> pending = new IgaChangeRequestService(em, session)
-                .listPendingByActionTypeIn(realm.getId(), EDGE_SET_ACTION_TYPES, null, CARRIER_SWEEP_LIMIT);
+                .listPendingByActionTypeIn(realm.getId(), OWNER_SET_ACTION_TYPES, null, CARRIER_SWEEP_LIMIT);
         List<IgaChangeRequestEntity> batch = new ArrayList<>();
         boolean selfIncluded = false;
         for (IgaChangeRequestEntity other : pending) {
@@ -5521,7 +5535,7 @@ public class TideAttestor implements IgaAttestor {
                                                 List<String> committedCrIds) {
         Set<String> committedOwners = new HashSet<>(owners);
         List<IgaChangeRequestEntity> pending = new IgaChangeRequestService(em, session)
-                .listPendingByActionTypeIn(realm.getId(), EDGE_SET_ACTION_TYPES, null, CARRIER_SWEEP_LIMIT);
+                .listPendingByActionTypeIn(realm.getId(), OWNER_SET_ACTION_TYPES, null, CARRIER_SWEEP_LIMIT);
         int invalidated = 0;
         for (IgaChangeRequestEntity other : pending) {
             String carrier = other.getRequestModel();
