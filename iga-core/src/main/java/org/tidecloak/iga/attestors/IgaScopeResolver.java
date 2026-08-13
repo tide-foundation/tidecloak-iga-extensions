@@ -225,8 +225,9 @@ public final class IgaScopeResolver {
                 break;
             // CREATE_USER / CREATE_ROLE / CREATE_GROUP / CREATE_CLIENT /
             // CREATE_ORGANIZATION, the ADOPT_* family, and realm-wide
-            // action types (REQUEST_SERVER_CERT, INSTALL_LICENSE,
-            // ROTATE_LICENSE) intentionally leave the scope empty.
+            // action types (REQUEST_SERVER_CERT, REQUEST_REALM_CERT,
+            // INSTALL_LICENSE, ROTATE_LICENSE) intentionally leave the
+            // scope empty.
             default:
                 break;
         }

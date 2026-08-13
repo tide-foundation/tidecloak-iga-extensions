@@ -106,35 +106,6 @@ public class IgaAdminResource {
         return new IgaServerCertDraftService(getEm(), getService());
     }
 
-    /**
-     * The three REQUEST_SERVER_CERT carrier keys in the order the leaf-first accept must run
-     * (leaf records the approver toward threshold; ca + pk dedup as the same admin and only
-     * persist their carrier). Used by the multi-carrier /approve batch (phase 1 build + phase 2
-     * accept). leaf -> cr.requestModel, ca -> draft.caRequestModel, pk -> draft.pkRequestModel.
-     */
-    private static final List<String> SERVER_CERT_CARRIER_KEYS = List.of(
-            TideAttestor.SERVER_CERT_CARRIER_LEAF,
-            TideAttestor.SERVER_CERT_CARRIER_CA,
-            TideAttestor.SERVER_CERT_CARRIER_PK);
-
-    /**
-     * Parse the phase-2 {@code requestModels:[{key,requestModel},...]} array into a key -> dokened
-     * carrier map. Tolerates the entries in any order; ignores unknown keys.
-     */
-    private static Map<String, String> parseServerCertDokenedCarriers(List<?> requestModels) {
-        Map<String, String> out = new LinkedHashMap<>();
-        if (requestModels == null) return out;
-        for (Object o : requestModels) {
-            if (!(o instanceof Map<?, ?> m)) continue;
-            Object k = m.get("key");
-            Object rm = m.get("requestModel");
-            if (k instanceof String key && rm instanceof String carrier) {
-                out.put(key, carrier);
-            }
-        }
-        return out;
-    }
-
     private IgaServerCertEnrollmentTokenService getEnrollmentTokenService() {
         return new IgaServerCertEnrollmentTokenService(getEm());
     }
@@ -1173,15 +1144,12 @@ public class IgaAdminResource {
         if (multiAdmin) {
             TideAttestor tide = (TideAttestor) attestor;
             String requestModel = body != null ? (String) body.get("requestModel") : null;
-            // ServerCert is the ONE multi-carrier action: ONE enclave popup signs all THREE
-            // carriers (leaf / CA / PK) in a single batch. Phase 1 returns them as an array
-            // (requestModels:[{key,requestModel},...]); phase 2 posts all three dokened carriers
-            // back in one body (requestModels:[...]). Every other CR type keeps the single-carrier
-            // requestModel string shape. Branch on actionType.
-            boolean isServerCert = TideAttestor.ACTION_REQUEST_SERVER_CERT.equals(cr.getActionType());
-            List<?> requestModels = body != null && body.get("requestModels") instanceof List<?> l ? l : null;
-            boolean phase2 = (requestModel != null && !requestModel.isBlank())
-                    || (requestModels != null && !requestModels.isEmpty());
+            // Every action — REQUEST_SERVER_CERT included — uses the single-carrier
+            // `requestModel` string shape. ServerCert used to be the one exception, batching three
+            // carriers (leaf / CA / PK) through `requestModels:[{key,requestModel},...]`;
+            // ResourceIdentity:1 is a single carrier returning three signatures, so that shape and
+            // its phase-2 completeness gate are gone.
+            boolean phase2 = requestModel != null && !requestModel.isBlank();
 
             if (!phase2) {
                 // Phase 1: build + persist the Policy:1 carrier(s) for the enclave.
@@ -1191,21 +1159,7 @@ public class IgaAdminResource {
                     resp.put("mode", "needs-approval");
                     resp.put("changeRequestId", cr.getId());
                     resp.put("actionType", cr.getActionType());
-                    if (isServerCert) {
-                        // Build all three carriers; return them as a keyed array. Each carrier is
-                        // signed by the enclave under id = `${crId}#${key}`.
-                        List<Map<String, Object>> models = new java.util.ArrayList<>();
-                        for (String key : SERVER_CERT_CARRIER_KEYS) {
-                            String carrier = tide.buildMultiAdminApprovalModel(session, realm, cr, key);
-                            Map<String, Object> m = new LinkedHashMap<>();
-                            m.put("key", key);
-                            m.put("requestModel", carrier);
-                            models.add(m);
-                        }
-                        resp.put("requestModels", models);
-                    } else {
-                        resp.put("requestModel", tide.buildMultiAdminApprovalModel(session, realm, cr));
-                    }
+                    resp.put("requestModel", tide.buildMultiAdminApprovalModel(session, realm, cr));
                     resp.put("authCount", authCount(em, cr));
                     resp.put("threshold", threshold);
                     return Response.ok(resp).build();
@@ -1227,36 +1181,7 @@ public class IgaAdminResource {
             // returns false), but still falls through to commitIfReady so a final
             // approver re-hitting Authorize on a now-at-quorum CR applies it.
             try {
-                if (isServerCert) {
-                    // ALL THREE dokened carriers MUST be present in one phase-2 body — otherwise a
-                    // partial post that crosses quorum would commit with an un-dokened CA/PK carrier
-                    // and the ORK PolicyAuthorizationFlow rejects ("Must pass at least 1 doken").
-                    Map<String, String> byKey = parseServerCertDokenedCarriers(requestModels);
-                    for (String key : SERVER_CERT_CARRIER_KEYS) {
-                        String dokened = byKey.get(key);
-                        if (dokened == null || dokened.isBlank()) {
-                            return Response.status(Response.Status.BAD_REQUEST)
-                                    .entity(Map.of("error", "SERVER_CERT_CARRIERS_INCOMPLETE",
-                                            "message", "REQUEST_SERVER_CERT phase 2 requires all three "
-                                                    + "dokened carriers (leaf, ca, pk) in requestModels; missing '"
-                                                    + key + "'"))
-                                    .build();
-                        }
-                    }
-                    // Persist all three; record the approver toward threshold exactly ONCE (the
-                    // leaf accept does record(); ca + pk dedup as the same admin, persisting only).
-                    tide.acceptMultiAdminApprovalModel(session, realm, cr,
-                            byKey.get(TideAttestor.SERVER_CERT_CARRIER_LEAF), admin,
-                            TideAttestor.SERVER_CERT_CARRIER_LEAF);
-                    tide.acceptMultiAdminApprovalModel(session, realm, cr,
-                            byKey.get(TideAttestor.SERVER_CERT_CARRIER_CA), admin,
-                            TideAttestor.SERVER_CERT_CARRIER_CA);
-                    tide.acceptMultiAdminApprovalModel(session, realm, cr,
-                            byKey.get(TideAttestor.SERVER_CERT_CARRIER_PK), admin,
-                            TideAttestor.SERVER_CERT_CARRIER_PK);
-                } else {
-                    tide.acceptMultiAdminApprovalModel(session, realm, cr, requestModel, admin);
-                }
+                tide.acceptMultiAdminApprovalModel(session, realm, cr, requestModel, admin);
             } catch (ForbiddenException fe) {
                 return Response.status(Response.Status.FORBIDDEN)
                         .entity(Map.of("error", "FORBIDDEN_APPROVER_ROLE",
@@ -2499,7 +2424,7 @@ public class IgaAdminResource {
     }
 
     // -------------------------------------------------------------------------
-    // Server Cert Drafts (workload TLS / SPIFFE cert request flow)
+    // Server Cert Drafts (workload TLS cert request flow)
     // -------------------------------------------------------------------------
 
     @GET
@@ -2534,18 +2459,6 @@ public class IgaAdminResource {
         return Response.ok(toServerCertDraftRepresentation(entity)).build();
     }
 
-    @GET
-    @Path("server-certs/instance/{instanceId}")
-    @Produces(MediaType.APPLICATION_JSON)
-    public List<IgaServerCertDraftRepresentation> listServerCertsByInstance(
-            @PathParam("instanceId") String instanceId) {
-        auth.realm().requireManageRealm();
-        return getServerCertDraftService()
-                .findByRealmAndInstance(realm.getId(), instanceId).stream()
-                .map(this::toServerCertDraftRepresentation)
-                .collect(Collectors.toList());
-    }
-
     @POST
     @Path("server-certs/request")
     @Consumes(MediaType.APPLICATION_JSON)
@@ -2553,85 +2466,63 @@ public class IgaAdminResource {
     public Response requestServerCert(IgaServerCertDraftRepresentation rep) {
         auth.realm().requireManageRealm();
 
-        if (rep == null) {
+        if (rep == null || rep.getCsr() == null || rep.getCsr().isBlank()) {
             return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "Missing request body"))
+                    .entity(Map.of("error", "csr is required"))
                     .build();
         }
-        if (rep.getClientId() == null || rep.getClientId().isBlank()) {
+        if (rep.getCsr().length() > 8192) {
             return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "clientId is required"))
-                    .build();
-        }
-        if (rep.getInstanceId() == null || rep.getInstanceId().isBlank()) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "instanceId is required"))
-                    .build();
-        }
-        if (rep.getPublicKey() == null || rep.getPublicKey().isBlank()) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "publicKey is required"))
-                    .build();
-        }
-        if (rep.getPublicKey().length() > 4096) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "publicKey exceeds maximum length of 4096 characters"))
-                    .build();
-        }
-        if (rep.getSpiffeId() != null && rep.getSpiffeId().length() > 512) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "spiffeId exceeds maximum length of 512 characters"))
-                    .build();
-        }
-        if (rep.getSignedPolicy() != null && rep.getSignedPolicy().length() > 8192) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "signedPolicy exceeds maximum length of 8192 characters"))
+                    .entity(Map.of("error", "csr exceeds maximum length of 8192 characters"))
                     .build();
         }
 
+        // Parse + verify proof of possession, exactly as the public enrolment endpoint does. The
+        // clientId and public key come from the CSR rather than the body: an admin-filed request
+        // must certify a key the requester demonstrably holds, same as a workload-filed one.
+        final org.tidecloak.iga.crypto.CertificationRequestParser.ParsedCsr csr;
+        try {
+            csr = org.tidecloak.iga.crypto.CertificationRequestParser.parseAndVerify(rep.getCsr());
+        } catch (IllegalArgumentException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "INVALID_CSR", "message", String.valueOf(e.getMessage())))
+                    .build();
+        }
+
+        // Same CN contract as the public enrolment endpoint: the ORK requires exactly
+        // "CN=client_<clientId>", so a bare CN here would be rejected by the cohort at commit.
+        if (csr.commonName == null || !csr.commonName.startsWith("client_")) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "INVALID_CSR",
+                            "message", "CSR subject must be CN=client_<clientId>"))
+                    .build();
+        }
         IgaServerCertDraftEntity created = getServerCertDraftService().createRequest(
                 realm,
                 currentUserId(),
-                rep.getClientId(),
-                rep.getInstanceId(),
-                rep.getSpiffeId(),
-                rep.getPublicKey(),
-                rep.getPublicKeyFingerprint(),
-                rep.getRequestedLifetime(),
-                rep.getSignedPolicy());
+                csr.commonName.substring("client_".length()),
+                java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(csr.derEncoded),
+                java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(csr.subjectPublicKeyInfo),
+                serverCertFingerprint(csr.subjectPublicKeyInfo),
+                java.util.HexFormat.of().formatHex(
+                        org.tidecloak.iga.crypto.ServerCertSigner.newSerialNumber()));
         return Response.status(Response.Status.CREATED)
                 .entity(toServerCertDraftRepresentation(created))
                 .build();
     }
 
-    @POST
-    @Path("server-certs/{id}/issue")
-    @Consumes(MediaType.APPLICATION_JSON)
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response issueServerCert(@PathParam("id") String id, Map<String, Object> body) {
-        auth.realm().requireManageRealm();
-
-        IgaServerCertDraftService service = getServerCertDraftService();
-        IgaServerCertDraftEntity entity = service.findById(id);
-        if (entity == null || !realm.getId().equals(entity.getRealmId())) {
-            return Response.status(Response.Status.NOT_FOUND).build();
+    /**
+     * SHA-256 over the DER SubjectPublicKeyInfo, matching the public enrolment endpoint's format
+     * so both paths produce the same fingerprint for the same key — it is the dedup and lookup key.
+     */
+    private static String serverCertFingerprint(byte[] subjectPublicKeyInfoDer) {
+        try {
+            byte[] hash = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(subjectPublicKeyInfoDer);
+            return "SHA256:" + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(hash);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable in this JVM", e);
         }
-
-        String certificate = body != null ? (String) body.get("certificate") : null;
-        String trustBundle = body != null ? (String) body.get("trustBundle") : null;
-        if (certificate == null || certificate.isBlank()) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "certificate is required"))
-                    .build();
-        }
-        if (trustBundle == null || trustBundle.isBlank()) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "trustBundle is required"))
-                    .build();
-        }
-
-        IgaServerCertDraftEntity updated = service.issueCert(id, certificate, trustBundle);
-        return Response.ok(toServerCertDraftRepresentation(updated)).build();
     }
 
     @POST
@@ -2649,20 +2540,6 @@ public class IgaAdminResource {
         return Response.ok(toServerCertDraftRepresentation(updated)).build();
     }
 
-    /**
-     * Revoke ALL server-cert rows for an instanceId (source-branch parity with
-     * {@code server-cert/revoke}). Every non-revoked draft for the (realm, instance)
-     * pair is marked revoked and surfaces on the public CRL endpoint.
-     */
-    @POST
-    @Path("server-certs/instance/{instanceId}/revoke")
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response revokeServerCertsByInstance(@PathParam("instanceId") String instanceId) {
-        auth.realm().requireManageRealm();
-        int revoked = getServerCertDraftService().revokeByInstance(realm.getId(), instanceId);
-        return Response.ok(Map.of("instanceId", instanceId, "revoked", revoked)).build();
-    }
-
     @DELETE
     @Path("server-certs/{id}")
     public Response deleteServerCert(@PathParam("id") String id) {
@@ -2677,73 +2554,9 @@ public class IgaAdminResource {
         return Response.noContent().build();
     }
 
-    /**
-     * Mint a ONE-TIME enrollment token for a client's server-identity flow. The plaintext is
-     * returned ONCE and never stored (only its SHA-256 hash is persisted). The workload then
-     * presents the plaintext as an {@code Authorization: Bearer} header on the public
-     * {@code /realms/{realm}/tide-server-identity/request} call.
-     *
-     * <p>Body: {@code {clientId (required), ttlSeconds (optional, default 86400, clamp 60..604800)}}.
-     * Minting also sets {@code tide.server-identity.enabled=true} on the client (idempotent) and
-     * SUPERSEDES (invalidates) any prior unconsumed token for the client.
-     */
-    @POST
-    @Path("server-certs/enrollment-token")
-    @Consumes(MediaType.APPLICATION_JSON)
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response mintEnrollmentToken(Map<String, Object> body) {
-        auth.realm().requireManageRealm();
-
-        String clientId = body != null ? (String) body.get("clientId") : null;
-        if (clientId == null || clientId.isBlank()) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "clientId is required"))
-                    .build();
-        }
-
-        // ttlSeconds: default 86400 (24h), clamp 60..604800 (7d).
-        long ttlSeconds = 86400L;
-        if (body != null && body.get("ttlSeconds") != null) {
-            Object raw = body.get("ttlSeconds");
-            if (raw instanceof Number) {
-                ttlSeconds = ((Number) raw).longValue();
-            } else {
-                try {
-                    ttlSeconds = Long.parseLong(raw.toString().trim());
-                } catch (NumberFormatException e) {
-                    return Response.status(Response.Status.BAD_REQUEST)
-                            .entity(Map.of("error", "ttlSeconds must be an integer"))
-                            .build();
-                }
-            }
-        }
-        ttlSeconds = Math.max(60L, Math.min(604800L, ttlSeconds));
-
-        // Validate the client exists in this realm (mirror requestServerCert).
-        ClientModel client = realm.getClientByClientId(clientId);
-        if (client == null) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "Client '" + clientId + "' not found in realm"))
-                    .build();
-        }
-
-        // Mark the client as server-identity enabled (idempotent gate for the request endpoint).
-        client.setAttribute("tide.server-identity.enabled", "true");
-
-        IgaServerCertEnrollmentTokenService.MintResult result =
-                getEnrollmentTokenService().mint(realm.getId(), clientId, ttlSeconds, currentUserId());
-
-        LinkedHashMap<String, Object> resp = new LinkedHashMap<>();
-        resp.put("token", result.plaintext);
-        resp.put("clientId", clientId);
-        resp.put("expiresAt", result.expiresAt);
-        return Response.status(Response.Status.CREATED).entity(resp).build();
-    }
-
     // -------------------------------------------------------------------------
     // Licensing Drafts (realm license install/rotate flow)
     // -------------------------------------------------------------------------
-
     @POST
     @Path("licensing/trigger")
     @Consumes(MediaType.APPLICATION_JSON)
@@ -2969,14 +2782,13 @@ public class IgaAdminResource {
         rep.setChangeRequestId(entity.getChangeRequest() != null ? entity.getChangeRequest().getId() : null);
         rep.setRealmId(entity.getRealmId());
         rep.setClientId(entity.getClientId());
-        rep.setInstanceId(entity.getInstanceId());
-        rep.setSpiffeId(entity.getSpiffeId());
         rep.setPublicKey(entity.getPublicKey());
         rep.setPublicKeyFingerprint(entity.getPublicKeyFingerprint());
-        rep.setRequestedLifetime(entity.getRequestedLifetime());
+        rep.setCsr(entity.getCsr());
+        rep.setSerialNumber(entity.getSerialNumber());
         rep.setCertificate(entity.getCertificate());
-        rep.setTrustBundle(entity.getTrustBundle());
-        rep.setSignedPolicy(entity.getSignedPolicy());
+        rep.setNotBefore(entity.getNotBefore());
+        rep.setNotAfter(entity.getNotAfter());
         rep.setRevoked(entity.isRevoked());
         rep.setRevokedAt(entity.getRevokedAt());
         rep.setCreatedAt(entity.getCreatedAt());

@@ -12,12 +12,12 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Service for managing pending workload TLS / SPIFFE certificate requests.
+ * Service for managing pending workload TLS certificate requests.
  *
  * Sidecar pattern: a parent {@link IgaChangeRequestEntity} drives the approval
  * flow (action_type = "REQUEST_SERVER_CERT") and the {@link IgaServerCertDraftEntity}
- * sidecar holds cert-specific data (public key, instance id, issued cert, trust
- * bundle, revocation state).
+ * sidecar holds cert-specific data (public key, issued cert, trust bundle,
+ * revocation state).
  */
 public class IgaServerCertDraftService {
 
@@ -30,30 +30,49 @@ public class IgaServerCertDraftService {
     }
 
     /**
-     * Create a new server-cert request. Inserts BOTH the parent
-     * IGA_CHANGE_REQUEST row (entity_type=CLIENT, action_type=REQUEST_SERVER_CERT)
-     * AND the IGA_SERVER_CERT_DRAFT sidecar linked via the changeRequest FK.
-     *
-     * Returns the sidecar entity with {@code changeRequest} populated.
+     * Create a new server-cert request with no prerequisite. See
+     * {@link #createRequest(RealmModel, String, String, String, String, String, String, List)}.
      */
     public IgaServerCertDraftEntity createRequest(RealmModel realm,
                                                    String requestedBy,
                                                    String clientId,
-                                                   String instanceId,
-                                                   String spiffeId,
+                                                   String csr,
                                                    String publicKey,
                                                    String publicKeyFingerprint,
-                                                   Long requestedLifetime,
-                                                   String signedPolicy) {
+                                                   String serialNumber) {
+        return createRequest(realm, requestedBy, clientId, csr, publicKey, publicKeyFingerprint,
+                serialNumber, null);
+    }
+
+    /**
+     * Create a new server-cert request. Inserts BOTH the parent
+     * IGA_CHANGE_REQUEST row (entity_type=CLIENT, action_type=REQUEST_SERVER_CERT)
+     * AND the IGA_SERVER_CERT_DRAFT sidecar linked via the changeRequest FK.
+     *
+     * <p>A non-empty {@code dependsOn} marks the CR blocked until every listed prerequisite CR is
+     * APPROVED — the commit path enforces that with a 412. The enrolment flow uses it to chain a
+     * client certificate to the realm certificate it will be anchored by: issuing a workload leaf
+     * before the realm root CA exists produces a certificate that cannot complete a handshake.
+     *
+     * Returns the sidecar entity with {@code changeRequest} populated.
+     *
+     * @param dependsOn prerequisite CR ids, or null/empty for an unblocked request
+     */
+    public IgaServerCertDraftEntity createRequest(RealmModel realm,
+                                                   String requestedBy,
+                                                   String clientId,
+                                                   String csr,
+                                                   String publicKey,
+                                                   String publicKeyFingerprint,
+                                                   String serialNumber,
+                                                   List<String> dependsOn) {
         // Build the row payload that the parent CR carries. This is what the
         // replay dispatcher will see when REQUEST_SERVER_CERT is approved.
         Map<String, Object> row = new HashMap<>();
         row.put("client_id", clientId);
-        row.put("instance_id", instanceId);
-        if (spiffeId != null) row.put("spiffe_id", spiffeId);
         row.put("public_key", publicKey);
         if (publicKeyFingerprint != null) row.put("public_key_fingerprint", publicKeyFingerprint);
-        if (requestedLifetime != null) row.put("requested_lifetime", requestedLifetime);
+        if (serialNumber != null) row.put("serial_number", serialNumber);
 
         IgaChangeRequestEntity cr = changeRequestService.create(
                 realm,
@@ -61,7 +80,8 @@ public class IgaServerCertDraftService {
                 clientId,
                 "REQUEST_SERVER_CERT",
                 List.of(row),
-                requestedBy);
+                requestedBy,
+                dependsOn);
 
         long now = System.currentTimeMillis();
         IgaServerCertDraftEntity entity = new IgaServerCertDraftEntity();
@@ -69,12 +89,10 @@ public class IgaServerCertDraftService {
         entity.setChangeRequest(cr);
         entity.setRealmId(realm.getId());
         entity.setClientId(clientId);
-        entity.setInstanceId(instanceId);
-        entity.setSpiffeId(spiffeId);
+        entity.setCsr(csr);
         entity.setPublicKey(publicKey);
         entity.setPublicKeyFingerprint(publicKeyFingerprint);
-        entity.setRequestedLifetime(requestedLifetime);
-        entity.setSignedPolicy(signedPolicy);
+        entity.setSerialNumber(serialNumber);
         entity.setRevoked(false);
         entity.setCreatedAt(now);
         em.persist(entity);
@@ -83,26 +101,23 @@ public class IgaServerCertDraftService {
     }
 
     /**
-     * Set the issued certificate + trust bundle on the sidecar. If the parent
-     * change request is still PENDING it is also marked APPROVED here (used
-     * when issuance is driven from outside the replay dispatcher path).
+     * Store the validated certificate from a committed signing round.
+     *
+     * <p>Sidecar only — the parent CR's status is NOT touched here. The commit path owns the CR
+     * lifecycle (the replay dispatcher's tail sets APPROVED + resolvedAt once replay returns), and
+     * having a sidecar service reach up and resolve its own parent would put that transition in two
+     * places that could disagree.
      */
-    public IgaServerCertDraftEntity issueCert(String draftId, String certificate, String trustBundle) {
+    public IgaServerCertDraftEntity issueCert(String draftId, String certificate,
+                                              Long notBefore, Long notAfter) {
         IgaServerCertDraftEntity entity = em.find(IgaServerCertDraftEntity.class, draftId);
         if (entity == null) {
             throw new IllegalArgumentException("Server cert draft not found: " + draftId);
         }
-        long now = System.currentTimeMillis();
         entity.setCertificate(certificate);
-        entity.setTrustBundle(trustBundle);
-        entity.setUpdatedAt(now);
-
-        IgaChangeRequestEntity cr = entity.getChangeRequest();
-        if (cr != null && "PENDING".equals(cr.getStatus())) {
-            cr.setStatus("APPROVED");
-            cr.setResolvedAt(now);
-        }
-
+        entity.setNotBefore(notBefore);
+        entity.setNotAfter(notAfter);
+        entity.setUpdatedAt(System.currentTimeMillis());
         em.flush();
         return entity;
     }
@@ -121,29 +136,6 @@ public class IgaServerCertDraftService {
         entity.setUpdatedAt(now);
         em.flush();
         return entity;
-    }
-
-    /**
-     * Revoke EVERY draft row for a (realm, instance) pair. Mirrors the source branch's
-     * {@code server-cert/revoke} (revoke ALL rows for an instanceId) so a re-issued
-     * instance's prior certificates are all marked revoked (and surface on the CRL).
-     *
-     * @return the number of rows revoked.
-     */
-    public int revokeByInstance(String realmId, String instanceId) {
-        List<IgaServerCertDraftEntity> rows = findByRealmAndInstance(realmId, instanceId);
-        long now = System.currentTimeMillis();
-        int count = 0;
-        for (IgaServerCertDraftEntity entity : rows) {
-            if (!entity.isRevoked()) {
-                entity.setRevoked(true);
-                entity.setRevokedAt(now);
-                entity.setUpdatedAt(now);
-                count++;
-            }
-        }
-        em.flush();
-        return count;
     }
 
     /**
@@ -174,13 +166,15 @@ public class IgaServerCertDraftService {
     }
 
     /**
-     * List drafts for a (realm, instance) pair, ordered by createdAt DESC.
+     * List drafts for a (realm, public-key fingerprint) pair, ordered by createdAt DESC.
+     * Backs the enrolment endpoint's duplicate-request guard: the fingerprint identifies the
+     * keypair a CSR is asking to have certified.
      */
-    public List<IgaServerCertDraftEntity> findByRealmAndInstance(String realmId, String instanceId) {
+    public List<IgaServerCertDraftEntity> findByRealmAndFingerprint(String realmId, String fingerprint) {
         TypedQuery<IgaServerCertDraftEntity> query = em.createNamedQuery(
-                "IgaServerCertDraft.findByRealmAndInstance", IgaServerCertDraftEntity.class);
+                "IgaServerCertDraft.findByRealmAndFingerprint", IgaServerCertDraftEntity.class);
         query.setParameter("realmId", realmId);
-        query.setParameter("instanceId", instanceId);
+        query.setParameter("fingerprint", fingerprint);
         return query.getResultList();
     }
 

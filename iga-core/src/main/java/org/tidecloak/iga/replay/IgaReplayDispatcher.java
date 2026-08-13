@@ -13,7 +13,11 @@ import org.keycloak.models.RoleModel;
 import org.keycloak.services.managers.ClientManager;
 import org.keycloak.services.managers.RealmManager;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.entities.IgaRealmCertEntity;
 import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
+import org.tidecloak.iga.providers.IgaChangeRequestService;
+import org.tidecloak.iga.providers.IgaRealmCertService;
+import org.tidecloak.iga.providers.IgaServerCertDraftService;
 import org.tidecloak.iga.providers.TidePolicyService;
 
 import jakarta.persistence.EntityManager;
@@ -232,6 +236,7 @@ public class IgaReplayDispatcher {
             case "SCOPE_MAPPING_REMOVE" -> replayRevoke(session, realm, rows, finalAttestation, em,
                     r -> scopeMappingRemoveDirect(session, realm, r), setSigned, "SCOPE_MAPPING_REMOVE");
             case "REQUEST_SERVER_CERT" -> replayRequestServerCert(session, realm, cr, em);
+            case "REQUEST_REALM_CERT" -> replayRequestRealmCert(session, realm, cr, em);
             case "INSTALL_LICENSE", "ROTATE_LICENSE" -> replayLicenseAction(cr);
 
             // ----- Governed IGA disable -----
@@ -1380,22 +1385,27 @@ public class IgaReplayDispatcher {
     // -------------------------------------------------------------------------
 
     /**
-     * REQUEST_SERVER_CERT commit: sign the workload's leaf SVID + the realm VVK-CA + the
-     * raw public key via the ORK network, assemble the X.509 certs, and store them on the
-     * IGA_SERVER_CERT_DRAFT sidecar (status ACTIVE). Ported from the source branch's
-     * {@code TideIGACommitter.commitServerCert}, retargeted onto the consolidated CR model:
-     * the leaf carrier rides {@code cr.getRequestModel()}, the CA + PK carriers ride the
-     * sidecar columns ({@code caRequestModel}/{@code pkRequestModel}).
+     * REQUEST_SERVER_CERT commit — TEMPLATE.
      *
-     * <p>Ordering: {@code combineFinal} (which, for multiAdmin, is where the enclave dokens
-     * were collected onto the carriers) has already run by the time replay reaches here, so
-     * {@link org.tidecloak.iga.crypto.ServerCertSigner#issue} reuses the doken-bound,
-     * enclave-approved carriers. firstAdmin / dev realms with no carriers rebuild the leaf and
-     * fall back to a local VRK CA signature.
+     * <p>Signs the {@code ResourceIdentity:1} carrier via the ORK cohort and stores the issued
+     * certificates on the IGA_SERVER_CERT_DRAFT sidecar (status ACTIVE). The single carrier rides
+     * {@code cr.getRequestModel()}; {@code combineFinal} has already collected the enclave dokens
+     * onto it by the time replay reaches here, so {@code ServerCertSigner.issue} reuses it rather
+     * than rebuilding.
      *
      * <p>Capability-gated: a non-real-signing-capable realm (no VVK material) leaves the cert
-     * UN-issued (the workload status endpoint keeps reporting DRAFT) rather than hard-failing
-     * the commit, mirroring the firstAdmin-stub posture of the rest of the attestor.
+     * UN-issued (the workload status endpoint keeps reporting DRAFT) rather than hard-failing the
+     * commit, mirroring the firstAdmin-stub posture of the rest of the attestor.
+     *
+     * <p>Nothing is persisted unvalidated: {@code ServerCertSigner.issue} runs every returned
+     * certificate through {@code IssuedCertificateValidator} first, so a response that certifies
+     * the wrong key, is out of its validity bounds, or carries permissions beyond what was
+     * requested aborts the commit instead of landing in the database.
+     *
+     * <p>TODO: only the resource leaf is stored. The root CA and the realm server certificate are
+     * REALM-scoped, not per-request, so the {@code trustBundle} / {@code realmCertificate} columns
+     * that used to duplicate them on every row have been dropped pending a realm-scoped home. Until
+     * that lands the workload receives a leaf with no trust anchor.
      */
     private static void replayRequestServerCert(KeycloakSession session, RealmModel realm,
                                                 IgaChangeRequestEntity cr, EntityManager em) {
@@ -1417,26 +1427,73 @@ public class IgaReplayDispatcher {
             return;
         }
 
-        org.tidecloak.iga.crypto.ServerCertSigner.IssuedCert issued =
-                org.tidecloak.iga.crypto.ServerCertSigner.issue(realm, draft);
+        org.tidecloak.iga.crypto.ServerCertSigner.IssuedCerts issued =
+                org.tidecloak.iga.crypto.ServerCertSigner.issue(session, realm, draft);
 
-        long now = System.currentTimeMillis();
-        draft.setCertificate(issued.certificatePem);
-        draft.setTrustBundle(issued.trustBundlePem);
-        if (issued.signedPublicKey != null) {
-            // signedPolicy reuses its column to carry the ORK-signed workload public key.
-            draft.setSignedPolicy(issued.signedPublicKey);
+        // Persist through the service so the sidecar's write rules live in one place. The CR's own
+        // status transition is NOT its job — this dispatcher's tail sets APPROVED + resolvedAt.
+        new IgaServerCertDraftService(em, new IgaChangeRequestService(em, session))
+                .issueCert(draft.getId(), issued.resourceCertificatePem,
+                        issued.notBefore, issued.notAfter);
+
+        log.infof("REQUEST_SERVER_CERT issued for CR %s (client %s, realm %s) — validated certificate "
+                        + "stored, notAfter=%d, status ACTIVE.",
+                cr.getId(), draft.getClientId(), realm.getName(), issued.notAfter);
+    }
+
+    /**
+     * REQUEST_REALM_CERT commit — TEMPLATE.
+     *
+     * <p>The realm-scoped sibling of {@link #replayRequestServerCert}: signs the same
+     * {@code ResourceIdentity:1} carrier via the cohort, but stores slots 1 and 2 — the P-256 realm
+     * server certificate and the Ed25519 realm root CA — onto the IGA_REALM_CERT row. Those are the
+     * two halves a workload needs beyond its own leaf: the anchor to verify peers against, and
+     * Tidecloak's own TLS identity.
+     *
+     * <p>Committing this is what unblocks any client certificate CR chained to it — the enrolment
+     * path files client requests with this CR as a {@code dependsOn} prerequisite precisely so a
+     * leaf is never issued into a realm with no anchor.
+     *
+     * <p>Same posture as the client path in both directions: capability-gated (a realm with no VVK
+     * material leaves the row un-issued rather than hard-failing the commit), and nothing is
+     * persisted unvalidated — {@code ServerCertSigner.issueRealm} runs both certificates through
+     * {@code IssuedCertificateValidator} and requires BOTH slots, so a round that returns a server
+     * certificate without its anchor aborts instead of landing half a result.
+     */
+    private static void replayRequestRealmCert(KeycloakSession session, RealmModel realm,
+                                               IgaChangeRequestEntity cr, EntityManager em) {
+        List<IgaRealmCertEntity> rows = em.createNamedQuery(
+                        "IgaRealmCert.findByChangeRequestId", IgaRealmCertEntity.class)
+                .setParameter("crId", cr.getId())
+                .getResultList();
+        if (rows.isEmpty()) {
+            log.warnf("REQUEST_REALM_CERT commit: CR %s has no IGA_REALM_CERT sidecar — "
+                    + "nothing to issue.", cr.getId());
+            return;
         }
-        // The enclave-approved sub-model carriers are consumed; clear them (source deletes the
-        // -ca / -pk sibling entities at commit).
-        draft.setCaRequestModel(null);
-        draft.setPkRequestModel(null);
-        draft.setUpdatedAt(now);
-        em.merge(draft);
-        em.flush();
+        IgaRealmCertEntity realmCert = rows.get(0);
 
-        log.infof("REQUEST_SERVER_CERT issued for CR %s (instance %s, realm %s) — SVID + trust bundle stored, status ACTIVE.",
-                cr.getId(), draft.getInstanceId(), realm.getName());
+        if (!org.tidecloak.iga.attestors.TideAttestor.isRealSigningCapableRealm(realm)) {
+            log.infof("REQUEST_REALM_CERT approved for CR %s but realm %s is not real-signing-capable "
+                    + "(no VVK material) — leaving the realm certificates un-issued.",
+                    cr.getId(), realm.getName());
+            return;
+        }
+
+        org.tidecloak.iga.crypto.ServerCertSigner.IssuedRealmCerts issued =
+                org.tidecloak.iga.crypto.ServerCertSigner.issueRealm(session, realm, realmCert);
+
+        // Persist through the service, as the client path does. The dispatcher tail owns the CR
+        // status transition.
+        new IgaRealmCertService(em, new IgaChangeRequestService(em, session))
+                .issueCerts(realmCert.getId(),
+                        issued.serverCertificatePem, issued.serverNotBefore, issued.serverNotAfter,
+                        issued.rootCaPem, issued.rootCaSerialNumberHex,
+                        issued.rootCaNotBefore, issued.rootCaNotAfter);
+
+        log.infof("REQUEST_REALM_CERT issued for CR %s (realm %s) — validated server certificate + "
+                        + "root CA stored, server notAfter=%d, root CA notAfter=%d.",
+                cr.getId(), realm.getName(), issued.serverNotAfter, issued.rootCaNotAfter);
     }
 
     // -------------------------------------------------------------------------

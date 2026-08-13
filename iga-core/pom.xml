@@ -119,6 +119,22 @@
         </dependency>
         <dependency>
             <!--
+              Bouncy Castle PKIX — provides org.bouncycastle.pkcs.PKCS10CertificationRequest
+              and the openssl PEMParser used by CertificationRequestParser to read the workload
+              CSR on the server-identity enrolment endpoint and verify its proof of possession.
+
+              provided: Keycloak 26.5.5 already ships bcpkix/bcprov/bcutil-jdk18on-1.82 on the
+              server runtime classpath (/opt/keycloak/lib/lib/main/), so bundling them would put
+              duplicate classes on the runtime path. Version pinned to the runtime's 1.82 to keep
+              compile-time and runtime APIs identical. bcprov + bcutil arrive transitively.
+            -->
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+            <version>1.82</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <!--
               Midgard Java client — provides Midgard.SignWithVrk + Midgard.SignModel
               + SignRequestSettingsMidgard + ModelRequest. Used by the tide attestor's
               firstAdmin VRK signing ceremony (TideAttestor.sign), which routes the

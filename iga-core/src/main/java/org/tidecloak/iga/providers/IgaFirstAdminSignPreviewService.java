@@ -371,7 +371,8 @@ public class IgaFirstAdminSignPreviewService {
             }
             case "CREATE_USER", "CREATE_ROLE", "CREATE_GROUP", "CREATE_CLIENT",
                   "ADD_PROTOCOL_MAPPER",
-                  "REQUEST_SERVER_CERT", "INSTALL_LICENSE", "ROTATE_LICENSE" ->
+                  "REQUEST_SERVER_CERT", "REQUEST_REALM_CERT",
+                  "INSTALL_LICENSE", "ROTATE_LICENSE" ->
                     resolved.put("note", "would create new entity");
             default -> resolved.put("note", "unrecognised action type — raw row only");
         }

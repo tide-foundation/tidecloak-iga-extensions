@@ -38,8 +38,10 @@ import org.keycloak.storage.UserStorageUtil;
 import org.tidecloak.iga.crypto.SecretKeys;
 import org.tidecloak.iga.replay.SidecarCapExceededException;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.entities.IgaRealmCertEntity;
 import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
+import org.tidecloak.iga.providers.IgaRealmCertService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
 import org.tidecloak.iga.services.IgaAdoptCancel;
 import org.tidecloak.iga.services.IgaAdoptScan;
@@ -793,7 +795,7 @@ public class TideAdminCompatResource {
     }
 
     // -------------------------------------------------------------------------
-    // Server-identity (SPIFFE server-cert) list + revoke compat routes.
+    // Server-identity (server-cert) list + revoke compat routes.
     //
     // The admin SPA's Server Identity tab / page call GET .../tide-admin/server-cert/requests
     // and POST .../tide-admin/server-cert/revoke (api-client tide-admin/index.ts). The
@@ -809,6 +811,17 @@ public class TideAdminCompatResource {
     private IgaServerCertDraftService serverCertDraftService() {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         return new IgaServerCertDraftService(em, new IgaChangeRequestService(em, session));
+    }
+
+    /**
+     * The realm's current root CA (PEM), or null if the realm has no issued certificates yet.
+     * Realm-scoped, hence resolved once per response rather than per row.
+     */
+    private String currentRealmTrustBundle() {
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaRealmCertEntity current = new IgaRealmCertService(em, new IgaChangeRequestService(em, session))
+                .findCurrent(realm.getId());
+        return current != null ? current.getRootCaCertificate() : null;
     }
 
     /**
@@ -843,15 +856,18 @@ public class TideAdminCompatResource {
         return epochMs == null ? null : epochMs / 1000L;
     }
 
-    private static Map<String, Object> serverCertRow(IgaServerCertDraftEntity d) {
+    /**
+     * @param trustBundle the realm's current root CA, resolved once by the caller — it is
+     *                    realm-scoped, so every row in one response carries the same value
+     */
+    private static Map<String, Object> serverCertRow(IgaServerCertDraftEntity d, String trustBundle) {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("id", d.getId());
-        row.put("instanceId", d.getInstanceId());
         row.put("clientId", d.getClientId());
-        row.put("spiffeId", d.getSpiffeId());
+        row.put("fingerprint", d.getPublicKeyFingerprint());
         row.put("status", serverCertStatus(d));
         row.put("certificate", d.getCertificate());
-        row.put("trustBundle", d.getTrustBundle());
+        row.put("trustBundle", trustBundle);
         // ms -> Unix SECONDS (the SPA multiplies these back by 1000 for RelativeTime).
         row.put("requestedAt", epochMsToSeconds(d.getCreatedAt()));
         row.put("issuedAt", epochMsToSeconds(d.getUpdatedAt()));
@@ -866,27 +882,48 @@ public class TideAdminCompatResource {
     @Produces(MediaType.APPLICATION_JSON)
     public Response serverCertRequests() {
         auth.realm().requireManageRealm();
+        // One lookup for the whole response: the trust bundle is realm-scoped, so it is the same
+        // for every row. Null until the realm's REQUEST_REALM_CERT commits.
+        String trustBundle = currentRealmTrustBundle();
         List<Map<String, Object>> out = new ArrayList<>();
         for (IgaServerCertDraftEntity d : serverCertDraftService().listByRealm(realm.getId())) {
-            out.add(serverCertRow(d));
+            out.add(serverCertRow(d, trustBundle));
         }
         return Response.ok(out).build();
     }
 
+    /**
+     * Revoke a single server-cert draft. The body key is the draft {@code id} — the row identifier
+     * the GET above already returns as {@code id}.
+     *
+     * <p>This used to take {@code instanceId} and revoke every row for that instance. instanceId
+     * no longer exists (a workload is identified by the key in its CSR), so revocation is now
+     * per-row, matching {@code iga/server-certs/{id}/revoke}. The SPA must post {@code {id}}.
+     */
     @POST
     @Path("server-cert/revoke")
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
     public Response serverCertRevoke(Map<String, Object> body) {
         auth.realm().requireManageRealm();
-        String instanceId = body != null && body.get("instanceId") instanceof String s ? s : null;
-        if (instanceId == null || instanceId.isBlank()) {
+        String id = body != null && body.get("id") instanceof String s ? s : null;
+        if (id == null || id.isBlank()) {
             return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "instanceId is required"))
+                    .entity(Map.of("error", "id is required"))
                     .build();
         }
-        int revoked = serverCertDraftService().revokeByInstance(realm.getId(), instanceId);
-        return Response.ok(Map.of("revoked", revoked, "instanceId", instanceId)).build();
+        IgaServerCertDraftService service = serverCertDraftService();
+        IgaServerCertDraftEntity draft = service.findById(id);
+        if (draft == null || !realm.getId().equals(draft.getRealmId())) {
+            return Response.status(Response.Status.NOT_FOUND)
+                    .entity(Map.of("error", "Server cert not found"))
+                    .build();
+        }
+        boolean alreadyRevoked = draft.isRevoked();
+        if (!alreadyRevoked) {
+            service.revoke(id);
+        }
+        return Response.ok(Map.of("revoked", alreadyRevoked ? 0 : 1, "id", id)).build();
     }
 
     /**
