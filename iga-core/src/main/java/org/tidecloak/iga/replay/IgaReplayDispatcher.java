@@ -1491,9 +1491,15 @@ public class IgaReplayDispatcher {
                         issued.rootCaPem, issued.rootCaSerialNumberHex,
                         issued.rootCaNotBefore, issued.rootCaNotAfter);
 
+        // The generation the certificates landed in — the number every replica's nginx must reach
+        // before this issuance is actually being served.
+        long generation = new org.tidecloak.iga.nginx.NginxGlobalCounterService(em)
+                .readDesiredGeneration();
+        org.tidecloak.iga.nginx.NginxGenerationNotifier.notifyAfterCommit(session, generation);
+
         log.infof("REQUEST_REALM_CERT issued for CR %s (realm %s) — validated server certificate + "
-                        + "root CA stored, server notAfter=%d, root CA notAfter=%d.",
-                cr.getId(), realm.getName(), issued.serverNotAfter, issued.rootCaNotAfter);
+                        + "root CA stored, server notAfter=%d, root CA notAfter=%d, nginx generation=%d.",
+                cr.getId(), realm.getName(), issued.serverNotAfter, issued.rootCaNotAfter, generation);
     }
 
     // -------------------------------------------------------------------------

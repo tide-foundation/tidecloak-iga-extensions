@@ -21,6 +21,7 @@
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <keycloak.version>26.5.5</keycloak.version>
+        <protostream.version>5.0.14.Final</protostream.version>
     </properties>
 
     <dependencies>
@@ -46,6 +47,12 @@
             <groupId>org.keycloak</groupId>
             <artifactId>keycloak-model-infinispan</artifactId>
             <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.infinispan.protostream</groupId>
+            <artifactId>protostream</artifactId>
+            <version>${protostream.version}</version>
             <scope>provided</scope>
         </dependency>
         <dependency>

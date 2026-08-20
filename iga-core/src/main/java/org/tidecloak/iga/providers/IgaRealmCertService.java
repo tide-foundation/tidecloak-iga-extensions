@@ -18,6 +18,7 @@ import org.keycloak.models.RealmModel;
 import org.tidecloak.iga.crypto.CertificationRequestParser;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaRealmCertEntity;
+import org.tidecloak.iga.nginx.NginxGlobalCounterService;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
@@ -248,6 +249,12 @@ public class IgaRealmCertService {
      *
      * <p>Sidecar only — the parent CR's status is NOT touched here, for the same reason as
      * {@link IgaServerCertDraftService#issueCert}: the commit path owns the CR lifecycle.
+     *
+     * <p>Also advances the global nginx generation, because this is the write that changes what the
+     * proxy in front of every replica must serve. It happens here rather than at the caller so the
+     * two land in the same transaction: a replica that reacts to the new generation is then
+     * guaranteed to read the certificates that caused it. Reading them back is the reconciler's
+     * job — this method only records that there is something new to read.
      */
     public IgaRealmCertEntity issueCerts(String id,
                                          String serverCertificate,
@@ -269,6 +276,7 @@ public class IgaRealmCertService {
         entity.setRootCaNotBefore(rootCaNotBefore);
         entity.setRootCaNotAfter(rootCaNotAfter);
         entity.setUpdatedAt(System.currentTimeMillis());
+        new NginxGlobalCounterService(em).allocateNextGeneration();
         em.flush();
         return entity;
     }
