@@ -34,11 +34,13 @@ import java.util.Date;
  */
 public final class IssuedCertificateValidator {
 
-    /** Refuse a workload leaf whose validity window is longer than this. The ORK issues 1 month. */
-    private static final long MAX_LEAF_LIFETIME_MILLIS = 62L * 24 * 3600 * 1000;
+    /**
+     * Refuse a workload leaf whose validity window is longer than this. The ORK issues 10 years.
+     */
+    private static final long MAX_LEAF_LIFETIME_MILLIS = 11L * 365 * 24 * 3600 * 1000;
     /**
      * Refuse a realm server certificate whose validity window is longer than this. The ORK issues
-     * 20 years — the same window as the root CA, not the 1 month a workload leaf gets, because
+     * 20 years — the same window as the root CA, twice what a workload leaf gets, because
      * Tidecloak's own TLS identity is not re-enrolled on the workload cadence.
      *
      * <p>Kept separate from {@link #MAX_CA_LIFETIME_MILLIS} even though the values match: this
@@ -108,7 +110,7 @@ public final class IssuedCertificateValidator {
      * serverAuth rather than clientAuth, and its key is Tidecloak's own rather than the workload's.
      *
      * <p>Its permitted lifetime is the one real difference: {@link #MAX_REALM_CERT_LIFETIME_MILLIS}
-     * rather than the workload leaf's 62 days, because the ORK issues this one for 20 years.
+     * rather than the workload leaf's 11 years, because the ORK issues this one for 20 years.
      */
     public static ValidatedCertificate validateRealmCertificate(byte[] certificateDer,
                                                                 byte[] expectedSpkiDer,

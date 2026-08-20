@@ -78,7 +78,7 @@ So the CN carries the clientId and the SAN carries the UUID. Enrolment resolves 
   subject-key and signature algorithms independent.
 - Client/realm serials are generated here before approval opens, so admins approve a fixed
   identity. The **root CA serial is derived by the cohort** from the gVVK SPKI and must not be sent.
-- Lifetimes: client leaf **1 month**; realm server certificate and root CA **20 years**.
+- Lifetimes: client leaf **10 years**; realm server certificate and root CA **20 years**.
   `IssuedCertificateValidator` has a separate ceiling per type (21y allows for leap days).
 
 ### frontendUrl
