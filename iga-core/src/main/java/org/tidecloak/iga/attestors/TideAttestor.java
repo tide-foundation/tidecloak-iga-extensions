@@ -41,7 +41,9 @@ import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
+import org.tidecloak.iga.entities.IgaForsetiContractEntity;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
+import org.tidecloak.iga.providers.IgaForsetiContractService;
 import org.tidecloak.iga.providers.IgaConflictException;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.replay.IgaReplayExtension;
@@ -2183,8 +2185,9 @@ public class TideAttestor implements IgaAttestor {
         // itself, carried verbatim in ROWS_JSON, wrapped in a Policy:1 request the existing admin
         // quorum authorizes.
         if (ACTION_SIGN_JIT_POLICY.equals(cr.getActionType())) {
-            return buildPolicySignCarrier(session, realm, cr,
-                    readUnsignedPolicyBytesFromCr(cr), "jit-policy");
+            byte[] policyBytes = readUnsignedPolicyBytesFromCr(cr);
+            return buildPolicySignCarrier(session, realm, cr, policyBytes, "jit-policy",
+                    contractSourceFor(session, realm, policyBytes));
         }
 
         // The M0 admin Policy bytes to embed — the genuine VVK-signed threshold Policy.
@@ -2426,6 +2429,16 @@ public class TideAttestor implements IgaAttestor {
     private String buildPolicySignCarrier(KeycloakSession session, RealmModel realm,
                                           IgaChangeRequestEntity cr, byte[] policyBytes,
                                           String label) {
+        return buildPolicySignCarrier(session, realm, cr, policyBytes, label, null);
+    }
+
+    /**
+     * @param contractSource sent WITH the policy when the orks may not hold this contract yet.
+     *                       Null when they certainly do.
+     */
+    private String buildPolicySignCarrier(KeycloakSession session, RealmModel realm,
+                                          IgaChangeRequestEntity cr, byte[] policyBytes,
+                                          String label, String contractSource) {
         // The EXISTING M0 admin Policy that authorizes the quorum.
         byte[] existingM0 = readM0AdminPolicyBytes(session, realm);
         if (existingM0 == null) {
@@ -2438,6 +2451,14 @@ public class TideAttestor implements IgaAttestor {
         // policy. Mirrors signAdminPolicyViaPolicyFlow's request construction, but we persist
         // the carrier for the enclaves to approve rather than signing it here.
         PolicySignRequest req = new PolicySignRequest(policyBytes, POLICY_AUTH_FLOW);
+
+        // A contract reaches the orks by travelling with the first policy that names it. Storing
+        // it in TideCloak only records the source; a policy naming a contract the orks do not hold
+        // is refused outright. Sending it again later is harmless - they already have it.
+        if (contractSource != null && !contractSource.isBlank()) {
+            req.AddContractToUpload(PolicySignRequest.ContractType.forseti,
+                    buildContractPayload(contractSource));
+        }
         // LONG expiry — like buildMultiAdminApprovalModel, this carrier is PERSISTED and re-read
         // (ModelRequest.FromBytes) at commit, hours/days after this first phase-1 build. The old
         // 3-minute window expired the re-sign carrier before the quorum assembled ("Expiry cannot
@@ -2620,6 +2641,52 @@ public class TideAttestor implements IgaAttestor {
     static String jitPolicyEntityId(String policyName) {
         return java.util.UUID.nameUUIDFromBytes(
                 policyName.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
+    }
+
+    /**
+     * The contract itself, packed the way a policy signature carries one.
+     *
+     * A contract reaches the ork network by travelling WITH the first policy that references it.
+     * Storing it in TideCloak only records the source; the orks have never seen it, and a policy
+     * naming a contract they do not hold is refused with "Policy referenced a contract which
+     * doesn't exist".
+     *
+     * Only the first policy for a given contract needs to carry it. After that the orks hold it,
+     * and a later policy simply names it - which is why this returns null when the contract is
+     * already known to have been sent.
+     *
+     * PolicySignRequest.AddContractToUpload adds the outer ["forseti", ...] wrapper itself, so
+     * this builds only what goes inside it. The nesting is fixed by what the ork unpacks:
+     *   forsetiData  = [ placeholder, innerPayload ]
+     *   innerPayload = [ sourceCode ]
+     */
+    private static byte[] buildContractPayload(String contractSource) {
+        byte[] innerPayload = org.midgard.Serialization.Tools.CreateTideMemory(
+                contractSource.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        // The placeholder is what the ork's ForsetiContract reads past to reach the payload.
+        return org.midgard.Serialization.Tools.CreateTideMemory(new byte[0], innerPayload);
+    }
+
+    /**
+     * The source of the contract a policy names, so it can be sent along with it.
+     *
+     * Best effort: if it cannot be found, the policy is sent alone and the orks will refuse it if
+     * they do not already hold the contract. That refusal is clearer than a guess here would be.
+     */
+    private static String contractSourceFor(KeycloakSession session, RealmModel realm, byte[] policyBytes) {
+        try {
+            String contractId = Policy.From(policyBytes).getContractId();
+            if (contractId == null || contractId.isBlank()) return null;
+
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            IgaForsetiContractEntity contract =
+                    new IgaForsetiContractService(em).findById(contractId);
+
+            return contract == null ? null : contract.getContractCode();
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     /** Decode {@link #ROW_JIT_POLICY_NAME} from a JIT-policy CR's rows. */
