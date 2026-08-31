@@ -32,6 +32,7 @@ public class IgaJitPolicyServiceTest {
     private static final String RESOURCE = "myclient";
     private static final String ROLE     = "case:read";
     private static final String CASE     = "assessment-1";
+    private static final String VVK      = "the-realms-vvk";
 
     private static RealmModel realmWithLifespan(int seconds) {
         RealmModel realm = mock(RealmModel.class);
@@ -44,7 +45,7 @@ public class IgaJitPolicyServiceTest {
     }
 
     private static Policy jitPolicy(RealmModel realm, Long expiry, String role) {
-        return IgaJitPolicyService.buildPolicy(realm, CONTRACT, VUID, RESOURCE, role, CASE,
+        return IgaJitPolicyService.buildPolicy(realm, CONTRACT, VVK, VUID, RESOURCE, role, CASE,
                 "content", expiry);
     }
 
@@ -79,7 +80,11 @@ public class IgaJitPolicyServiceTest {
         assertEquals(ROLE, p.GetParameter("GrantedRole", String.class));
         assertEquals(CASE, p.GetParameter("AssessmentId", String.class));
         assertEquals("assessment", p.GetParameter("Scope", String.class));
-        assertEquals(VUID, p.getKeyId());
+        // The REALM's key, because that is what signs a policy and what a policy must name.
+        assertEquals(VVK, p.getKeyId());
+        // Who the grant is for travels as a parameter, and the contract checks it against the
+        // minter's own doken rather than trusting the field.
+        assertEquals(VUID, p.GetParameter("GrantedTo", String.class));
         assertEquals(Long.valueOf(1800000000L), p.getExpiry());
         assertEquals(IgaJitPolicyService.JIT_MODEL_ID, p.getModelIds()[0]);
     }
@@ -100,7 +105,7 @@ public class IgaJitPolicyServiceTest {
 
     @Test
     public void aGrantWithNoAssessmentIsOrgScoped() {
-        Policy p = IgaJitPolicyService.buildPolicy(realmWithLifespan(300), CONTRACT, VUID, RESOURCE,
+        Policy p = IgaJitPolicyService.buildPolicy(realmWithLifespan(300), CONTRACT, VVK, VUID, RESOURCE,
                 ROLE, null, "content", null);
 
         assertEquals("org", p.GetParameter("Scope", String.class));
@@ -179,7 +184,7 @@ public class IgaJitPolicyServiceTest {
         // The extra rules key off the model id, so an ordinary policy is untouched by them.
         PolicyParameters params = new PolicyParameters();
         params.put("resource", RESOURCE);
-        Policy ordinary = new Policy(CONTRACT, new String[]{"SomethingElse:1"}, VUID,
+        Policy ordinary = new Policy(CONTRACT, new String[]{"SomethingElse:1"}, VVK,
                 ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params);
 
         assertNull(IgaJitPolicyService.rejectionReason(realmWithLifespan(60), ordinary));
@@ -190,8 +195,9 @@ public class IgaJitPolicyServiceTest {
     private static Policy handBuilt(String grantedRole, Long expiry) {
         PolicyParameters params = new PolicyParameters();
         params.put("GrantedRole", grantedRole);
+        params.put("GrantedTo", VUID);
         params.put("Resource", RESOURCE);
-        return new Policy(CONTRACT, new String[]{IgaJitPolicyService.JIT_MODEL_ID}, VUID,
+        return new Policy(CONTRACT, new String[]{IgaJitPolicyService.JIT_MODEL_ID}, VVK,
                 ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params, expiry);
     }
 }

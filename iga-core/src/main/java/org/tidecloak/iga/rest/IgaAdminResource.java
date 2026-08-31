@@ -2950,9 +2950,18 @@ public class IgaAdminResource {
             } else {
                 // Built here from intent. This is the only place that knows the realm's access
                 // token lifespan, so it is the only place that can apply it as the fallback expiry.
-                parsed = IgaJitPolicyService.buildPolicy(realm, rep.getContractId(), rep.getVuid(),
-                        rep.getResource(), rep.getGrantedRole(), rep.getAssessmentId(),
-                        rep.getTier(), rep.getExpiry());
+                // The realm's own key, because that is what signs a policy and what a policy
+                // must name. Who the grant is for travels as a parameter.
+                String vvkId = new TideAttestor(session).realmVvkIdForPolicy(realm);
+                if (vvkId == null || vvkId.isBlank()) {
+                    return Response.status(Response.Status.CONFLICT)
+                            .entity(Map.of("error", "This realm has no Tide key, so no policy can be signed for it."))
+                            .build();
+                }
+
+                parsed = IgaJitPolicyService.buildPolicy(realm, rep.getContractId(), vvkId,
+                        rep.getVuid(), rep.getResource(), rep.getGrantedRole(),
+                        rep.getAssessmentId(), rep.getTier(), rep.getExpiry());
                 unsigned = parsed.ToBytes();
             }
         } catch (IllegalArgumentException e) {

@@ -82,10 +82,11 @@ public final class IgaJitPolicyService {
      *
      * @param expiry epoch seconds, or null to take the realm's access token lifespan from now
      */
-    public static Policy buildPolicy(RealmModel realm, String contractId, String vuid,
+    public static Policy buildPolicy(RealmModel realm, String contractId, String vvkId, String vuid,
                                      String resource, String grantedRole, String assessmentId,
                                      String tier, Long expiry) {
         if (contractId == null || contractId.isBlank())   throw new IllegalArgumentException("contractId is required");
+        if (vvkId == null || vvkId.isBlank())             throw new IllegalArgumentException("vvkId is required");
         if (vuid == null || vuid.isBlank())               throw new IllegalArgumentException("vuid is required");
         if (resource == null || resource.isBlank())       throw new IllegalArgumentException("resource is required");
         if (grantedRole == null || grantedRole.isBlank()) throw new IllegalArgumentException("grantedRole is required");
@@ -102,6 +103,7 @@ public final class IgaJitPolicyService {
         PolicyParameters params = new PolicyParameters();
         params.put("AssessmentId", assessmentId == null ? "" : assessmentId);
         params.put("GrantedRole", grantedRole);
+        params.put("GrantedTo", vuid);
         params.put("Resource", resource);
         params.put("Scope", scope);
         params.put("Tier", tier == null || tier.isBlank() ? "content" : tier);
@@ -119,7 +121,18 @@ public final class IgaJitPolicyService {
         // audience is a different key. The contract then requires that same caller to hold the role
         // being minted. So a grant is approved once and used many times, but only by the person it
         // was granted to, only while their own credential is live, and only until the policy expires.
-        return new Policy(contractId, new String[]{JIT_MODEL_ID}, vuid,
+        // KeyId is the REALM's key, not the person's.
+        //
+        // A policy is only ever signed against a vvk (PolicySignRequest.AllowedUserTypes), and it
+        // must name the key that signs it (PolicySignRequest.Validate: "Policy referenced wrong
+        // user/key id"). PolicyAuthorizationFlow then verifies the signature with that same key,
+        // so naming the person here makes the policy impossible to sign AND impossible to verify.
+        //
+        // Who the grant is FOR is a parameter instead, and PRIVATE execution is what proves it:
+        // the ork requires the minter's own doken, and the contract checks that doken names the
+        // person the policy was granted to. The person is established by something they hold,
+        // rather than by a field anyone could put a name in.
+        return new Policy(contractId, new String[]{JIT_MODEL_ID}, vvkId,
                 ApprovalType.IMPLICIT, ExecutionType.PRIVATE, params, effectiveExpiry);
     }
 
@@ -184,8 +197,14 @@ public final class IgaJitPolicyService {
             if (role == null || role.isBlank()) {
                 return "a JIT policy must pin the role it grants";
             }
+            String grantedTo = policy.GetParameter("GrantedTo", String.class);
+            if (grantedTo == null || grantedTo.isBlank()) {
+                // Without this the policy says who may do what, but not to whom - and the contract
+                // would have nothing to check the minter's own doken against.
+                return "a JIT policy must name who it is granted to";
+            }
         } catch (RuntimeException e) {
-            return "a JIT policy must pin the role it grants";
+            return "a JIT policy must pin the role and who it is granted to";
         }
         return null;
     }

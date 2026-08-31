@@ -77,7 +77,7 @@ class TideAttestorJitPolicyCrTest {
     }
 
     private byte[] jitPolicyBytes() {
-        Policy p = IgaJitPolicyService.buildPolicy(realm, "contract-1", "vuid-abc", "myclient",
+        Policy p = IgaJitPolicyService.buildPolicy(realm, "contract-1", "the-realms-vvk", "vuid-abc", "myclient",
                 "case:read", "assessment-1", "content",
                 (System.currentTimeMillis() / 1000L) + 3600);
         return p.ToBytes();

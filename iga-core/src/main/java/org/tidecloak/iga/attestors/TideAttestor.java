@@ -1968,6 +1968,16 @@ public class TideAttestor implements IgaAttestor {
             java.util.regex.Pattern.compile("\"threshold\"\\s*:\\s*(\\d+)");
 
     /** The realm's {@code vvkId} from its {@code tide-vendor-key} component, or null. */
+    /**
+     * The realm's Tide key id, for callers building a policy.
+     *
+     * A policy must name the key that signs it, and a policy is only ever signed against a vvk.
+     * So this is the only value a policy's KeyId may take, whoever the grant is for.
+     */
+    public String realmVvkIdForPolicy(RealmModel realm) {
+        return realmVvkId(realm);
+    }
+
     private static String realmVvkId(RealmModel realm) {
         ComponentModel vendorKey = realm.getComponentsStream()
                 .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
