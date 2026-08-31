@@ -2373,19 +2373,36 @@ public class TideAttestor implements IgaAttestor {
         // NOT recomputed (so phase-1 / commit cannot drift on the threshold or shape).
         byte[] newPolicyBytes = readUnsignedPolicyBytesFromCr(cr);
 
-        // The EXISTING M0 admin Policy that authorizes the re-sign quorum (the policy
-        // bootstraps its own re-sign).
+        return buildPolicySignCarrier(session, realm, cr, newPolicyBytes, "threshold-policy");
+    }
+
+    /**
+     * The Policy:1 carrier the admin quorum approves in order to sign ONE new policy.
+     *
+     * <p>Shared by every governed policy signature, so the admin-policy re-sign and a per-grant
+     * JIT policy are approved through byte-identical machinery. Only the policy being signed
+     * differs; the authorizing quorum, the expiry window, the draft materialisation and the seg-7
+     * creation-authorisation are the same, and are the parts that were hard to get right.</p>
+     *
+     * @param policyBytes the UNSIGNED policy to be signed, carried verbatim so the bytes the
+     *                    admins approve and the bytes the commit signs cannot drift apart
+     * @param label       what this signature is for, for the log line only
+     */
+    private String buildPolicySignCarrier(KeycloakSession session, RealmModel realm,
+                                          IgaChangeRequestEntity cr, byte[] policyBytes,
+                                          String label) {
+        // The EXISTING M0 admin Policy that authorizes the quorum.
         byte[] existingM0 = readM0AdminPolicyBytes(session, realm);
         if (existingM0 == null) {
-            throw new RuntimeException("IGA threshold-policy approval: realm " + realm.getName()
-                    + " is multiAdmin but has no existing M0 admin Policy to bootstrap the "
-                    + "Policy:1 threshold re-sign for CR " + cr.getId());
+            throw new RuntimeException("IGA " + label + " approval: realm " + realm.getName()
+                    + " is multiAdmin but has no existing M0 admin Policy to authorize the "
+                    + "Policy:1 signature for CR " + cr.getId());
         }
 
         // Policy:1 auth flow (admin quorum) over the NEW policy bytes; embed the EXISTING M0
         // policy. Mirrors signAdminPolicyViaPolicyFlow's request construction, but we persist
         // the carrier for the enclaves to approve rather than signing it here.
-        PolicySignRequest req = new PolicySignRequest(newPolicyBytes, POLICY_AUTH_FLOW);
+        PolicySignRequest req = new PolicySignRequest(policyBytes, POLICY_AUTH_FLOW);
         // LONG expiry — like buildMultiAdminApprovalModel, this carrier is PERSISTED and re-read
         // (ModelRequest.FromBytes) at commit, hours/days after this first phase-1 build. The old
         // 3-minute window expired the re-sign carrier before the quorum assembled ("Expiry cannot
@@ -2435,11 +2452,12 @@ public class TideAttestor implements IgaAttestor {
         String encoded = java.util.Base64.getEncoder().encodeToString(req.Encode());
         cr.setRequestModel(encoded);
         session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
-        log.infof("IGA threshold-policy approval (phase 1): built Policy:1 re-sign ModelRequest for "
-                + "CR %s (realm %s, creation-auth=%s).", cr.getId(), realm.getName(),
+        log.infof("IGA %s approval (phase 1): built Policy:1 ModelRequest for "
+                + "CR %s (realm %s, creation-auth=%s).", label, cr.getId(), realm.getName(),
                 approvalRequestNeedsVrkInit(realm) ? "VRK" : "none(dev)");
         return encoded;
     }
+
 
     /** Decode {@link #ROW_POLICY_BODY_UNSIGNED} (Base64 Policy.ToBytes()) from a REGEN CR's rows. */
     private static byte[] readUnsignedPolicyBytesFromCr(IgaChangeRequestEntity cr) {
