@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.13.0: The expiry of a time-limited policy.
+
+      EXPIRY - epoch SECONDS, matching exactly what the policy itself carries and
+               signs: a little-endian int64 at index 7 of its DataToVerify
+               (Midgard Policy v4, Ork.Shared Policy v4). BIGINT rather than a
+               timestamp because the signed representation is the point. A
+               converted value would have to be turned back into seconds to
+               rebuild the policy, and any drift there produces different bytes
+               and therefore a signature that no longer verifies.
+
+      This column is a READ-BACK of what POLICY already contains, kept beside it
+      so a time-limited policy can be found without parsing every blob (the
+      expiry sweep, and "which grants lapse soon"). It is NOT a second authority.
+      Nothing may consult EXPIRY to decide access: PolicyAuthorizationFlow on
+      every ork rejects an expired policy after verifying its signature, and
+      PolicySignRequest refuses to sign one that has already lapsed. A server
+      that read this column to answer "may they" would be overriding a rule the
+      network owns, with nothing to detect it having done so.
+
+      Nullable, and existing rows backfill to NULL, which is the correct legacy
+      semantic: a policy written before this column could not carry an expiry at
+      all, because the layout that holds one did not exist. NULL means a standing
+      policy, never an expired or unknown one.
+    -->
+
+    <changeSet id="iga-2.13.0-1" author="tidecloak-iga">
+        <addColumn tableName="IGA_ROLE_POLICY">
+            <column name="EXPIRY" type="BIGINT"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>

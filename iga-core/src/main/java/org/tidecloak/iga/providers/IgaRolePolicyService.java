@@ -30,7 +30,7 @@ public class IgaRolePolicyService {
     public IgaRolePolicyEntity upsert(String realmId, String name, String policy,
                                       String policySig, String contractId,
                                       String approvalType, String executionType,
-                                      Integer threshold, String policyData) {
+                                      Integer threshold, String policyData, Long expiry) {
         IgaRolePolicyEntity existing = findByRealmAndName(realmId, name);
         long now = System.currentTimeMillis();
         if (existing != null) {
@@ -41,6 +41,7 @@ public class IgaRolePolicyService {
             existing.setExecutionType(executionType);
             existing.setThreshold(threshold);
             existing.setPolicyData(policyData);
+            existing.setExpiry(expiry);
             existing.setUpdatedAt(now);
             em.merge(existing);
             em.flush();
@@ -58,6 +59,7 @@ public class IgaRolePolicyService {
         entity.setExecutionType(executionType);
         entity.setThreshold(threshold);
         entity.setPolicyData(policyData);
+        entity.setExpiry(expiry);
         entity.setCreatedAt(now);
         em.persist(entity);
         em.flush();

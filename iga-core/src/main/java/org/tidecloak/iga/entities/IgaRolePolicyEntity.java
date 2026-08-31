@@ -84,6 +84,18 @@ public class IgaRolePolicyEntity {
     @Column(name = "POLICY_DATA", columnDefinition = "TEXT")
     private String policyData;
 
+    /**
+     * Epoch SECONDS, exactly as the policy itself carries and signs it (little-endian int64 at
+     * index 7 of its DataToVerify). A read-back of the POLICY blob, kept beside it so time-limited
+     * policies can be found without parsing every one.
+     *
+     * <p>NOT an authority. Nothing may consult this to decide access: an expired policy is refused
+     * by PolicyAuthorizationFlow on every ork, after its signature verifies. NULL is a standing
+     * policy, never an expired or unknown one.</p>
+     */
+    @Column(name = "EXPIRY")
+    private Long expiry;
+
     @Column(name = "CREATED_AT", nullable = false)
     private Long createdAt;
 
@@ -119,6 +131,9 @@ public class IgaRolePolicyEntity {
 
     public String getPolicyData() { return policyData; }
     public void setPolicyData(String policyData) { this.policyData = policyData; }
+
+    public Long getExpiry() { return expiry; }
+    public void setExpiry(Long expiry) { this.expiry = expiry; }
 
     public Long getCreatedAt() { return createdAt; }
     public void setCreatedAt(Long createdAt) { this.createdAt = createdAt; }

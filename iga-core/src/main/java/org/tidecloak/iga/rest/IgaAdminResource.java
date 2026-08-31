@@ -30,6 +30,7 @@ import org.tidecloak.iga.entities.IgaCommentEntity;
 import org.tidecloak.iga.entities.IgaForsetiContractEntity;
 import org.tidecloak.iga.entities.IgaLicenseHistoryEntity;
 import org.tidecloak.iga.entities.IgaLicensingDraftEntity;
+import org.midgard.models.Policy.Policy;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
@@ -56,6 +57,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Base64;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -2871,6 +2873,28 @@ public class IgaAdminResource {
                     .build();
         }
 
+        // EXPIRY is DERIVED from the signed policy, never taken from the request body. The column
+        // is a read-back of what POLICY already contains, so deriving it is what makes it unable to
+        // disagree with the bytes the ork will verify. A caller-supplied value could claim a
+        // lifetime the signed policy does not carry, and nothing downstream would notice.
+        Long expiry;
+        try {
+            expiry = Policy.From(Base64.getDecoder().decode(rep.getPolicy())).getExpiry();
+        } catch (Exception e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "policy could not be parsed: " + e.getMessage()))
+                    .build();
+        }
+
+        // An already-expired policy is refused here rather than stored. PolicySignRequest will not
+        // sign one and PolicyAuthorizationFlow will not honour it, so storing it would only defer
+        // the failure to somewhere further from the cause.
+        if (expiry != null && expiry < (System.currentTimeMillis() / 1000L)) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "policy expired at " + expiry))
+                    .build();
+        }
+
         IgaRolePolicyEntity upserted = getRolePolicyService().upsert(
                 realm.getId(),
                 rep.getName(),
@@ -2880,7 +2904,8 @@ public class IgaAdminResource {
                 rep.getApprovalType(),
                 rep.getExecutionType(),
                 rep.getThreshold(),
-                rep.getPolicyData());
+                rep.getPolicyData(),
+                expiry);
         return Response.ok(toRolePolicyRepresentation(upserted)).build();
     }
 
@@ -3433,6 +3458,7 @@ public class IgaAdminResource {
         rep.setExecutionType(entity.getExecutionType());
         rep.setThreshold(entity.getThreshold());
         rep.setPolicyData(entity.getPolicyData());
+        rep.setExpiry(entity.getExpiry());
         rep.setCreatedAt(entity.getCreatedAt());
         rep.setUpdatedAt(entity.getUpdatedAt());
         return rep;
