@@ -73,7 +73,14 @@ public final class IgaJitPolicyService {
      * The policy for one grant. One policy per grant, so the role and the assessment are pinned
      * here rather than read from whatever the request happens to ask for.
      *
-     * @param expiry epoch seconds, or null for a standing grant
+     * <p>An expiry is always set. When the caller gives none, the realm's own access token
+     * lifespan applies from now, so a standing grant still mints a credential living no longer
+     * than an ordinary token from the same realm. Defaulting HERE rather than in the contract is
+     * what keeps the contract free of a clock read: every ork runs the contract independently, so
+     * a decision depending on the current time can differ between them and the threshold silently
+     * fails to assemble.</p>
+     *
+     * @param expiry epoch seconds, or null to take the realm's access token lifespan from now
      */
     public static Policy buildPolicy(RealmModel realm, String contractId, String vuid,
                                      String resource, String grantedRole, String assessmentId,
@@ -85,19 +92,22 @@ public final class IgaJitPolicyService {
 
         String scope = (assessmentId == null || assessmentId.isBlank()) ? "org" : "assessment";
 
+        long effectiveExpiry = expiry != null
+                ? expiry
+                : (System.currentTimeMillis() / 1000L) + jitLifetimeSeconds(realm);
+
         // Inserted in sorted key order deliberately. Midgard's PolicyParameters is insertion
         // ordered and the ork's is sorted, so the same logical policy serialises differently
         // depending on insertion order. Sorted order is the one the ork reconstructs.
         PolicyParameters params = new PolicyParameters();
         params.put("AssessmentId", assessmentId == null ? "" : assessmentId);
         params.put("GrantedRole", grantedRole);
-        params.put("MaxJitLifetimeSeconds", jitLifetimeSeconds(realm));
         params.put("Resource", resource);
         params.put("Scope", scope);
         params.put("Tier", tier == null || tier.isBlank() ? "content" : tier);
 
         return new Policy(contractId, new String[]{JIT_MODEL_ID}, vuid,
-                ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params, expiry);
+                ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params, effectiveExpiry);
     }
 
     /**
@@ -138,30 +148,22 @@ public final class IgaJitPolicyService {
     }
 
     /**
-     * The realm's lifespan is authoritative, whoever built the policy.
+     * The rules a JIT policy must satisfy before it is worth storing or signing.
      *
-     * <p>MaxJitLifetimeSeconds lives INSIDE the signed policy, so it cannot be corrected on the way
-     * in; the only options are to accept it or refuse it. A policy claiming a longer fallback than
-     * the realm's own tokens would let a standing grant mint a credential outliving anything the
-     * realm otherwise issues, so it is refused.</p>
+     * <p>The realm's access token lifespan is a FALLBACK applied when a policy is built without an
+     * expiry, not a ceiling on one a grant sets deliberately: a grant may legitimately run longer
+     * than an access token. What is checked here is that the policy can actually mint a credential
+     * at all.</p>
      *
      * @return null when acceptable, otherwise why it was refused
      */
     public static String rejectionReason(RealmModel realm, Policy policy) {
         if (!isJitPolicy(policy)) return null;
 
-        int allowed = jitLifetimeSeconds(realm);
-        Integer claimed;
-        try {
-            claimed = policy.GetParameter("MaxJitLifetimeSeconds", Integer.class);
-        } catch (RuntimeException e) {
-            return "a JIT policy must carry MaxJitLifetimeSeconds";
-        }
-        if (claimed == null || claimed < 1) {
-            return "MaxJitLifetimeSeconds must be at least 1 second";
-        }
-        if (claimed > allowed) {
-            return "MaxJitLifetimeSeconds " + claimed + " exceeds the realm's access token lifespan of " + allowed;
+        // The contract requires one, and buildDraft cannot pin a lifetime without one. A JIT policy
+        // with no expiry would mint a standing token wearing a just-in-time name.
+        if (policy.getExpiry() == null) {
+            return "a JIT policy must carry an expiry";
         }
 
         try {
@@ -174,4 +176,5 @@ public final class IgaJitPolicyService {
         }
         return null;
     }
+
 }

@@ -40,7 +40,11 @@ public class IgaJitPolicyServiceTest {
     }
 
     private static Policy jitPolicy(RealmModel realm, Long expiry) {
-        return IgaJitPolicyService.buildPolicy(realm, CONTRACT, VUID, RESOURCE, ROLE, CASE,
+        return jitPolicy(realm, expiry, ROLE);
+    }
+
+    private static Policy jitPolicy(RealmModel realm, Long expiry, String role) {
+        return IgaJitPolicyService.buildPolicy(realm, CONTRACT, VUID, RESOURCE, role, CASE,
                 "content", expiry);
     }
 
@@ -69,10 +73,9 @@ public class IgaJitPolicyServiceTest {
     }
 
     @Test
-    public void thePolicyCarriesTheRealmsLifespanAndPinsTheGrant() {
+    public void thePolicyPinsTheGrant() {
         Policy p = jitPolicy(realmWithLifespan(900), 1800000000L);
 
-        assertEquals(Integer.valueOf(900), p.GetParameter("MaxJitLifetimeSeconds", Integer.class));
         assertEquals(ROLE, p.GetParameter("GrantedRole", String.class));
         assertEquals(CASE, p.GetParameter("AssessmentId", String.class));
         assertEquals("assessment", p.GetParameter("Scope", String.class));
@@ -88,6 +91,30 @@ public class IgaJitPolicyServiceTest {
 
         assertEquals("org", p.GetParameter("Scope", String.class));
         assertEquals("", p.GetParameter("AssessmentId", String.class));
+    }
+
+    @Test
+    public void aGrantWithNoExpiryTakesTheRealmsLifespanFromNow() {
+        // The fallback lands on the POLICY, at build time. Doing it here rather than in the
+        // contract is what keeps the contract free of a clock read, which every ork must agree on.
+        long before = System.currentTimeMillis() / 1000L;
+        Policy p = jitPolicy(realmWithLifespan(900), null);
+        long after = System.currentTimeMillis() / 1000L;
+
+        assertNotNull(p.getExpiry());
+        assertTrue(p.getExpiry() >= before + 900 && p.getExpiry() <= after + 900,
+                "expected roughly now+900, got " + p.getExpiry());
+    }
+
+    @Test
+    public void anExplicitExpiryIsKeptEvenBeyondTheRealmsLifespan() {
+        // The realm's lifespan is a fallback, not a ceiling: a grant may legitimately outlive an
+        // access token.
+        long weekOut = (System.currentTimeMillis() / 1000L) + 604800;
+
+        assertEquals(Long.valueOf(weekOut), jitPolicy(realmWithLifespan(300), weekOut).getExpiry());
+        assertNull(IgaJitPolicyService.rejectionReason(realmWithLifespan(300),
+                jitPolicy(realmWithLifespan(300), weekOut)));
     }
 
     @Test
@@ -113,36 +140,21 @@ public class IgaJitPolicyServiceTest {
 
     @Test
     public void aPolicyWithNoExpiryCannotMintAJitToken() {
-        // Not an oversight: without an expiry there is nothing to pin the credential's lifetime to,
-        // and the token would be a standing one wearing a just-in-time name.
-        Policy p = jitPolicy(realmWithLifespan(900), null);
+        // buildPolicy always sets one, so this is the hand-assembled case: without an expiry there
+        // is nothing to pin the credential's lifetime to, and the token would be a standing one
+        // wearing a just-in-time name.
+        Policy p = handBuilt(ROLE, null);
 
+        assertNull(p.getExpiry());
         assertThrows(IllegalArgumentException.class,
                 () -> IgaJitPolicyService.buildDraft(p, VUID, CASE, ROLE, "{}"));
-    }
-
-    @Test
-    public void aPolicyClaimingMoreThanTheRealmAllowsIsRefused() {
-        // MaxJitLifetimeSeconds is inside the signed bytes and cannot be corrected on the way in,
-        // so the realm's number is enforced by refusing rather than by rewriting.
-        RealmModel realm = realmWithLifespan(300);
-        Policy overreaching = handBuilt(3600, ROLE);
-
-        String reason = IgaJitPolicyService.rejectionReason(realm, overreaching);
-
-        assertNotNull(reason);
-        assertTrue(reason.contains("exceeds the realm's access token lifespan"), reason);
-    }
-
-    @Test
-    public void aPolicyWithinTheRealmsLifespanIsAccepted() {
-        assertNull(IgaJitPolicyService.rejectionReason(realmWithLifespan(900), handBuilt(900, ROLE)));
-        assertNull(IgaJitPolicyService.rejectionReason(realmWithLifespan(900), handBuilt(60, ROLE)));
+        assertNotNull(IgaJitPolicyService.rejectionReason(realmWithLifespan(900), p));
     }
 
     @Test
     public void aJitPolicyThatPinsNoRoleIsRefused() {
-        String reason = IgaJitPolicyService.rejectionReason(realmWithLifespan(900), handBuilt(300, ""));
+        String reason = IgaJitPolicyService.rejectionReason(realmWithLifespan(900),
+                handBuilt("", 1800000000L));
 
         assertNotNull(reason);
         assertTrue(reason.contains("pin the role"), reason);
@@ -160,13 +172,12 @@ public class IgaJitPolicyServiceTest {
         assertTrue(!IgaJitPolicyService.isJitPolicy(ordinary));
     }
 
-    /** A JIT policy assembled by hand, so a value the builder would never produce can be tested. */
-    private static Policy handBuilt(int maxLifetime, String grantedRole) {
+    /** A JIT policy assembled by hand, so a shape the builder would never produce can be tested. */
+    private static Policy handBuilt(String grantedRole, Long expiry) {
         PolicyParameters params = new PolicyParameters();
         params.put("GrantedRole", grantedRole);
-        params.put("MaxJitLifetimeSeconds", maxLifetime);
         params.put("Resource", RESOURCE);
         return new Policy(CONTRACT, new String[]{IgaJitPolicyService.JIT_MODEL_ID}, VUID,
-                ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params);
+                ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params, expiry);
     }
 }
