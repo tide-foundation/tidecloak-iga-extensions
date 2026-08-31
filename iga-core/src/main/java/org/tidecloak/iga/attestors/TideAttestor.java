@@ -2617,7 +2617,7 @@ public class TideAttestor implements IgaAttestor {
             new IgaRolePolicyService(em).upsert(
                     realm.getId(), policyName,
                     java.util.Base64.getEncoder().encodeToString(policy.ToBytes()),
-                    vvkSig, policy.getContractId(),
+                    vvkSig, localContractRowId(session, realm, policy.getContractId()),
                     policy.getApprovalType().name(), policy.getExecutionType().name(),
                     null, null, policy.getExpiry());
             em.flush();
@@ -2680,12 +2680,64 @@ public class TideAttestor implements IgaAttestor {
             if (contractId == null || contractId.isBlank()) return null;
 
             EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
-            IgaForsetiContractEntity contract =
-                    new IgaForsetiContractService(em).findById(contractId);
 
-            return contract == null ? null : contract.getContractCode();
+            // Matched by recomputing the hash, because neither stored column is the id the orks
+            // use. Our own id is a database uuid and our stored hash is a SHA-256; the orks name a
+            // contract by the SHA-512 of its source. So the only way to find the contract a policy
+            // refers to is to hash each one the way the orks would.
+            for (IgaForsetiContractEntity contract : new IgaForsetiContractService(em).listByRealm(realm.getId())) {
+                String source = contract.getContractCode();
+                if (source == null || source.isBlank()) continue;
+                if (contractId.equalsIgnoreCase(orkContractId(source))) return source;
+            }
+            return null;
         } catch (RuntimeException e) {
             return null;
+        }
+    }
+
+    /**
+     * The local contract row a policy names.
+     *
+     * CONTRACT_ID is a foreign key into IGA_FORSETI_CONTRACT, so what belongs in it is OUR row id,
+     * a uuid. The id a policy carries is the orks' one - the SHA-512 of the source - which is not a
+     * row id here; storing it verbatim breaks the foreign key, and the constraint violation reaches
+     * the caller as an opaque 409 "Duplicate resource error". The two ids are matched by hashing
+     * each stored contract the way the orks would.
+     *
+     * Null when nothing stored matches. The column is nullable, and the orks' id stays inside the
+     * policy's own bytes either way, so the link is a convenience rather than the record.
+     */
+    private static String localContractRowId(KeycloakSession session, RealmModel realm,
+                                             String contractId) {
+        if (contractId == null || contractId.isBlank()) return null;
+        try {
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            for (IgaForsetiContractEntity contract : new IgaForsetiContractService(em).listByRealm(realm.getId())) {
+                String source = contract.getContractCode();
+                if (source == null || source.isBlank()) continue;
+                if (contractId.equalsIgnoreCase(orkContractId(source))) return contract.getId();
+            }
+            return null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * A contract's identity to the ork network: the SHA-512 of its source, upper-case hex.
+     *
+     * Confirmed against a live refusal, which named the hash it expected and matched this exactly.
+     */
+    private static String orkContractId(String contractSource) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-512")
+                    .digest(contractSource.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            for (byte b : digest) hex.append(String.format("%02X", b));
+            return hex.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-512 is unavailable", e);
         }
     }
 

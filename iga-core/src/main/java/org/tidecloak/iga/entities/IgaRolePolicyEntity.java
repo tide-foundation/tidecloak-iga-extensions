@@ -69,6 +69,13 @@ public class IgaRolePolicyEntity {
     @Column(name = "POLICY_SIG", length = 512, nullable = false)
     private String policySig;
 
+    /**
+     * The contract this policy names, as OUR row id - IGA_FORSETI_CONTRACT.ID, a uuid.
+     *
+     * Not the id the policy itself carries. The orks identify a contract by the SHA-512 of its
+     * source, and that id lives in the policy bytes; putting it here instead breaks the foreign
+     * key. See TideAttestor.localContractRowId, which translates one into the other.
+     */
     @Column(name = "CONTRACT_ID", length = 36)
     private String contractId;
 
