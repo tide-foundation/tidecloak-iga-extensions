@@ -2508,8 +2508,13 @@ public class TideAttestor implements IgaAttestor {
 
         // One pending signature per policy name. A second would let two different policies race
         // for the same row, and whichever committed last would silently win.
+        // ENTITY_ID is varchar(36), sized for a UUID, and a policy name is longer than that and
+        // not a UUID. A name-based UUID keys the row deterministically, so the duplicate check
+        // below still works, while the readable name travels in ROWS_JSON.
+        String entityId = jitPolicyEntityId(policyName);
+
         IgaChangeRequestEntity pending =
-                service.findPending(realm.getId(), ENTITY_TYPE_JIT_POLICY, policyName);
+                service.findPending(realm.getId(), ENTITY_TYPE_JIT_POLICY, entityId);
         if (pending != null) {
             throw new IgaConflictException("a signature for JIT policy '" + policyName
                     + "' is already pending approval (change request " + pending.getId() + ")");
@@ -2521,7 +2526,7 @@ public class TideAttestor implements IgaAttestor {
         row.put(ROW_POLICY_BODY_UNSIGNED, java.util.Base64.getEncoder().encodeToString(unsignedPolicy));
         rows.add(row);
 
-        IgaChangeRequestEntity created = service.create(realm, ENTITY_TYPE_JIT_POLICY, policyName,
+        IgaChangeRequestEntity created = service.create(realm, ENTITY_TYPE_JIT_POLICY, entityId,
                 ACTION_SIGN_JIT_POLICY, rows, requestedBy == null ? "system" : requestedBy,
                 new ArrayList<>());
         log.infof("IGA JIT-policy signature requested: realm %s policy '%s' CR %s.",
@@ -2599,6 +2604,12 @@ public class TideAttestor implements IgaAttestor {
             throw new RuntimeException("IGA jit-policy commit failed for realm " + realm.getName()
                     + " (CR " + cr.getId() + "): " + e.getMessage(), e);
         }
+    }
+
+    /** A stable 36-char key for a policy name, so it fits ENTITY_ID and still dedups per policy. */
+    static String jitPolicyEntityId(String policyName) {
+        return java.util.UUID.nameUUIDFromBytes(
+                policyName.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
     }
 
     /** Decode {@link #ROW_JIT_POLICY_NAME} from a JIT-policy CR's rows. */

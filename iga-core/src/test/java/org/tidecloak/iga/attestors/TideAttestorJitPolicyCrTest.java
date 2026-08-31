@@ -105,7 +105,12 @@ class TideAttestorJitPolicyCrTest {
 
         assertEquals(TideAttestor.ACTION_SIGN_JIT_POLICY, cr.getActionType());
         assertEquals(TideAttestor.ENTITY_TYPE_JIT_POLICY, cr.getEntityType());
-        assertEquals(POLICY_NAME, cr.getEntityId());
+        // ENTITY_ID is varchar(36): a policy name does not fit and is not a UUID, so it is keyed by
+        // a name-derived UUID instead. Storing the name here overflowed the column and the realm
+        // answered 500.
+        assertEquals(TideAttestor.jitPolicyEntityId(POLICY_NAME), cr.getEntityId());
+        assertEquals(36, cr.getEntityId().length());
+        assertTrue(cr.getRowsJson().contains(POLICY_NAME), "the readable name travels in ROWS_JSON");
 
         // Carried verbatim, so the bytes an admin approves are the bytes the commit signs.
         String expected = Base64.getEncoder().encodeToString(policy);
