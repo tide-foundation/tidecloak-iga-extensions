@@ -42,6 +42,8 @@ import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
+import org.tidecloak.iga.providers.IgaConflictException;
+import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.replay.IgaReplayExtension;
 
 import jakarta.persistence.EntityManager;
@@ -314,6 +316,21 @@ public class TideAttestor implements IgaAttestor {
     public static final String ROW_POLICY_VVK_ID = "VVK_ID";
     /** Base64 of the NEW unsigned {@code Policy.ToBytes()} at NEW_THRESHOLD. */
     public static final String ROW_POLICY_BODY_UNSIGNED = "POLICY_BODY_UNSIGNED";
+
+    /**
+     * Sign ONE per-grant just-in-time policy under the admin quorum.
+     *
+     * <p>Separate from {@link #ACTION_REGEN_ADMIN_POLICY} because it installs a DIFFERENT policy:
+     * that one re-signs the M0 the quorum itself is defined by, this one signs a policy that lets
+     * a single user mint a time-limited credential for a single role. They share the carrier
+     * ({@link #buildPolicySignCarrier}) because the approval ceremony is identical; they share
+     * nothing else, and conflating them would let a JIT grant rewrite the admin quorum.</p>
+     */
+    public static final String ACTION_SIGN_JIT_POLICY = "SIGN_JIT_POLICY";
+    /** Entity type stamped on a {@link #ACTION_SIGN_JIT_POLICY} CR. */
+    public static final String ENTITY_TYPE_JIT_POLICY = "JIT_POLICY";
+    /** The IGA_ROLE_POLICY name the signed JIT policy is stored under. */
+    public static final String ROW_JIT_POLICY_NAME = "JIT_POLICY_NAME";
 
     // -------------------------------------------------------------------------
     // Admin-policy artifact shape
@@ -2152,6 +2169,14 @@ public class TideAttestor implements IgaAttestor {
             return buildPolicyResignApprovalModel(session, realm, cr);
         }
 
+        // A per-grant JIT policy is approved the same way: the draft is the unsigned policy
+        // itself, carried verbatim in ROWS_JSON, wrapped in a Policy:1 request the existing admin
+        // quorum authorizes.
+        if (ACTION_SIGN_JIT_POLICY.equals(cr.getActionType())) {
+            return buildPolicySignCarrier(session, realm, cr,
+                    readUnsignedPolicyBytesFromCr(cr), "jit-policy");
+        }
+
         // The M0 admin Policy bytes to embed — the genuine VVK-signed threshold Policy.
         byte[] adminPolicyBytes = readM0AdminPolicyBytes(session, realm);
         if (adminPolicyBytes == null) {
@@ -2458,6 +2483,133 @@ public class TideAttestor implements IgaAttestor {
         return encoded;
     }
 
+
+    /**
+     * Raise the governed request to sign one JIT policy.
+     *
+     * <p>The policy arrives already built (by {@code IgaJitPolicyService}) and is carried verbatim,
+     * so the bytes an admin approves are the bytes the commit signs. Nothing is stored in
+     * IGA_ROLE_POLICY until the quorum has signed it: an unsigned JIT policy cannot mint anything,
+     * and storing one early would put a row there that looks like a grant and is not.</p>
+     */
+    public IgaChangeRequestEntity requestJitPolicySignature(KeycloakSession session, RealmModel realm,
+                                                            String policyName, byte[] unsignedPolicy,
+                                                            String requestedBy) {
+        if (policyName == null || policyName.isBlank())
+            throw new IllegalArgumentException("policyName is required");
+        if (unsignedPolicy == null || unsignedPolicy.length == 0)
+            throw new IllegalArgumentException("unsignedPolicy is required");
+        if (TIDE_REALM_ADMIN_POLICY_KEY.equals(policyName))
+            throw new IllegalArgumentException("the reserved " + TIDE_REALM_ADMIN_POLICY_KEY
+                    + " policy may not be written through the JIT path");
+
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaChangeRequestService service = new IgaChangeRequestService(em, session);
+
+        // One pending signature per policy name. A second would let two different policies race
+        // for the same row, and whichever committed last would silently win.
+        IgaChangeRequestEntity pending =
+                service.findPending(realm.getId(), ENTITY_TYPE_JIT_POLICY, policyName);
+        if (pending != null) {
+            throw new IgaConflictException("a signature for JIT policy '" + policyName
+                    + "' is already pending approval (change request " + pending.getId() + ")");
+        }
+
+        List<Map<String, Object>> rows = new ArrayList<>(1);
+        Map<String, Object> row = new java.util.LinkedHashMap<>();
+        row.put(ROW_JIT_POLICY_NAME, policyName);
+        row.put(ROW_POLICY_BODY_UNSIGNED, java.util.Base64.getEncoder().encodeToString(unsignedPolicy));
+        rows.add(row);
+
+        IgaChangeRequestEntity created = service.create(realm, ENTITY_TYPE_JIT_POLICY, policyName,
+                ACTION_SIGN_JIT_POLICY, rows, requestedBy == null ? "system" : requestedBy,
+                new ArrayList<>());
+        log.infof("IGA JIT-policy signature requested: realm %s policy '%s' CR %s.",
+                realm.getName(), policyName, created.getId());
+        return created;
+    }
+
+    /**
+     * COMMIT of a {@link #ACTION_SIGN_JIT_POLICY} CR: the real Policy:1 quorum signature with the
+     * collected admin dokens, then store the signed policy in IGA_ROLE_POLICY.
+     *
+     * <p>Mirrors {@link #replayRegenAdminPolicy}, minus the threshold bookkeeping, and stores
+     * through {@code IgaRolePolicyService} so EXPIRY is derived from the signed bytes exactly as
+     * the REST path derives it. Fail-closed: no carrier, no material or a failed signature throws
+     * and rolls the commit back, so an unsigned or half-signed policy is never installed.</p>
+     */
+    public void replaySignJitPolicy(KeycloakSession session, RealmModel realm,
+                                    IgaChangeRequestEntity cr) {
+        String carrier = cr.getRequestModel();
+        if (carrier == null || carrier.isBlank()) {
+            throw new RuntimeException("IGA jit-policy commit: CR " + cr.getId()
+                    + " has no approval-model carrier — cannot Policy:1-sign the JIT policy");
+        }
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException("IGA jit-policy commit: realm "
+                        + realm.getName() + " has no tide-vendor-key component (VRK not provisioned)"));
+        MultivaluedHashMap<String, String> config = vendorKey.getConfig();
+        if (config == null) {
+            throw new RuntimeException("IGA jit-policy commit: tide-vendor-key component has no config "
+                    + "(realm " + realm.getName() + ")");
+        }
+
+        // The exact unsigned bytes the admins approved, and the row to store under.
+        byte[] unsignedPolicy = readUnsignedPolicyBytesFromCr(cr);
+        String policyName = readJitPolicyNameFromCr(cr);
+
+        try {
+            SignRequestSettingsMidgard settings = constructSignSettings(config);
+            ModelRequest req = ModelRequest.FromBytes(java.util.Base64.getDecoder().decode(carrier));
+
+            SignatureResponse resp = Midgard.SignModel(settings, req);
+            if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
+                    || resp.Signatures[0] == null) {
+                throw new RuntimeException("IGA jit-policy commit: Midgard.SignModel returned no "
+                        + "signature for realm " + realm.getName() + " (CR " + cr.getId() + ")");
+            }
+            String vvkSig = resp.Signatures[0];
+
+            // Rebuild from the EXACT approved bytes and attach the signature, so the stored body is
+            // the one the quorum saw.
+            Policy policy = Policy.From(unsignedPolicy);
+            policy.AddSignature(java.util.Base64.getDecoder().decode(vvkSig));
+
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            new IgaRolePolicyService(em).upsert(
+                    realm.getId(), policyName,
+                    java.util.Base64.getEncoder().encodeToString(policy.ToBytes()),
+                    vvkSig, policy.getContractId(),
+                    policy.getApprovalType().name(), policy.getExecutionType().name(),
+                    null, null, policy.getExpiry());
+            em.flush();
+
+            cr.setStatus("APPROVED");
+            cr.setResolvedAt(System.currentTimeMillis());
+            em.flush();
+
+            log.infof("IGA JIT policy '%s' signed via the Policy:1 admin quorum and stored "
+                    + "(realm %s, CR %s, expiry %s).", policyName, realm.getName(), cr.getId(),
+                    policy.getExpiry());
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("IGA jit-policy commit failed for realm " + realm.getName()
+                    + " (CR " + cr.getId() + "): " + e.getMessage(), e);
+        }
+    }
+
+    /** Decode {@link #ROW_JIT_POLICY_NAME} from a JIT-policy CR's rows. */
+    private static String readJitPolicyNameFromCr(IgaChangeRequestEntity cr) {
+        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+            String name = str(row, ROW_JIT_POLICY_NAME);
+            if (name != null && !name.isBlank()) return name;
+        }
+        throw new RuntimeException("IGA jit-policy CR " + cr.getId()
+                + " carries no " + ROW_JIT_POLICY_NAME);
+    }
 
     /** Decode {@link #ROW_POLICY_BODY_UNSIGNED} (Base64 Policy.ToBytes()) from a REGEN CR's rows. */
     private static byte[] readUnsignedPolicyBytesFromCr(IgaChangeRequestEntity cr) {

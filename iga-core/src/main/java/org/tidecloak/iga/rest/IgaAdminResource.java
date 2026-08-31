@@ -40,6 +40,7 @@ import org.tidecloak.iga.providers.IgaFirstAdminSignPreviewService;
 import org.tidecloak.iga.providers.IgaForsetiContractService;
 import org.tidecloak.iga.providers.IgaLicenseHistoryService;
 import org.tidecloak.iga.providers.IgaLicensingDraftService;
+import org.tidecloak.iga.providers.IgaConflictException;
 import org.tidecloak.iga.providers.IgaJitPolicyService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
@@ -2919,6 +2920,75 @@ public class IgaAdminResource {
                 rep.getPolicyData(),
                 expiry);
         return Response.ok(toRolePolicyRepresentation(upserted)).build();
+    }
+
+    /**
+     * Raise the governed request to sign one per-grant JIT policy.
+     *
+     * <p>Returns 202: the policy is NOT stored yet. It is signed and installed only once the admin
+     * quorum has approved the change request, because an unsigned JIT policy cannot mint anything
+     * and a row stored before then would look like a grant that is not one.</p>
+     */
+    @POST
+    @Path("jit-policies")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response requestJitPolicy(IgaRolePolicyRepresentation rep) {
+        auth.realm().requireManageRealm();
+
+        if (rep == null || rep.getName() == null || rep.getName().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "name is required")).build();
+        }
+        if (rep.getPolicy() == null || rep.getPolicy().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "policy is required")).build();
+        }
+
+        byte[] unsigned;
+        Policy parsed;
+        try {
+            unsigned = Base64.getDecoder().decode(rep.getPolicy());
+            parsed = Policy.From(unsigned);
+        } catch (Exception e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "policy could not be parsed: " + e.getMessage())).build();
+        }
+
+        if (!IgaJitPolicyService.isJitPolicy(parsed)) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "not a JIT policy: no model id "
+                            + IgaJitPolicyService.JIT_MODEL_ID)).build();
+        }
+        String rejection = IgaJitPolicyService.rejectionReason(realm, parsed);
+        if (rejection != null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", rejection)).build();
+        }
+        // Refused rather than stored: the ork will not sign an expired policy, so a signature
+        // request for one can only ever fail, later and further from the cause.
+        if (parsed.getExpiry() != null && parsed.getExpiry() < (System.currentTimeMillis() / 1000L)) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "policy expired at " + parsed.getExpiry())).build();
+        }
+
+        try {
+            IgaChangeRequestEntity cr = new TideAttestor(session).requestJitPolicySignature(
+                    session, realm, rep.getName(), unsigned,
+                    auth.adminAuth().getUser().getUsername());
+            return Response.status(Response.Status.ACCEPTED)
+                    .entity(Map.of(
+                            "changeRequestId", cr.getId(),
+                            "status", "PENDING",
+                            "message", "awaiting admin quorum approval; the policy is not stored yet"))
+                    .build();
+        } catch (IllegalArgumentException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", e.getMessage())).build();
+        } catch (IgaConflictException e) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of("error", e.getMessage())).build();
+        }
     }
 
     @DELETE
