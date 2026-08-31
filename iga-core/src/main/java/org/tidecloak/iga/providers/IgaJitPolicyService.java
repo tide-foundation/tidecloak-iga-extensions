@@ -106,8 +106,21 @@ public final class IgaJitPolicyService {
         params.put("Scope", scope);
         params.put("Tier", tier == null || tier.isBlank() ? "content" : tier);
 
+        // IMPLICIT approval, PRIVATE execution. This pair is the whole shape of a just-in-time
+        // grant, and getting it wrong makes the mechanism either useless or unguarded.
+        //
+        // EXPLICIT would make PolicyAuthorizationFlow demand a fresh quorum of approver dokens at
+        // EVERY mint, and run the contract's ValidateApprovers besides. The grant was already
+        // approved, once, when the quorum signed this policy; requiring a quorum again per token
+        // would mean nobody could ever use a grant they had been given.
+        //
+        // PRIVATE is what keeps that from being a hole. It obliges the minter to present their own
+        // doken, which the ork verifies against the vvk, refuses if expired, and refuses if its
+        // audience is a different key. The contract then requires that same caller to hold the role
+        // being minted. So a grant is approved once and used many times, but only by the person it
+        // was granted to, only while their own credential is live, and only until the policy expires.
         return new Policy(contractId, new String[]{JIT_MODEL_ID}, vuid,
-                ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params, effectiveExpiry);
+                ApprovalType.IMPLICIT, ExecutionType.PRIVATE, params, effectiveExpiry);
     }
 
     /**

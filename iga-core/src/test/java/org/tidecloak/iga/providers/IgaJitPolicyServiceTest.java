@@ -85,6 +85,20 @@ public class IgaJitPolicyServiceTest {
     }
 
     @Test
+    public void aGrantIsApprovedOnceAndUsedByItsHolderAlone() {
+        // IMPLICIT + PRIVATE is the shape of a just-in-time grant, and either half alone breaks it.
+        //
+        // EXPLICIT would make PolicyAuthorizationFlow demand a fresh quorum of approver dokens at
+        // every mint, so a grant already approved could never actually be used. PRIVATE is what
+        // stops IMPLICIT being a hole: the minter must present their own unexpired doken, bound by
+        // audience to this key, before the contract is even reached.
+        Policy p = jitPolicy(realmWithLifespan(900), 1800000000L);
+
+        assertEquals(ApprovalType.IMPLICIT, p.getApprovalType());
+        assertEquals(ExecutionType.PRIVATE, p.getExecutionType());
+    }
+
+    @Test
     public void aGrantWithNoAssessmentIsOrgScoped() {
         Policy p = IgaJitPolicyService.buildPolicy(realmWithLifespan(300), CONTRACT, VUID, RESOURCE,
                 ROLE, null, "content", null);
