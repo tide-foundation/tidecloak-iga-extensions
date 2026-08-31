@@ -40,6 +40,7 @@ import org.tidecloak.iga.providers.IgaFirstAdminSignPreviewService;
 import org.tidecloak.iga.providers.IgaForsetiContractService;
 import org.tidecloak.iga.providers.IgaLicenseHistoryService;
 import org.tidecloak.iga.providers.IgaLicensingDraftService;
+import org.tidecloak.iga.providers.IgaJitPolicyService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
 import org.tidecloak.iga.replay.EntityVanishedException;
@@ -2877,12 +2878,23 @@ public class IgaAdminResource {
         // is a read-back of what POLICY already contains, so deriving it is what makes it unable to
         // disagree with the bytes the ork will verify. A caller-supplied value could claim a
         // lifetime the signed policy does not carry, and nothing downstream would notice.
-        Long expiry;
+        Policy parsedPolicy;
         try {
-            expiry = Policy.From(Base64.getDecoder().decode(rep.getPolicy())).getExpiry();
+            parsedPolicy = Policy.From(Base64.getDecoder().decode(rep.getPolicy()));
         } catch (Exception e) {
             return Response.status(Response.Status.BAD_REQUEST)
                     .entity(Map.of("error", "policy could not be parsed: " + e.getMessage()))
+                    .build();
+        }
+        Long expiry = parsedPolicy.getExpiry();
+
+        // A JIT policy's fallback lifetime is bounded by the realm's own access token lifespan.
+        // MaxJitLifetimeSeconds lives INSIDE the signed policy and cannot be corrected here, so the
+        // only options are to accept it or refuse it.
+        String jitRejection = IgaJitPolicyService.rejectionReason(realm, parsedPolicy);
+        if (jitRejection != null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", jitRejection))
                     .build();
         }
 
