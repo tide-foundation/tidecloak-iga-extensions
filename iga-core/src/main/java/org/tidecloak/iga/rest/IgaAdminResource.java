@@ -2933,26 +2933,34 @@ public class IgaAdminResource {
     @Path("jit-policies")
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
-    public Response requestJitPolicy(IgaRolePolicyRepresentation rep) {
+    public Response requestJitPolicy(IgaJitPolicyRequest rep) {
         auth.realm().requireManageRealm();
 
         if (rep == null || rep.getName() == null || rep.getName().isBlank()) {
             return Response.status(Response.Status.BAD_REQUEST)
                     .entity(Map.of("error", "name is required")).build();
         }
-        if (rep.getPolicy() == null || rep.getPolicy().isBlank()) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "policy is required")).build();
-        }
-
         byte[] unsigned;
         Policy parsed;
         try {
-            unsigned = Base64.getDecoder().decode(rep.getPolicy());
-            parsed = Policy.From(unsigned);
+            if (rep.getPolicy() != null && !rep.getPolicy().isBlank()) {
+                // A caller that already built the policy; taken verbatim.
+                unsigned = Base64.getDecoder().decode(rep.getPolicy());
+                parsed = Policy.From(unsigned);
+            } else {
+                // Built here from intent. This is the only place that knows the realm's access
+                // token lifespan, so it is the only place that can apply it as the fallback expiry.
+                parsed = IgaJitPolicyService.buildPolicy(realm, rep.getContractId(), rep.getVuid(),
+                        rep.getResource(), rep.getGrantedRole(), rep.getAssessmentId(),
+                        rep.getTier(), rep.getExpiry());
+                unsigned = parsed.ToBytes();
+            }
+        } catch (IllegalArgumentException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", e.getMessage())).build();
         } catch (Exception e) {
             return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "policy could not be parsed: " + e.getMessage())).build();
+                    .entity(Map.of("error", "policy could not be built: " + e.getMessage())).build();
         }
 
         if (!IgaJitPolicyService.isJitPolicy(parsed)) {
@@ -2976,10 +2984,15 @@ public class IgaAdminResource {
             IgaChangeRequestEntity cr = new TideAttestor(session).requestJitPolicySignature(
                     session, realm, rep.getName(), unsigned,
                     auth.adminAuth().getUser().getUsername());
+            // The expiry is returned because it may have been DERIVED here (the realm's access
+            // token lifespan when the caller gave none), and the caller needs the value that was
+            // actually signed rather than the one it asked for.
             return Response.status(Response.Status.ACCEPTED)
                     .entity(Map.of(
                             "changeRequestId", cr.getId(),
                             "status", "PENDING",
+                            "policyName", rep.getName(),
+                            "expiry", parsed.getExpiry(),
                             "message", "awaiting admin quorum approval; the policy is not stored yet"))
                     .build();
         } catch (IllegalArgumentException e) {
