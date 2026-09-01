@@ -1016,12 +1016,19 @@ public class TideAttestor implements IgaAttestor {
                                                      String policyBody, String policySig, int threshold) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         long now = System.currentTimeMillis();
+
+        // Set on BOTH branches, including when it is null. On a re-sign the row keeps whatever it
+        // held unless something overwrites it, so a policy that drops its expiry would otherwise
+        // leave the old one standing - a row claiming a lifetime the signed bytes no longer carry.
+        Long expiry = policyBodyExpiry(policyBody);
+
         if (existing != null) {
             existing.setPolicy(policyBody);
             existing.setPolicySig(policySig);
             existing.setThreshold(threshold);
             existing.setApprovalType(POLICY_APPROVAL_TYPE);
             existing.setExecutionType(POLICY_EXECUTION_TYPE);
+            existing.setExpiry(expiry);
             existing.setUpdatedAt(now);
             return existing;
         }
@@ -1043,11 +1050,32 @@ public class TideAttestor implements IgaAttestor {
         row.setThreshold(threshold);
         row.setApprovalType(POLICY_APPROVAL_TYPE);
         row.setExecutionType(POLICY_EXECUTION_TYPE);
+        row.setExpiry(expiry);
         row.setCreatedAt(now);
         em.persist(row);
         log.infof("IGA admin Policy (M0) row created for realm %s (tide-realm-admin, threshold %d).",
                 realm.getName(), threshold);
         return row;
+    }
+
+    /**
+     * The expiry a policy body carries, or null when it carries none.
+     *
+     * DERIVED from the bytes, never passed in - the same rule the REST upsert follows. EXPIRY is a
+     * read-back of what POLICY already contains, so deriving it is what makes the column unable to
+     * disagree with the bytes an ork will verify. A value arriving from anywhere else could claim a
+     * lifetime the signed policy does not have, and nothing downstream would notice.
+     *
+     * A body that is not a policy has no expiry rather than being an error: the non-capable
+     * bootstrap stores a JSON stub here, which is not a broken policy, it is not one at all.
+     */
+    private static Long policyBodyExpiry(String policyBody) {
+        if (policyBody == null || policyBody.isBlank()) return null;
+        try {
+            return Policy.From(java.util.Base64.getDecoder().decode(policyBody)).getExpiry();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**
