@@ -49,6 +49,14 @@ import jakarta.persistence.UniqueConstraint;
     @NamedQuery(
         name = "IgaRolePolicy.deleteByRealm",
         query = "DELETE FROM IgaRolePolicyEntity p WHERE p.realmId = :realmId"
+    ),
+    // Every realm at once, deliberately: an expired policy is expired everywhere, and one query
+    // beats waking up per realm to ask the same thing. A null EXPIRY is a standing policy and is
+    // never selected, which is what keeps the reserved tide-realm-admin row out of the sweep.
+    @NamedQuery(
+        name = "IgaRolePolicy.findExpired",
+        query = "SELECT p FROM IgaRolePolicyEntity p WHERE p.expiry IS NOT NULL AND p.expiry < :now"
+                + " ORDER BY p.expiry"
     )
 })
 public class IgaRolePolicyEntity {

@@ -111,6 +111,26 @@ public class IgaRolePolicyService {
     }
 
     /**
+     * Every policy across every realm whose expiry has passed.
+     *
+     * A standing policy (null EXPIRY) is never returned. Nor is one that merely LOOKS spent for
+     * some other reason: expiry is the only thing this asks about, because it is the only thing the
+     * column is a read-back of.
+     *
+     * Note what this is NOT for. An expired policy is already refused by the network - the orks
+     * check it after verifying the signature, and refuse to sign one that has expired in the first
+     * place - so nothing here decides whether a policy still grants anything. It only finds rows
+     * that no longer do, so they can be cleared away.
+     *
+     * @param now the current time in Unix epoch SECONDS, the unit a policy signs its expiry in
+     */
+    public List<IgaRolePolicyEntity> findExpired(long now) {
+        return em.createNamedQuery("IgaRolePolicy.findExpired", IgaRolePolicyEntity.class)
+                .setParameter("now", now)
+                .getResultList();
+    }
+
+    /**
      * Delete a policy by id. No-op if it doesn't exist.
      */
     public void deleteById(String id) {
