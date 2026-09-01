@@ -2626,6 +2626,33 @@ public class TideAttestor implements IgaAttestor {
 
         try {
             SignRequestSettingsMidgard settings = constructSignSettings(config);
+
+            // EVERY ork, not just a quorum, when this request carries the contract.
+            //
+            // A contract reaches the network by travelling with the first policy that names it, and
+            // only the orks that take part in that signing round receive it. Sign at the threshold
+            // and the ones left out never see it - so a later request routed to one of them fails
+            // with "Contract does not exist in code store", which looks like an intermittent fault
+            // and is not. This contract needed three separate signings before all five held it.
+            //
+            // Raising T to N makes the round wait for all of them. It is the same lever the browser
+            // side exposes as waitForAll on executeSignRequest, and it changes only how many orks
+            // must answer - the signature that comes out is the same ordinary Ed25519 signature.
+            //
+            // The cost is availability, and it is deliberate: one ork down means this policy cannot
+            // be signed. That is better than signing it and discovering later that a fraction of
+            // requests fail for a reason nothing reports. Only applied when a contract is actually
+            // attached; a policy naming a contract the network already holds signs at threshold.
+            boolean carriesContract = contractSourceFor(session, realm, unsignedPolicy) != null;
+            if (carriesContract) {
+                settings.Threshold_T = settings.Threshold_N;
+                log.infof("IGA jit-policy commit: policy '%s' carries its contract, so signing "
+                        + "requires all %d orks rather than %d - every ork must receive the "
+                        + "contract or later requests routed to it will be refused.",
+                        policyName, settings.Threshold_N,
+                        Integer.parseInt(System.getenv(ENV_THRESHOLD_T)));
+            }
+
             ModelRequest req = ModelRequest.FromBytes(java.util.Base64.getDecoder().decode(carrier));
 
             SignatureResponse resp = Midgard.SignModel(settings, req);
