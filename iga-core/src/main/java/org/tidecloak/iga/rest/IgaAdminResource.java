@@ -2972,10 +2972,22 @@ public class IgaAdminResource {
                     .entity(Map.of("error", "policy could not be built: " + e.getMessage())).build();
         }
 
-        if (!IgaJitPolicyService.isJitPolicy(parsed)) {
+        // Any well-formed policy for THIS realm may be signed here, not only a JIT one.
+        //
+        // The endpoint's job is to put a policy through the admin quorum, and a realm needs more
+        // than one kind. An authoriser policy - EXPLICIT, naming Policy:1, delegating who may
+        // approve a later signature to a client role - goes through exactly the same ceremony and
+        // was previously refused for the sole reason that it is not a JIT policy.
+        //
+        // What still has to hold is the realm binding: an ork refuses a policy whose KeyId is not
+        // the key being asked to sign it, so a policy naming another realm is rejected here rather
+        // than after a round trip. The JIT-specific rules below still apply, and only, to JIT
+        // policies - rejectionReason returns null for anything else.
+        String realmVvk = new TideAttestor(session).realmVvkIdForPolicy(realm);
+        if (realmVvk != null && parsed.getKeyId() != null && !realmVvk.equals(parsed.getKeyId())) {
             return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(Map.of("error", "not a JIT policy: no model id "
-                            + IgaJitPolicyService.JIT_MODEL_ID)).build();
+                    .entity(Map.of("error", "policy names key " + parsed.getKeyId()
+                            + " but this realm signs with " + realmVvk)).build();
         }
         String rejection = IgaJitPolicyService.rejectionReason(realm, parsed);
         if (rejection != null) {
@@ -2996,14 +3008,15 @@ public class IgaAdminResource {
             // The expiry is returned because it may have been DERIVED here (the realm's access
             // token lifespan when the caller gave none), and the caller needs the value that was
             // actually signed rather than the one it asked for.
-            return Response.status(Response.Status.ACCEPTED)
-                    .entity(Map.of(
-                            "changeRequestId", cr.getId(),
-                            "status", "PENDING",
-                            "policyName", rep.getName(),
-                            "expiry", parsed.getExpiry(),
-                            "message", "awaiting admin quorum approval; the policy is not stored yet"))
-                    .build();
+            // LinkedHashMap, not Map.of: a policy without an expiry is legitimate now that this
+            // endpoint signs more than JIT policies, and Map.of rejects a null value outright.
+            java.util.Map<String, Object> body = new java.util.LinkedHashMap<>();
+            body.put("changeRequestId", cr.getId());
+            body.put("status", "PENDING");
+            body.put("policyName", rep.getName());
+            body.put("expiry", parsed.getExpiry());
+            body.put("message", "awaiting admin quorum approval; the policy is not stored yet");
+            return Response.status(Response.Status.ACCEPTED).entity(body).build();
         } catch (IllegalArgumentException e) {
             return Response.status(Response.Status.BAD_REQUEST)
                     .entity(Map.of("error", e.getMessage())).build();
