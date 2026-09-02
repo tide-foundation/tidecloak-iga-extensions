@@ -41,7 +41,11 @@ import org.tidecloak.iga.entities.IgaAuthorizerEntity;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
+import org.tidecloak.iga.entities.IgaForsetiContractEntity;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
+import org.tidecloak.iga.providers.IgaForsetiContractService;
+import org.tidecloak.iga.providers.IgaConflictException;
+import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.replay.IgaReplayExtension;
 
 import jakarta.persistence.EntityManager;
@@ -341,6 +345,21 @@ public class TideAttestor implements IgaAttestor {
     public static final String ROW_POLICY_VVK_ID = "VVK_ID";
     /** Base64 of the NEW unsigned {@code Policy.ToBytes()} at NEW_THRESHOLD. */
     public static final String ROW_POLICY_BODY_UNSIGNED = "POLICY_BODY_UNSIGNED";
+
+    /**
+     * Sign ONE per-grant just-in-time policy under the admin quorum.
+     *
+     * <p>Separate from {@link #ACTION_REGEN_ADMIN_POLICY} because it installs a DIFFERENT policy:
+     * that one re-signs the M0 the quorum itself is defined by, this one signs a policy that lets
+     * a single user mint a time-limited credential for a single role. They share the carrier
+     * ({@link #buildPolicySignCarrier}) because the approval ceremony is identical; they share
+     * nothing else, and conflating them would let a JIT grant rewrite the admin quorum.</p>
+     */
+    public static final String ACTION_SIGN_JIT_POLICY = "SIGN_JIT_POLICY";
+    /** Entity type stamped on a {@link #ACTION_SIGN_JIT_POLICY} CR. */
+    public static final String ENTITY_TYPE_JIT_POLICY = "JIT_POLICY";
+    /** The IGA_ROLE_POLICY name the signed JIT policy is stored under. */
+    public static final String ROW_JIT_POLICY_NAME = "JIT_POLICY_NAME";
 
     // -------------------------------------------------------------------------
     // Admin-policy artifact shape
@@ -1024,12 +1043,19 @@ public class TideAttestor implements IgaAttestor {
                                                      String policyBody, String policySig, int threshold) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         long now = System.currentTimeMillis();
+
+        // Set on BOTH branches, including when it is null. On a re-sign the row keeps whatever it
+        // held unless something overwrites it, so a policy that drops its expiry would otherwise
+        // leave the old one standing - a row claiming a lifetime the signed bytes no longer carry.
+        Long expiry = policyBodyExpiry(policyBody);
+
         if (existing != null) {
             existing.setPolicy(policyBody);
             existing.setPolicySig(policySig);
             existing.setThreshold(threshold);
             existing.setApprovalType(POLICY_APPROVAL_TYPE);
             existing.setExecutionType(POLICY_EXECUTION_TYPE);
+            existing.setExpiry(expiry);
             existing.setUpdatedAt(now);
             return existing;
         }
@@ -1051,11 +1077,32 @@ public class TideAttestor implements IgaAttestor {
         row.setThreshold(threshold);
         row.setApprovalType(POLICY_APPROVAL_TYPE);
         row.setExecutionType(POLICY_EXECUTION_TYPE);
+        row.setExpiry(expiry);
         row.setCreatedAt(now);
         em.persist(row);
         log.infof("IGA admin Policy (M0) row created for realm %s (tide-realm-admin, threshold %d).",
                 realm.getName(), threshold);
         return row;
+    }
+
+    /**
+     * The expiry a policy body carries, or null when it carries none.
+     *
+     * DERIVED from the bytes, never passed in - the same rule the REST upsert follows. EXPIRY is a
+     * read-back of what POLICY already contains, so deriving it is what makes the column unable to
+     * disagree with the bytes an ork will verify. A value arriving from anywhere else could claim a
+     * lifetime the signed policy does not have, and nothing downstream would notice.
+     *
+     * A body that is not a policy has no expiry rather than being an error: the non-capable
+     * bootstrap stores a JSON stub here, which is not a broken policy, it is not one at all.
+     */
+    private static Long policyBodyExpiry(String policyBody) {
+        if (policyBody == null || policyBody.isBlank()) return null;
+        try {
+            return Policy.From(java.util.Base64.getDecoder().decode(policyBody)).getExpiry();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**
@@ -1978,6 +2025,16 @@ public class TideAttestor implements IgaAttestor {
             java.util.regex.Pattern.compile("\"threshold\"\\s*:\\s*(\\d+)");
 
     /** The realm's {@code vvkId} from its {@code tide-vendor-key} component, or null. */
+    /**
+     * The realm's Tide key id, for callers building a policy.
+     *
+     * A policy must name the key that signs it, and a policy is only ever signed against a vvk.
+     * So this is the only value a policy's KeyId may take, whoever the grant is for.
+     */
+    public String realmVvkIdForPolicy(RealmModel realm) {
+        return realmVvkId(realm);
+    }
+
     private static String realmVvkId(RealmModel realm) {
         ComponentModel vendorKey = realm.getComponentsStream()
                 .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
@@ -2177,6 +2234,15 @@ public class TideAttestor implements IgaAttestor {
         // Policy:1 PolicySignRequest with the EXISTING M0 policy embedded as the authorizer.
         if (ACTION_REGEN_ADMIN_POLICY.equals(cr.getActionType())) {
             return buildPolicyResignApprovalModel(session, realm, cr);
+        }
+
+        // A per-grant JIT policy is approved the same way: the draft is the unsigned policy
+        // itself, carried verbatim in ROWS_JSON, wrapped in a Policy:1 request the existing admin
+        // quorum authorizes.
+        if (ACTION_SIGN_JIT_POLICY.equals(cr.getActionType())) {
+            byte[] policyBytes = readUnsignedPolicyBytesFromCr(cr);
+            return buildPolicySignCarrier(session, realm, cr, policyBytes, "jit-policy",
+                    contractSourceFor(session, realm, policyBytes));
         }
 
         // The M0 admin Policy bytes to embed — the genuine VVK-signed threshold Policy.
@@ -2400,19 +2466,54 @@ public class TideAttestor implements IgaAttestor {
         // NOT recomputed (so phase-1 / commit cannot drift on the threshold or shape).
         byte[] newPolicyBytes = readUnsignedPolicyBytesFromCr(cr);
 
-        // The EXISTING M0 admin Policy that authorizes the re-sign quorum (the policy
-        // bootstraps its own re-sign).
+        return buildPolicySignCarrier(session, realm, cr, newPolicyBytes, "threshold-policy");
+    }
+
+    /**
+     * The Policy:1 carrier the admin quorum approves in order to sign ONE new policy.
+     *
+     * <p>Shared by every governed policy signature, so the admin-policy re-sign and a per-grant
+     * JIT policy are approved through byte-identical machinery. Only the policy being signed
+     * differs; the authorizing quorum, the expiry window, the draft materialisation and the seg-7
+     * creation-authorisation are the same, and are the parts that were hard to get right.</p>
+     *
+     * @param policyBytes the UNSIGNED policy to be signed, carried verbatim so the bytes the
+     *                    admins approve and the bytes the commit signs cannot drift apart
+     * @param label       what this signature is for, for the log line only
+     */
+    private String buildPolicySignCarrier(KeycloakSession session, RealmModel realm,
+                                          IgaChangeRequestEntity cr, byte[] policyBytes,
+                                          String label) {
+        return buildPolicySignCarrier(session, realm, cr, policyBytes, label, null);
+    }
+
+    /**
+     * @param contractSource sent WITH the policy when the orks may not hold this contract yet.
+     *                       Null when they certainly do.
+     */
+    private String buildPolicySignCarrier(KeycloakSession session, RealmModel realm,
+                                          IgaChangeRequestEntity cr, byte[] policyBytes,
+                                          String label, String contractSource) {
+        // The EXISTING M0 admin Policy that authorizes the quorum.
         byte[] existingM0 = readM0AdminPolicyBytes(session, realm);
         if (existingM0 == null) {
-            throw new RuntimeException("IGA threshold-policy approval: realm " + realm.getName()
-                    + " is multiAdmin but has no existing M0 admin Policy to bootstrap the "
-                    + "Policy:1 threshold re-sign for CR " + cr.getId());
+            throw new RuntimeException("IGA " + label + " approval: realm " + realm.getName()
+                    + " is multiAdmin but has no existing M0 admin Policy to authorize the "
+                    + "Policy:1 signature for CR " + cr.getId());
         }
 
         // Policy:1 auth flow (admin quorum) over the NEW policy bytes; embed the EXISTING M0
         // policy. Mirrors signAdminPolicyViaPolicyFlow's request construction, but we persist
         // the carrier for the enclaves to approve rather than signing it here.
-        PolicySignRequest req = new PolicySignRequest(newPolicyBytes, POLICY_AUTH_FLOW);
+        PolicySignRequest req = new PolicySignRequest(policyBytes, POLICY_AUTH_FLOW);
+
+        // A contract reaches the orks by travelling with the first policy that names it. Storing
+        // it in TideCloak only records the source; a policy naming a contract the orks do not hold
+        // is refused outright. Sending it again later is harmless - they already have it.
+        if (contractSource != null && !contractSource.isBlank()) {
+            req.AddContractToUpload(PolicySignRequest.ContractType.forseti,
+                    buildContractPayload(contractSource));
+        }
         // LONG expiry — like buildMultiAdminApprovalModel, this carrier is PERSISTED and re-read
         // (ModelRequest.FromBytes) at commit, hours/days after this first phase-1 build. The old
         // 3-minute window expired the re-sign carrier before the quorum assembled ("Expiry cannot
@@ -2462,10 +2563,274 @@ public class TideAttestor implements IgaAttestor {
         String encoded = java.util.Base64.getEncoder().encodeToString(req.Encode());
         cr.setRequestModel(encoded);
         session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
-        log.infof("IGA threshold-policy approval (phase 1): built Policy:1 re-sign ModelRequest for "
-                + "CR %s (realm %s, creation-auth=%s).", cr.getId(), realm.getName(),
+        log.infof("IGA %s approval (phase 1): built Policy:1 ModelRequest for "
+                + "CR %s (realm %s, creation-auth=%s).", label, cr.getId(), realm.getName(),
                 approvalRequestNeedsVrkInit(realm) ? "VRK" : "none(dev)");
         return encoded;
+    }
+
+
+    /**
+     * Raise the governed request to sign one JIT policy.
+     *
+     * <p>The policy arrives already built (by {@code IgaJitPolicyService}) and is carried verbatim,
+     * so the bytes an admin approves are the bytes the commit signs. Nothing is stored in
+     * IGA_ROLE_POLICY until the quorum has signed it: an unsigned JIT policy cannot mint anything,
+     * and storing one early would put a row there that looks like a grant and is not.</p>
+     */
+    public IgaChangeRequestEntity requestJitPolicySignature(KeycloakSession session, RealmModel realm,
+                                                            String policyName, byte[] unsignedPolicy,
+                                                            String requestedBy) {
+        if (policyName == null || policyName.isBlank())
+            throw new IllegalArgumentException("policyName is required");
+        if (unsignedPolicy == null || unsignedPolicy.length == 0)
+            throw new IllegalArgumentException("unsignedPolicy is required");
+        if (TIDE_REALM_ADMIN_POLICY_KEY.equals(policyName))
+            throw new IllegalArgumentException("the reserved " + TIDE_REALM_ADMIN_POLICY_KEY
+                    + " policy may not be written through the JIT path");
+
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaChangeRequestService service = new IgaChangeRequestService(em, session);
+
+        // One pending signature per policy name. A second would let two different policies race
+        // for the same row, and whichever committed last would silently win.
+        // ENTITY_ID is varchar(36), sized for a UUID, and a policy name is longer than that and
+        // not a UUID. A name-based UUID keys the row deterministically, so the duplicate check
+        // below still works, while the readable name travels in ROWS_JSON.
+        String entityId = jitPolicyEntityId(policyName);
+
+        IgaChangeRequestEntity pending =
+                service.findPending(realm.getId(), ENTITY_TYPE_JIT_POLICY, entityId);
+        if (pending != null) {
+            throw new IgaConflictException("a signature for JIT policy '" + policyName
+                    + "' is already pending approval (change request " + pending.getId() + ")");
+        }
+
+        List<Map<String, Object>> rows = new ArrayList<>(1);
+        Map<String, Object> row = new java.util.LinkedHashMap<>();
+        row.put(ROW_JIT_POLICY_NAME, policyName);
+        row.put(ROW_POLICY_BODY_UNSIGNED, java.util.Base64.getEncoder().encodeToString(unsignedPolicy));
+        rows.add(row);
+
+        IgaChangeRequestEntity created = service.create(realm, ENTITY_TYPE_JIT_POLICY, entityId,
+                ACTION_SIGN_JIT_POLICY, rows, requestedBy == null ? "system" : requestedBy,
+                new ArrayList<>());
+        log.infof("IGA JIT-policy signature requested: realm %s policy '%s' CR %s.",
+                realm.getName(), policyName, created.getId());
+        return created;
+    }
+
+    /**
+     * COMMIT of a {@link #ACTION_SIGN_JIT_POLICY} CR: the real Policy:1 quorum signature with the
+     * collected admin dokens, then store the signed policy in IGA_ROLE_POLICY.
+     *
+     * <p>Mirrors {@link #replayRegenAdminPolicy}, minus the threshold bookkeeping, and stores
+     * through {@code IgaRolePolicyService} so EXPIRY is derived from the signed bytes exactly as
+     * the REST path derives it. Fail-closed: no carrier, no material or a failed signature throws
+     * and rolls the commit back, so an unsigned or half-signed policy is never installed.</p>
+     */
+    public void replaySignJitPolicy(KeycloakSession session, RealmModel realm,
+                                    IgaChangeRequestEntity cr) {
+        String carrier = cr.getRequestModel();
+        if (carrier == null || carrier.isBlank()) {
+            throw new RuntimeException("IGA jit-policy commit: CR " + cr.getId()
+                    + " has no approval-model carrier — cannot Policy:1-sign the JIT policy");
+        }
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException("IGA jit-policy commit: realm "
+                        + realm.getName() + " has no tide-vendor-key component (VRK not provisioned)"));
+        MultivaluedHashMap<String, String> config = vendorKey.getConfig();
+        if (config == null) {
+            throw new RuntimeException("IGA jit-policy commit: tide-vendor-key component has no config "
+                    + "(realm " + realm.getName() + ")");
+        }
+
+        // The exact unsigned bytes the admins approved, and the row to store under.
+        byte[] unsignedPolicy = readUnsignedPolicyBytesFromCr(cr);
+        String policyName = readJitPolicyNameFromCr(cr);
+
+        try {
+            SignRequestSettingsMidgard settings = constructSignSettings(config);
+
+            // EVERY ork, not just a quorum, when this request carries the contract.
+            //
+            // A contract reaches the network by travelling with the first policy that names it, and
+            // only the orks that take part in that signing round receive it. Sign at the threshold
+            // and the ones left out never see it - so a later request routed to one of them fails
+            // with "Contract does not exist in code store", which looks like an intermittent fault
+            // and is not. This contract needed three separate signings before all five held it.
+            //
+            // Raising T to N makes the round wait for all of them. It is the same lever the browser
+            // side exposes as waitForAll on executeSignRequest, and it changes only how many orks
+            // must answer - the signature that comes out is the same ordinary Ed25519 signature.
+            //
+            // The cost is availability, and it is deliberate: one ork down means this policy cannot
+            // be signed. That is better than signing it and discovering later that a fraction of
+            // requests fail for a reason nothing reports. Only applied when a contract is actually
+            // attached; a policy naming a contract the network already holds signs at threshold.
+            boolean carriesContract = contractSourceFor(session, realm, unsignedPolicy) != null;
+            if (carriesContract) {
+                settings.Threshold_T = settings.Threshold_N;
+                log.infof("IGA jit-policy commit: policy '%s' carries its contract, so signing "
+                        + "requires all %d orks rather than %d - every ork must receive the "
+                        + "contract or later requests routed to it will be refused.",
+                        policyName, settings.Threshold_N,
+                        Integer.parseInt(System.getenv(ENV_THRESHOLD_T)));
+            }
+
+            ModelRequest req = ModelRequest.FromBytes(java.util.Base64.getDecoder().decode(carrier));
+
+            SignatureResponse resp = Midgard.SignModel(settings, req);
+            if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
+                    || resp.Signatures[0] == null) {
+                throw new RuntimeException("IGA jit-policy commit: Midgard.SignModel returned no "
+                        + "signature for realm " + realm.getName() + " (CR " + cr.getId() + ")");
+            }
+            String vvkSig = resp.Signatures[0];
+
+            // Rebuild from the EXACT approved bytes and attach the signature, so the stored body is
+            // the one the quorum saw.
+            Policy policy = Policy.From(unsignedPolicy);
+            policy.AddSignature(java.util.Base64.getDecoder().decode(vvkSig));
+
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            new IgaRolePolicyService(em).upsert(
+                    realm.getId(), policyName,
+                    java.util.Base64.getEncoder().encodeToString(policy.ToBytes()),
+                    vvkSig, localContractRowId(session, realm, policy.getContractId()),
+                    policy.getApprovalType().name(), policy.getExecutionType().name(),
+                    null, null, policy.getExpiry());
+            em.flush();
+
+            cr.setStatus("APPROVED");
+            cr.setResolvedAt(System.currentTimeMillis());
+            em.flush();
+
+            log.infof("IGA JIT policy '%s' signed via the Policy:1 admin quorum and stored "
+                    + "(realm %s, CR %s, expiry %s).", policyName, realm.getName(), cr.getId(),
+                    policy.getExpiry());
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("IGA jit-policy commit failed for realm " + realm.getName()
+                    + " (CR " + cr.getId() + "): " + e.getMessage(), e);
+        }
+    }
+
+    /** A stable 36-char key for a policy name, so it fits ENTITY_ID and still dedups per policy. */
+    static String jitPolicyEntityId(String policyName) {
+        return java.util.UUID.nameUUIDFromBytes(
+                policyName.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
+    }
+
+    /**
+     * The contract itself, packed the way a policy signature carries one.
+     *
+     * A contract reaches the ork network by travelling WITH the first policy that references it.
+     * Storing it in TideCloak only records the source; the orks have never seen it, and a policy
+     * naming a contract they do not hold is refused with "Policy referenced a contract which
+     * doesn't exist".
+     *
+     * Only the first policy for a given contract needs to carry it. After that the orks hold it,
+     * and a later policy simply names it - which is why this returns null when the contract is
+     * already known to have been sent.
+     *
+     * PolicySignRequest.AddContractToUpload adds the outer ["forseti", ...] wrapper itself, so
+     * this builds only what goes inside it. The nesting is fixed by what the ork unpacks:
+     *   forsetiData  = [ placeholder, innerPayload ]
+     *   innerPayload = [ sourceCode ]
+     */
+    private static byte[] buildContractPayload(String contractSource) {
+        byte[] innerPayload = org.midgard.Serialization.Tools.CreateTideMemory(
+                contractSource.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        // The placeholder is what the ork's ForsetiContract reads past to reach the payload.
+        return org.midgard.Serialization.Tools.CreateTideMemory(new byte[0], innerPayload);
+    }
+
+    /**
+     * The source of the contract a policy names, so it can be sent along with it.
+     *
+     * Best effort: if it cannot be found, the policy is sent alone and the orks will refuse it if
+     * they do not already hold the contract. That refusal is clearer than a guess here would be.
+     */
+    private static String contractSourceFor(KeycloakSession session, RealmModel realm, byte[] policyBytes) {
+        try {
+            String contractId = Policy.From(policyBytes).getContractId();
+            if (contractId == null || contractId.isBlank()) return null;
+
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+            // Matched by recomputing the hash, because neither stored column is the id the orks
+            // use. Our own id is a database uuid and our stored hash is a SHA-256; the orks name a
+            // contract by the SHA-512 of its source. So the only way to find the contract a policy
+            // refers to is to hash each one the way the orks would.
+            for (IgaForsetiContractEntity contract : new IgaForsetiContractService(em).listByRealm(realm.getId())) {
+                String source = contract.getContractCode();
+                if (source == null || source.isBlank()) continue;
+                if (contractId.equalsIgnoreCase(orkContractId(source))) return source;
+            }
+            return null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * The local contract row a policy names.
+     *
+     * CONTRACT_ID is a foreign key into IGA_FORSETI_CONTRACT, so what belongs in it is OUR row id,
+     * a uuid. The id a policy carries is the orks' one - the SHA-512 of the source - which is not a
+     * row id here; storing it verbatim breaks the foreign key, and the constraint violation reaches
+     * the caller as an opaque 409 "Duplicate resource error". The two ids are matched by hashing
+     * each stored contract the way the orks would.
+     *
+     * Null when nothing stored matches. The column is nullable, and the orks' id stays inside the
+     * policy's own bytes either way, so the link is a convenience rather than the record.
+     */
+    private static String localContractRowId(KeycloakSession session, RealmModel realm,
+                                             String contractId) {
+        if (contractId == null || contractId.isBlank()) return null;
+        try {
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            for (IgaForsetiContractEntity contract : new IgaForsetiContractService(em).listByRealm(realm.getId())) {
+                String source = contract.getContractCode();
+                if (source == null || source.isBlank()) continue;
+                if (contractId.equalsIgnoreCase(orkContractId(source))) return contract.getId();
+            }
+            return null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * A contract's identity to the ork network: the SHA-512 of its source, upper-case hex.
+     *
+     * Confirmed against a live refusal, which named the hash it expected and matched this exactly.
+     */
+    private static String orkContractId(String contractSource) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-512")
+                    .digest(contractSource.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            for (byte b : digest) hex.append(String.format("%02X", b));
+            return hex.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-512 is unavailable", e);
+        }
+    }
+
+    /** Decode {@link #ROW_JIT_POLICY_NAME} from a JIT-policy CR's rows. */
+    private static String readJitPolicyNameFromCr(IgaChangeRequestEntity cr) {
+        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+            String name = str(row, ROW_JIT_POLICY_NAME);
+            if (name != null && !name.isBlank()) return name;
+        }
+        throw new RuntimeException("IGA jit-policy CR " + cr.getId()
+                + " carries no " + ROW_JIT_POLICY_NAME);
     }
 
     /** Decode {@link #ROW_POLICY_BODY_UNSIGNED} (Base64 Policy.ToBytes()) from a REGEN CR's rows. */
