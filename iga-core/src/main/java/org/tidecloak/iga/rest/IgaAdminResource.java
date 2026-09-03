@@ -18,7 +18,9 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.ClientModel;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.services.resources.admin.AdminEventBuilder;
@@ -146,6 +148,64 @@ public class IgaAdminResource {
         } catch (Exception ignored) {
         }
         return null;
+    }
+
+    /**
+     * Realm attribute naming the role that may approve a JIT policy signature without holding
+     * realm authority. {@code "<clientId>:<role>"} for a client role, split on the FIRST colon
+     * because role names contain colons of their own ({@code myclient:case:assign}); a value with
+     * no colon is read as a realm role. Unset means nobody qualifies.
+     */
+    public static final String ATTR_JIT_APPROVER_ROLE = "iga.jitApproverRole";
+
+    /**
+     * May this caller act on this change request without {@code manage-realm}?
+     *
+     * Only for {@code SIGN_JIT_POLICY}, and only for the role the realm names. Signing a grant's
+     * policy is not realm administration: the authority is the authorising policy, which says
+     * which client role an approver must hold, and the orks check exactly that when the signing
+     * round runs. Requiring {@code manage-realm} on top of it put an everyday act of casework
+     * behind realm authority - the thing this lane exists to remove - and left signed grants
+     * uncommittable by the only people involved in making them.
+     *
+     * Every other action type keeps the gate it had. This method never grants anything by itself:
+     * it only decides whether the manage-realm check is the one that applies, so a caller who
+     * fails here is refused exactly as before - including for a change request id that does not
+     * exist, which is why this returns false rather than 404 and leaks nothing about which ids
+     * are real.
+     */
+    private boolean callerMayApproveJitPolicy(String changeRequestId) {
+        String configured = realm.getAttribute(ATTR_JIT_APPROVER_ROLE);
+        if (configured == null || configured.isBlank()) return false;
+
+        UserModel admin = currentUser();
+        if (admin == null) return false;
+
+        IgaChangeRequestEntity cr = getEm().find(IgaChangeRequestEntity.class, changeRequestId);
+        if (cr == null || !realm.getId().equals(cr.getRealmId())) return false;
+        if (!"SIGN_JIT_POLICY".equals(cr.getActionType())) return false;
+
+        RoleModel role;
+        int split = configured.indexOf(':');
+        if (split > 0) {
+            ClientModel client = realm.getClientByClientId(configured.substring(0, split));
+            role = client == null ? null : client.getRole(configured.substring(split + 1));
+        } else {
+            role = realm.getRole(configured);
+        }
+
+        if (role == null) {
+            log.warnf("IGA: %s names '%s', which is not a role on this realm; refusing.",
+                    ATTR_JIT_APPROVER_ROLE, configured);
+            return false;
+        }
+
+        boolean holds = admin.hasRole(role);
+        if (holds) {
+            log.infof("IGA: %s acting on CR %s under '%s' rather than manage-realm",
+                    admin.getUsername(), changeRequestId, configured);
+        }
+        return holds;
     }
 
     /**
@@ -629,7 +689,9 @@ public class IgaAdminResource {
     @Path("change-requests/{id}/commit")
     @Produces(MediaType.APPLICATION_JSON)
     public Response commit(@PathParam("id") String id) {
-        auth.realm().requireManageRealm();
+        if (!callerMayApproveJitPolicy(id)) {
+            auth.realm().requireManageRealm();
+        }
 
         EntityManager em = getEm();
         IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
@@ -1482,7 +1544,9 @@ public class IgaAdminResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
     public Response approve(@PathParam("id") String id, Map<String, Object> body) {
-        auth.realm().requireManageRealm();
+        if (!callerMayApproveJitPolicy(id)) {
+            auth.realm().requireManageRealm();
+        }
 
         EntityManager em = getEm();
         IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
