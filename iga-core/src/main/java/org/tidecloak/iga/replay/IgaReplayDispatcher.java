@@ -267,6 +267,14 @@ public class IgaReplayDispatcher {
                     new org.tidecloak.iga.attestors.TideAttestor(session)
                             .replayRegenAdminPolicy(session, realm, cr);
 
+            // Signs ONE per-grant JIT policy with the collected admin dokens and stores it in
+            // IGA_ROLE_POLICY. Same ceremony as the admin-policy re-sign, different policy: this
+            // one lets a single user mint a time-limited credential for a single role, and touches
+            // neither the M0 nor the threshold.
+            case "SIGN_JIT_POLICY" ->
+                    new org.tidecloak.iga.attestors.TideAttestor(session)
+                            .replaySignJitPolicy(session, realm, cr);
+
             // ----- Attribute writes -----
             case "SET_USER_ATTRIBUTE" -> replaySetUserAttribute(session, realm, rows, finalAttestation, em);
             case "REMOVE_USER_ATTRIBUTE" -> replayRemoveUserAttribute(session, realm, rows, em);
