@@ -15,14 +15,21 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.midgard.models.Policy.ApprovalType;
+import org.midgard.models.Policy.ExecutionType;
+import org.midgard.models.Policy.Policy;
+import org.midgard.models.Policy.PolicyParameters;
 import org.tidecloak.iga.attestors.TideAttestor;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 
+import java.util.Base64;
 import java.util.List;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -142,9 +149,85 @@ class IgaRealmPolicyEndpointTest {
         verify(em, never()).merge(any());
     }
 
+    /**
+     * A real Base64 policy body. The upsert endpoint derives EXPIRY by parsing this, so a
+     * placeholder string is no longer a valid policy to store.
+     */
+    private static String policyBody(Long expiry) {
+        PolicyParameters params = new PolicyParameters();
+        params.put("resource", "myclient");
+        return Base64.getEncoder().encodeToString(
+                new Policy("contract-1", new String[]{"m:1"}, "vuid-abc",
+                        ApprovalType.EXPLICIT, ExecutionType.PUBLIC, params, expiry).ToBytes());
+    }
+
     @Test
     void upsert_acceptsNonReservedName() {
         stubFindByRealmAndName(null); // no existing row -> INSERT path
+        IgaRolePolicyRepresentation rep = new IgaRolePolicyRepresentation();
+        rep.setName("custom-policy");
+        rep.setPolicy(policyBody(null));
+        rep.setPolicySig("SIG");
+
+        Response resp = resource.upsertRolePolicy(rep);
+
+        assertEquals(200, resp.getStatus());
+        verify(em).persist(any(IgaRolePolicyEntity.class));
+    }
+
+    @Test
+    void upsert_derivesExpiryFromTheSignedPolicy_notFromTheRequestBody() {
+        // The column is a read-back of what POLICY already contains. Deriving it is what stops it
+        // disagreeing with the bytes the ork will verify, so a caller-supplied value is ignored.
+        stubFindByRealmAndName(null);
+        long expiry = (System.currentTimeMillis() / 1000L) + 3600;
+        IgaRolePolicyRepresentation rep = new IgaRolePolicyRepresentation();
+        rep.setName("custom-policy");
+        rep.setPolicy(policyBody(expiry));
+        rep.setPolicySig("SIG");
+        rep.setExpiry(1L); // a lie; the signed policy is the authority
+
+        Response resp = resource.upsertRolePolicy(rep);
+
+        assertEquals(200, resp.getStatus());
+        verify(em).persist(argThat((IgaRolePolicyEntity e) ->
+                e != null && Long.valueOf(expiry).equals(e.getExpiry())));
+    }
+
+    @Test
+    void upsert_storesNoExpiryForAStandingPolicy() {
+        stubFindByRealmAndName(null);
+        IgaRolePolicyRepresentation rep = new IgaRolePolicyRepresentation();
+        rep.setName("custom-policy");
+        rep.setPolicy(policyBody(null));
+        rep.setPolicySig("SIG");
+
+        Response resp = resource.upsertRolePolicy(rep);
+
+        assertEquals(200, resp.getStatus());
+        verify(em).persist(argThat((IgaRolePolicyEntity e) -> e != null && e.getExpiry() == null));
+    }
+
+    @Test
+    void upsert_refusesAnAlreadyExpiredPolicy() {
+        // PolicySignRequest will not sign one and PolicyAuthorizationFlow will not honour it, so
+        // storing it would only defer the failure to somewhere further from the cause.
+        IgaRolePolicyRepresentation rep = new IgaRolePolicyRepresentation();
+        rep.setName("custom-policy");
+        rep.setPolicy(policyBody((System.currentTimeMillis() / 1000L) - 60));
+        rep.setPolicySig("SIG");
+
+        Response resp = resource.upsertRolePolicy(rep);
+
+        assertEquals(400, resp.getStatus());
+        verify(em, never()).persist(any());
+        verify(em, never()).merge(any());
+    }
+
+    @Test
+    void upsert_refusesAPolicyBodyItCannotParse() {
+        // Storing it with a null expiry would hide a time-limited policy from anything that reads
+        // the column, which is the failure this check exists to avoid.
         IgaRolePolicyRepresentation rep = new IgaRolePolicyRepresentation();
         rep.setName("custom-policy");
         rep.setPolicy("body");
@@ -152,8 +235,8 @@ class IgaRealmPolicyEndpointTest {
 
         Response resp = resource.upsertRolePolicy(rep);
 
-        assertEquals(200, resp.getStatus());
-        verify(em).persist(any(IgaRolePolicyEntity.class));
+        assertEquals(400, resp.getStatus());
+        verify(em, never()).persist(any());
     }
 
     @Test

@@ -18,7 +18,9 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.ClientModel;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.services.resources.admin.AdminEventBuilder;
@@ -30,6 +32,7 @@ import org.tidecloak.iga.entities.IgaCommentEntity;
 import org.tidecloak.iga.entities.IgaForsetiContractEntity;
 import org.tidecloak.iga.entities.IgaLicenseHistoryEntity;
 import org.tidecloak.iga.entities.IgaLicensingDraftEntity;
+import org.midgard.models.Policy.Policy;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
@@ -39,6 +42,8 @@ import org.tidecloak.iga.providers.IgaFirstAdminSignPreviewService;
 import org.tidecloak.iga.providers.IgaForsetiContractService;
 import org.tidecloak.iga.providers.IgaLicenseHistoryService;
 import org.tidecloak.iga.providers.IgaLicensingDraftService;
+import org.tidecloak.iga.providers.IgaConflictException;
+import org.tidecloak.iga.providers.IgaJitPolicyService;
 import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.providers.IgaServerCertDraftService;
 import org.tidecloak.iga.replay.EntityVanishedException;
@@ -56,6 +61,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Base64;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -142,6 +148,64 @@ public class IgaAdminResource {
         } catch (Exception ignored) {
         }
         return null;
+    }
+
+    /**
+     * Realm attribute naming the role that may approve a JIT policy signature without holding
+     * realm authority. {@code "<clientId>:<role>"} for a client role, split on the FIRST colon
+     * because role names contain colons of their own ({@code myclient:case:assign}); a value with
+     * no colon is read as a realm role. Unset means nobody qualifies.
+     */
+    public static final String ATTR_JIT_APPROVER_ROLE = "iga.jitApproverRole";
+
+    /**
+     * May this caller act on this change request without {@code manage-realm}?
+     *
+     * Only for {@code SIGN_JIT_POLICY}, and only for the role the realm names. Signing a grant's
+     * policy is not realm administration: the authority is the authorising policy, which says
+     * which client role an approver must hold, and the orks check exactly that when the signing
+     * round runs. Requiring {@code manage-realm} on top of it put an everyday act of casework
+     * behind realm authority - the thing this lane exists to remove - and left signed grants
+     * uncommittable by the only people involved in making them.
+     *
+     * Every other action type keeps the gate it had. This method never grants anything by itself:
+     * it only decides whether the manage-realm check is the one that applies, so a caller who
+     * fails here is refused exactly as before - including for a change request id that does not
+     * exist, which is why this returns false rather than 404 and leaks nothing about which ids
+     * are real.
+     */
+    private boolean callerMayApproveJitPolicy(String changeRequestId) {
+        String configured = realm.getAttribute(ATTR_JIT_APPROVER_ROLE);
+        if (configured == null || configured.isBlank()) return false;
+
+        UserModel admin = currentUser();
+        if (admin == null) return false;
+
+        IgaChangeRequestEntity cr = getEm().find(IgaChangeRequestEntity.class, changeRequestId);
+        if (cr == null || !realm.getId().equals(cr.getRealmId())) return false;
+        if (!"SIGN_JIT_POLICY".equals(cr.getActionType())) return false;
+
+        RoleModel role;
+        int split = configured.indexOf(':');
+        if (split > 0) {
+            ClientModel client = realm.getClientByClientId(configured.substring(0, split));
+            role = client == null ? null : client.getRole(configured.substring(split + 1));
+        } else {
+            role = realm.getRole(configured);
+        }
+
+        if (role == null) {
+            log.warnf("IGA: %s names '%s', which is not a role on this realm; refusing.",
+                    ATTR_JIT_APPROVER_ROLE, configured);
+            return false;
+        }
+
+        boolean holds = admin.hasRole(role);
+        if (holds) {
+            log.infof("IGA: %s acting on CR %s under '%s' rather than manage-realm",
+                    admin.getUsername(), changeRequestId, configured);
+        }
+        return holds;
     }
 
     /**
@@ -625,7 +689,9 @@ public class IgaAdminResource {
     @Path("change-requests/{id}/commit")
     @Produces(MediaType.APPLICATION_JSON)
     public Response commit(@PathParam("id") String id) {
-        auth.realm().requireManageRealm();
+        if (!callerMayApproveJitPolicy(id)) {
+            auth.realm().requireManageRealm();
+        }
 
         EntityManager em = getEm();
         IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
@@ -1478,7 +1544,9 @@ public class IgaAdminResource {
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
     public Response approve(@PathParam("id") String id, Map<String, Object> body) {
-        auth.realm().requireManageRealm();
+        if (!callerMayApproveJitPolicy(id)) {
+            auth.realm().requireManageRealm();
+        }
 
         EntityManager em = getEm();
         IgaChangeRequestEntity cr = em.find(IgaChangeRequestEntity.class, id);
@@ -2871,6 +2939,39 @@ public class IgaAdminResource {
                     .build();
         }
 
+        // EXPIRY is DERIVED from the signed policy, never taken from the request body. The column
+        // is a read-back of what POLICY already contains, so deriving it is what makes it unable to
+        // disagree with the bytes the ork will verify. A caller-supplied value could claim a
+        // lifetime the signed policy does not carry, and nothing downstream would notice.
+        Policy parsedPolicy;
+        try {
+            parsedPolicy = Policy.From(Base64.getDecoder().decode(rep.getPolicy()));
+        } catch (Exception e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "policy could not be parsed: " + e.getMessage()))
+                    .build();
+        }
+        Long expiry = parsedPolicy.getExpiry();
+
+        // A JIT policy's fallback lifetime is bounded by the realm's own access token lifespan.
+        // MaxJitLifetimeSeconds lives INSIDE the signed policy and cannot be corrected here, so the
+        // only options are to accept it or refuse it.
+        String jitRejection = IgaJitPolicyService.rejectionReason(realm, parsedPolicy);
+        if (jitRejection != null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", jitRejection))
+                    .build();
+        }
+
+        // An already-expired policy is refused here rather than stored. PolicySignRequest will not
+        // sign one and PolicyAuthorizationFlow will not honour it, so storing it would only defer
+        // the failure to somewhere further from the cause.
+        if (expiry != null && expiry < (System.currentTimeMillis() / 1000L)) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "policy expired at " + expiry))
+                    .build();
+        }
+
         IgaRolePolicyEntity upserted = getRolePolicyService().upsert(
                 realm.getId(),
                 rep.getName(),
@@ -2880,8 +2981,113 @@ public class IgaAdminResource {
                 rep.getApprovalType(),
                 rep.getExecutionType(),
                 rep.getThreshold(),
-                rep.getPolicyData());
+                rep.getPolicyData(),
+                expiry);
         return Response.ok(toRolePolicyRepresentation(upserted)).build();
+    }
+
+    /**
+     * Raise the governed request to sign one per-grant JIT policy.
+     *
+     * <p>Returns 202: the policy is NOT stored yet. It is signed and installed only once the admin
+     * quorum has approved the change request, because an unsigned JIT policy cannot mint anything
+     * and a row stored before then would look like a grant that is not one.</p>
+     */
+    @POST
+    @Path("jit-policies")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response requestJitPolicy(IgaJitPolicyRequest rep) {
+        auth.realm().requireManageRealm();
+
+        if (rep == null || rep.getName() == null || rep.getName().isBlank()) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "name is required")).build();
+        }
+        byte[] unsigned;
+        Policy parsed;
+        try {
+            if (rep.getPolicy() != null && !rep.getPolicy().isBlank()) {
+                // A caller that already built the policy; taken verbatim.
+                unsigned = Base64.getDecoder().decode(rep.getPolicy());
+                parsed = Policy.From(unsigned);
+            } else {
+                // Built here from intent. This is the only place that knows the realm's access
+                // token lifespan, so it is the only place that can apply it as the fallback expiry.
+                // The realm's own key, because that is what signs a policy and what a policy
+                // must name. Who the grant is for travels as a parameter.
+                String vvkId = new TideAttestor(session).realmVvkIdForPolicy(realm);
+                if (vvkId == null || vvkId.isBlank()) {
+                    return Response.status(Response.Status.CONFLICT)
+                            .entity(Map.of("error", "This realm has no Tide key, so no policy can be signed for it."))
+                            .build();
+                }
+
+                parsed = IgaJitPolicyService.buildPolicy(realm, rep.getContractId(), vvkId,
+                        rep.getVuid(), rep.getResource(), rep.getGrantedRole(),
+                        rep.getAssessmentId(), rep.getTier(), rep.getExpiry());
+                unsigned = parsed.ToBytes();
+            }
+        } catch (IllegalArgumentException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", e.getMessage())).build();
+        } catch (Exception e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "policy could not be built: " + e.getMessage())).build();
+        }
+
+        // Any well-formed policy for THIS realm may be signed here, not only a JIT one.
+        //
+        // The endpoint's job is to put a policy through the admin quorum, and a realm needs more
+        // than one kind. An authoriser policy - EXPLICIT, naming Policy:1, delegating who may
+        // approve a later signature to a client role - goes through exactly the same ceremony and
+        // was previously refused for the sole reason that it is not a JIT policy.
+        //
+        // What still has to hold is the realm binding: an ork refuses a policy whose KeyId is not
+        // the key being asked to sign it, so a policy naming another realm is rejected here rather
+        // than after a round trip. The JIT-specific rules below still apply, and only, to JIT
+        // policies - rejectionReason returns null for anything else.
+        String realmVvk = new TideAttestor(session).realmVvkIdForPolicy(realm);
+        if (realmVvk != null && parsed.getKeyId() != null && !realmVvk.equals(parsed.getKeyId())) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "policy names key " + parsed.getKeyId()
+                            + " but this realm signs with " + realmVvk)).build();
+        }
+        String rejection = IgaJitPolicyService.rejectionReason(realm, parsed);
+        if (rejection != null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", rejection)).build();
+        }
+        // Refused rather than stored: the ork will not sign an expired policy, so a signature
+        // request for one can only ever fail, later and further from the cause.
+        if (parsed.getExpiry() != null && parsed.getExpiry() < (System.currentTimeMillis() / 1000L)) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", "policy expired at " + parsed.getExpiry())).build();
+        }
+
+        try {
+            IgaChangeRequestEntity cr = new TideAttestor(session).requestJitPolicySignature(
+                    session, realm, rep.getName(), unsigned,
+                    auth.adminAuth().getUser().getUsername());
+            // The expiry is returned because it may have been DERIVED here (the realm's access
+            // token lifespan when the caller gave none), and the caller needs the value that was
+            // actually signed rather than the one it asked for.
+            // LinkedHashMap, not Map.of: a policy without an expiry is legitimate now that this
+            // endpoint signs more than JIT policies, and Map.of rejects a null value outright.
+            java.util.Map<String, Object> body = new java.util.LinkedHashMap<>();
+            body.put("changeRequestId", cr.getId());
+            body.put("status", "PENDING");
+            body.put("policyName", rep.getName());
+            body.put("expiry", parsed.getExpiry());
+            body.put("message", "awaiting admin quorum approval; the policy is not stored yet");
+            return Response.status(Response.Status.ACCEPTED).entity(body).build();
+        } catch (IllegalArgumentException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", e.getMessage())).build();
+        } catch (IgaConflictException e) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of("error", e.getMessage())).build();
+        }
     }
 
     @DELETE
@@ -3433,6 +3639,7 @@ public class IgaAdminResource {
         rep.setExecutionType(entity.getExecutionType());
         rep.setThreshold(entity.getThreshold());
         rep.setPolicyData(entity.getPolicyData());
+        rep.setExpiry(entity.getExpiry());
         rep.setCreatedAt(entity.getCreatedAt());
         rep.setUpdatedAt(entity.getUpdatedAt());
         return rep;

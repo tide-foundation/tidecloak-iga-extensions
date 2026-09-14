@@ -16,6 +16,7 @@ public class IgaRolePolicyRepresentation {
     private String executionType;
     private Integer threshold;
     private String policyData;
+    private Long expiry;
     private Long createdAt;
     private Long updatedAt;
 
@@ -42,6 +43,9 @@ public class IgaRolePolicyRepresentation {
 
     public String getExecutionType() { return executionType; }
     public void setExecutionType(String executionType) { this.executionType = executionType; }
+
+    public Long getExpiry() { return expiry; }
+    public void setExpiry(Long expiry) { this.expiry = expiry; }
 
     public Integer getThreshold() { return threshold; }
     public void setThreshold(Integer threshold) { this.threshold = threshold; }
