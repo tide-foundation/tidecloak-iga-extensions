@@ -29,6 +29,9 @@ public class IgaRealmProviderFactory implements RealmProviderFactory<IgaRealmPro
 
     @Override
     public void init(Config.Scope config) {
+        // spi-realm--iga-realm-provider--master-admin-realm-delete-bypass, on by default.
+        IgaMasterAdminBypass.setEnabled(config == null
+                || config.getBoolean(IgaMasterAdminBypass.CONFIG_KEY, true));
     }
 
     @Override
