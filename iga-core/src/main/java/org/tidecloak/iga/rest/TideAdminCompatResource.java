@@ -1580,9 +1580,10 @@ public class TideAdminCompatResource {
                         + "candidates: " + holders + "). Phase 6c will enforce ADOPT "
                         + "approval before admin actions — provision a second "
                         + "manage-realm admin (or configure iga.approverRole) NOW. "
-                        + "Recovery path if locked out: the master-realm admin can "
-                        + "always disable IGA on this realm via the master realm "
-                        + "(escape hatch) — there is no other recovery.";
+                        + "Recovery path if locked out: a master realm super admin "
+                        + "(realm role admin) can delete this realm directly, with no "
+                        + "change request. IGA itself cannot be switched off from "
+                        + "the master realm.";
             }
         } catch (RuntimeException ex) {
             logger.warnf(ex, "buildAdminCoverageWarning: heuristic failed for realm %s — " +
