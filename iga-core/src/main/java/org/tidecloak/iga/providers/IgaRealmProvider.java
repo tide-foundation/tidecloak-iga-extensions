@@ -1,8 +1,10 @@
 package org.tidecloak.iga.providers;
 
+import org.keycloak.Config;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.services.IgaMigrationContext;
+import org.keycloak.models.AdminRoles;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.GroupModel;
@@ -10,6 +12,8 @@ import org.keycloak.models.GroupModel.Type;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
+import org.keycloak.models.UserModel;
+import org.keycloak.models.UserSessionModel;
 import org.keycloak.models.jpa.JpaRealmProvider;
 import org.keycloak.models.jpa.RealmAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
@@ -34,6 +38,11 @@ import java.util.Set;
 public class IgaRealmProvider extends JpaRealmProvider {
 
     private static final Logger log = Logger.getLogger(IgaRealmProvider.class);
+
+    /** SPI config key for the master admin realm-delete bypass, read by the factory. Default on. */
+    static final String MASTER_ADMIN_DELETE_BYPASS_KEY = "masterAdminRealmDeleteBypass";
+
+    static volatile boolean masterAdminDeleteBypass = true;
 
     private final KeycloakSession igaSession;
 
@@ -138,9 +147,29 @@ public class IgaRealmProvider extends JpaRealmProvider {
             if (realm != null && isIgaActive(realm)) {
                 // A master super admin deletes the realm directly, no CR. Checked only
                 // here, never in isIgaActive, so every other master write stays governed.
-                IgaMasterAdminBypass.Caller caller = IgaMasterAdminBypass.resolveCaller(igaSession, realm);
-                if (caller != null) {
-                    return removeRealmAsMasterAdmin(id, realm.getName(), caller);
+                if (masterAdminDeleteBypass && isMasterAdmin(igaSession)) {
+                    UserModel admin = igaSession.getContext().getUserSession().getUser();
+                    RealmModel adminRealm = igaSession.getContext().getUserSession().getRealm();
+                    String realmName = realm.getName();
+                    log.warnf("IGA bypass: realm %s (%s) deleted with no change request by master admin %s (%s)",
+                            realmName, id, admin.getUsername(), admin.getId());
+                    // Same flag the commit replay uses, so the delete cascade is not captured again.
+                    Object prior = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
+                    igaSession.setAttribute("IGA_REPLAY_ACTIVE", "true");
+                    boolean removed;
+                    try {
+                        removed = super.removeRealm(id);
+                    } finally {
+                        if (prior == null) {
+                            igaSession.removeAttribute("IGA_REPLAY_ACTIVE");
+                        } else {
+                            igaSession.setAttribute("IGA_REPLAY_ACTIVE", prior);
+                        }
+                    }
+                    if (removed) {
+                        recordBypassAudit(adminRealm, id, realmName, admin.getId(), admin.getUsername());
+                    }
+                    return removed;
                 }
                 Map<String, Object> row = new LinkedHashMap<>();
                 row.put("REALM_ID", id);
@@ -154,22 +183,23 @@ public class IgaRealmProvider extends JpaRealmProvider {
     }
 
     /**
-     * Ungoverned delete for a verified master super admin. Runs under
-     * {@code IGA_REPLAY_ACTIVE} like the commit replay does, so the delete cascade
-     * is not re-captured as DELETE_CLIENT and friends, then leaves an audit row.
+     * True when the request comes from a master realm user holding the master
+     * {@code admin} role. No bearer token or user session (import overwrite, jobs)
+     * means false, and so does any error.
      */
-    private boolean removeRealmAsMasterAdmin(String id, String realmName,
-                                             IgaMasterAdminBypass.Caller caller) {
-        log.warnf("IGA bypass: realm %s (%s) deleted with no change request by master admin "
-                        + "%s (%s) via client %s (temporary admin: %s, service account: %s)",
-                realmName, id, caller.username(), caller.userId(), caller.clientId(),
-                caller.temporaryAdmin(), caller.serviceAccount());
-        boolean removed = IgaMasterAdminBypass.runUnderReplayFlag(igaSession,
-                () -> super.removeRealm(id));
-        if (removed) {
-            recordBypassAudit(id, realmName, caller);
+    static boolean isMasterAdmin(KeycloakSession session) {
+        try {
+            if (session.getContext().getBearerToken() == null) return false;
+            UserSessionModel userSession = session.getContext().getUserSession();
+            if (userSession == null) return false;
+            RealmModel adminRealm = userSession.getRealm();
+            if (adminRealm == null || !Config.getAdminRealm().equals(adminRealm.getName())) return false;
+            UserModel user = userSession.getUser();
+            RoleModel admin = adminRealm.getRole(AdminRoles.ADMIN);
+            return user != null && user.isEnabled() && admin != null && user.hasRole(admin);
+        } catch (RuntimeException e) {
+            return false;
         }
-        return removed;
     }
 
     /**
@@ -177,22 +207,21 @@ public class IgaRealmProvider extends JpaRealmProvider {
      * APPROVED, so it outlives the deleted realm and nothing can act on it. Same
      * transaction as the delete: if the delete rolls back, so does the record.
      */
-    private void recordBypassAudit(String realmId, String realmName, IgaMasterAdminBypass.Caller caller) {
+    private void recordBypassAudit(RealmModel adminRealm, String realmId, String realmName,
+                                   String adminUserId, String adminUsername) {
         // ENTITY_ID and REQUESTED_BY are 36-char columns.
         if (realmId.length() > 36) {
             log.warnf("IGA bypass: no audit row for realm %s, id %s is longer than 36 chars",
                     realmName, realmId);
             return;
         }
-        String requestedBy = caller.userId() != null && caller.userId().length() <= 36
-                ? caller.userId() : null;
+        String requestedBy = adminUserId != null && adminUserId.length() <= 36 ? adminUserId : null;
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("REALM_ID", realmId);
         row.put("REALM_NAME", realmName);
         row.put("BYPASS", "master-admin");
-        row.put("ADMIN_USERNAME", caller.username());
-        row.put("CLIENT_ID", caller.clientId());
-        IgaChangeRequestEntity audit = getService().create(caller.adminRealm(), "REALM", realmId,
+        row.put("ADMIN_USERNAME", adminUsername);
+        IgaChangeRequestEntity audit = getService().create(adminRealm, "REALM", realmId,
                 "DELETE_REALM", List.of(row), requestedBy);
         audit.setStatus("APPROVED");
         audit.setResolvedAt(System.currentTimeMillis());
