@@ -3,6 +3,7 @@ package org.tidecloak.iga.providers;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 import org.tidecloak.iga.services.IgaMigrationContext;
+import org.tidecloak.iga.services.IgaRealmCleanup;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.GroupModel;
@@ -142,6 +143,13 @@ public class IgaRealmProvider extends JpaRealmProvider {
                 if (caller != null) {
                     return removeRealmAsMasterAdmin(id, realm.getName(), caller);
                 }
+                // A repeated delete answers with the CR that is already pending instead
+                // of stacking another one.
+                String pendingId = pendingDeleteRealmCrId(getService(), id);
+                if (pendingId != null) {
+                    igaSession.getTransactionManager().setRollbackOnly();
+                    throw new IgaPendingApprovalException(pendingId, "REALM", "DELETE_REALM");
+                }
                 Map<String, Object> row = new LinkedHashMap<>();
                 row.put("REALM_ID", id);
                 // REALM_NAME so the approval UI can render which realm is being deleted.
@@ -150,7 +158,33 @@ public class IgaRealmProvider extends JpaRealmProvider {
                 return false; // unreachable
             }
         }
-        return super.removeRealm(id);
+        // Under replay the DELETE_REALM commit purges the IGA rows itself, because it
+        // has to keep the CR it is committing (see IgaReplayDispatcher.replayDeleteRealm).
+        boolean replay = "true".equals(igaSession.getAttribute("IGA_REPLAY_ACTIVE"));
+        // Only an admin API delete purges. An import overwrite removes the realm and
+        // brings it straight back under the same id, where its authorizer and license
+        // rows are still needed.
+        boolean adminApiDelete = isAdminApiRequest();
+        boolean removed = super.removeRealm(id);
+        if (removed && !replay && adminApiDelete && id != null) {
+            IgaRealmCleanup.purge(em, id, null);
+        }
+        return removed;
+    }
+
+    private boolean isAdminApiRequest() {
+        try {
+            return igaSession.getContext() != null && igaSession.getContext().getBearerToken() != null;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** Id of the realm's PENDING DELETE_REALM change request, or null. */
+    static String pendingDeleteRealmCrId(IgaChangeRequestService service, String realmId) {
+        List<IgaChangeRequestEntity> pending =
+                service.findPendingByAction(realmId, "REALM", "DELETE_REALM");
+        return pending == null || pending.isEmpty() ? null : pending.get(0).getId();
     }
 
     /**
@@ -167,6 +201,8 @@ public class IgaRealmProvider extends JpaRealmProvider {
         boolean removed = IgaMasterAdminBypass.runUnderReplayFlag(igaSession,
                 () -> super.removeRealm(id));
         if (removed) {
+            IgaRealmCleanup.purge(em, id, null);
+            // Filed under master, so a purge by this realm's id never touches it.
             recordBypassAudit(id, realmName, caller);
         }
         return removed;

@@ -2662,6 +2662,8 @@ public class IgaReplayDispatcher {
                     + "false for realm " + realmName + " (" + realmId + ") — nothing removed; rolling "
                     + "back so the CR stays committable-retry.");
         }
+        // Drop the realm's IGA rows, but keep this CR: the commit tail resolves it next.
+        org.tidecloak.iga.services.IgaRealmCleanup.purge(em, realmId, cr != null ? cr.getId() : null);
         log.infof("DELETE_REALM replay: realm %s (%s) removed via RealmManager.removeRealm.",
                 realmName, realmId);
     }
