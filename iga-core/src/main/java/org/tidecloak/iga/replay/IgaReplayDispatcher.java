@@ -1283,15 +1283,9 @@ public class IgaReplayDispatcher {
             }
 
             if (added) {
-                // SET-SIGNING (tide): fan the set signature out across every
-                // mapper owned by the same parent (client OR client_scope). The
-                // per-(table, owner) set for protocol_mapper is "all mappers of
-                // this parent". simple attestor keeps the per-row (e.id) stamp.
-                if (setSigned && sig != null && !sig.isEmpty()
-                        && stampOwnerSetFanOut(em, "ADD_PROTOCOL_MAPPER",
-                                java.util.List.of(row), sig)) {
-                    continue;
-                }
+                // Stamp only this mapper. Its column carries its own unit sig and
+                // the owner set column is stamped by stampProducerUnitColumns.
+                // Fanning out to siblings would overwrite their real sigs.
                 em.createQuery("UPDATE ProtocolMapperEntity e SET e.attestation = :sig WHERE e.id = :id")
                         .setParameter("sig", sig)
                         .setParameter("id", mapperId)
