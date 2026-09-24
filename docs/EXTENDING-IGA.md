@@ -1619,9 +1619,10 @@ than rethrowing. The reasoning, documented at
 - The invitation row is already persisted by `invitationManager.create(...)`
   before the e-mail send is attempted, and the invite link is stored
   on the invitation entity (`JpaInvitationManager.create` does
-  `em.persist + flush` at end of the commit tx). So the invitee can
-  still be notified out-of-band (admin UI / resend) even if SMTP is
-  down.
+  `em.persist + flush` at end of the commit tx). So the invite can
+  still be re-sent via the governed resend endpoint even if SMTP is
+  down. Since KC 26.7.3 (CVE-2026-16072) the admin API no longer
+  returns `inviteLink`.
 - The original requester is long gone by the time replay runs — there
   is no operator to surface the SMTP error to via an HTTP response.
 - Failing the commit would discard an already-approved governance
