@@ -2376,6 +2376,35 @@ public class IgaAdminResource {
             return outcome;
         }
 
+        // Fail-closed quorum floor, the bulk twin of the gate in commitResolvedLocked. The bulk
+        // drain has its own inline commit body and does not run that pipeline, so without this a
+        // batched revoke could still strand the realm below its own threshold — the exact shape of
+        // the shrink that bricked tideqa-1790586762-1-local. Rejected per-CR so the rest of the
+        // batch still drains and the operator can see which revoke was held back and why.
+        TideAttestor.AdminQuorumFloor floor;
+        try {
+            floor = new TideAttestor(session).checkTideRealmAdminRevokeFloor(session, realm, cr);
+        } catch (RuntimeException ex) {
+            log.warnf(ex, "IGA tide-realm-admin quorum floor check failed for realm %s (CR %s) "
+                    + "— refusing the commit.", realm.getName(), cr.getId());
+            outcome.put("status", "REJECTED");
+            outcome.put("error", "ADMIN_QUORUM_FLOOR_UNVERIFIABLE");
+            return outcome;
+        }
+        if (floor != null && floor.breached()) {
+            outcome.put("status", "REJECTED");
+            outcome.put("error", "ADMIN_QUORUM_FLOOR");
+            outcome.put("message", "Committing this would leave " + floor.committedAfter
+                    + " tide-realm-admin(s) against a quorum of " + floor.inForceThreshold
+                    + ", so the realm could never commit anything again. Lower the threshold first "
+                    + "by committing the threshold policy change request the approval enclave "
+                    + "raises, then retry.");
+            outcome.put("committedAdmins", floor.committedNow);
+            outcome.put("committedAdminsAfter", floor.committedAfter);
+            outcome.put("inForceThreshold", floor.inForceThreshold);
+            return outcome;
+        }
+
         // -- authorize step: record() enforces requireApprover() internally;
         //    ADOPT_* CRs short-circuit the approver gate inside the resolver.
         try {
