@@ -863,6 +863,53 @@ public class IgaAdminResource {
             }
         }
 
+        // Fail-closed quorum floor for the multiAdmin admin set: refuse a tide-realm-admin
+        // REVOKE_ROLES commit that would leave fewer committed approvers than the threshold in
+        // force needs signatures. Without this, a realm can revoke its way into a state where no
+        // change request can ever be committed again — including the REGEN_ADMIN_POLICY whose whole
+        // job is to lower the threshold back to something collectable. That state is not
+        // recoverable from inside the realm: the threshold is enforced by every ORK at PreSign
+        // against the signed M0, so an under-quorum carrier is rejected there whatever the local
+        // gate says. It has to be prevented here.
+        //
+        // The mirror image of the grant-side TideRealmAdminGuard lockout safeguard, and the other
+        // half of the lowering clamp in TideAttestor.ensureThresholdPolicyCrForEnclave. The clamp
+        // stops the policy running ahead of the admin set; this stops the admin set running ahead
+        // of the policy. Shrinking past the floor is not blocked, only split into rounds: revoke
+        // down to the floor, let the regen lower the threshold, revoke again.
+        //
+        // A no-op for non-REVOKE CRs, for firstAdmin / Tideless realms, for revokes that do not
+        // target tide-realm-admin, and for revokes that leave the count at or above the floor.
+        TideAttestor.AdminQuorumFloor floor;
+        try {
+            floor = new TideAttestor(session).checkTideRealmAdminRevokeFloor(session, realm, cr);
+        } catch (RuntimeException ex) {
+            log.warnf(ex, "IGA tide-realm-admin quorum floor check failed for realm %s (CR %s) "
+                    + "— failing closed.", realm.getName(), cr.getId());
+            floor = null;
+        }
+        if (floor != null && floor.breached()) {
+            return Response.status(Response.Status.PRECONDITION_FAILED)
+                    .entity(Map.of(
+                            "error", "ADMIN_QUORUM_FLOOR",
+                            "message", "This change request would remove " + floor.removed
+                                    + " of the realm's " + floor.committedNow + " tide-realm-admin(s), "
+                                    + "leaving " + floor.committedAfter + ". Every governed action in "
+                                    + "this realm currently needs " + floor.inForceThreshold
+                                    + " approvals, so " + floor.committedAfter + " approver(s) could "
+                                    + "never reach quorum again and the realm would be permanently "
+                                    + "unable to commit anything, including the change that would "
+                                    + "lower the threshold. Shrink the admin set in rounds instead: "
+                                    + "commit revokes down to " + floor.safeFloor() + " admin(s), "
+                                    + "re-open the approval enclave so the threshold policy is "
+                                    + "regenerated for the smaller set, commit that, then continue.",
+                            "committedAdmins", floor.committedNow,
+                            "committedAdminsAfter", floor.committedAfter,
+                            "inForceThreshold", floor.inForceThreshold,
+                            "minCommittedAdmins", floor.safeFloor()))
+                    .build();
+        }
+
         UserModel admin = currentUser();
         if (admin == null) {
             return Response.status(Response.Status.UNAUTHORIZED)
