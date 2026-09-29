@@ -2148,6 +2148,52 @@ public class TideAttestor implements IgaAttestor {
                 + " carries no " + ROW_NEW_THRESHOLD + " (the final threshold to install)");
     }
 
+    /** Read an int row key from a REGEN CR's rows, or {@code null} when absent/unparseable. */
+    private static Integer readThresholdRow(IgaChangeRequestEntity cr, String key) {
+        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+            Object v = row.get(key);
+            if (v instanceof Number n) {
+                return n.intValue();
+            }
+            if (v != null) {
+                try {
+                    return Integer.parseInt(v.toString());
+                } catch (NumberFormatException ignore) {
+                    // try the next row
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Does committing this {@link #ACTION_REGEN_ADMIN_POLICY} CR RAISE the threshold?
+     *
+     * <p>This is the direction the commit-last ordering exists for. A rising threshold re-gates
+     * every still-pending assignment CR upward the moment it lands, stranding change requests that
+     * were signed under the old quorum — so the policy must go last. A FALLING threshold cannot
+     * strand anything: it only ever makes a pending change request easier to commit. Holding a
+     * lowering policy back is not a safeguard, it is the deadlock, because the revokes it waits on
+     * are exactly what removes the approvers it needs.
+     *
+     * <p>Read from the CR's own pinned OLD/NEW rows rather than the live encoded threshold, so the
+     * bulk comparator (which has no session) and the commit gate answer identically. OLD is
+     * re-pinned on every fold and only one REGEN CR is ever pending at a time, so it tracks the
+     * encoded value. Unreadable or ambiguous rows answer {@code true}: that keeps the guard firing
+     * exactly as it did before, which is the safe side of this question.
+     */
+    public static boolean regenRaisesThreshold(IgaChangeRequestEntity cr) {
+        if (cr == null || !ACTION_REGEN_ADMIN_POLICY.equals(cr.getActionType())) {
+            return false;
+        }
+        Integer newThreshold = readThresholdRow(cr, ROW_NEW_THRESHOLD);
+        Integer oldThreshold = readThresholdRow(cr, ROW_OLD_THRESHOLD);
+        if (newThreshold == null || oldThreshold == null) {
+            return true;
+        }
+        return newThreshold > oldThreshold;
+    }
+
     /**
      * Read the threshold the current policy artifact encodes, for the IsEqualTo
      * short-circuit. Prefers the stored {@code IgaRolePolicyEntity.threshold}
@@ -5724,16 +5770,21 @@ public class TideAttestor implements IgaAttestor {
 
     /**
      * The deterministic order a batch of change requests commits in: DELETE_REALM strictly
-     * last, REGEN_ADMIN_POLICY last among the rest, every other change request keeping its
-     * selection order (a STABLE sort). This is the order the bulk drain applies, and phase-1
+     * last, a RAISING REGEN_ADMIN_POLICY last among the rest, every other change request keeping
+     * its selection order (a STABLE sort). This is the order the bulk drain applies, and phase-1
      * framing replays the batch in the SAME order so the framed bytes are the bytes the
      * commit produces.
+     *
+     * <p>Only a RAISING policy needs to go last — it re-gates the pending assignments upward and
+     * would strand them. A LOWERING policy sorts with everything else, because holding it behind
+     * the revokes it accompanies is what strands the realm: the revokes remove the very approvers
+     * the policy commit needs. See {@link #regenRaisesThreshold}.
      */
     public static final Comparator<IgaChangeRequestEntity> BULK_COMMIT_ORDER =
             Comparator.comparingInt(c -> {
                 String at = c.getActionType();
                 if (ACTION_DELETE_REALM.equals(at)) return 2;
-                if (ACTION_REGEN_ADMIN_POLICY.equals(at)) return 1;
+                if (ACTION_REGEN_ADMIN_POLICY.equals(at) && regenRaisesThreshold(c)) return 1;
                 return 0;
             });
 
