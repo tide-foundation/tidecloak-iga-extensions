@@ -489,7 +489,7 @@ public class TideAttestor implements IgaAttestor {
         }
         // No IGA_ROLE_POLICY row yet (or a row with no encoded threshold) — pre-bootstrap /
         // legacy. Fall back to the live floor so the gate is still sensibly populated.
-        return Math.max(1, (int) (THRESHOLD_PERCENTAGE * countActiveTideRealmAdmins(realm, session)));
+        return thresholdFloor(countActiveTideRealmAdmins(realm, session));
     }
 
     /**
@@ -516,7 +516,7 @@ public class TideAttestor implements IgaAttestor {
                 return Math.max(1, encoded);
             }
         }
-        return Math.max(1, (int) (THRESHOLD_PERCENTAGE * countActiveTideRealmAdmins(realm, session)));
+        return thresholdFloor(countActiveTideRealmAdmins(realm, session));
     }
 
     /**
@@ -625,6 +625,16 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
+     * The admin quorum {@code n} holders justify: {@code max(1, floor(0.7 x n))}. The single
+     * place the formula lives, so the commit gate, the policy projection and the revoke floor
+     * guard can never drift apart. Note {@code thresholdFloor(n) <= n} for every {@code n >= 0},
+     * which is why a threshold pinned to the CURRENT holder count is always collectable.
+     */
+    static int thresholdFloor(int adminCount) {
+        return Math.max(1, (int) (THRESHOLD_PERCENTAGE * Math.max(0, adminCount)));
+    }
+
+    /**
      * Count the realm's ACTIVE tide-realm-admins for the dynamic multiAdmin
      * threshold. A user counts iff it simultaneously
      * (a) holds the {@code tide-realm-admin} realm-management role,
@@ -637,15 +647,25 @@ public class TideAttestor implements IgaAttestor {
      * sub-predicates.
      */
     private static int countActiveTideRealmAdmins(RealmModel realm, KeycloakSession session) {
+        return activeTideRealmAdminUserIds(realm, session).size();
+    }
+
+    /**
+     * The user ids {@link #countActiveTideRealmAdmins} counts — same predicate, same order of
+     * checks, just the identities instead of the tally. The revoke floor guard needs to know
+     * WHICH holders a change request would remove, and it must ask the question the exact way
+     * the threshold projection asks it, or the two would disagree about who counts.
+     */
+    private static Set<String> activeTideRealmAdminUserIds(RealmModel realm, KeycloakSession session) {
         ClientModel rm = realm.getClientByClientId(REALM_MANAGEMENT_CLIENT_ID);
-        if (rm == null) return 0;
+        if (rm == null) return Set.of();
         RoleModel tideAdmin = rm.getRole(TIDE_REALM_ADMIN_ROLE);
-        if (tideAdmin == null) return 0;
+        if (tideAdmin == null) return Set.of();
 
         // (user id) set whose USER_ROLE_MAPPING.attestation IS NOT NULL for the
         // tide-realm-admin role — the committed/stamped grants.
         Set<String> committedAdminUserIds = committedTideAdminUserIds(session, realm, tideAdmin.getId());
-        if (committedAdminUserIds.isEmpty()) return 0;
+        if (committedAdminUserIds.isEmpty()) return Set.of();
 
         // Defensive: ensure the realm is bound on the session context before the user-stream
         // lookup. In KC 26.5.5, session.users().getRoleMembersStream hits the Infinispan
@@ -658,10 +678,11 @@ public class TideAttestor implements IgaAttestor {
             ctx.setRealm(realm);
         }
 
-        return (int) session.users().getRoleMembersStream(realm, tideAdmin)
+        return session.users().getRoleMembersStream(realm, tideAdmin)
                 .filter(UserModel::isEnabled)
-                .filter(u -> committedAdminUserIds.contains(u.getId()))  // committed grant only (not PENDING)
-                .count();
+                .map(UserModel::getId)
+                .filter(committedAdminUserIds::contains)  // committed grant only (not PENDING)
+                .collect(java.util.stream.Collectors.toSet());
     }
 
     /**
@@ -979,7 +1000,7 @@ public class TideAttestor implements IgaAttestor {
             // the regen use, so the installed admin policy and the live gate agree.
             int postCommitCount = Math.max(0,
                     countActiveTideRealmAdmins(realm, session) + tideRealmAdminMembershipDelta(realm, cr));
-            int threshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
+            int threshold = thresholdFloor(postCommitCount);
             String vvkId = realmVvkId(realm);
             AdminPolicyArtifact artifact = buildSignedAdminPolicyArtifact(session, realm, threshold, vvkId);
             // M0 FIX: the policy row MUST exist after the flip. On a real-signing-capable
@@ -1009,7 +1030,7 @@ public class TideAttestor implements IgaAttestor {
         if (policy == null) {
             int postCommitCount = Math.max(0,
                     countActiveTideRealmAdmins(realm, session) + tideRealmAdminMembershipDelta(realm, cr));
-            int threshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
+            int threshold = thresholdFloor(postCommitCount);
             String stubBody = buildAdminPolicyArtifact(threshold, realmVvkId(realm));
             policy = upsertAdminPolicyRow(session, realm, null, stubBody, sig, threshold);
             if (policy == null) {
@@ -1167,7 +1188,10 @@ public class TideAttestor implements IgaAttestor {
      *   <li>Compute the PROJECTED post-commit count: committed count
      *       ({@link #countActiveTideRealmAdmins}) plus the NET delta of every pending assignment
      *       CR ({@link #pendingTideRealmAdminDelta}). Clamp at 0, apply the SAME
-     *       {@code max(1, floor(0.7 × N))} formula {@link #getThreshold} uses.</li>
+     *       {@link #thresholdFloor} formula {@link #getThreshold} uses, then take the LARGER of
+     *       that and the floor the COMMITTED count alone justifies. Raising is unchanged (the
+     *       projection wins); lowering is clamped to the committed floor so the realm never
+     *       installs a quorum it has not yet earned. See "Why lowering is clamped" below.</li>
      *   <li>IsEqualTo no-op: if {@code newThreshold} equals the current encoded threshold, emit
      *       NO CR — and CANCEL any stale pending policy CR.</li>
      *   <li>Fold to exactly ONE: if a pending policy CR exists, UPDATE its ROWS_JSON in place
@@ -1187,6 +1211,19 @@ public class TideAttestor implements IgaAttestor {
      * assignments commit. The enclave-open re-ensure also self-corrects: if the pending assignment set
      * changes before signing, the next open folds the policy CR to the new pinned threshold (or cancels
      * it if it nets back to the encoded value).
+     *
+     * <h3>Why lowering is clamped to the committed floor</h3>
+     * That FAIL-SAFE argument only holds while the threshold is RISING. Pinning a LOWER threshold
+     * to a projection is the opposite: it installs a quorum the realm has not earned. Five admins
+     * at threshold 3 with four pending revokes project down to 1, so committing the policy first
+     * would leave ONE signature in control while all five still hold the role, and leave it that
+     * way permanently if the revokes are never committed. So a lowering threshold is clamped to
+     * {@code thresholdFloor(committedCount)} — the quorum the holders who exist RIGHT NOW justify.
+     * Shrinking then converges over several enclave rounds (revoke down to the floor, regen, repeat)
+     * instead of one, and at every point the encoded threshold is both collectable and no weaker
+     * than the live admin set warrants. The paired revoke floor guard
+     * ({@code IgaAdminResource.commitResolvedLocked}) stops the count running ahead of the policy
+     * in the other direction; neither guard works without the other.
      *
      * <p>This method NEVER signs. The Policy:1 sign happens at the policy CR's own commit
      * ({@link #replayRegenAdminPolicy}). Because it runs as a side-effect of a read (the enclave
@@ -1223,8 +1260,21 @@ public class TideAttestor implements IgaAttestor {
         // Projected post-commit count = committed count + the NET delta of ALL pending
         // tide-realm-admin assignment CRs. Clamp at 0. SAME formula getThreshold uses.
         int netPending = pendingTideRealmAdminDelta(session, realm, tideRoleId);
-        int postCommitCount = Math.max(0, countActiveTideRealmAdmins(realm, session) + netPending);
-        int newThreshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
+        int committedCount = countActiveTideRealmAdmins(realm, session);
+        int postCommitCount = Math.max(0, committedCount + netPending);
+        // The threshold NEVER drops below what the admins who actually hold the role RIGHT NOW
+        // justify. Raising is unaffected (the projection is the larger value, so max picks it and
+        // the policy keeps running ahead of the incoming admins — fail-safe, more approvers than
+        // the current set needs). Lowering is clamped to the committed floor, because a threshold
+        // pinned to a projection is a threshold the realm has not earned yet: installing
+        // floor(0.7 x 1) while five admins still hold the role hands any one of them what
+        // previously took three signatures, and it stays that way if the revokes never commit.
+        // Clamping keeps `encoded <= committed` (floor(0.7 x N) <= N for all N), which is what
+        // makes the quorum always collectable, and costs only that a large shrink converges over
+        // several rounds instead of one. See the revoke floor guard in IgaAdminResource.
+        int projectedFloor = thresholdFloor(postCommitCount);
+        int committedFloor = thresholdFloor(committedCount);
+        int newThreshold = Math.max(projectedFloor, committedFloor);
 
         Integer priorThreshold = (policy == null) ? null : currentEncodedThreshold(policy);
 
@@ -1239,6 +1289,17 @@ public class TideAttestor implements IgaAttestor {
                         + "realm %s tide-realm-admin threshold stays %d (net pending delta %+d) — "
                         + "pending CR %s CANCELLED.",
                         realm.getName(), newThreshold, netPending, pending.getId());
+            } else if (committedFloor > projectedFloor) {
+                // The clamp is what held the threshold here: the pending revokes want it lower,
+                // but the admins who still hold the role justify this value. Say so plainly —
+                // an operator mid-shrink needs to know the round is waiting on revokes, not stuck.
+                log.infof("IGA threshold-policy CR skipped (lowering clamped to the committed floor): "
+                        + "realm %s tide-realm-admin stays at threshold %d — %d committed admin(s) "
+                        + "justify %d, the %+d pending assignment delta would project %d. Commit the "
+                        + "revokes that keep the count at or above %d, then re-open the enclave to "
+                        + "lower the threshold in the next round.",
+                        realm.getName(), newThreshold, committedCount, committedFloor,
+                        netPending, projectedFloor, newThreshold);
             } else {
                 log.infof("IGA threshold-policy CR skipped (threshold unchanged at enclave open): "
                         + "realm %s tide-realm-admin policy already encodes threshold %d "
