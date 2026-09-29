@@ -506,6 +506,17 @@ public class TideAttestor implements IgaAttestor {
      * straight to the realm-default gate.
      */
     private int normalQuorumThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr) {
+        return inForceAdminQuorum(session, realm);
+    }
+
+    /**
+     * The realm-default quorum in force RIGHT NOW: the encoded M0 policy threshold, falling back
+     * to the live floor when no policy row exists. This is the value {@link #getThreshold}'s
+     * multiAdmin realm-default branch returns and therefore the number of signatures every
+     * governed action in the realm currently needs, so it is also the floor the committed
+     * tide-realm-admin count must never fall below.
+     */
+    public int inForceAdminQuorum(KeycloakSession session, RealmModel realm) {
         if (MODE_FIRST_ADMIN.equals(resolveMode(session, realm))) {
             return 1;
         }
@@ -1384,6 +1395,87 @@ public class TideAttestor implements IgaAttestor {
                 realm.getName(), oldThreshold, newThreshold, netPending, postCommitCount,
                 created.getId(), assignmentCrIds);
         return created.getId();
+    }
+
+    // -------------------------------------------------------------------------
+    // Admin quorum floor: the committed holder count may never fall below the
+    // threshold in force
+    // -------------------------------------------------------------------------
+
+    /** What a {@code REVOKE_ROLES} commit would do to the realm's admin quorum. */
+    public static final class AdminQuorumFloor {
+        /** Committed, enabled tide-realm-admin holders before this change request applies. */
+        public final int committedNow;
+        /** How many of them this change request removes. */
+        public final int removed;
+        /** Committed holders left afterwards. */
+        public final int committedAfter;
+        /** Signatures every governed action in the realm needs right now. */
+        public final int inForceThreshold;
+
+        AdminQuorumFloor(int committedNow, int removed, int inForceThreshold) {
+            this.committedNow = committedNow;
+            this.removed = removed;
+            this.committedAfter = Math.max(0, committedNow - removed);
+            this.inForceThreshold = inForceThreshold;
+        }
+
+        /** True when applying this change request would leave the quorum uncollectable. */
+        public boolean breached() {
+            return committedAfter < inForceThreshold;
+        }
+
+        /** The largest committed count this change request may reduce the realm to. */
+        public int safeFloor() {
+            return inForceThreshold;
+        }
+    }
+
+    /**
+     * Would committing {@code cr} leave the realm with fewer committed tide-realm-admins than the
+     * threshold in force needs signatures?
+     *
+     * <p>This is the missing mirror of the grant-side lockout safeguard
+     * ({@code TideRealmAdminGuard}). That one stops the approver role reaching someone who could
+     * never sign; this one stops the approver set shrinking below the number of signatures the
+     * realm demands. Both end in the same place if unguarded: a realm where no change request can
+     * ever be committed again, including the one that would fix it. The threshold is enforced
+     * cryptographically by every ORK at PreSign against the signed M0 policy, so a realm that
+     * reaches this state cannot be argued out of it locally — it has to be prevented.
+     *
+     * <p>Returns {@code null} when the question does not apply: not a {@code REVOKE_ROLES} change
+     * request, not steady-state multiAdmin, no resolvable tide-realm-admin role, or the change
+     * request removes no committed holder. Otherwise returns the counts, and the caller checks
+     * {@link AdminQuorumFloor#breached()}.
+     */
+    public AdminQuorumFloor checkTideRealmAdminRevokeFloor(KeycloakSession session, RealmModel realm,
+                                                           IgaChangeRequestEntity cr) {
+        if (cr == null || !"REVOKE_ROLES".equals(cr.getActionType())) {
+            return null;
+        }
+        if (!MODE_MULTI_ADMIN.equals(resolveMode(session, realm))) {
+            return null;
+        }
+        String tideRoleId = tideRealmAdminRoleId(realm);
+        if (tideRoleId == null || !crTargetsRole(cr, tideRoleId)) {
+            return null;
+        }
+
+        Set<String> active = activeTideRealmAdminUserIds(realm, session);
+        // Distinct users, because one change request can carry several rows for the same user and
+        // double-counting them would refuse a revoke that is actually safe.
+        Set<String> removing = new HashSet<>();
+        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+            if (!tideRoleId.equals(str(row, "ROLE_ID"))) continue;
+            String userId = str(row, "USER_ID");
+            if (userId != null && active.contains(userId)) {
+                removing.add(userId);
+            }
+        }
+        if (removing.isEmpty()) {
+            return null;
+        }
+        return new AdminQuorumFloor(active.size(), removing.size(), inForceAdminQuorum(session, realm));
     }
 
     /**
