@@ -664,6 +664,80 @@ class TideAttestorThresholdPolicyCrTest {
                 "raising still pins the PROJECTED floor, not the committed one");
     }
 
+    // --- revoke quorum floor (shared by the single-CR and bulk commit lanes) --
+
+    /** A REVOKE_ROLES CR stripping tide-realm-admin from each of {@code userIds}. */
+    private IgaChangeRequestEntity adminRevokeCr(String... userIds) {
+        StringBuilder rows = new StringBuilder("[");
+        for (int i = 0; i < userIds.length; i++) {
+            if (i > 0) rows.append(',');
+            rows.append("{\"USER_ID\":\"").append(userIds[i])
+                .append("\",\"ROLE_ID\":\"").append(TIDE_ROLE_ID).append("\"}");
+        }
+        IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
+        cr.setId("revoke-floor");
+        cr.setRealmId(REALM_ID);
+        cr.setActionType("REVOKE_ROLES");
+        cr.setEntityType("USER");
+        cr.setRowsJson(rows.append(']').toString());
+        return cr;
+    }
+
+    @Test
+    void revokeFloor_breachedWhenTheSurvivorsCannotReachQuorum() {
+        // Both commit lanes call this one function, so its verdict is the guard. 2 committed
+        // admins at quorum 2: removing one leaves a realm that can never commit anything again.
+        stubMultiAdminMode();
+        stubActiveAdminCount(2);
+        stubPolicyLookup(policyAtThreshold(2));
+
+        TideAttestor.AdminQuorumFloor floor = attestor.checkTideRealmAdminRevokeFloor(
+                session, realm, adminRevokeCr("admin-user-0"));
+
+        assertNotNull(floor);
+        assertTrue(floor.breached());
+        assertEquals(2, floor.committedNow);
+        assertEquals(1, floor.removed);
+        assertEquals(1, floor.committedAfter);
+        assertEquals(2, floor.inForceThreshold);
+    }
+
+    @Test
+    void revokeFloor_notBreachedWhenQuorumSurvives() {
+        stubMultiAdminMode();
+        stubActiveAdminCount(3);
+        stubPolicyLookup(policyAtThreshold(2));
+
+        TideAttestor.AdminQuorumFloor floor = attestor.checkTideRealmAdminRevokeFloor(
+                session, realm, adminRevokeCr("admin-user-0"));
+
+        assertNotNull(floor);
+        assertFalse(floor.breached(), "3 admins at quorum 2 may drop to 2");
+    }
+
+    @Test
+    void revokeFloor_ignoresUsersWhoDoNotHoldTheRoleAnyway() {
+        // An already-uncommitted or already-revoked user removes nothing, so there is no question
+        // to answer. Counting them would refuse a revoke that changes nothing.
+        stubMultiAdminMode();
+        stubActiveAdminCount(2);
+        stubPolicyLookup(policyAtThreshold(2));
+
+        assertNull(attestor.checkTideRealmAdminRevokeFloor(
+                session, realm, adminRevokeCr("someone-who-is-not-an-admin")));
+    }
+
+    @Test
+    void revokeFloor_doesNotApplyInFirstAdminMode() {
+        // firstAdmin is single-signer onboarding; the steady-state quorum machinery is not in play.
+        stubFirstAdminMode();
+        stubActiveAdminCount(1);
+        stubPolicyLookup(policyAtThreshold(2));
+
+        assertNull(attestor.checkTideRealmAdminRevokeFloor(
+                session, realm, adminRevokeCr("admin-user-0")));
+    }
+
     // --- raising-vs-lowering predicate (drives the commit-last ordering) ------
 
     private IgaChangeRequestEntity regenCr(Integer oldThreshold, Integer newThreshold) {
