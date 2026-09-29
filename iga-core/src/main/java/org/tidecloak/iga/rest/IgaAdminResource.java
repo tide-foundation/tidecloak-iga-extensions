@@ -891,11 +891,31 @@ public class IgaAdminResource {
         try {
             floor = new TideAttestor(session).checkTideRealmAdminRevokeFloor(session, realm, cr);
         } catch (RuntimeException ex) {
+            // Fail CLOSED and mean it: if we cannot tell whether this revoke strands the realm,
+            // we do not apply it. The damage is unrecoverable and a refusal costs a retry.
             log.warnf(ex, "IGA tide-realm-admin quorum floor check failed for realm %s (CR %s) "
-                    + "— failing closed.", realm.getName(), cr.getId());
-            floor = null;
+                    + "— refusing the commit.", realm.getName(), cr.getId());
+            return Response.status(Response.Status.PRECONDITION_FAILED)
+                    .entity(Map.of(
+                            "error", "ADMIN_QUORUM_FLOOR_UNVERIFIABLE",
+                            "message", "Could not determine whether committing this change request "
+                                    + "would leave the realm with too few tide-realm-admins to reach "
+                                    + "quorum, so it was not applied. Check the change request's rows "
+                                    + "and the realm's admin policy, then retry."))
+                    .build();
         }
         if (floor != null && floor.breached()) {
+            // Say what happened, why it is refused, and what to do next. An operator mid-shrink
+            // meets this without warning, and "precondition failed" on its own tells them nothing.
+            String nextStep = floor.committedNow > floor.safeFloor()
+                    ? "Shrink the admin set in rounds instead: commit revokes down to "
+                      + floor.safeFloor() + " admin(s), re-open the approval enclave so the "
+                      + "threshold policy is regenerated for the smaller set, commit that policy "
+                      + "change request, then continue with the remaining revokes."
+                    : "The admin set is already at the floor this threshold allows, so the "
+                      + "threshold has to come down first: re-open the approval enclave, which "
+                      + "raises a threshold policy change request for the smaller set, commit "
+                      + "that with the admins you still have, then retry this revoke.";
             return Response.status(Response.Status.PRECONDITION_FAILED)
                     .entity(Map.of(
                             "error", "ADMIN_QUORUM_FLOOR",
@@ -906,10 +926,7 @@ public class IgaAdminResource {
                                     + " approvals, so " + floor.committedAfter + " approver(s) could "
                                     + "never reach quorum again and the realm would be permanently "
                                     + "unable to commit anything, including the change that would "
-                                    + "lower the threshold. Shrink the admin set in rounds instead: "
-                                    + "commit revokes down to " + floor.safeFloor() + " admin(s), "
-                                    + "re-open the approval enclave so the threshold policy is "
-                                    + "regenerated for the smaller set, commit that, then continue.",
+                                    + "lower the threshold. " + nextStep,
                             "committedAdmins", floor.committedNow,
                             "committedAdminsAfter", floor.committedAfter,
                             "inForceThreshold", floor.inForceThreshold,

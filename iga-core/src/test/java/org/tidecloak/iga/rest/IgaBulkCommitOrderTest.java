@@ -53,6 +53,10 @@ import static org.mockito.Mockito.when;
  * find (SKIPPED/ALREADY_RESOLVED) — no replay needed — and we capture the find order. That
  * order IS the COMMIT order the loop would follow, so asserting REGEN_ADMIN_POLICY is found
  * LAST proves it would also be committed last.
+ *
+ * <p>Commit-last applies to a RAISING policy only. The CRs below pin no OLD/NEW thresholds, so
+ * their direction is unknown and the comparator treats them as raising — the original behaviour.
+ * The two direction-specific tests pin thresholds explicitly.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -172,6 +176,36 @@ class IgaBulkCommitOrderTest {
         List<String> order = drainOrderFor(List.of(regenPolicy));
 
         assertEquals(List.of("regen-policy"), order);
+    }
+
+    @Test
+    void loweringPolicyKeepsItsPlace_insteadOfSortingLast() {
+        // Commit-last exists because a RISING threshold re-gates the pending assignments upward.
+        // A LOWERING one cannot strand anything, and sorting it behind the revokes it accompanies
+        // is what strands the REALM: the revokes remove the approvers the policy commit needs.
+        // So a policy CR pinned 3 -> 2 sorts with everything else and keeps its listed position.
+        IgaChangeRequestEntity revokeA = cr("revoke-A", "REVOKE_ROLES");
+        IgaChangeRequestEntity loweringPolicy = cr("lowering-policy", "REGEN_ADMIN_POLICY");
+        loweringPolicy.setRowsJson("[{\"OLD_THRESHOLD\":3,\"NEW_THRESHOLD\":2}]");
+        IgaChangeRequestEntity revokeB = cr("revoke-B", "REVOKE_ROLES");
+
+        List<String> order = drainOrderFor(List.of(revokeA, loweringPolicy, revokeB));
+
+        assertEquals(List.of("revoke-A", "lowering-policy", "revoke-B"), order,
+                "a lowering policy keeps its selection order rather than sorting last");
+    }
+
+    @Test
+    void risingPolicyStillSortsLast_whenItCarriesItsThresholds() {
+        // The narrowing is by DIRECTION only: a policy pinned 1 -> 2 sorts last exactly as before.
+        IgaChangeRequestEntity grantA = cr("grant-A", "GRANT_ROLES");
+        IgaChangeRequestEntity risingPolicy = cr("rising-policy", "REGEN_ADMIN_POLICY");
+        risingPolicy.setRowsJson("[{\"OLD_THRESHOLD\":1,\"NEW_THRESHOLD\":2}]");
+        IgaChangeRequestEntity grantB = cr("grant-B", "GRANT_ROLES");
+
+        List<String> order = drainOrderFor(List.of(grantA, risingPolicy, grantB));
+
+        assertEquals(List.of("grant-A", "grant-B", "rising-policy"), order);
     }
 
     @Test
