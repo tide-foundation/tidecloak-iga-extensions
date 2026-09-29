@@ -842,7 +842,14 @@ public class IgaAdminResource {
         // assignment linkage (same source as relatedPolicyCrId). A no-op for
         // non-REGEN CRs, for firstAdmin/non-tide realms (linkage == none()), and
         // for REGEN CRs whose grants are all already committed (empty set).
-        if (TideAttestor.ACTION_REGEN_ADMIN_POLICY.equals(cr.getActionType())) {
+        //
+        // RAISING ONLY. The stranding this prevents is caused by the threshold going UP, so the
+        // guard only applies when it does. A LOWERING policy held behind its revokes is the
+        // deadlock, not the cure: the revokes it waits on remove the approvers it needs, and a
+        // threshold that outlives its admin set can never be collected again. A lowering policy
+        // makes every pending CR easier, so letting it through first strands nothing.
+        if (TideAttestor.ACTION_REGEN_ADMIN_POLICY.equals(cr.getActionType())
+                && TideAttestor.regenRaisesThreshold(cr)) {
             TideAttestor.PolicyCrLinkage policyLinkage;
             try {
                 policyLinkage = new TideAttestor(session).resolvePolicyCrLinkage(session, realm);
