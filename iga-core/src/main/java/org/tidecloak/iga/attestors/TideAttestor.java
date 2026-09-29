@@ -1457,15 +1457,18 @@ public class TideAttestor implements IgaAttestor {
             return null;
         }
         String tideRoleId = tideRealmAdminRoleId(realm);
-        if (tideRoleId == null || !crTargetsRole(cr, tideRoleId)) {
+        if (tideRoleId == null) {
             return null;
         }
+        // Unreadable rows are the caller's problem to surface, not ours to wave through: a revoke
+        // whose rows cannot be parsed cannot be replayed either, so let it throw.
+        List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
 
         Set<String> active = activeTideRealmAdminUserIds(realm, session);
         // Distinct users, because one change request can carry several rows for the same user and
         // double-counting them would refuse a revoke that is actually safe.
         Set<String> removing = new HashSet<>();
-        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+        for (Map<String, Object> row : rows) {
             if (!tideRoleId.equals(str(row, "ROLE_ID"))) continue;
             String userId = str(row, "USER_ID");
             if (userId != null && active.contains(userId)) {
@@ -2148,9 +2151,20 @@ public class TideAttestor implements IgaAttestor {
                 + " carries no " + ROW_NEW_THRESHOLD + " (the final threshold to install)");
     }
 
-    /** Read an int row key from a REGEN CR's rows, or {@code null} when absent/unparseable. */
+    /**
+     * Read an int row key from a REGEN CR's rows, or {@code null} when absent, unparseable, or
+     * the CR has no rows at all. Total by design: its callers decide what an unknown means, and
+     * {@code parseRows} throws on a null ROWS_JSON.
+     */
     private static Integer readThresholdRow(IgaChangeRequestEntity cr, String key) {
-        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+        List<Map<String, Object>> rows;
+        try {
+            if (cr.getRowsJson() == null || cr.getRowsJson().isBlank()) return null;
+            rows = parseRows(cr.getRowsJson());
+        } catch (RuntimeException unreadable) {
+            return null;
+        }
+        for (Map<String, Object> row : rows) {
             Object v = row.get(key);
             if (v instanceof Number n) {
                 return n.intValue();
