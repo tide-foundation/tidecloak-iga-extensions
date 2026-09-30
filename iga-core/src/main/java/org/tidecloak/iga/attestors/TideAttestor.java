@@ -3068,16 +3068,31 @@ public class TideAttestor implements IgaAttestor {
      * <ol>
      *   <li><b>Validate</b> — the returned Base64 must parse via {@link ModelRequest#FromBytes}.
      *       A malformed request is rejected (the enclave round-trip produced garbage).</li>
-     *   <li><b>Persist</b> — overwrite {@code REQUEST_MODEL} with the doken-embedded bytes.
-     *       The policy is deliberately NOT re-set ({@code SetPolicy} would invalidate the
-     *       embedded doken — gold reference {@code MultiAdmin.commit}, the "would invalidate
-     *       the doken" skip).</li>
-     *   <li><b>Record</b> — once-per-admin dedup (mirrors the gold reference's
-     *       already-approved guard), then persist the admin's {@link IgaAuthorizationEntity}
-     *       toward the {@link #getThreshold} gate, reusing {@link #record}'s approver-role +
+     *   <li><b>Dedup</b> — once-per-admin (mirrors the gold reference's already-approved
+     *       guard). This runs BEFORE the carrier write, because an admin already in the
+     *       accumulated carrier has appended a SECOND doken for themselves and that carrier
+     *       must not be stored.</li>
+     *   <li><b>Persist</b> — for a new approver, overwrite {@code REQUEST_MODEL} with the
+     *       doken-embedded bytes. The policy is deliberately NOT re-set ({@code SetPolicy}
+     *       would invalidate the embedded doken — gold reference {@code MultiAdmin.commit},
+     *       the "would invalidate the doken" skip).</li>
+     *   <li><b>Record</b> — persist the admin's {@link IgaAuthorizationEntity} toward the
+     *       {@link #getThreshold} gate, reusing {@link #record}'s approver-role +
      *       persistence path. The commit gate ({@code IgaAdminResource.commit}) still does
      *       the actual threshold check + combineFinal/dispatch.</li>
      * </ol>
+     *
+     * <h3>Why the already-approved path does not save the returned carrier</h3>
+     * The ORK requires every doken in a carrier to come from a DISTINCT user
+     * ({@code PolicyAuthorizationFlow}) and refuses the whole commit at PreSign otherwise.
+     * Phase 1 hands the 2nd..Nth approver the ACCUMULATED carrier and the enclave appends onto
+     * whatever it is handed, so an admin who approves twice returns a carrier naming themselves
+     * twice. Storing it satisfies the local threshold while guaranteeing the ORK refuses forever.
+     * So the stored carrier wins, and only a CR holding an approval row with NO carrier at all
+     * accepts the returned one — there the admin's doken is the only copy and dropping it would
+     * strand the CR the other way. The real prevention is upstream in
+     * {@code IgaAdminResource.approve}, which does not send an admin who has already approved
+     * back through the enclave at all; this is the backstop for any other caller.
      *
      * <p>This (phase 2) only collects + persists the doken-embedded carrier and counts
      * the approval toward threshold; the actual {@code Midgard.SignModel(Policy:1)} over
@@ -3086,8 +3101,9 @@ public class TideAttestor implements IgaAttestor {
      *
      * @param dokenEmbeddedModelB64 the Base64 of the doken-embedded {@code ModelRequest.Encode()}.
      * @param admin the approving admin (whose distinct approval counts toward threshold).
-     * @return {@code true} if this call recorded a NEW approval; {@code false} if the admin
-     *         had already approved (idempotent dedup — the model is still persisted).
+     * @return {@code true} if this call recorded a NEW approval; {@code false} if the admin had
+     *         already approved (idempotent dedup — the stored carrier is then left untouched
+     *         unless there was none).
      * @throws RuntimeException if the returned bytes do not parse as a {@link ModelRequest}.
      */
     public boolean acceptMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
@@ -3112,11 +3128,12 @@ public class TideAttestor implements IgaAttestor {
                     + cr.getId() + " is not a valid ModelRequest: " + e.getMessage(), e);
         }
 
-        // (2) Persist the doken-embedded model back on the carrier. NO re-SetPolicy —
-        // that would invalidate the embedded doken (gold reference MultiAdmin.commit).
-        cr.setRequestModel(dokenEmbeddedModelB64);
-
-        // (3) Once-per-admin dedup, then record toward threshold.
+        // (2) Once-per-admin dedup FIRST, because whether the carrier may be written depends on
+        // the answer. An admin already in the accumulated carrier who returns another one has
+        // appended a SECOND doken for themselves (the enclave appends onto whatever it is handed,
+        // and phase 1 hands back the accumulated carrier). Saving that makes the carrier
+        // non-distinct, every ORK refuses it at PreSign with "Not all dokens provided are
+        // distinct. User repetitions found", and the CR is uncommittable for good.
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<IgaAuthorizationEntity> existing = em.createNamedQuery(
                         "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
@@ -3125,12 +3142,31 @@ public class TideAttestor implements IgaAttestor {
         for (IgaAuthorizationEntity a : existing) {
             if ((admin.getUsername() != null && admin.getUsername().equals(a.getApproval()))
                     || (admin.getId() != null && admin.getId().equals(a.getAuthorizedBy()))) {
-                em.flush(); // keep the doken-embedded model write
+                // The carrier write is kept for the ONE case that still needs it: an approval row
+                // with no stored carrier, where this admin's doken is the only copy and dropping
+                // it would leave the CR unable to commit for the opposite reason. A carrier that
+                // is already stored is left exactly as it is.
+                String stored = cr.getRequestModel();
+                if (stored == null || stored.isBlank()) {
+                    cr.setRequestModel(dokenEmbeddedModelB64);
+                    em.flush();
+                    log.infof("IGA multiAdmin approval (phase 2): admin %s already approved CR %s but "
+                            + "it carried no model — storing theirs, no new approval recorded.",
+                            admin.getUsername(), cr.getId());
+                    return false;
+                }
                 log.infof("IGA multiAdmin approval (phase 2): admin %s already approved CR %s — "
-                        + "model persisted, no new approval recorded.", admin.getUsername(), cr.getId());
+                        + "KEEPING the stored carrier and discarding the returned one, which would "
+                        + "carry this admin twice and make the change request uncommittable. No new "
+                        + "approval recorded.", admin.getUsername(), cr.getId());
                 return false;
             }
         }
+
+        // (3) A genuinely new approver: persist the doken-embedded model back on the carrier, then
+        // record toward threshold. NO re-SetPolicy — that would invalidate the embedded doken
+        // (gold reference MultiAdmin.commit).
+        cr.setRequestModel(dokenEmbeddedModelB64);
         // record() enforces the approver-role gate and persists the IgaAuthorizationEntity.
         record(session, cr, admin, null);
         em.flush();
