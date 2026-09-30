@@ -873,7 +873,7 @@ public class IgaAdminResource {
         // Fail-closed quorum floor for the multiAdmin admin set: refuse a tide-realm-admin
         // REVOKE_ROLES commit that would leave fewer committed approvers than the threshold in
         // force needs signatures. Without this, a realm can revoke its way into a state where no
-        // change request can ever be committed again — including the REGEN_ADMIN_POLICY whose whole
+        // change request can ever be committed again, including the REGEN_ADMIN_POLICY whose whole
         // job is to lower the threshold back to something collectable. That state is not
         // recoverable from inside the realm: the threshold is enforced by every ORK at PreSign
         // against the signed M0, so an under-quorum carrier is rejected there whatever the local
@@ -894,7 +894,7 @@ public class IgaAdminResource {
             // Fail CLOSED and mean it: if we cannot tell whether this revoke strands the realm,
             // we do not apply it. The damage is unrecoverable and a refusal costs a retry.
             log.warnf(ex, "IGA tide-realm-admin quorum floor check failed for realm %s (CR %s) "
-                    + "— refusing the commit.", realm.getName(), cr.getId());
+                    + ", refusing the commit.", realm.getName(), cr.getId());
             return Response.status(Response.Status.PRECONDITION_FAILED)
                     .entity(Map.of(
                             "error", "ADMIN_QUORUM_FLOOR_UNVERIFIABLE",
@@ -1681,11 +1681,11 @@ public class IgaAdminResource {
             // THEIR doken, the enclave appends onto whatever it is handed, and the result carries
             // that admin twice. Every ORK then refuses the commit at PreSign with "Not all dokens
             // provided are distinct. User repetitions found", and once that carrier is persisted
-            // the CR can never be committed again — quorum satisfied on paper, permanently stuck.
+            // the CR can never be committed again: quorum satisfied on paper, permanently stuck.
             //
             // Re-approving is a SUPPORTED action, not a mistake: it is how the UI re-drives a CR
             // that met quorum while a commit gate refused it (dependency, REGEN-ordering, admin
-            // quorum floor, a transient ORK error). So this does not refuse the call — it skips
+            // quorum floor, a transient ORK error). So this does not refuse the call: it skips
             // the pointless enclave round-trip and goes straight to the commit, which is all the
             // caller actually wanted. The duplicate is never created rather than created and then
             // declined, and nothing about the once-per-admin dedup is relaxed.
@@ -1697,7 +1697,7 @@ public class IgaAdminResource {
             String storedCarrier = cr.getRequestModel();
             if (storedCarrier != null && !storedCarrier.isBlank()
                     && alreadySignedBy(em, cr, admin)) {
-                log.infof("IGA approve (multiAdmin): admin %s has already approved CR %s — skipping "
+                log.infof("IGA approve (multiAdmin): admin %s has already approved CR %s, skipping "
                         + "the enclave round-trip (a second doken from the same admin would make the "
                         + "carrier non-distinct and the CR uncommittable) and re-running the commit "
                         + "gates.", admin.getUsername(), cr.getId());
@@ -2437,7 +2437,7 @@ public class IgaAdminResource {
 
         // Fail-closed quorum floor, the bulk twin of the gate in commitResolvedLocked. The bulk
         // drain has its own inline commit body and does not run that pipeline, so without this a
-        // batched revoke could still strand the realm below its own threshold — the exact shape of
+        // batched revoke could still strand the realm below its own threshold, the exact shape of
         // the shrink that bricked tideqa-1790586762-1-local. Rejected per-CR so the rest of the
         // batch still drains and the operator can see which revoke was held back and why.
         TideAttestor.AdminQuorumFloor floor;
@@ -2445,7 +2445,7 @@ public class IgaAdminResource {
             floor = new TideAttestor(session).checkTideRealmAdminRevokeFloor(session, realm, cr);
         } catch (RuntimeException ex) {
             log.warnf(ex, "IGA tide-realm-admin quorum floor check failed for realm %s (CR %s) "
-                    + "— refusing the commit.", realm.getName(), cr.getId());
+                    + ", refusing the commit.", realm.getName(), cr.getId());
             outcome.put("status", "REJECTED");
             outcome.put("error", "ADMIN_QUORUM_FLOOR_UNVERIFIABLE");
             return outcome;

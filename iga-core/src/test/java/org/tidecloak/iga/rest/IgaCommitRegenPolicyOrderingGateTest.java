@@ -185,7 +185,7 @@ class IgaCommitRegenPolicyOrderingGateTest {
     @SuppressWarnings("unchecked")
     void blockedWhenTideRealmAdminGrantStillPending() {
         // This policy CR pins no OLD/NEW thresholds, so the direction is unknown and the guard
-        // treats it as RAISING — the old behaviour, unchanged. See
+        // treats it as RAISING, the old behaviour, unchanged. See
         // loweringPolicyIsNotBlockedByPendingRevokes for the narrowing.
         IgaChangeRequestEntity policy = policyCr();
         when(em.find(IgaChangeRequestEntity.class, POLICY_CR_ID)).thenReturn(policy);

@@ -55,7 +55,7 @@ import static org.mockito.Mockito.when;
  * LAST proves it would also be committed last.
  *
  * <p>Commit-last applies to a RAISING policy only. The CRs below pin no OLD/NEW thresholds, so
- * their direction is unknown and the comparator treats them as raising — the original behaviour.
+ * their direction is unknown and the comparator treats them as raising, the original behaviour.
  * The two direction-specific tests pin thresholds explicitly.
  */
 @ExtendWith(MockitoExtension.class)

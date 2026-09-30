@@ -34,13 +34,13 @@ import static org.mockito.Mockito.when;
  *
  * <p>THE DEFECT: phase 1 hands the 2nd..Nth approver the ACCUMULATED carrier, and the enclave
  * appends its doken onto whatever it is handed. So an admin who approves a second time returns a
- * carrier naming themselves TWICE. Phase 2 used to persist that unconditionally — the approval
+ * carrier naming themselves TWICE. Phase 2 used to persist that unconditionally: the approval
  * RECORD was deduped, the carrier write was not. Every ORK then refuses the commit at PreSign with
  * {@code PolicyAuthorizationFlowException: Not all dokens provided are distinct. User repetitions
  * found}, and because the poisoned carrier is now stored the change request can never be committed
  * again: quorum satisfied on paper, permanently stuck.
  *
- * <p>Reachable far beyond the flow that caught it. Re-approving is a SUPPORTED action — it is how
+ * <p>Reachable far beyond the flow that caught it. Re-approving is a SUPPORTED action: it is how
  * the UI re-drives a change request that met quorum while a commit gate refused it. Any refusal
  * (dependency not met, REGEN ordering, the admin quorum floor, a transient ORK error) followed by
  * the documented "hit Authorize again" reproduces it, as does a double-click.
@@ -75,7 +75,7 @@ class TideAttestorReapprovalCarrierTest {
     }
 
     /**
-     * A real, parseable carrier — phase 2 validates via {@code ModelRequest.FromBytes} before it
+     * A real, parseable carrier: phase 2 validates via {@code ModelRequest.FromBytes} before it
      * decides anything, so a placeholder string would fail for the wrong reason. {@code marker}
      * distinguishes the stored carrier from the returned one.
      */
@@ -135,7 +135,7 @@ class TideAttestorReapprovalCarrierTest {
 
         assertFalse(recorded, "a repeat approval by the same admin records nothing");
         assertEquals(stored, cr.getRequestModel(),
-                "the stored carrier must be KEPT — saving the returned one would carry this admin "
+                "the stored carrier must be KEPT: saving the returned one would carry this admin "
                         + "twice and the ORKs would refuse the commit forever");
     }
 
@@ -166,7 +166,7 @@ class TideAttestorReapprovalCarrierTest {
 
         boolean recorded = attestor.acceptMultiAdminApprovalModel(session, realm, cr, returned, admin);
 
-        assertFalse(recorded, "still no NEW approval recorded — the dedup is unchanged");
+        assertFalse(recorded, "still no NEW approval recorded, the dedup is unchanged");
         assertEquals(returned, cr.getRequestModel(),
                 "a change request holding an approval but no carrier accepts this admin's carrier");
     }

@@ -662,7 +662,7 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
-     * The user ids {@link #countActiveTideRealmAdmins} counts — same predicate, same order of
+     * The user ids {@link #countActiveTideRealmAdmins} counts: same predicate, same order of
      * checks, just the identities instead of the tally. The revoke floor guard needs to know
      * WHICH holders a change request would remove, and it must ask the question the exact way
      * the threshold projection asks it, or the two would disagree about who counts.
@@ -1229,7 +1229,7 @@ public class TideAttestor implements IgaAttestor {
      * at threshold 3 with four pending revokes project down to 1, so committing the policy first
      * would leave ONE signature in control while all five still hold the role, and leave it that
      * way permanently if the revokes are never committed. So a lowering threshold is clamped to
-     * {@code thresholdFloor(committedCount)} — the quorum the holders who exist RIGHT NOW justify.
+     * {@code thresholdFloor(committedCount)}, the quorum the holders who exist RIGHT NOW justify.
      * Shrinking then converges over several enclave rounds (revoke down to the floor, regen, repeat)
      * instead of one, and at every point the encoded threshold is both collectable and no weaker
      * than the live admin set warrants. The paired revoke floor guard
@@ -1275,7 +1275,7 @@ public class TideAttestor implements IgaAttestor {
         int postCommitCount = Math.max(0, committedCount + netPending);
         // The threshold NEVER drops below what the admins who actually hold the role RIGHT NOW
         // justify. Raising is unaffected (the projection is the larger value, so max picks it and
-        // the policy keeps running ahead of the incoming admins — fail-safe, more approvers than
+        // the policy keeps running ahead of the incoming admins: fail-safe, more approvers than
         // the current set needs). Lowering is clamped to the committed floor, because a threshold
         // pinned to a projection is a threshold the realm has not earned yet: installing
         // floor(0.7 x 1) while five admins still hold the role hands any one of them what
@@ -1302,10 +1302,10 @@ public class TideAttestor implements IgaAttestor {
                         realm.getName(), newThreshold, netPending, pending.getId());
             } else if (committedFloor > projectedFloor) {
                 // The clamp is what held the threshold here: the pending revokes want it lower,
-                // but the admins who still hold the role justify this value. Say so plainly —
+                // but the admins who still hold the role justify this value. Say so plainly:
                 // an operator mid-shrink needs to know the round is waiting on revokes, not stuck.
                 log.infof("IGA threshold-policy CR skipped (lowering clamped to the committed floor): "
-                        + "realm %s tide-realm-admin stays at threshold %d — %d committed admin(s) "
+                        + "realm %s tide-realm-admin stays at threshold %d: %d committed admin(s) "
                         + "justify %d, the %+d pending assignment delta would project %d. Commit the "
                         + "revokes that keep the count at or above %d, then re-open the enclave to "
                         + "lower the threshold in the next round.",
@@ -1441,7 +1441,7 @@ public class TideAttestor implements IgaAttestor {
      * realm demands. Both end in the same place if unguarded: a realm where no change request can
      * ever be committed again, including the one that would fix it. The threshold is enforced
      * cryptographically by every ORK at PreSign against the signed M0 policy, so a realm that
-     * reaches this state cannot be argued out of it locally — it has to be prevented.
+     * reaches this state cannot be argued out of it locally: it has to be prevented.
      *
      * <p>Returns {@code null} when the question does not apply: not a {@code REVOKE_ROLES} change
      * request, not steady-state multiAdmin, no resolvable tide-realm-admin role, or the change
@@ -2185,7 +2185,7 @@ public class TideAttestor implements IgaAttestor {
      *
      * <p>This is the direction the commit-last ordering exists for. A rising threshold re-gates
      * every still-pending assignment CR upward the moment it lands, stranding change requests that
-     * were signed under the old quorum — so the policy must go last. A FALLING threshold cannot
+     * were signed under the old quorum, so the policy must go last. A FALLING threshold cannot
      * strand anything: it only ever makes a pending change request easier to commit. Holding a
      * lowering policy back is not a safeguard, it is the deadlock, because the revokes it waits on
      * are exactly what removes the approvers it needs.
@@ -3068,15 +3068,15 @@ public class TideAttestor implements IgaAttestor {
      * <ol>
      *   <li><b>Validate</b> — the returned Base64 must parse via {@link ModelRequest#FromBytes}.
      *       A malformed request is rejected (the enclave round-trip produced garbage).</li>
-     *   <li><b>Dedup</b> — once-per-admin (mirrors the gold reference's already-approved
+     *   <li><b>Dedup</b>: once-per-admin (mirrors the gold reference's already-approved
      *       guard). This runs BEFORE the carrier write, because an admin already in the
      *       accumulated carrier has appended a SECOND doken for themselves and that carrier
      *       must not be stored.</li>
-     *   <li><b>Persist</b> — for a new approver, overwrite {@code REQUEST_MODEL} with the
+     *   <li><b>Persist</b>: for a new approver, overwrite {@code REQUEST_MODEL} with the
      *       doken-embedded bytes. The policy is deliberately NOT re-set ({@code SetPolicy}
-     *       would invalidate the embedded doken — gold reference {@code MultiAdmin.commit},
+     *       would invalidate the embedded doken; gold reference {@code MultiAdmin.commit},
      *       the "would invalidate the doken" skip).</li>
-     *   <li><b>Record</b> — persist the admin's {@link IgaAuthorizationEntity} toward the
+     *   <li><b>Record</b>: persist the admin's {@link IgaAuthorizationEntity} toward the
      *       {@link #getThreshold} gate, reusing {@link #record}'s approver-role +
      *       persistence path. The commit gate ({@code IgaAdminResource.commit}) still does
      *       the actual threshold check + combineFinal/dispatch.</li>
@@ -3089,7 +3089,7 @@ public class TideAttestor implements IgaAttestor {
      * whatever it is handed, so an admin who approves twice returns a carrier naming themselves
      * twice. Storing it satisfies the local threshold while guaranteeing the ORK refuses forever.
      * So the stored carrier wins, and only a CR holding an approval row with NO carrier at all
-     * accepts the returned one — there the admin's doken is the only copy and dropping it would
+     * accepts the returned one: there the admin's doken is the only copy and dropping it would
      * strand the CR the other way. The real prevention is upstream in
      * {@code IgaAdminResource.approve}, which does not send an admin who has already approved
      * back through the enclave at all; this is the backstop for any other caller.
@@ -3102,7 +3102,7 @@ public class TideAttestor implements IgaAttestor {
      * @param dokenEmbeddedModelB64 the Base64 of the doken-embedded {@code ModelRequest.Encode()}.
      * @param admin the approving admin (whose distinct approval counts toward threshold).
      * @return {@code true} if this call recorded a NEW approval; {@code false} if the admin had
-     *         already approved (idempotent dedup — the stored carrier is then left untouched
+     *         already approved (idempotent dedup, the stored carrier is then left untouched
      *         unless there was none).
      * @throws RuntimeException if the returned bytes do not parse as a {@link ModelRequest}.
      */
@@ -3151,7 +3151,7 @@ public class TideAttestor implements IgaAttestor {
                     cr.setRequestModel(dokenEmbeddedModelB64);
                     em.flush();
                     log.infof("IGA multiAdmin approval (phase 2): admin %s already approved CR %s but "
-                            + "it carried no model — storing theirs, no new approval recorded.",
+                            + "it carried no model: storing theirs, no new approval recorded.",
                             admin.getUsername(), cr.getId());
                     return false;
                 }
@@ -3164,7 +3164,7 @@ public class TideAttestor implements IgaAttestor {
         }
 
         // (3) A genuinely new approver: persist the doken-embedded model back on the carrier, then
-        // record toward threshold. NO re-SetPolicy — that would invalidate the embedded doken
+        // record toward threshold. NO re-SetPolicy: that would invalidate the embedded doken
         // (gold reference MultiAdmin.commit).
         cr.setRequestModel(dokenEmbeddedModelB64);
         // record() enforces the approver-role gate and persists the IgaAuthorizationEntity.
@@ -5825,7 +5825,7 @@ public class TideAttestor implements IgaAttestor {
      * framing replays the batch in the SAME order so the framed bytes are the bytes the
      * commit produces.
      *
-     * <p>Only a RAISING policy needs to go last — it re-gates the pending assignments upward and
+     * <p>Only a RAISING policy needs to go last: it re-gates the pending assignments upward and
      * would strand them. A LOWERING policy sorts with everything else, because holding it behind
      * the revokes it accompanies is what strands the realm: the revokes remove the very approvers
      * the policy commit needs. See {@link #regenRaisesThreshold}.
