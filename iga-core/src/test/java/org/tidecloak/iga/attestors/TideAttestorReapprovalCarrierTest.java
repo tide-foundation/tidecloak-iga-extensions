@@ -83,7 +83,14 @@ class TideAttestorReapprovalCarrierTest {
         AttestationUnitSignRequest req = new AttestationUnitSignRequest("Policy:1");
         req.SetUnits(new byte[][]{ marker.getBytes(StandardCharsets.UTF_8) });
         req.SetPolicy("admin-policy-bytes".getBytes(StandardCharsets.UTF_8));
-        req.GetDraft(); // materialize Draft before Encode(), as the phase-1 build does
+        try {
+            // Materialize Draft before Encode(), as the phase-1 build does. GetDraft is the only
+            // checked-throwing call here; wrapped so the five callers stay throws-free like the
+            // other helpers. A failure is broken scaffolding, not a failed assertion.
+            req.GetDraft();
+        } catch (Exception e) {
+            throw new IllegalStateException("could not build the test carrier fixture", e);
+        }
         return Base64.getEncoder().encodeToString(req.Encode());
     }
 
