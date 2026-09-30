@@ -1463,6 +1463,24 @@ public class IgaAdminResource {
                             "message", "Resolved attestor does not support the two-phase approval ceremony"))
                     .build();
         }
+        // Same rule as the /approve lane: never hand the accumulated carrier to an admin whose
+        // doken is already in it. The enclave appends onto whatever it is handed, so they would
+        // return a carrier naming themselves twice, which every ORK refuses at PreSign as
+        // non-distinct and which makes the change request permanently uncommittable. This lane
+        // has no commit fallback to redirect to, so say so plainly and point at the commit lane.
+        String storedCarrier = cr.getRequestModel();
+        if (storedCarrier != null && !storedCarrier.isBlank()
+                && alreadySignedBy(em, cr, currentUser())) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of("error", "ALREADY_APPROVED",
+                            "message", "You have already approved this change request. Approving "
+                                    + "again would add a second signature from the same admin, which "
+                                    + "the ORKs reject and which would leave the change request "
+                                    + "permanently uncommittable. If it is waiting on quorum it "
+                                    + "needs a different admin; if quorum is met use the commit lane."))
+                    .build();
+        }
+
         try {
             String serializedModel = tide.buildMultiAdminApprovalModel(session, realm, cr);
             // Shape mirrors the gold-reference response: the serialized request the
@@ -1658,6 +1676,34 @@ public class IgaAdminResource {
             TideAttestor tide = (TideAttestor) attestor;
             String requestModel = body != null ? (String) body.get("requestModel") : null;
 
+            // An admin who has ALREADY approved this CR must not be sent back through the enclave.
+            // The phase-1 accumulation short-circuit hands out the carrier that already holds
+            // THEIR doken, the enclave appends onto whatever it is handed, and the result carries
+            // that admin twice. Every ORK then refuses the commit at PreSign with "Not all dokens
+            // provided are distinct. User repetitions found", and once that carrier is persisted
+            // the CR can never be committed again — quorum satisfied on paper, permanently stuck.
+            //
+            // Re-approving is a SUPPORTED action, not a mistake: it is how the UI re-drives a CR
+            // that met quorum while a commit gate refused it (dependency, REGEN-ordering, admin
+            // quorum floor, a transient ORK error). So this does not refuse the call — it skips
+            // the pointless enclave round-trip and goes straight to the commit, which is all the
+            // caller actually wanted. The duplicate is never created rather than created and then
+            // declined, and nothing about the once-per-admin dedup is relaxed.
+            //
+            // Guarded on a non-blank stored carrier: if the CR somehow holds an approval row with
+            // NO carrier, the admin's signature is genuinely needed to repair it, so let phase 1
+            // run (it builds fresh, since the accumulation short-circuit needs a carrier to
+            // accumulate onto).
+            String storedCarrier = cr.getRequestModel();
+            if (storedCarrier != null && !storedCarrier.isBlank()
+                    && alreadySignedBy(em, cr, admin)) {
+                log.infof("IGA approve (multiAdmin): admin %s has already approved CR %s — skipping "
+                        + "the enclave round-trip (a second doken from the same admin would make the "
+                        + "carrier non-distinct and the CR uncommittable) and re-running the commit "
+                        + "gates.", admin.getUsername(), cr.getId());
+                return commitIfReady(cr, em, id, attestor);
+            }
+
             if (requestModel == null || requestModel.isBlank()) {
                 // Phase 1: build + persist the Policy:1 carrier for the enclave.
                 try {
@@ -1723,18 +1769,7 @@ public class IgaAdminResource {
         // firstAdmin CR to apply through /approve alone. The separate POST .../commit
         // lane (apply-only) remains available for the "Commit" button.
         // ---------------------------------------------------------------------
-        boolean alreadySigned = false;
-        for (IgaAuthorizationEntity a : authorizationsOf(em, cr)) {
-            if (admin.getUsername() != null && admin.getUsername().equals(a.getApproval())) {
-                alreadySigned = true;
-                break;
-            }
-            if (admin.getId() != null && admin.getId().equals(a.getAuthorizedBy())) {
-                alreadySigned = true;
-                break;
-            }
-        }
-        if (!alreadySigned) {
+        if (!alreadySignedBy(em, cr, admin)) {
             String approval = body != null ? (String) body.get("approval") : null;
             try {
                 // record() enforces IgaScopeResolver.requireApprover() internally.
@@ -1801,6 +1836,30 @@ public class IgaAdminResource {
         resp.put("readyToCommit", authCount >= threshold);
         resp.put("status", crStatus);
         return Response.ok(resp).build();
+    }
+
+    /**
+     * Has {@code admin} already recorded an approval for {@code cr}? Matched on username OR user
+     * id, since {@code IgaAuthorizationEntity} carries both and either may be the one populated.
+     *
+     * <p>One rule for both approve lanes. The multiAdmin lane uses it to avoid sending an admin
+     * back through the enclave for a second doken (which would make the carrier non-distinct and
+     * the CR permanently uncommittable); the firstAdmin/simple lane uses it to skip a duplicate
+     * record. Same question, so it must not be asked two ways.
+     */
+    private boolean alreadySignedBy(EntityManager em, IgaChangeRequestEntity cr, UserModel admin) {
+        if (admin == null) {
+            return false;
+        }
+        for (IgaAuthorizationEntity a : authorizationsOf(em, cr)) {
+            if (admin.getUsername() != null && admin.getUsername().equals(a.getApproval())) {
+                return true;
+            }
+            if (admin.getId() != null && admin.getId().equals(a.getAuthorizedBy())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
