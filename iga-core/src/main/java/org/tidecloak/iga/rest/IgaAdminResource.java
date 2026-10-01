@@ -842,7 +842,14 @@ public class IgaAdminResource {
         // assignment linkage (same source as relatedPolicyCrId). A no-op for
         // non-REGEN CRs, for firstAdmin/non-tide realms (linkage == none()), and
         // for REGEN CRs whose grants are all already committed (empty set).
-        if (TideAttestor.ACTION_REGEN_ADMIN_POLICY.equals(cr.getActionType())) {
+        //
+        // RAISING ONLY. The stranding this prevents is caused by the threshold going UP, so the
+        // guard only applies when it does. A LOWERING policy held behind its revokes is the
+        // deadlock, not the cure: the revokes it waits on remove the approvers it needs, and a
+        // threshold that outlives its admin set can never be collected again. A lowering policy
+        // makes every pending CR easier, so letting it through first strands nothing.
+        if (TideAttestor.ACTION_REGEN_ADMIN_POLICY.equals(cr.getActionType())
+                && TideAttestor.regenRaisesThreshold(cr)) {
             TideAttestor.PolicyCrLinkage policyLinkage;
             try {
                 policyLinkage = new TideAttestor(session).resolvePolicyCrLinkage(session, realm);
@@ -861,6 +868,70 @@ public class IgaAdminResource {
                                 "pendingAssignmentCrIds", List.copyOf(policyLinkage.assignmentCrIds)))
                         .build();
             }
+        }
+
+        // Fail-closed quorum floor for the multiAdmin admin set: refuse a tide-realm-admin
+        // REVOKE_ROLES commit that would leave fewer committed approvers than the threshold in
+        // force needs signatures. Without this, a realm can revoke its way into a state where no
+        // change request can ever be committed again, including the REGEN_ADMIN_POLICY whose whole
+        // job is to lower the threshold back to something collectable. That state is not
+        // recoverable from inside the realm: the threshold is enforced by every ORK at PreSign
+        // against the signed M0, so an under-quorum carrier is rejected there whatever the local
+        // gate says. It has to be prevented here.
+        //
+        // The mirror image of the grant-side TideRealmAdminGuard lockout safeguard, and the other
+        // half of the lowering clamp in TideAttestor.ensureThresholdPolicyCrForEnclave. The clamp
+        // stops the policy running ahead of the admin set; this stops the admin set running ahead
+        // of the policy. Shrinking past the floor is not blocked, only split into rounds: revoke
+        // down to the floor, let the regen lower the threshold, revoke again.
+        //
+        // A no-op for non-REVOKE CRs, for firstAdmin / Tideless realms, for revokes that do not
+        // target tide-realm-admin, and for revokes that leave the count at or above the floor.
+        TideAttestor.AdminQuorumFloor floor;
+        try {
+            floor = new TideAttestor(session).checkTideRealmAdminRevokeFloor(session, realm, cr);
+        } catch (RuntimeException ex) {
+            // Fail CLOSED and mean it: if we cannot tell whether this revoke strands the realm,
+            // we do not apply it. The damage is unrecoverable and a refusal costs a retry.
+            log.warnf(ex, "IGA tide-realm-admin quorum floor check failed for realm %s (CR %s) "
+                    + ", refusing the commit.", realm.getName(), cr.getId());
+            return Response.status(Response.Status.PRECONDITION_FAILED)
+                    .entity(Map.of(
+                            "error", "ADMIN_QUORUM_FLOOR_UNVERIFIABLE",
+                            "message", "Could not determine whether committing this change request "
+                                    + "would leave the realm with too few tide-realm-admins to reach "
+                                    + "quorum, so it was not applied. Check the change request's rows "
+                                    + "and the realm's admin policy, then retry."))
+                    .build();
+        }
+        if (floor != null && floor.breached()) {
+            // Say what happened, why it is refused, and what to do next. An operator mid-shrink
+            // meets this without warning, and "precondition failed" on its own tells them nothing.
+            String nextStep = floor.committedNow > floor.safeFloor()
+                    ? "Shrink the admin set in rounds instead: commit revokes down to "
+                      + floor.safeFloor() + " admin(s), re-open the approval enclave so the "
+                      + "threshold policy is regenerated for the smaller set, commit that policy "
+                      + "change request, then continue with the remaining revokes."
+                    : "The admin set is already at the floor this threshold allows, so the "
+                      + "threshold has to come down first: re-open the approval enclave, which "
+                      + "raises a threshold policy change request for the smaller set, commit "
+                      + "that with the admins you still have, then retry this revoke.";
+            return Response.status(Response.Status.PRECONDITION_FAILED)
+                    .entity(Map.of(
+                            "error", "ADMIN_QUORUM_FLOOR",
+                            "message", "This change request would remove " + floor.removed
+                                    + " of the realm's " + floor.committedNow + " tide-realm-admin(s), "
+                                    + "leaving " + floor.committedAfter + ". Every governed action in "
+                                    + "this realm currently needs " + floor.inForceThreshold
+                                    + " approvals, so " + floor.committedAfter + " approver(s) could "
+                                    + "never reach quorum again and the realm would be permanently "
+                                    + "unable to commit anything, including the change that would "
+                                    + "lower the threshold. " + nextStep,
+                            "committedAdmins", floor.committedNow,
+                            "committedAdminsAfter", floor.committedAfter,
+                            "inForceThreshold", floor.inForceThreshold,
+                            "minCommittedAdmins", floor.safeFloor()))
+                    .build();
         }
 
         UserModel admin = currentUser();
@@ -1392,6 +1463,24 @@ public class IgaAdminResource {
                             "message", "Resolved attestor does not support the two-phase approval ceremony"))
                     .build();
         }
+        // Same rule as the /approve lane: never hand the accumulated carrier to an admin whose
+        // doken is already in it. The enclave appends onto whatever it is handed, so they would
+        // return a carrier naming themselves twice, which every ORK refuses at PreSign as
+        // non-distinct and which makes the change request permanently uncommittable. This lane
+        // has no commit fallback to redirect to, so say so plainly and point at the commit lane.
+        String storedCarrier = cr.getRequestModel();
+        if (storedCarrier != null && !storedCarrier.isBlank()
+                && alreadySignedBy(em, cr, currentUser())) {
+            return Response.status(Response.Status.CONFLICT)
+                    .entity(Map.of("error", "ALREADY_APPROVED",
+                            "message", "You have already approved this change request. Approving "
+                                    + "again would add a second signature from the same admin, which "
+                                    + "the ORKs reject and which would leave the change request "
+                                    + "permanently uncommittable. If it is waiting on quorum it "
+                                    + "needs a different admin; if quorum is met use the commit lane."))
+                    .build();
+        }
+
         try {
             String serializedModel = tide.buildMultiAdminApprovalModel(session, realm, cr);
             // Shape mirrors the gold-reference response: the serialized request the
@@ -1587,6 +1676,34 @@ public class IgaAdminResource {
             TideAttestor tide = (TideAttestor) attestor;
             String requestModel = body != null ? (String) body.get("requestModel") : null;
 
+            // An admin who has ALREADY approved this CR must not be sent back through the enclave.
+            // The phase-1 accumulation short-circuit hands out the carrier that already holds
+            // THEIR doken, the enclave appends onto whatever it is handed, and the result carries
+            // that admin twice. Every ORK then refuses the commit at PreSign with "Not all dokens
+            // provided are distinct. User repetitions found", and once that carrier is persisted
+            // the CR can never be committed again: quorum satisfied on paper, permanently stuck.
+            //
+            // Re-approving is a SUPPORTED action, not a mistake: it is how the UI re-drives a CR
+            // that met quorum while a commit gate refused it (dependency, REGEN-ordering, admin
+            // quorum floor, a transient ORK error). So this does not refuse the call: it skips
+            // the pointless enclave round-trip and goes straight to the commit, which is all the
+            // caller actually wanted. The duplicate is never created rather than created and then
+            // declined, and nothing about the once-per-admin dedup is relaxed.
+            //
+            // Guarded on a non-blank stored carrier: if the CR somehow holds an approval row with
+            // NO carrier, the admin's signature is genuinely needed to repair it, so let phase 1
+            // run (it builds fresh, since the accumulation short-circuit needs a carrier to
+            // accumulate onto).
+            String storedCarrier = cr.getRequestModel();
+            if (storedCarrier != null && !storedCarrier.isBlank()
+                    && alreadySignedBy(em, cr, admin)) {
+                log.infof("IGA approve (multiAdmin): admin %s has already approved CR %s, skipping "
+                        + "the enclave round-trip (a second doken from the same admin would make the "
+                        + "carrier non-distinct and the CR uncommittable) and re-running the commit "
+                        + "gates.", admin.getUsername(), cr.getId());
+                return commitIfReady(cr, em, id, attestor);
+            }
+
             if (requestModel == null || requestModel.isBlank()) {
                 // Phase 1: build + persist the Policy:1 carrier for the enclave.
                 try {
@@ -1652,18 +1769,7 @@ public class IgaAdminResource {
         // firstAdmin CR to apply through /approve alone. The separate POST .../commit
         // lane (apply-only) remains available for the "Commit" button.
         // ---------------------------------------------------------------------
-        boolean alreadySigned = false;
-        for (IgaAuthorizationEntity a : authorizationsOf(em, cr)) {
-            if (admin.getUsername() != null && admin.getUsername().equals(a.getApproval())) {
-                alreadySigned = true;
-                break;
-            }
-            if (admin.getId() != null && admin.getId().equals(a.getAuthorizedBy())) {
-                alreadySigned = true;
-                break;
-            }
-        }
-        if (!alreadySigned) {
+        if (!alreadySignedBy(em, cr, admin)) {
             String approval = body != null ? (String) body.get("approval") : null;
             try {
                 // record() enforces IgaScopeResolver.requireApprover() internally.
@@ -1730,6 +1836,30 @@ public class IgaAdminResource {
         resp.put("readyToCommit", authCount >= threshold);
         resp.put("status", crStatus);
         return Response.ok(resp).build();
+    }
+
+    /**
+     * Has {@code admin} already recorded an approval for {@code cr}? Matched on username OR user
+     * id, since {@code IgaAuthorizationEntity} carries both and either may be the one populated.
+     *
+     * <p>One rule for both approve lanes. The multiAdmin lane uses it to avoid sending an admin
+     * back through the enclave for a second doken (which would make the carrier non-distinct and
+     * the CR permanently uncommittable); the firstAdmin/simple lane uses it to skip a duplicate
+     * record. Same question, so it must not be asked two ways.
+     */
+    private boolean alreadySignedBy(EntityManager em, IgaChangeRequestEntity cr, UserModel admin) {
+        if (admin == null) {
+            return false;
+        }
+        for (IgaAuthorizationEntity a : authorizationsOf(em, cr)) {
+            if (admin.getUsername() != null && admin.getUsername().equals(a.getApproval())) {
+                return true;
+            }
+            if (admin.getId() != null && admin.getId().equals(a.getAuthorizedBy())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -2302,6 +2432,35 @@ public class IgaAdminResource {
             outcome.put("error", "DEPENDENCY_NOT_MET");
             outcome.put("message", block.reason);
             outcome.put("dependsOn", cr.getDependsOnList());
+            return outcome;
+        }
+
+        // Fail-closed quorum floor, the bulk twin of the gate in commitResolvedLocked. The bulk
+        // drain has its own inline commit body and does not run that pipeline, so without this a
+        // batched revoke could still strand the realm below its own threshold, the exact shape of
+        // the shrink that bricked tideqa-1790586762-1-local. Rejected per-CR so the rest of the
+        // batch still drains and the operator can see which revoke was held back and why.
+        TideAttestor.AdminQuorumFloor floor;
+        try {
+            floor = new TideAttestor(session).checkTideRealmAdminRevokeFloor(session, realm, cr);
+        } catch (RuntimeException ex) {
+            log.warnf(ex, "IGA tide-realm-admin quorum floor check failed for realm %s (CR %s) "
+                    + ", refusing the commit.", realm.getName(), cr.getId());
+            outcome.put("status", "REJECTED");
+            outcome.put("error", "ADMIN_QUORUM_FLOOR_UNVERIFIABLE");
+            return outcome;
+        }
+        if (floor != null && floor.breached()) {
+            outcome.put("status", "REJECTED");
+            outcome.put("error", "ADMIN_QUORUM_FLOOR");
+            outcome.put("message", "Committing this would leave " + floor.committedAfter
+                    + " tide-realm-admin(s) against a quorum of " + floor.inForceThreshold
+                    + ", so the realm could never commit anything again. Lower the threshold first "
+                    + "by committing the threshold policy change request the approval enclave "
+                    + "raises, then retry.");
+            outcome.put("committedAdmins", floor.committedNow);
+            outcome.put("committedAdminsAfter", floor.committedAfter);
+            outcome.put("inForceThreshold", floor.inForceThreshold);
             return outcome;
         }
 
