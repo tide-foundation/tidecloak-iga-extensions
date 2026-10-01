@@ -1730,7 +1730,8 @@ public class IgaUserAdapter extends UserAdapter {
      * this is safe even if a token-issuing request ever attempted to set a
      * session attribute. Token-mapping call sites
      * ({@code GroupMembershipMapper}, {@code TokenManager}) are NEVER in the
-     * admin resource package — the strip fires there as designed.</p>
+     * admin resource package — the strip fires there as designed.
+     * KC 26.7.3+ {@code AdminRoleTokenPostProcessor} lands here too; it only removes claims, so safe.</p>
      */
     @Override
     public Stream<GroupModel> getGroupsStream() {

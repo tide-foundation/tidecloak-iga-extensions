@@ -1097,8 +1097,9 @@ public class IgaReplayDispatcher {
             // Best-effort e-mail send. The invitation row is already persisted
             // by invitationManager.create(...) above (JpaInvitationManager.create
             // does em.persist + flush at end of the commit tx), and the invite
-            // link is stored on the invitation entity, so the invitee can be
-            // notified out-of-band (admin UI / resend) even if SMTP is down.
+            // link is stored on the invitation entity, so it can be re-sent via
+            // the governed resend endpoint even if SMTP is down. Since KC 26.7.3
+            // (CVE-2026-16072) the admin API no longer returns inviteLink.
             //
             // Unlike KC's request-time OrganizationInvitationResource.sendInvitation,
             // we are running POST-approval inside an IGA commit. The original
