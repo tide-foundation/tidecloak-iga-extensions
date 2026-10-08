@@ -159,8 +159,9 @@ public class TideAttestor implements IgaAttestor {
      * {@link org.tidecloak.iga.providers.IgaRealmCertService#ACTION_TYPE}.
      */
     public static final String ACTION_REQUEST_REALM_CERT = "REQUEST_REALM_CERT";
-  
-     /* Action type for a governed whole-realm delete. It is a NON-producer teardown CR
+
+    /**
+     * Action type for a governed whole-realm delete. It is a NON-producer teardown CR
      * (stub-signed own attestation, NOT auto-committable, NOT an ADOPT action) and runs
      * NO ORK/doken ceremony: the teardown is a plain {@code RealmManager.removeRealm} on
      * commit ({@code IgaReplayDispatcher.replayDeleteRealm}), and in multiAdmin its
@@ -2983,6 +2984,7 @@ public class TideAttestor implements IgaAttestor {
                     + "for realm " + realm.getName());
         }
         return resp.Signatures[0];
+    }
 
     /**
      * Raise the governed request to sign one JIT policy.
@@ -5200,36 +5202,6 @@ public class TideAttestor implements IgaAttestor {
                 ClientModel c = resolveClientForStamp(realm, cr);
                 if (c != null) {
                     if ("CREATE_CLIENT".equals(action)) {
-                        // Frame the FULL client-owned derived closure a newly-created client
-                        // folds in — client_config (1), client_mapper_set (12),
-                        // client_scope_assignment_set (11), scope_role_allowlist_set (14) and a
-                        // protocol_mapper (3) per client-owned mapper — the SAME per-client set
-                        // RealmAttestationExporter.exportRealmMetadata and the login read emit
-                        // (clientOwnedUnits). Post-flip the multiAdmin carrier is the ONLY signer
-                        // of these (convergeAfterCommit is a firstAdmin-only backstop, a no-op
-                        // here since the firstAdmin pack is burned), so EVERY client-owned unit
-                        // the login reads MUST be framed here or its column stays NULL and
-                        // fail-closes the login (unit 11 was framed before; scope_role_allowlist_set
-                        // / client_mapper_set / client protocol_mappers were not). A freshly-created
-                        // client materializes all of these at create time via RepresentationToModel
-                        // .createClient (config, default+optional scopes, protocol mappers, full-scope
-                        // / scope-mappings), which the phase-1 scratch replay runs identically, so the
-                        // framed bytes equal the live post-commit bytes the login reads and the
-                        // distribution stamps (byte-identity by construction, same invariant as unit 11).
-                        // Sorted by (unit-type wire value, target id) for a DETERMINISTIC carrier
-                        // order so phase-1 framing and phase-2 distribution enumerate the same units
-                        // in the same order (index alignment); client_config has the lowest wire value
-                        // so it stays at index 0. The login read + the firstAdmin stamper key by
-                        // column, so the sort is login-neutral.
-                        List<AttestationUnit> owned =
-                                new RealmAttestationExporter().clientOwnedUnits(session, c, realmId);
-                        owned.sort(java.util.Comparator
-                                .comparingInt((AttestationUnit u) -> u.type().wireValue())
-                                .thenComparing(AttestationUnit::targetId));
-                        units.addAll(owned);
-                    } else {
-                        // SET_/UPDATE_ client CRs do NOT touch the derived sets — frame only the
-                        // client_config node (the derived units are already real by then).
                         // COMPLETE BY CONSTRUCTION (mirrors the CREATE_USER branch below): a
                         // freshly-created client's LOGIN replay reads its WHOLE client-owned
                         // family, not just the client_config node. KC attaches the realm
@@ -5363,64 +5335,6 @@ public class TideAttestor implements IgaAttestor {
             }
 
             // ---- DERIVED owner-sets ----
-            case "ASSIGN_SCOPE", "REMOVE_SCOPE" -> {
-                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
-                ClientModel c = clientUuid == null ? null : realm.getClientById(clientUuid);
-                if (c != null) units.add(RealmAttestationExporter.clientScopeAssignmentSet(c, realmId));
-            }
-            case "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER" -> {
-                // Frame the owner's FULL mapper closure — the mapper-set unit (12 client / 13
-                // scope) AND a protocol_mapper unit (3) per owned mapper — not just the set.
-                // The changed/added mapper's INDIVIDUAL ProtocolMapperEntity.attestation column
-                // is what login reads (unit 3, keyed on mapper id); the replay leaves it on the
-                // set fan-out's TIDE-DUMMY (ADD fans that stub across EVERY sibling mapper), and
-                // the multiAdmin carrier is the only signer, so every owned mapper's unit 3 must
-                // be framed here or its column stays DUMMY and fail-closes the login. Sorted by
-                // (unit-type wire value, target id) for a deterministic carrier order so phase-1
-                // framing and phase-2 distribution align. Byte-match holds — the mapper config is
-                // final at commit (the stampProducerUnitColumns invalidation refreshes it).
-                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
-                String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
-                List<AttestationUnit> closure = null;
-                if (clientUuid != null) {
-                    ClientModel c = realm.getClientById(clientUuid);
-                    if (c != null) closure = new RealmAttestationExporter().clientMapperUnits(c, realmId);
-                } else if (scopeId != null) {
-                    ClientScopeModel s = realm.getClientScopeById(scopeId);
-                    if (s != null) closure = new RealmAttestationExporter().clientScopeMapperUnits(s, realmId);
-                }
-                if (closure != null) {
-                    closure.sort(java.util.Comparator
-                            .comparingInt((AttestationUnit u) -> u.type().wireValue())
-                            .thenComparing(AttestationUnit::targetId));
-                    units.addAll(closure);
-                }
-            }
-            case "REMOVE_PROTOCOL_MAPPER" -> {
-                // The removed mapper's row (and its unit-3 column) is deleted, and REMOVE does NOT
-                // fan-out a stub onto the survivors (replayRemoveProtocolMapper writes no
-                // attestation), so only the owner's mapper-SET unit changed — frame just that.
-                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
-                String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
-                if (clientUuid != null) {
-                    ClientModel c = realm.getClientById(clientUuid);
-                    if (c != null) units.add(RealmAttestationExporter.clientMapperSet(c, realmId));
-                } else if (scopeId != null) {
-                    ClientScopeModel s = realm.getClientScopeById(scopeId);
-                    if (s != null) units.add(RealmAttestationExporter.clientScopeMapperSet(s, realmId));
-                }
-            }
-            case "SCOPE_MAPPING_ADD", "SCOPE_MAPPING_REMOVE" -> {
-                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
-                ClientModel c = clientUuid == null ? null : realm.getClientById(clientUuid);
-                if (c != null) units.add(RealmAttestationExporter.scopeRoleAllowlistSet(
-                        ParentType.client, c.getId(), c, realmId));
-            }
-            case "SCOPE_ADD_ROLE", "SCOPE_REMOVE_ROLE" -> {
-                String scopeId = firstRowKey(cr, "SCOPE_ID");
-                ClientScopeModel s = scopeId == null ? null : realm.getClientScopeById(scopeId);
-                if (s != null) units.add(RealmAttestationExporter.scopeRoleAllowlistSet(
-                        ParentType.client_scope, s.getId(), s, realmId));
             // These derived owner-sets are built by buildDerivedOwnerSetUnit, the same method
             // setUnitOwnerKey groups on and stampCoalescedSetUnits signs, so the unit framed
             // here and the unit those two act on cannot drift apart.
@@ -5948,36 +5862,6 @@ public class TideAttestor implements IgaAttestor {
         try {
             switch (action) {
                 // ---- NODE units: re-stamp the owner's node column with the real envelope ----
-                case "CREATE_CLIENT" -> {
-                        // Stamp the FULL client-owned derived closure a newly-created client
-                        // folds in at create time — client_config (1), client_mapper_set (12),
-                        // client_scope_assignment_set (11), scope_role_allowlist_set (14) and a
-                        // protocol_mapper (3) per client-owned mapper — the EXACT set the login
-                        // reads (RealmAttestationExporter.clientOwnedUnits, the shared per-client
-                        // emission of exportRealmMetadata). Before this, only client_config (+
-                        // unit 11) were stamped, so scope_role_allowlist_set / client_mapper_set /
-                        // client protocol_mappers stayed NULL and the fail-closed login TVE
-                        // producer 500'd the mint on whichever was read first. Reuse the
-                        // producer's own enumeration so we never drift from what login emits.
-                        // Signed per-unit via signProducerEnvelope (real firstAdmin VVK when
-                        // capable, else stub) + stamped by column key (order-independent), the
-                        // SAME path the dedicated node/derived stampers use. Pre-toggle clients
-                        // get this set via ADOPT_CLIENT (stampAdoptClient); later scope/mapper
-                        // changes re-stamp the affected unit via ASSIGN_SCOPE / SCOPE_MAPPING_* /
-                        // ADD_PROTOCOL_MAPPER.
-                        ClientModel newClient = resolveClientForStamp(realm, cr);
-                        if (newClient != null) {
-                            try {
-                                for (AttestationUnit u : new RealmAttestationExporter()
-                                        .clientOwnedUnits(session, newClient, realm.getId())) {
-                                    UnitColumnMapping.stamp(em, u,
-                                            signProducerEnvelope(session, realm, mode, u.serialize()));
-                                }
-                            } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
-                        }
-                        // Part B3: also stamp the SA user's user_identity when the client has
-                        // serviceAccountsEnabled. Self-gates (no-op for non-SA clients / SA-less
-                        // UPDATE rows), so safe to call unconditionally for every client CR.
                 // CREATE_CLIENT stamps the client's FULL owned unit family (config + the three
                 // derived owner-sets + each folded protocol_mapper), NOT just the node: the
                 // default-scope attachments and any rep-carried mappers are FOLDED into this CR

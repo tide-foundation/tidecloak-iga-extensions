@@ -78,13 +78,11 @@ public final class NginxGenerationNotifier {
      */
     public static final class Schema implements SerializationContextInitializer {
 
-        @Override
-        public String getProtoFileName() {
+        private static String getProtoFileName() {
             return "tidecloak-nginx.proto";
         }
 
-        @Override
-        public String getProtoFile() {
+        private static String getProtoFile() {
             return "syntax = \"proto2\";\n"
                     + "package tidecloak.nginx;\n"
                     + "message ProxyTlsGenerationEvent {\n"

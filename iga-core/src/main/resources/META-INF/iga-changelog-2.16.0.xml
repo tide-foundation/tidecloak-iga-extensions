@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <!--
+      2.16.0: Server-identity schema, applied as a forward migration.
+
+      Brings IGA_SERVER_CERT_DRAFT to the shape the ResourceIdentity:1 flow needs
+      (IgaServerCertDraftEntity) and creates the enrollment-token table
+      (IgaServerCertEnrollmentTokenEntity).
+
+      These changes live here, rather than in iga-changelog-1.5.0.xml and
+      iga-changelog-2.13.0.xml, because both of those files have already been
+      released and must not be edited in place: an applied changeSet whose content
+      changes fails Liquibase checksum validation, and a database that has already
+      run it never picks up the edit.
+    -->
+
+    <!-- 1: Drop the per-instance index and the columns ResourceIdentity:1 no longer uses.
+         The index goes first because it covers INSTANCE_ID. -->
+    <changeSet id="iga-2.16.0-1" author="tidecloak-iga">
+        <dropIndex tableName="IGA_SERVER_CERT_DRAFT" indexName="IDX_IGA_SERVER_CERT_REALM_INSTANCE"/>
+        <dropColumn tableName="IGA_SERVER_CERT_DRAFT" columnName="INSTANCE_ID"/>
+        <dropColumn tableName="IGA_SERVER_CERT_DRAFT" columnName="SPIFFE_ID"/>
+        <dropColumn tableName="IGA_SERVER_CERT_DRAFT" columnName="REQUESTED_LIFETIME"/>
+        <dropColumn tableName="IGA_SERVER_CERT_DRAFT" columnName="TRUST_BUNDLE"/>
+        <dropColumn tableName="IGA_SERVER_CERT_DRAFT" columnName="SIGNED_POLICY"/>
+    </changeSet>
+
+    <!-- 2: Add the CSR and the issued-certificate serial / validity columns -->
+    <changeSet id="iga-2.16.0-2" author="tidecloak-iga">
+        <addColumn tableName="IGA_SERVER_CERT_DRAFT">
+            <column name="CSR" type="clob">
+                <constraints nullable="false"/>
+            </column>
+            <column name="SERIAL_NUMBER" type="VARCHAR(64)"/>
+            <column name="NOT_BEFORE" type="BIGINT"/>
+            <column name="NOT_AFTER" type="BIGINT"/>
+        </addColumn>
+    </changeSet>
+
+    <!-- 3: Composite index on (REALM_ID, PUBLIC_KEY_FINGERPRINT) for the enrolment
+         duplicate-request lookup (IgaServerCertDraft.findByRealmAndFingerprint) -->
+    <changeSet id="iga-2.16.0-3" author="tidecloak-iga">
+        <createIndex tableName="IGA_SERVER_CERT_DRAFT" indexName="IDX_IGA_SERVER_CERT_REALM_FPR">
+            <column name="REALM_ID"/>
+            <column name="PUBLIC_KEY_FINGERPRINT"/>
+        </createIndex>
+    </changeSet>
+
+    <!-- 4: Create IGA_SERVER_CERT_ENROLLMENT_TOKEN table (one-time server-cert enrollment tokens) -->
+    <changeSet id="iga-2.16.0-4" author="tidecloak-iga">
+        <createTable tableName="IGA_SERVER_CERT_ENROLLMENT_TOKEN">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="REALM_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CLIENT_ID" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="TOKEN_HASH" type="VARCHAR(64)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="EXPIRES_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CONSUMED_AT" type="BIGINT"/>
+            <column name="CREATED_BY" type="VARCHAR(36)"/>
+        </createTable>
+
+        <createIndex tableName="IGA_SERVER_CERT_ENROLLMENT_TOKEN"
+                     indexName="UX_IGA_SCET_REALM_HASH" unique="true">
+            <column name="REALM_ID"/>
+            <column name="TOKEN_HASH"/>
+        </createIndex>
+
+        <createIndex tableName="IGA_SERVER_CERT_ENROLLMENT_TOKEN"
+                     indexName="IDX_IGA_SCET_REALM_CLIENT">
+            <column name="REALM_ID"/>
+            <column name="CLIENT_ID"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>

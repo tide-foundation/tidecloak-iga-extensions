@@ -17,17 +17,18 @@
             <column name="CLIENT_ID" type="VARCHAR(255)">
                 <constraints nullable="false"/>
             </column>
-            <column name="CSR" type="clob">
+            <column name="INSTANCE_ID" type="VARCHAR(255)">
                 <constraints nullable="false"/>
             </column>
+            <column name="SPIFFE_ID" type="VARCHAR(512)"/>
             <column name="PUBLIC_KEY" type="clob">
                 <constraints nullable="false"/>
             </column>
             <column name="PUBLIC_KEY_FINGERPRINT" type="VARCHAR(255)"/>
-            <column name="SERIAL_NUMBER" type="VARCHAR(64)"/>
+            <column name="REQUESTED_LIFETIME" type="BIGINT"/>
             <column name="CERTIFICATE" type="clob"/>
-            <column name="NOT_BEFORE" type="BIGINT"/>
-            <column name="NOT_AFTER" type="BIGINT"/>
+            <column name="TRUST_BUNDLE" type="clob"/>
+            <column name="SIGNED_POLICY" type="clob"/>
             <column name="REVOKED" type="BOOLEAN" defaultValueBoolean="false">
                 <constraints nullable="false"/>
             </column>
@@ -56,12 +57,11 @@
         </createIndex>
     </changeSet>
 
-    <!-- 4: Composite index on (REALM_ID, PUBLIC_KEY_FINGERPRINT) for the enrolment
-         duplicate-request lookup (IgaServerCertDraft.findByRealmAndFingerprint) -->
+    <!-- 4: Composite index on (REALM_ID, INSTANCE_ID) for per-instance lookup -->
     <changeSet id="iga-1.5.0-4" author="tidecloak-iga">
-        <createIndex tableName="IGA_SERVER_CERT_DRAFT" indexName="IDX_IGA_SERVER_CERT_REALM_FPR">
+        <createIndex tableName="IGA_SERVER_CERT_DRAFT" indexName="IDX_IGA_SERVER_CERT_REALM_INSTANCE">
             <column name="REALM_ID"/>
-            <column name="PUBLIC_KEY_FINGERPRINT"/>
+            <column name="INSTANCE_ID"/>
         </createIndex>
     </changeSet>
 

@@ -19,7 +19,6 @@ import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
-import org.keycloak.models.ClientModel;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
@@ -1688,9 +1687,6 @@ public class IgaAdminResource {
             // its phase-2 completeness gate are gone.
             boolean phase2 = requestModel != null && !requestModel.isBlank();
 
-            if (!phase2) {
-                // Phase 1: build + persist the Policy:1 carrier(s) for the enclave.
-
             // An admin who has ALREADY approved this CR must not be sent back through the enclave.
             // The phase-1 accumulation short-circuit hands out the carrier that already holds
             // THEIR doken, the enclave appends onto whatever it is handed, and the result carries
@@ -1719,7 +1715,7 @@ public class IgaAdminResource {
                 return commitIfReady(cr, em, id, attestor);
             }
 
-            if (requestModel == null || requestModel.isBlank()) {
+            if (!phase2) {
                 // Phase 1: build + persist the Policy:1 carrier for the enclave.
                 try {
                     int threshold = tide.getThreshold(session, realm, cr);
