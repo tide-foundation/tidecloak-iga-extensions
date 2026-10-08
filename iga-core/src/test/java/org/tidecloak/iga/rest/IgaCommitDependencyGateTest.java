@@ -18,6 +18,8 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.tidecloak.iga.attestors.IgaAttestor;
+import org.tidecloak.iga.attestors.SimpleNameAttestor;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
 
 import java.util.List;
@@ -68,6 +70,21 @@ class IgaCommitDependencyGateTest {
         when(realm.getId()).thenReturn(REALM_ID);
         when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
         when(jpa.getEntityManager()).thenReturn(em);
+        // The bulk path's post-batch convergeAfterCommit block re-resolves the LIVE realm via
+        // session.realms().getRealm(realmId) and only runs converge when non-null. This test
+        // pins the dependency gate, not converge, so return a RealmProvider whose getRealm(...)
+        // is null → the converge block is skipped (avoids an unrelated NPE on the bare mock).
+        org.keycloak.models.RealmProvider realmProvider = mock(org.keycloak.models.RealmProvider.class);
+        when(session.realms()).thenReturn(realmProvider);
+        // Both the bulk lane and the single-CR commit pipeline run under the per-realm
+        // IgaBulkLock, so the cluster mutex must resolve; run its callable inline.
+        IgaTestClusterLock.stubInlineClusterLock(session);
+        // The bulk drain resolves the realm's attestor up-front (frozen-carrier refusal gate),
+        // so the IgaAttestor SPI must resolve or the bulk test throws before the gate under
+        // test. This is a Tideless realm: iga.attestor unset -> the "simple" attestor. It is not
+        // a TideAttestor, so the frozen-carrier gate short-circuits and never fires.
+        when(session.getProvider(IgaAttestor.class, SimpleNameAttestor.ID))
+                .thenReturn(new SimpleNameAttestor(session));
         // requireManageRealm() is a void no-op on the mock (permission granted).
         resource = new IgaAdminResource(session, realm, auth);
 

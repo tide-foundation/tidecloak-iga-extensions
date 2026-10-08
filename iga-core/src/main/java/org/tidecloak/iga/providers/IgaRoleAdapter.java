@@ -2,6 +2,7 @@ package org.tidecloak.iga.providers;
 
 import org.jboss.logging.Logger;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.tidecloak.iga.services.IgaMigrationContext;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
@@ -195,6 +196,10 @@ public class IgaRoleAdapter extends RoleAdapter {
         // Scoped vendor/system provisioning bypass (see
         // IgaChangeRequestService.IGA_VENDOR_PROVISIONING): apply directly, no capture.
         if (service.isVendorProvisioning()) return false;
+        // TIDECLOAK: Keycloak's own model migration must apply directly — never
+        // captured as a governance CR (would 409 on a realm with a pending CR
+        // and abort boot). See IgaMigrationContext.
+        if (IgaMigrationContext.isOnKeycloakMigrationPath()) return false;
         Object replay = session.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }
@@ -421,6 +426,16 @@ public class IgaRoleAdapter extends RoleAdapter {
             // Pass through so the real scratch model gets the composite link
             // (kept consistent with the snapshot; discarded with the rollback).
             super.addCompositeRole(role);
+            return;
+        }
+        // TIDECLOAK: Keycloak's own model migration adding a composite to an EXISTING
+        // role (e.g. realm-admin/admin ⊃ a new org-admin role). The child is a
+        // not-yet-committed migration-capture phantom, so super.addCompositeRole would
+        // FK-fail at the outer flush, and applying the edge directly would leave an
+        // un-attested CompositeRoleEntity that fails the login closure. Capture it as a
+        // dependent ADD_COMPOSITE CR instead. See IgaMigrationRoleCapture.
+        if (IgaMigrationContext.isOnKeycloakMigrationPath() && getService().isIgaEnabled(realm)) {
+            new IgaMigrationRoleCapture(session).captureComposite(realm, this, role);
             return;
         }
         if (!isIgaActive()) {

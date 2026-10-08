@@ -55,9 +55,19 @@ public final class IgaSystemEntityFilter {
 
     /**
      * KC's per-realm built-in clients. Mirrors
-     * {@code RepresentationToModel#getBuiltinClients} / the master-realm setup
-     * in stock KC 26.5.x — these clients are auto-created at realm creation
-     * and back the admin/account/CLI surfaces.
+     * {@code org.keycloak.models.Constants#defaultClients} / the master-realm
+     * setup in stock KC 26.7.x — these clients are auto-created at realm
+     * creation and back the admin/account/CLI surfaces.
+     *
+     * <p>Re-verified against the upstream 26.7.0 tag. {@code Constants
+     * .defaultClients} GREW in 26.7.0 (it was {account, admin-cli, broker,
+     * realm-management, security-admin-console}) and now additionally carries
+     * {@code account-console}, {@code admin-permissions}
+     * ({@code ADMIN_PERMISSIONS_CLIENT_ID}, the FGAPv2 admin-permissions
+     * client) and {@code _system}
+     * ({@code SystemClientUtil.SYSTEM_CLIENT_ID}). The latter two are new to
+     * this set — without them a 26.7.0 realm would surface them on toggle-on
+     * as admin-authored ADOPT_CLIENTs and quarantine them.</p>
      */
     public static final Set<String> BUILTIN_CLIENT_IDS = Set.of(
             "realm-management",
@@ -66,6 +76,15 @@ public final class IgaSystemEntityFilter {
             "security-admin-console",
             "broker",
             "admin-cli",
+            // KC 26.7.0: FGAPv2's admin-permissions client. Present as a
+            // Constants constant on 26.5.5 but only promoted into
+            // Constants.defaultClients in 26.7.0.
+            "admin-permissions",
+            // KC 26.7.0: SystemClientUtil.SYSTEM_CLIENT_ID. Lazily created
+            // (realm.addClient("_system")) for system operations when the
+            // `account` client is unavailable. Promoted into
+            // Constants.defaultClients in 26.7.0.
+            "_system",
             // Tide-realm default: the KC-hosted Tide admin console, auto-created
             // (create-if-absent) for every Tide-enabled realm by
             // VendorResource.setupTideAdminConsole (called from SignIdpSettings),
@@ -88,24 +107,41 @@ public final class IgaSystemEntityFilter {
      * soft-skipped (lifted by {@code iga.adopt.includeSystem=true}) so an
      * operator can still opt them in if needed.
      *
-     * <p>Sources (Keycloak 26.5.5):
+     * <p>Sources (re-verified against the upstream Keycloak 26.7.0 tag):
      * <ul>
      *   <li>{@code org.keycloak.protocol.oidc.OIDCLoginProtocolFactory
      *       #createDefaultClientScopesImpl}: profile, email, address, phone,
      *       roles, web-origins, microprofile-jwt, basic, service_account
      *       (always); acr (Profile.Feature.STEP_UP_AUTHENTICATION); organization
-     *       (Profile.Feature.ORGANIZATION).</li>
+     *       (Profile.Feature.ORGANIZATION); <b>delegation</b>
+     *       (Profile.Feature.TOKEN_EXCHANGE_DELEGATION) — NEW in 26.7.0.</li>
      *   <li>{@code org.keycloak.services.managers.RealmManager
      *       #setupOfflineTokens} → {@code DefaultClientScopes
      *       .createOfflineAccessClientScope}: offline_access.</li>
      *   <li>{@code org.keycloak.protocol.saml.SamlProtocolFactory
      *       #createDefaultClientScopesImpl}: role_list (always);
-     *       saml_organization (Profile.Feature.ORGANIZATION).</li>
+     *       saml_organization (Profile.Feature.ORGANIZATION);
+     *       <b>AuthnContextClassRef</b>
+     *       (Profile.Feature.STEP_UP_AUTHENTICATION_SAML, created by
+     *       {@code addSamlAuthnContextClassRefClientScope}) — NEW in
+     *       26.7.0.</li>
      *   <li>{@code org.keycloak.protocol.oid4vc.OID4VCLoginProtocolFactory
-     *       #createDefaultClientScopesImpl}: oid4vc_natural_person
-     *       (when the OID4VC provider is enabled).</li>
+     *       #createDefaultClientScopes} (note: this factory implements
+     *       {@code LoginProtocolFactory} directly, so the method is
+     *       {@code createDefaultClientScopes}, NOT the
+     *       {@code ...Impl} variant used by the OIDC/SAML factories, which
+     *       extend {@code AbstractLoginProtocolFactory}): in 26.7.0 this loops
+     *       {@code VCFormat.SUPPORTED_FORMATS} and creates ONE scope per
+     *       format — {@code oid4vc_natural_person_jwt} (JWT_VC) and
+     *       {@code oid4vc_natural_person_sd} (SD_JWT_VC). On 26.5.5 it created
+     *       exactly one, {@code oid4vc_natural_person}.</li>
      * </ul>
      * </p>
+     *
+     * <p>{@code oid4vc_natural_person} (the 26.5.5 name) is RETAINED alongside
+     * the two 26.7.0 names: a realm provisioned on 26.5.5 and migrated forward
+     * still carries a row under the old name, and dropping it here would make
+     * the toggle-on ADOPT scan quarantine it as admin-authored.</p>
      *
      * <p>We list every name unconditionally (feature flags vary per
      * deployment); a missing scope just means the realm never had it and the
@@ -126,7 +162,17 @@ public final class IgaSystemEntityFilter {
             "organization",
             "role_list",
             "saml_organization",
-            "oid4vc_natural_person"
+            // KC 26.7.0: OIDC, gated on Profile.Feature.TOKEN_EXCHANGE_DELEGATION.
+            "delegation",
+            // KC 26.7.0: SAML, gated on Profile.Feature.STEP_UP_AUTHENTICATION_SAML.
+            "AuthnContextClassRef",
+            // OID4VC. 26.5.5 created a single "oid4vc_natural_person"; 26.7.0
+            // creates one scope per VCFormat.SUPPORTED_FORMATS instead. All
+            // three are listed so both fresh-26.7.0 and migrated-from-26.5.5
+            // realms are covered.
+            "oid4vc_natural_person",
+            "oid4vc_natural_person_jwt",
+            "oid4vc_natural_person_sd"
     );
 
     /**

@@ -49,6 +49,14 @@ import jakarta.persistence.UniqueConstraint;
     @NamedQuery(
         name = "IgaRolePolicy.deleteByRealm",
         query = "DELETE FROM IgaRolePolicyEntity p WHERE p.realmId = :realmId"
+    ),
+    // Every realm at once, deliberately: an expired policy is expired everywhere, and one query
+    // beats waking up per realm to ask the same thing. A null EXPIRY is a standing policy and is
+    // never selected, which is what keeps the reserved tide-realm-admin row out of the sweep.
+    @NamedQuery(
+        name = "IgaRolePolicy.findExpired",
+        query = "SELECT p FROM IgaRolePolicyEntity p WHERE p.expiry IS NOT NULL AND p.expiry < :now"
+                + " ORDER BY p.expiry"
     )
 })
 public class IgaRolePolicyEntity {
@@ -69,6 +77,13 @@ public class IgaRolePolicyEntity {
     @Column(name = "POLICY_SIG", length = 512, nullable = false)
     private String policySig;
 
+    /**
+     * The contract this policy names, as OUR row id - IGA_FORSETI_CONTRACT.ID, a uuid.
+     *
+     * Not the id the policy itself carries. The orks identify a contract by the SHA-512 of its
+     * source, and that id lives in the policy bytes; putting it here instead breaks the foreign
+     * key. See TideAttestor.localContractRowId, which translates one into the other.
+     */
     @Column(name = "CONTRACT_ID", length = 36)
     private String contractId;
 
@@ -83,6 +98,18 @@ public class IgaRolePolicyEntity {
 
     @Column(name = "POLICY_DATA", columnDefinition = "TEXT")
     private String policyData;
+
+    /**
+     * Epoch SECONDS, exactly as the policy itself carries and signs it (little-endian int64 at
+     * index 7 of its DataToVerify). A read-back of the POLICY blob, kept beside it so time-limited
+     * policies can be found without parsing every one.
+     *
+     * <p>NOT an authority. Nothing may consult this to decide access: an expired policy is refused
+     * by PolicyAuthorizationFlow on every ork, after its signature verifies. NULL is a standing
+     * policy, never an expired or unknown one.</p>
+     */
+    @Column(name = "EXPIRY")
+    private Long expiry;
 
     @Column(name = "CREATED_AT", nullable = false)
     private Long createdAt;
@@ -119,6 +146,9 @@ public class IgaRolePolicyEntity {
 
     public String getPolicyData() { return policyData; }
     public void setPolicyData(String policyData) { this.policyData = policyData; }
+
+    public Long getExpiry() { return expiry; }
+    public void setExpiry(Long expiry) { this.expiry = expiry; }
 
     public Long getCreatedAt() { return createdAt; }
     public void setCreatedAt(Long createdAt) { this.createdAt = createdAt; }

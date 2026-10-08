@@ -30,7 +30,7 @@ public class IgaRolePolicyService {
     public IgaRolePolicyEntity upsert(String realmId, String name, String policy,
                                       String policySig, String contractId,
                                       String approvalType, String executionType,
-                                      Integer threshold, String policyData) {
+                                      Integer threshold, String policyData, Long expiry) {
         IgaRolePolicyEntity existing = findByRealmAndName(realmId, name);
         long now = System.currentTimeMillis();
         if (existing != null) {
@@ -41,6 +41,7 @@ public class IgaRolePolicyService {
             existing.setExecutionType(executionType);
             existing.setThreshold(threshold);
             existing.setPolicyData(policyData);
+            existing.setExpiry(expiry);
             existing.setUpdatedAt(now);
             em.merge(existing);
             em.flush();
@@ -58,6 +59,7 @@ public class IgaRolePolicyService {
         entity.setExecutionType(executionType);
         entity.setThreshold(threshold);
         entity.setPolicyData(policyData);
+        entity.setExpiry(expiry);
         entity.setCreatedAt(now);
         em.persist(entity);
         em.flush();
@@ -106,6 +108,26 @@ public class IgaRolePolicyService {
         }
         em.remove(existing);
         em.flush();
+    }
+
+    /**
+     * Every policy across every realm whose expiry has passed.
+     *
+     * A standing policy (null EXPIRY) is never returned. Nor is one that merely LOOKS spent for
+     * some other reason: expiry is the only thing this asks about, because it is the only thing the
+     * column is a read-back of.
+     *
+     * Note what this is NOT for. An expired policy is already refused by the network - the orks
+     * check it after verifying the signature, and refuse to sign one that has expired in the first
+     * place - so nothing here decides whether a policy still grants anything. It only finds rows
+     * that no longer do, so they can be cleared away.
+     *
+     * @param now the current time in Unix epoch SECONDS, the unit a policy signs its expiry in
+     */
+    public List<IgaRolePolicyEntity> findExpired(long now) {
+        return em.createNamedQuery("IgaRolePolicy.findExpired", IgaRolePolicyEntity.class)
+                .setParameter("now", now)
+                .getResultList();
     }
 
     /**

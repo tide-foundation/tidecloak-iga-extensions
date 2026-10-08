@@ -37,6 +37,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -546,13 +547,33 @@ class TideAttestorThresholdPolicyCrTest {
     // --- revoke lowers threshold ---------------------------------------------
 
     @Test
-    void revoke_emitsCr_whenThresholdLowers() {
-        // 3 committed admins (floor(0.7*3)=2); a pending tide-realm-admin revoke nets -1 ->
-        // projected 2 -> floor(0.7*2)=1. Threshold LOWERS 2 -> 1 -> a CR.
+    void revoke_noCr_whenLoweringWouldOutrunTheCommittedSet() {
+        // 3 committed admins justify floor(0.7*3)=2, which is exactly the encoded threshold. A
+        // pending revoke projects down to 2 admins -> floor 1, but those 3 admins still hold the
+        // role: installing 1 now would let any ONE of them act alone, and leave it that way if the
+        // revoke is never committed. The lowering is CLAMPED to the committed floor 2 == encoded 2,
+        // so this round emits nothing. The revoke commits first; the NEXT round lowers.
         stubMultiAdminMode();
         stubPolicyLookup(policyAtThreshold(2));
         stubFindPending(null);
         stubActiveAdminCount(3);
+        stubPendingAssignments(0, 1);
+
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
+
+        verify(em, never()).persist(any());
+    }
+
+    @Test
+    void revoke_emitsCr_onceTheCommittedSetHasActuallyShrunk() {
+        // The next round of the same shrink: the revoke above has committed, so only 2 admins hold
+        // the role. They justify floor(0.7*2)=1 while the policy still encodes 2, so the lowering
+        // is no longer clamped and the CR is emitted 2 -> 1. Both remaining admins can sign it,
+        // which is the whole point: the quorum is still collectable when it is needed.
+        stubMultiAdminMode();
+        stubPolicyLookup(policyAtThreshold(2));
+        stubFindPending(null);
+        stubActiveAdminCount(2);
         stubPendingAssignments(0, 1);
 
         attestor.ensureThresholdPolicyCrForEnclave(session, realm);
@@ -564,6 +585,200 @@ class TideAttestorThresholdPolicyCrTest {
         assertTrue(emitted.getRowsJson().contains("\"NEW_THRESHOLD\":1"));
         assertTrue(emitted.getDependsOnList() == null || emitted.getDependsOnList().isEmpty(),
                 "policy CR carries NO dependsOn even for a revoke-driven lowering");
+    }
+
+    @Test
+    void lowering_neverPinsBelowWhatTheCommittedAdminsJustify() {
+        // The state that bricked realm tideqa-1790586762-1-local, as a unit: 5 committed admins at
+        // threshold 3, all four revokes filed at once. The projection says 1. Pinning 1 would hand
+        // one of the five what took three signatures to authorise. The clamp holds it at 3.
+        stubMultiAdminMode();
+        stubPolicyLookup(policyAtThreshold(3));
+        stubFindPending(null);
+        stubActiveAdminCount(5);
+        stubPendingAssignments(0, 4);
+
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
+
+        verify(em, never()).persist(any());
+    }
+
+    /**
+     * The multi-round shrink of realm tideqa-1790586762-1-local, 5 admins down to 1, one enclave
+     * open per row. {@code committed} is what the previous round's revokes left behind and
+     * {@code pendingRevokes} is what is still filed; {@code expected == encoded} means the round
+     * emits nothing because the clamp holds the threshold where it is.
+     *
+     * <p>The contract each row asserts: a threshold this code pins is never above the admins who
+     * are committed at that moment, so it can always be collected. The 412 the revoke floor guard
+     * returns BETWEEN these rounds is how the rounds are separated. It is the mechanism, not a
+     * regression, and an operator hitting it should re-open the enclave and commit the policy CR
+     * the next round emits.
+     */
+    @org.junit.jupiter.params.ParameterizedTest(name = "{0} committed, {1} pending revokes: {2} -> {3}")
+    @org.junit.jupiter.params.provider.CsvSource({
+            "5, 4, 3, 3",
+            "3, 2, 3, 2",
+            "2, 1, 2, 1",
+    })
+    void shrinkConvergesOverRounds_neverPinningAnUncollectableThreshold(
+            int committed, int pendingRevokes, int encoded, int expected) {
+        stubMultiAdminMode();
+        stubPolicyLookup(policyAtThreshold(encoded));
+        stubFindPending(null);
+        stubActiveAdminCount(committed);
+        stubPendingAssignments(0, pendingRevokes);
+
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
+
+        if (expected == encoded) {
+            verify(em, never()).persist(any());
+            return;
+        }
+        ArgumentCaptor<IgaChangeRequestEntity> captor =
+                ArgumentCaptor.forClass(IgaChangeRequestEntity.class);
+        verify(em, times(1)).persist(captor.capture());
+        String rows = captor.getValue().getRowsJson();
+        assertTrue(rows.contains("\"NEW_THRESHOLD\":" + expected),
+                "a round with " + committed + " committed admins must pin " + expected + ", got " + rows);
+        assertTrue(expected <= committed,
+                "a pinned threshold above the committed admin count could never be collected");
+    }
+
+    @Test
+    void raising_isUnaffectedByTheClamp_stillPinsTheProjection() {
+        // The clamp must not touch the growth path: the projection is the larger value, so it wins
+        // and the policy keeps running ahead of the incoming admins. 2 committed (floor 1) + 3
+        // pending grants -> projected 5 -> floor 3. The committed floor 1 must not drag it down.
+        stubMultiAdminMode();
+        stubPolicyLookup(policyAtThreshold(1));
+        stubFindPending(null);
+        stubActiveAdminCount(2);
+        stubPendingAssignments(3, 0);
+
+        attestor.ensureThresholdPolicyCrForEnclave(session, realm);
+
+        ArgumentCaptor<IgaChangeRequestEntity> captor = ArgumentCaptor.forClass(IgaChangeRequestEntity.class);
+        verify(em, times(1)).persist(captor.capture());
+        assertTrue(captor.getValue().getRowsJson().contains("\"NEW_THRESHOLD\":3"),
+                "raising still pins the PROJECTED floor, not the committed one");
+    }
+
+    // --- revoke quorum floor (shared by the single-CR and bulk commit lanes) --
+
+    /** A REVOKE_ROLES CR stripping tide-realm-admin from each of {@code userIds}. */
+    private IgaChangeRequestEntity adminRevokeCr(String... userIds) {
+        StringBuilder rows = new StringBuilder("[");
+        for (int i = 0; i < userIds.length; i++) {
+            if (i > 0) rows.append(',');
+            rows.append("{\"USER_ID\":\"").append(userIds[i])
+                .append("\",\"ROLE_ID\":\"").append(TIDE_ROLE_ID).append("\"}");
+        }
+        IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
+        cr.setId("revoke-floor");
+        cr.setRealmId(REALM_ID);
+        cr.setActionType("REVOKE_ROLES");
+        cr.setEntityType("USER");
+        cr.setRowsJson(rows.append(']').toString());
+        return cr;
+    }
+
+    @Test
+    void revokeFloor_breachedWhenTheSurvivorsCannotReachQuorum() {
+        // Both commit lanes call this one function, so its verdict is the guard. 2 committed
+        // admins at quorum 2: removing one leaves a realm that can never commit anything again.
+        stubMultiAdminMode();
+        stubActiveAdminCount(2);
+        stubPolicyLookup(policyAtThreshold(2));
+
+        TideAttestor.AdminQuorumFloor floor = attestor.checkTideRealmAdminRevokeFloor(
+                session, realm, adminRevokeCr("admin-user-0"));
+
+        assertNotNull(floor);
+        assertTrue(floor.breached());
+        assertEquals(2, floor.committedNow);
+        assertEquals(1, floor.removed);
+        assertEquals(1, floor.committedAfter);
+        assertEquals(2, floor.inForceThreshold);
+    }
+
+    @Test
+    void revokeFloor_notBreachedWhenQuorumSurvives() {
+        stubMultiAdminMode();
+        stubActiveAdminCount(3);
+        stubPolicyLookup(policyAtThreshold(2));
+
+        TideAttestor.AdminQuorumFloor floor = attestor.checkTideRealmAdminRevokeFloor(
+                session, realm, adminRevokeCr("admin-user-0"));
+
+        assertNotNull(floor);
+        assertFalse(floor.breached(), "3 admins at quorum 2 may drop to 2");
+    }
+
+    @Test
+    void revokeFloor_ignoresUsersWhoDoNotHoldTheRoleAnyway() {
+        // An already-uncommitted or already-revoked user removes nothing, so there is no question
+        // to answer. Counting them would refuse a revoke that changes nothing.
+        stubMultiAdminMode();
+        stubActiveAdminCount(2);
+        stubPolicyLookup(policyAtThreshold(2));
+
+        assertNull(attestor.checkTideRealmAdminRevokeFloor(
+                session, realm, adminRevokeCr("someone-who-is-not-an-admin")));
+    }
+
+    @Test
+    void revokeFloor_doesNotApplyInFirstAdminMode() {
+        // firstAdmin is single-signer onboarding; the steady-state quorum machinery is not in play.
+        stubFirstAdminMode();
+        stubActiveAdminCount(1);
+        stubPolicyLookup(policyAtThreshold(2));
+
+        assertNull(attestor.checkTideRealmAdminRevokeFloor(
+                session, realm, adminRevokeCr("admin-user-0")));
+    }
+
+    // --- raising-vs-lowering predicate (drives the commit-last ordering) ------
+
+    private IgaChangeRequestEntity regenCr(Integer oldThreshold, Integer newThreshold) {
+        IgaChangeRequestEntity cr = new IgaChangeRequestEntity();
+        cr.setId("regen-direction");
+        cr.setRealmId(REALM_ID);
+        cr.setActionType("REGEN_ADMIN_POLICY");
+        cr.setEntityType("ADMIN_POLICY");
+        cr.setEntityId(TIDE_ROLE_ID);
+        if (oldThreshold != null && newThreshold != null) {
+            cr.setRowsJson("[{\"OLD_THRESHOLD\":" + oldThreshold
+                    + ",\"NEW_THRESHOLD\":" + newThreshold + "}]");
+        }
+        return cr;
+    }
+
+    @Test
+    void regenRaisesThreshold_classifiesEachDirection() {
+        assertTrue(TideAttestor.regenRaisesThreshold(regenCr(1, 2)), "1 -> 2 raises");
+        assertFalse(TideAttestor.regenRaisesThreshold(regenCr(2, 1)), "2 -> 1 lowers");
+        assertFalse(TideAttestor.regenRaisesThreshold(regenCr(2, 2)), "2 -> 2 does not raise");
+    }
+
+    @Test
+    void regenRaisesThreshold_answersRaisingWhenItCannotTell() {
+        // Unknown means keep the old behaviour, which is to hold the policy back. Missing rows and
+        // a null ROWS_JSON both have to answer the same way, and neither may throw: this predicate
+        // runs inside a Comparator, where an exception would take out the whole batch sort.
+        assertTrue(TideAttestor.regenRaisesThreshold(regenCr(null, null)),
+                "a CR with no threshold rows is treated as raising");
+        IgaChangeRequestEntity malformed = regenCr(null, null);
+        malformed.setRowsJson("not json");
+        assertTrue(TideAttestor.regenRaisesThreshold(malformed),
+                "unparseable rows are treated as raising, and must not throw");
+    }
+
+    @Test
+    void regenRaisesThreshold_ignoresNonRegenCrs() {
+        IgaChangeRequestEntity grant = grantCr("plain-grant");
+        assertFalse(TideAttestor.regenRaisesThreshold(grant));
+        assertFalse(TideAttestor.regenRaisesThreshold(null));
     }
 
     // --- unsigned policy bytes + ModelIds config check -----------------------

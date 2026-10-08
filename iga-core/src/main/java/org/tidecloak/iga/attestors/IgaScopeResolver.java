@@ -195,6 +195,16 @@ public final class IgaScopeResolver {
                 // Realm-level attribute writes have no per-entity scope; fall
                 // through to the realm-default approver/threshold.
                 break;
+            case "DELETE_REALM":
+                // Whole-realm delete is a realm-node action with no per-scope
+                // entity (there is nothing finer-grained than the realm to carry
+                // an iga.approverRole/iga.threshold). Empty scope → realm-default
+                // approver, exactly like OFFBOARD_REALM (which reaches the same
+                // realm-default via the switch default). The irreversible
+                // min-admins floor is applied in TideAttestor.getThreshold, not
+                // here. Listed explicitly (not left to the default) so the
+                // realm-teardown scoping is auditable in one place.
+                break;
             // -----------------------------------------------------------------
             // Organizations. OrganizationModel supports attributes, so an org
             // may carry iga.approverRole / iga.threshold and is scoped just

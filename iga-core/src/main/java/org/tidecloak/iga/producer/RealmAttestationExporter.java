@@ -333,6 +333,11 @@ public final class RealmAttestationExporter {
         //    (e.g. the built-in `account` client, owner of manage-account/...).
         //    Skip the request client (already emitted above). Emitted regardless of
         //    the system filter: an unattested owner would drop a real token claim.
+        //    Since KC 26.7.5 (CVE-2026-93999) a disabled or removed client is kept
+        //    out of `aud` and its client roles out of `resource_access`, so for those
+        //    we now attest a client_config the token never uses. Harmless: the ORK
+        //    only ever reads units the token actually names, and over-attesting is
+        //    the safe direction here (under-attesting is what causes a false reject).
         for (String ownerUuid : ownerClientUuids) {
             if (ownerUuid.equals(client.getId())) {
                 continue;

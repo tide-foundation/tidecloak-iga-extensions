@@ -88,8 +88,42 @@ public final class IgaScratchUnitBuilder {
                                                                RealmModel realm,
                                                                IgaChangeRequestEntity cr,
                                                                LiveUnitEnumerator enumerator) {
+        return unitsFromBatchScratchReplay(session, realm, List.of(cr), cr, enumerator);
+    }
+
+    /**
+     * Batch form of {@link #unitsFromScratchReplay}: replay EVERY change request in
+     * {@code batch}, in the given (deterministic commit) order, into ONE scratch
+     * rolled-back transaction, then enumerate {@code target}'s producer units over the
+     * resulting post-BATCH scratch model.
+     *
+     * <p>Two change requests that perturb the SAME per-(table, owner) set must frame that
+     * owner's unit over the state after BOTH of them, not over {@code pre + own delta}
+     * each: a doken-bound carrier freezes the bytes it framed, so a per-request frame
+     * leaves whichever applies second holding a quorum signature over a set the database
+     * no longer holds. Replaying the whole group here makes every member of the group
+     * frame BYTE-IDENTICAL bytes for the shared owner, which is what lets the group apply
+     * in one operation.
+     *
+     * <p>A single-member batch is exactly {@link #unitsFromScratchReplay}, so the
+     * uncontested path is unchanged.
+     */
+    public static List<AttestationUnit> unitsFromBatchScratchReplay(KeycloakSession session,
+                                                                    RealmModel realm,
+                                                                    List<IgaChangeRequestEntity> batch,
+                                                                    IgaChangeRequestEntity target,
+                                                                    LiveUnitEnumerator enumerator) {
         final String realmId = realm.getId();
         final List<AttestationUnit> collected = new ArrayList<>();
+        final List<String> memberIds = new ArrayList<>();
+        for (IgaChangeRequestEntity member : batch) {
+            if (member != null && !memberIds.contains(member.getId())) {
+                memberIds.add(member.getId());
+            }
+        }
+        if (!memberIds.contains(target.getId())) {
+            memberIds.add(target.getId());
+        }
 
         KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(), scratch -> {
             // IGA_REPLAY_ACTIVE is ALSO set internally by IgaReplayDispatcher.replay; we set
@@ -112,27 +146,37 @@ public final class IgaScratchUnitBuilder {
                 scratch.getContext().setRealm(scratchRealm);
                 EntityManager em = scratch.getProvider(JpaConnectionProvider.class).getEntityManager();
 
-                // Re-load the CR in the scratch persistence context so the replay's
-                // STATUS=APPROVED flip (rolled back below) targets a managed scratch entity.
-                IgaChangeRequestEntity scratchCr = em.find(IgaChangeRequestEntity.class, cr.getId());
-                IgaChangeRequestEntity replayCr = scratchCr != null ? scratchCr : cr;
-
-                // Run the SAME full replay the real commit runs — applies the rep/delta to
+                // Re-load each member in the scratch persistence context so the replay's
+                // STATUS=APPROVED flip (rolled back below) targets a managed scratch entity,
+                // and run the SAME full replay the real commit runs, applying the rep/delta to
                 // the live scratch model for ANY actionType (CREATE / SET / UPDATE / ASSIGN /
                 // SCOPE_MAPPING / PROTOCOL_MAPPER / REALM / ORG). The finalAttestation passed
                 // here is a throwaway probe marker; it is stamped onto scratch rows that are
                 // immediately rolled back, and it never reaches the enumerated unit ENVELOPES
                 // (those are rebuilt from the model, not from the attestation columns).
-                IgaReplayDispatcher.replay(scratch, replayCr, SCRATCH_PROBE_ATTESTATION,
-                        /* setSigned (irrelevant for the probe — we re-enumerate the model) */ false);
+                IgaChangeRequestEntity targetCr = null;
+                for (String memberId : memberIds) {
+                    IgaChangeRequestEntity replayCr = em.find(IgaChangeRequestEntity.class, memberId);
+                    if (replayCr == null) {
+                        if (!target.getId().equals(memberId)) {
+                            continue;
+                        }
+                        replayCr = target;
+                    }
+                    if (target.getId().equals(memberId)) {
+                        targetCr = replayCr;
+                    }
+                    IgaReplayDispatcher.replay(scratch, replayCr, SCRATCH_PROBE_ATTESTATION,
+                            /* setSigned (irrelevant for the probe, we re-enumerate the model) */ false);
+                    // IgaReplayDispatcher.replay removes IGA_REPLAY_ACTIVE in its own finally;
+                    // re-assert it before the next replay / the enumeration read so anything
+                    // routing through an IGA wrapper passes straight through.
+                    scratch.setAttribute("IGA_REPLAY_ACTIVE", "true");
+                }
 
-                // IgaReplayDispatcher.replay removes IGA_REPLAY_ACTIVE in its own finally; the
-                // enumeration below is read-only (no mutation → no capture), but re-assert the
-                // flag so any read that routes through an IGA wrapper passes straight through.
-                scratch.setAttribute("IGA_REPLAY_ACTIVE", "true");
-
-                // Now the scratch model is POST-change. Enumerate via the shared helper.
-                List<AttestationUnit> units = enumerator.enumerate(scratch, scratchRealm, em, replayCr);
+                // Now the scratch model is POST-batch. Enumerate the target via the shared helper.
+                List<AttestationUnit> units = enumerator.enumerate(scratch, scratchRealm, em,
+                        targetCr != null ? targetCr : target);
                 if (units != null) {
                     for (AttestationUnit u : units) {
                         if (u != null) {
@@ -152,8 +196,9 @@ public final class IgaScratchUnitBuilder {
             }
         });
 
-        log.debugf("IgaScratchUnitBuilder: scratch-replay enumerated %d producer unit(s) for %s CR %s",
-                collected.size(), cr.getActionType(), cr.getId());
+        log.debugf("IgaScratchUnitBuilder: scratch-replay of %d change request(s) enumerated %d "
+                        + "producer unit(s) for %s CR %s",
+                memberIds.size(), collected.size(), target.getActionType(), target.getId());
         return collected;
     }
 

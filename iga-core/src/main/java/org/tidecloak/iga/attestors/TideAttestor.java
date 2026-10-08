@@ -43,7 +43,11 @@ import org.tidecloak.iga.entities.IgaRealmCertEntity;
 import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
 import org.tidecloak.iga.entities.IgaRolePolicyEntity;
 import org.tidecloak.iga.providers.IgaAuthorizerService;
+import org.tidecloak.iga.entities.IgaForsetiContractEntity;
 import org.tidecloak.iga.providers.IgaChangeRequestService;
+import org.tidecloak.iga.providers.IgaForsetiContractService;
+import org.tidecloak.iga.providers.IgaConflictException;
+import org.tidecloak.iga.providers.IgaRolePolicyService;
 import org.tidecloak.iga.replay.IgaReplayExtension;
 
 import jakarta.persistence.EntityManager;
@@ -155,6 +159,18 @@ public class TideAttestor implements IgaAttestor {
      * {@link org.tidecloak.iga.providers.IgaRealmCertService#ACTION_TYPE}.
      */
     public static final String ACTION_REQUEST_REALM_CERT = "REQUEST_REALM_CERT";
+  
+     /* Action type for a governed whole-realm delete. It is a NON-producer teardown CR
+     * (stub-signed own attestation, NOT auto-committable, NOT an ADOPT action) and runs
+     * NO ORK/doken ceremony: the teardown is a plain {@code RealmManager.removeRealm} on
+     * commit ({@code IgaReplayDispatcher.replayDeleteRealm}), and in multiAdmin its
+     * quorum is collected as ordinary enclave dokens over a canonical carrier exactly
+     * like {@code DISABLE_IGA}. UNLIKE {@code OFFBOARD_REALM}, DELETE_REALM is governed
+     * at the realm's ORDINARY admin quorum — the SAME threshold path as
+     * {@code DELETE_CLIENT} / {@code DELETE_USER}. It has NO offboard min-admins floor
+     * and NO dedicated delete floor; {@code iga.offboardMinAdmins} does not affect it.
+     */
+    public static final String ACTION_DELETE_REALM = "DELETE_REALM";
 
     /**
      * Realm attribute overriding the minimum distinct-admin approvals required to
@@ -292,8 +308,37 @@ public class TideAttestor implements IgaAttestor {
      */
     private static final int FIRSTADMIN_SIGN_BATCH_MAX = 100;
 
+    /**
+     * Hard upper bound on the number of producer unit-envelopes ONE approval carrier may frame.
+     *
+     * <p><b>Where 255 comes from.</b> The ork derives one nonce per requested signature and
+     * encodes the count in a SINGLE BYTE, so a request framing more than 255 units overflows
+     * that counter and the ork indexes past the end of its own nonce array. The failure is an
+     * {@code IndexOutOfRangeException} 500 with nothing in it naming the change request, the
+     * realm or the unit count, which makes a field occurrence close to undiagnosable.
+     *
+     * <p><b>Why 250 and not 255.</b> 255 is the exact overflow point, so sitting on it leaves no
+     * margin for a unit the producer may later add to an existing family (the enumerator has
+     * grown twice already: the {@code CREATE_CLIENT} family, then the per-mapper units). Five
+     * units of headroom cost nothing, because the bound is unreachable in practice either way:
+     * an entire default realm closure carries about 39 {@code protocol_mapper} units across ALL
+     * clients and scopes, so reaching even 250 needs roughly 246 jwt-relevant mappers attached
+     * to ONE client in ONE admin request.
+     *
+     * <p><b>Why refuse rather than split or truncate.</b> The quorum's approval commits
+     * {@code SHA512} over the ENTIRE Draft, so a carrier cannot be split across requests and
+     * still verify: each chunk would present a different Draft from the one the admins signed.
+     * Truncating would silently drop units, leaving exactly the unsigned columns this whole
+     * change exists to eliminate. Refusing is the only fail-closed option, and it is raised
+     * BEFORE the request is sent so no doken is ever collected against a carrier that cannot
+     * be signed.
+     */
+    static final int MAX_CARRIER_UNITS = 250;
+
     /** The action type whose firstAdmin sign is upgraded to the real VRK ceremony. */
     private static final String ACTION_GRANT_ROLES = "GRANT_ROLES";
+    /** The role-REMOVAL twin of {@link #ACTION_GRANT_ROLES}; signs the same shrunken user_role_mapping_set unit. */
+    private static final String ACTION_REVOKE_ROLES = "REVOKE_ROLES";
 
     // -------------------------------------------------------------------------
     // Threshold-policy re-sign CR (steady-state multiAdmin admin-policy regen)
@@ -317,6 +362,21 @@ public class TideAttestor implements IgaAttestor {
     public static final String ROW_POLICY_VVK_ID = "VVK_ID";
     /** Base64 of the NEW unsigned {@code Policy.ToBytes()} at NEW_THRESHOLD. */
     public static final String ROW_POLICY_BODY_UNSIGNED = "POLICY_BODY_UNSIGNED";
+
+    /**
+     * Sign ONE per-grant just-in-time policy under the admin quorum.
+     *
+     * <p>Separate from {@link #ACTION_REGEN_ADMIN_POLICY} because it installs a DIFFERENT policy:
+     * that one re-signs the M0 the quorum itself is defined by, this one signs a policy that lets
+     * a single user mint a time-limited credential for a single role. They share the carrier
+     * ({@link #buildPolicySignCarrier}) because the approval ceremony is identical; they share
+     * nothing else, and conflating them would let a JIT grant rewrite the admin quorum.</p>
+     */
+    public static final String ACTION_SIGN_JIT_POLICY = "SIGN_JIT_POLICY";
+    /** Entity type stamped on a {@link #ACTION_SIGN_JIT_POLICY} CR. */
+    public static final String ENTITY_TYPE_JIT_POLICY = "JIT_POLICY";
+    /** The IGA_ROLE_POLICY name the signed JIT policy is stored under. */
+    public static final String ROW_JIT_POLICY_NAME = "JIT_POLICY_NAME";
 
     // -------------------------------------------------------------------------
     // Tide policy CR (a caller-supplied Policy, drafted via TidePolicyService)
@@ -403,6 +463,13 @@ public class TideAttestor implements IgaAttestor {
         // so a larger multiAdmin quorum still wins, but the floor can never drop below
         // the configured minimum (default 3). Computed FIRST, before the firstAdmin
         // short-circuit, so firstAdmin offboards are NOT 1-of-1.
+        //
+        // DELETE_REALM is deliberately NOT here: a realm-delete is governed at the
+        // realm's ORDINARY admin quorum, exactly like DELETE_CLIENT / DELETE_USER (which
+        // also fall through to the normal-quorum branches below). It carries NO offboard
+        // floor and NO dedicated delete floor — iga.offboardMinAdmins / the offboard
+        // min-admins path have NO effect on DELETE_REALM. So a single-admin realm needs
+        // 1 approval to delete a realm, the same as to delete a client there.
         if (cr != null && ACTION_OFFBOARD_REALM.equals(cr.getActionType())) {
             return Math.max(normalQuorumThreshold(session, realm, cr), resolveOffboardMinAdmins(realm));
         }
@@ -451,7 +518,7 @@ public class TideAttestor implements IgaAttestor {
         }
         // No IGA_ROLE_POLICY row yet (or a row with no encoded threshold) — pre-bootstrap /
         // legacy. Fall back to the live floor so the gate is still sensibly populated.
-        return Math.max(1, (int) (THRESHOLD_PERCENTAGE * countActiveTideRealmAdmins(realm, session)));
+        return thresholdFloor(countActiveTideRealmAdmins(realm, session));
     }
 
     /**
@@ -468,6 +535,17 @@ public class TideAttestor implements IgaAttestor {
      * straight to the realm-default gate.
      */
     private int normalQuorumThreshold(KeycloakSession session, RealmModel realm, IgaChangeRequestEntity cr) {
+        return inForceAdminQuorum(session, realm);
+    }
+
+    /**
+     * The realm-default quorum in force RIGHT NOW: the encoded M0 policy threshold, falling back
+     * to the live floor when no policy row exists. This is the value {@link #getThreshold}'s
+     * multiAdmin realm-default branch returns and therefore the number of signatures every
+     * governed action in the realm currently needs, so it is also the floor the committed
+     * tide-realm-admin count must never fall below.
+     */
+    public int inForceAdminQuorum(KeycloakSession session, RealmModel realm) {
         if (MODE_FIRST_ADMIN.equals(resolveMode(session, realm))) {
             return 1;
         }
@@ -478,7 +556,7 @@ public class TideAttestor implements IgaAttestor {
                 return Math.max(1, encoded);
             }
         }
-        return Math.max(1, (int) (THRESHOLD_PERCENTAGE * countActiveTideRealmAdmins(realm, session)));
+        return thresholdFloor(countActiveTideRealmAdmins(realm, session));
     }
 
     /**
@@ -587,6 +665,16 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
+     * The admin quorum {@code n} holders justify: {@code max(1, floor(0.7 x n))}. The single
+     * place the formula lives, so the commit gate, the policy projection and the revoke floor
+     * guard can never drift apart. Note {@code thresholdFloor(n) <= n} for every {@code n >= 0},
+     * which is why a threshold pinned to the CURRENT holder count is always collectable.
+     */
+    static int thresholdFloor(int adminCount) {
+        return Math.max(1, (int) (THRESHOLD_PERCENTAGE * Math.max(0, adminCount)));
+    }
+
+    /**
      * Count the realm's ACTIVE tide-realm-admins for the dynamic multiAdmin
      * threshold. A user counts iff it simultaneously
      * (a) holds the {@code tide-realm-admin} realm-management role,
@@ -599,15 +687,25 @@ public class TideAttestor implements IgaAttestor {
      * sub-predicates.
      */
     private static int countActiveTideRealmAdmins(RealmModel realm, KeycloakSession session) {
+        return activeTideRealmAdminUserIds(realm, session).size();
+    }
+
+    /**
+     * The user ids {@link #countActiveTideRealmAdmins} counts: same predicate, same order of
+     * checks, just the identities instead of the tally. The revoke floor guard needs to know
+     * WHICH holders a change request would remove, and it must ask the question the exact way
+     * the threshold projection asks it, or the two would disagree about who counts.
+     */
+    private static Set<String> activeTideRealmAdminUserIds(RealmModel realm, KeycloakSession session) {
         ClientModel rm = realm.getClientByClientId(REALM_MANAGEMENT_CLIENT_ID);
-        if (rm == null) return 0;
+        if (rm == null) return Set.of();
         RoleModel tideAdmin = rm.getRole(TIDE_REALM_ADMIN_ROLE);
-        if (tideAdmin == null) return 0;
+        if (tideAdmin == null) return Set.of();
 
         // (user id) set whose USER_ROLE_MAPPING.attestation IS NOT NULL for the
         // tide-realm-admin role — the committed/stamped grants.
         Set<String> committedAdminUserIds = committedTideAdminUserIds(session, realm, tideAdmin.getId());
-        if (committedAdminUserIds.isEmpty()) return 0;
+        if (committedAdminUserIds.isEmpty()) return Set.of();
 
         // Defensive: ensure the realm is bound on the session context before the user-stream
         // lookup. In KC 26.5.5, session.users().getRoleMembersStream hits the Infinispan
@@ -620,10 +718,11 @@ public class TideAttestor implements IgaAttestor {
             ctx.setRealm(realm);
         }
 
-        return (int) session.users().getRoleMembersStream(realm, tideAdmin)
+        return session.users().getRoleMembersStream(realm, tideAdmin)
                 .filter(UserModel::isEnabled)
-                .filter(u -> committedAdminUserIds.contains(u.getId()))  // committed grant only (not PENDING)
-                .count();
+                .map(UserModel::getId)
+                .filter(committedAdminUserIds::contains)  // committed grant only (not PENDING)
+                .collect(java.util.stream.Collectors.toSet());
     }
 
     /**
@@ -941,7 +1040,7 @@ public class TideAttestor implements IgaAttestor {
             // the regen use, so the installed admin policy and the live gate agree.
             int postCommitCount = Math.max(0,
                     countActiveTideRealmAdmins(realm, session) + tideRealmAdminMembershipDelta(realm, cr));
-            int threshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
+            int threshold = thresholdFloor(postCommitCount);
             String vvkId = realmVvkId(realm);
             AdminPolicyArtifact artifact = buildSignedAdminPolicyArtifact(session, realm, threshold, vvkId);
             // M0 FIX: the policy row MUST exist after the flip. On a real-signing-capable
@@ -971,7 +1070,7 @@ public class TideAttestor implements IgaAttestor {
         if (policy == null) {
             int postCommitCount = Math.max(0,
                     countActiveTideRealmAdmins(realm, session) + tideRealmAdminMembershipDelta(realm, cr));
-            int threshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
+            int threshold = thresholdFloor(postCommitCount);
             String stubBody = buildAdminPolicyArtifact(threshold, realmVvkId(realm));
             policy = upsertAdminPolicyRow(session, realm, null, stubBody, sig, threshold);
             if (policy == null) {
@@ -1005,12 +1104,19 @@ public class TideAttestor implements IgaAttestor {
                                                      String policyBody, String policySig, int threshold) {
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         long now = System.currentTimeMillis();
+
+        // Set on BOTH branches, including when it is null. On a re-sign the row keeps whatever it
+        // held unless something overwrites it, so a policy that drops its expiry would otherwise
+        // leave the old one standing - a row claiming a lifetime the signed bytes no longer carry.
+        Long expiry = policyBodyExpiry(policyBody);
+
         if (existing != null) {
             existing.setPolicy(policyBody);
             existing.setPolicySig(policySig);
             existing.setThreshold(threshold);
             existing.setApprovalType(POLICY_APPROVAL_TYPE);
             existing.setExecutionType(POLICY_EXECUTION_TYPE);
+            existing.setExpiry(expiry);
             existing.setUpdatedAt(now);
             return existing;
         }
@@ -1032,11 +1138,32 @@ public class TideAttestor implements IgaAttestor {
         row.setThreshold(threshold);
         row.setApprovalType(POLICY_APPROVAL_TYPE);
         row.setExecutionType(POLICY_EXECUTION_TYPE);
+        row.setExpiry(expiry);
         row.setCreatedAt(now);
         em.persist(row);
         log.infof("IGA admin Policy (M0) row created for realm %s (tide-realm-admin, threshold %d).",
                 realm.getName(), threshold);
         return row;
+    }
+
+    /**
+     * The expiry a policy body carries, or null when it carries none.
+     *
+     * DERIVED from the bytes, never passed in - the same rule the REST upsert follows. EXPIRY is a
+     * read-back of what POLICY already contains, so deriving it is what makes the column unable to
+     * disagree with the bytes an ork will verify. A value arriving from anywhere else could claim a
+     * lifetime the signed policy does not have, and nothing downstream would notice.
+     *
+     * A body that is not a policy has no expiry rather than being an error: the non-capable
+     * bootstrap stores a JSON stub here, which is not a broken policy, it is not one at all.
+     */
+    private static Long policyBodyExpiry(String policyBody) {
+        if (policyBody == null || policyBody.isBlank()) return null;
+        try {
+            return Policy.From(java.util.Base64.getDecoder().decode(policyBody)).getExpiry();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**
@@ -1101,7 +1228,10 @@ public class TideAttestor implements IgaAttestor {
      *   <li>Compute the PROJECTED post-commit count: committed count
      *       ({@link #countActiveTideRealmAdmins}) plus the NET delta of every pending assignment
      *       CR ({@link #pendingTideRealmAdminDelta}). Clamp at 0, apply the SAME
-     *       {@code max(1, floor(0.7 × N))} formula {@link #getThreshold} uses.</li>
+     *       {@link #thresholdFloor} formula {@link #getThreshold} uses, then take the LARGER of
+     *       that and the floor the COMMITTED count alone justifies. Raising is unchanged (the
+     *       projection wins); lowering is clamped to the committed floor so the realm never
+     *       installs a quorum it has not yet earned. See "Why lowering is clamped" below.</li>
      *   <li>IsEqualTo no-op: if {@code newThreshold} equals the current encoded threshold, emit
      *       NO CR — and CANCEL any stale pending policy CR.</li>
      *   <li>Fold to exactly ONE: if a pending policy CR exists, UPDATE its ROWS_JSON in place
@@ -1121,6 +1251,19 @@ public class TideAttestor implements IgaAttestor {
      * assignments commit. The enclave-open re-ensure also self-corrects: if the pending assignment set
      * changes before signing, the next open folds the policy CR to the new pinned threshold (or cancels
      * it if it nets back to the encoded value).
+     *
+     * <h3>Why lowering is clamped to the committed floor</h3>
+     * That FAIL-SAFE argument only holds while the threshold is RISING. Pinning a LOWER threshold
+     * to a projection is the opposite: it installs a quorum the realm has not earned. Five admins
+     * at threshold 3 with four pending revokes project down to 1, so committing the policy first
+     * would leave ONE signature in control while all five still hold the role, and leave it that
+     * way permanently if the revokes are never committed. So a lowering threshold is clamped to
+     * {@code thresholdFloor(committedCount)}, the quorum the holders who exist RIGHT NOW justify.
+     * Shrinking then converges over several enclave rounds (revoke down to the floor, regen, repeat)
+     * instead of one, and at every point the encoded threshold is both collectable and no weaker
+     * than the live admin set warrants. The paired revoke floor guard
+     * ({@code IgaAdminResource.commitResolvedLocked}) stops the count running ahead of the policy
+     * in the other direction; neither guard works without the other.
      *
      * <p>This method NEVER signs. The Policy:1 sign happens at the policy CR's own commit
      * ({@link #replayRegenAdminPolicy}). Because it runs as a side-effect of a read (the enclave
@@ -1157,8 +1300,21 @@ public class TideAttestor implements IgaAttestor {
         // Projected post-commit count = committed count + the NET delta of ALL pending
         // tide-realm-admin assignment CRs. Clamp at 0. SAME formula getThreshold uses.
         int netPending = pendingTideRealmAdminDelta(session, realm, tideRoleId);
-        int postCommitCount = Math.max(0, countActiveTideRealmAdmins(realm, session) + netPending);
-        int newThreshold = Math.max(1, (int) (THRESHOLD_PERCENTAGE * postCommitCount));
+        int committedCount = countActiveTideRealmAdmins(realm, session);
+        int postCommitCount = Math.max(0, committedCount + netPending);
+        // The threshold NEVER drops below what the admins who actually hold the role RIGHT NOW
+        // justify. Raising is unaffected (the projection is the larger value, so max picks it and
+        // the policy keeps running ahead of the incoming admins: fail-safe, more approvers than
+        // the current set needs). Lowering is clamped to the committed floor, because a threshold
+        // pinned to a projection is a threshold the realm has not earned yet: installing
+        // floor(0.7 x 1) while five admins still hold the role hands any one of them what
+        // previously took three signatures, and it stays that way if the revokes never commit.
+        // Clamping keeps `encoded <= committed` (floor(0.7 x N) <= N for all N), which is what
+        // makes the quorum always collectable, and costs only that a large shrink converges over
+        // several rounds instead of one. See the revoke floor guard in IgaAdminResource.
+        int projectedFloor = thresholdFloor(postCommitCount);
+        int committedFloor = thresholdFloor(committedCount);
+        int newThreshold = Math.max(projectedFloor, committedFloor);
 
         Integer priorThreshold = (policy == null) ? null : currentEncodedThreshold(policy);
 
@@ -1173,6 +1329,17 @@ public class TideAttestor implements IgaAttestor {
                         + "realm %s tide-realm-admin threshold stays %d (net pending delta %+d) — "
                         + "pending CR %s CANCELLED.",
                         realm.getName(), newThreshold, netPending, pending.getId());
+            } else if (committedFloor > projectedFloor) {
+                // The clamp is what held the threshold here: the pending revokes want it lower,
+                // but the admins who still hold the role justify this value. Say so plainly:
+                // an operator mid-shrink needs to know the round is waiting on revokes, not stuck.
+                log.infof("IGA threshold-policy CR skipped (lowering clamped to the committed floor): "
+                        + "realm %s tide-realm-admin stays at threshold %d: %d committed admin(s) "
+                        + "justify %d, the %+d pending assignment delta would project %d. Commit the "
+                        + "revokes that keep the count at or above %d, then re-open the enclave to "
+                        + "lower the threshold in the next round.",
+                        realm.getName(), newThreshold, committedCount, committedFloor,
+                        netPending, projectedFloor, newThreshold);
             } else {
                 log.infof("IGA threshold-policy CR skipped (threshold unchanged at enclave open): "
                         + "realm %s tide-realm-admin policy already encodes threshold %d "
@@ -1235,8 +1402,7 @@ public class TideAttestor implements IgaAttestor {
             // it be approved/signed in the SAME enclave session as the assignments (no grey-out, no 412).
             // We CLEAR any stale dependsOn left by an older CR so a folded carrier is unblocked too.
             pending.setRowsJson(serializeRows(rows));
-            pending.setRequestModel(null);
-            clearAuthorizations(em, pending);
+            clearFramingCarrier(em, pending);
             pending.setDependsOnList(new ArrayList<>());
             em.flush();
             log.infof("IGA threshold-policy CR RE-PINNED at enclave open (signed content CHANGED): "
@@ -1258,6 +1424,90 @@ public class TideAttestor implements IgaAttestor {
                 realm.getName(), oldThreshold, newThreshold, netPending, postCommitCount,
                 created.getId(), assignmentCrIds);
         return created.getId();
+    }
+
+    // -------------------------------------------------------------------------
+    // Admin quorum floor: the committed holder count may never fall below the
+    // threshold in force
+    // -------------------------------------------------------------------------
+
+    /** What a {@code REVOKE_ROLES} commit would do to the realm's admin quorum. */
+    public static final class AdminQuorumFloor {
+        /** Committed, enabled tide-realm-admin holders before this change request applies. */
+        public final int committedNow;
+        /** How many of them this change request removes. */
+        public final int removed;
+        /** Committed holders left afterwards. */
+        public final int committedAfter;
+        /** Signatures every governed action in the realm needs right now. */
+        public final int inForceThreshold;
+
+        AdminQuorumFloor(int committedNow, int removed, int inForceThreshold) {
+            this.committedNow = committedNow;
+            this.removed = removed;
+            this.committedAfter = Math.max(0, committedNow - removed);
+            this.inForceThreshold = inForceThreshold;
+        }
+
+        /** True when applying this change request would leave the quorum uncollectable. */
+        public boolean breached() {
+            return committedAfter < inForceThreshold;
+        }
+
+        /** The largest committed count this change request may reduce the realm to. */
+        public int safeFloor() {
+            return inForceThreshold;
+        }
+    }
+
+    /**
+     * Would committing {@code cr} leave the realm with fewer committed tide-realm-admins than the
+     * threshold in force needs signatures?
+     *
+     * <p>This is the missing mirror of the grant-side lockout safeguard
+     * ({@code TideRealmAdminGuard}). That one stops the approver role reaching someone who could
+     * never sign; this one stops the approver set shrinking below the number of signatures the
+     * realm demands. Both end in the same place if unguarded: a realm where no change request can
+     * ever be committed again, including the one that would fix it. The threshold is enforced
+     * cryptographically by every ORK at PreSign against the signed M0 policy, so a realm that
+     * reaches this state cannot be argued out of it locally: it has to be prevented.
+     *
+     * <p>Returns {@code null} when the question does not apply: not a {@code REVOKE_ROLES} change
+     * request, not steady-state multiAdmin, no resolvable tide-realm-admin role, or the change
+     * request removes no committed holder. Otherwise returns the counts, and the caller checks
+     * {@link AdminQuorumFloor#breached()}.
+     */
+    public AdminQuorumFloor checkTideRealmAdminRevokeFloor(KeycloakSession session, RealmModel realm,
+                                                           IgaChangeRequestEntity cr) {
+        if (cr == null || !"REVOKE_ROLES".equals(cr.getActionType())) {
+            return null;
+        }
+        if (!MODE_MULTI_ADMIN.equals(resolveMode(session, realm))) {
+            return null;
+        }
+        String tideRoleId = tideRealmAdminRoleId(realm);
+        if (tideRoleId == null) {
+            return null;
+        }
+        // Unreadable rows are the caller's problem to surface, not ours to wave through: a revoke
+        // whose rows cannot be parsed cannot be replayed either, so let it throw.
+        List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
+
+        Set<String> active = activeTideRealmAdminUserIds(realm, session);
+        // Distinct users, because one change request can carry several rows for the same user and
+        // double-counting them would refuse a revoke that is actually safe.
+        Set<String> removing = new HashSet<>();
+        for (Map<String, Object> row : rows) {
+            if (!tideRoleId.equals(str(row, "ROLE_ID"))) continue;
+            String userId = str(row, "USER_ID");
+            if (userId != null && active.contains(userId)) {
+                removing.add(userId);
+            }
+        }
+        if (removing.isEmpty()) {
+            return null;
+        }
+        return new AdminQuorumFloor(active.size(), removing.size(), inForceAdminQuorum(session, realm));
     }
 
     /**
@@ -1931,6 +2181,63 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
+     * Read an int row key from a REGEN CR's rows, or {@code null} when absent, unparseable, or
+     * the CR has no rows at all. Total by design: its callers decide what an unknown means, and
+     * {@code parseRows} throws on a null ROWS_JSON.
+     */
+    private static Integer readThresholdRow(IgaChangeRequestEntity cr, String key) {
+        List<Map<String, Object>> rows;
+        try {
+            if (cr.getRowsJson() == null || cr.getRowsJson().isBlank()) return null;
+            rows = parseRows(cr.getRowsJson());
+        } catch (RuntimeException unreadable) {
+            return null;
+        }
+        for (Map<String, Object> row : rows) {
+            Object v = row.get(key);
+            if (v instanceof Number n) {
+                return n.intValue();
+            }
+            if (v != null) {
+                try {
+                    return Integer.parseInt(v.toString());
+                } catch (NumberFormatException ignore) {
+                    // try the next row
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Does committing this {@link #ACTION_REGEN_ADMIN_POLICY} CR RAISE the threshold?
+     *
+     * <p>This is the direction the commit-last ordering exists for. A rising threshold re-gates
+     * every still-pending assignment CR upward the moment it lands, stranding change requests that
+     * were signed under the old quorum, so the policy must go last. A FALLING threshold cannot
+     * strand anything: it only ever makes a pending change request easier to commit. Holding a
+     * lowering policy back is not a safeguard, it is the deadlock, because the revokes it waits on
+     * are exactly what removes the approvers it needs.
+     *
+     * <p>Read from the CR's own pinned OLD/NEW rows rather than the live encoded threshold, so the
+     * bulk comparator (which has no session) and the commit gate answer identically. OLD is
+     * re-pinned on every fold and only one REGEN CR is ever pending at a time, so it tracks the
+     * encoded value. Unreadable or ambiguous rows answer {@code true}: that keeps the guard firing
+     * exactly as it did before, which is the safe side of this question.
+     */
+    public static boolean regenRaisesThreshold(IgaChangeRequestEntity cr) {
+        if (cr == null || !ACTION_REGEN_ADMIN_POLICY.equals(cr.getActionType())) {
+            return false;
+        }
+        Integer newThreshold = readThresholdRow(cr, ROW_NEW_THRESHOLD);
+        Integer oldThreshold = readThresholdRow(cr, ROW_OLD_THRESHOLD);
+        if (newThreshold == null || oldThreshold == null) {
+            return true;
+        }
+        return newThreshold > oldThreshold;
+    }
+
+    /**
      * Read the threshold the current policy artifact encodes, for the IsEqualTo
      * short-circuit. Prefers the stored {@code IgaRolePolicyEntity.threshold}
      * column (authoritative + cheap); falls back to parsing {@code "threshold":N}
@@ -1960,6 +2267,16 @@ public class TideAttestor implements IgaAttestor {
             java.util.regex.Pattern.compile("\"threshold\"\\s*:\\s*(\\d+)");
 
     /** The realm's {@code vvkId} from its {@code tide-vendor-key} component, or null. */
+    /**
+     * The realm's Tide key id, for callers building a policy.
+     *
+     * A policy must name the key that signs it, and a policy is only ever signed against a vvk.
+     * So this is the only value a policy's KeyId may take, whoever the grant is for.
+     */
+    public String realmVvkIdForPolicy(RealmModel realm) {
+        return realmVvkId(realm);
+    }
+
     private static String realmVvkId(RealmModel realm) {
         ComponentModel vendorKey = realm.getComponentsStream()
                 .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
@@ -2066,14 +2383,38 @@ public class TideAttestor implements IgaAttestor {
         // Expiry edge: if the existing carrier's creation-auth has lapsed, returning it verbatim
         // is still correct — the embedded dokens cover their own signed bytes; re-initializing
         // would change those bytes and invalidate every prior doken. So it is returned untouched.
+        //
+        // FRAMING BATCH INTERACTION: this path must NOT re-frame, so a carrier's framing batch
+        // is FROZEN by its first recorded approval. That is the sound rule, not a limitation:
+        // re-framing would change the bytes the first admin's doken covers and invalidate it.
+        // A change request filed later against the same owner therefore does NOT join this
+        // batch; it forms its own (superset) batch and waits for this group to apply first,
+        // which is what the commit-time ordering already expresses. What is NOT sound is
+        // returning a carrier whose batch names a change request that has left the pool, since
+        // its projection can then never be reproduced. Detect that HERE, while the admin has
+        // the enclave open, and invalidate so they re-approve now instead of discovering it at
+        // commit.
         String existingCarrier = cr.getRequestModel();
         if (existingCarrier != null && !existingCarrier.isBlank()
                 && countRecordedApprovals(session, cr) >= 1) {
-            log.infof("IGA multiAdmin approval (phase 1): CR %s (action=%s) already has %d recorded "
-                            + "approval(s) + a non-blank carrier — returning the ACCUMULATED carrier "
-                            + "verbatim (the enclave appends the next doken) instead of rebuilding fresh.",
-                    cr.getId(), cr.getActionType(), countRecordedApprovals(session, cr));
-            return existingCarrier;
+            List<String> unreachable = unreachableFramingBasis(session, realm, cr);
+            if (unreachable.isEmpty()) {
+                log.infof("IGA multiAdmin approval (phase 1): CR %s (action=%s) already has %d recorded "
+                                + "approval(s) + a non-blank carrier (framing batch %s) - returning the "
+                                + "ACCUMULATED carrier verbatim (the enclave appends the next doken) "
+                                + "instead of rebuilding fresh.",
+                        cr.getId(), cr.getActionType(), countRecordedApprovals(session, cr),
+                        framingBatchIdOf(cr));
+                return existingCarrier;
+            }
+            log.warnf("IGA multiAdmin approval (phase 1): CR %s carries an accumulated carrier framed "
+                            + "over batch %s, but member(s) %s have left the approvable pool, so the "
+                            + "state it was framed over can never be reached. Invalidating the group "
+                            + "and re-framing against the current state; the collected approvals no "
+                            + "longer describe this change and are cleared.",
+                    cr.getId(), cr.getRequestBatchList(), unreachable);
+            EntityManager batchEm = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            invalidateFramingBatch(session, realm, batchEm, cr);
         }
 
         // OFFBOARD_REALM is NON-producer (its own CR attestation stub-signs — no AttestationUnit
@@ -2166,6 +2507,15 @@ public class TideAttestor implements IgaAttestor {
         // buildServerCertApprovalCarrier (routed at the top of this method via the
         // carrier-selector overload) — it never reaches this single-carrier body.
 
+        // A per-grant JIT policy is approved the same way: the draft is the unsigned policy
+        // itself, carried verbatim in ROWS_JSON, wrapped in a Policy:1 request the existing admin
+        // quorum authorizes.
+        if (ACTION_SIGN_JIT_POLICY.equals(cr.getActionType())) {
+            byte[] policyBytes = readUnsignedPolicyBytesFromCr(cr);
+            return buildPolicySignCarrier(session, realm, cr, policyBytes, "jit-policy",
+                    contractSourceFor(session, realm, policyBytes));
+        }
+
         // The M0 admin Policy bytes to embed — the genuine VVK-signed threshold Policy.
         byte[] adminPolicyBytes = readM0AdminPolicyBytes(session, realm);
         if (adminPolicyBytes == null) {
@@ -2184,7 +2534,46 @@ public class TideAttestor implements IgaAttestor {
         // action (dev/non-real-signing carry-through — never exercised by the live
         // Policy:1 round-trip) frame the single regular canonical so the carrier wiring
         // still round-trips.
-        byte[][] unitCbors = buildAllCrUnitCbor(session, realm, cr);
+        // DELETE_REALM is a non-producer, IRREVERSIBLE realm teardown that frames NO producer
+        // unit. It MUST NOT be discovered via the scratch replay (buildAllCrUnitCbor): that path
+        // runs the WHOLE CR replay — replayDeleteRealm → RealmManager.removeRealm — in a throwaway
+        // tx, and removeRealm's RealmModel.RealmRemovedEvent publish + session.onRealmRemoved
+        // cleanup are NON-transactional, so they would NOT roll back with the scratch tx — evicting
+        // the REAL realm from cache and killing its sessions just to build an approval carrier.
+        // Frame the plain canonical carrier DIRECTLY (the SAME non-unit carrier the 0-unit fallback
+        // below builds), skipping the scratch replay — mirrors how OFFBOARD_REALM returns its own
+        // carrier before ever reaching buildAllCrUnitCbor.
+        //
+        // FRAMING BATCH: a carrier freezes the bytes it frames, so framing a change request
+        // against the model as it stands right now is only correct while it is the ONLY pending
+        // change request perturbing its owner set. Frame instead over the state after EVERY
+        // currently-approvable PENDING change request that perturbs the same owner set, replayed
+        // in the deterministic bulk commit order, so two change requests against one owner frame
+        // BYTE-IDENTICAL units for it, and the group can be committed in one operation without
+        // either of them signing a partial set. resolveFramingBatch returns the change request
+        // alone when nothing contends, which is the framing this path always did.
+        List<IgaChangeRequestEntity> framingBatch = List.of(cr);
+        byte[][] unitCbors;
+        if (ACTION_DELETE_REALM.equals(cr.getActionType())) {
+            unitCbors = new byte[][]{ canonicalForRegularCr(session, cr) };
+        } else {
+            framingBatch = resolveFramingBatch(session, realm, cr);
+            unitCbors = buildAllCrUnitCbor(session, realm, cr, framingBatch);
+        }
+        // The digest the commit re-derives. Recorded ONLY for a carrier that actually frames
+        // typed producer units: the non-unit canonical fallbacks below carry no unit for the
+        // commit to rebuild, so there is nothing to compare and a recorded digest could only
+        // ever fail closed on a change request that frames none.
+        String framedUnitsDigest = unitCbors.length > 0 && !ACTION_DELETE_REALM.equals(cr.getActionType())
+                ? framedUnitsHash(unitCbors)
+                : null;
+        if (framingBatch.size() > 1) {
+            log.infof("IGA multiAdmin approval (phase 1): CR %s framed over batch %s of %d change "
+                            + "request(s) sharing its owner set (%s). Every member frames identical "
+                            + "bytes for that owner and the group commits in one operation.",
+                    cr.getId(), framingBatchId(realm.getId(), framingBatchIds(framingBatch)),
+                    framingBatch.size(), framingBatchIds(framingBatch));
+        }
         // A producer CR (CREATE_USER / GRANT_ROLES / etc.) MUST frame ≥1 typed
         // AttestationUnit. unitCbors.length==0 means the scratch-replay enumeration found no
         // unit — the carrier would then fall back to canonicalForRegularCr (a NON-CBOR
@@ -2247,6 +2636,10 @@ public class TideAttestor implements IgaAttestor {
 
         String encoded = java.util.Base64.getEncoder().encodeToString(req.Encode());
         cr.setRequestModel(encoded);
+        // The provenance the commit reads back: WHICH change requests these frozen bytes assume
+        // have applied, and WHAT the framed unit CBOR hashes to.
+        cr.setRequestBatchList(framingBatchIds(framingBatch));
+        cr.setRequestUnitsHash(framedUnitsDigest);
         session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
         log.infof("IGA multiAdmin approval (phase 1): built Policy:1 ModelRequest for CR %s "
                 + "(action=%s, realm=%s, creation-auth=%s).", cr.getId(), cr.getActionType(),
@@ -2344,19 +2737,54 @@ public class TideAttestor implements IgaAttestor {
         // NOT recomputed (so phase-1 / commit cannot drift on the threshold or shape).
         byte[] newPolicyBytes = readUnsignedPolicyBytesFromCr(cr);
 
-        // The EXISTING M0 admin Policy that authorizes the re-sign quorum (the policy
-        // bootstraps its own re-sign).
+        return buildPolicySignCarrier(session, realm, cr, newPolicyBytes, "threshold-policy");
+    }
+
+    /**
+     * The Policy:1 carrier the admin quorum approves in order to sign ONE new policy.
+     *
+     * <p>Shared by every governed policy signature, so the admin-policy re-sign and a per-grant
+     * JIT policy are approved through byte-identical machinery. Only the policy being signed
+     * differs; the authorizing quorum, the expiry window, the draft materialisation and the seg-7
+     * creation-authorisation are the same, and are the parts that were hard to get right.</p>
+     *
+     * @param policyBytes the UNSIGNED policy to be signed, carried verbatim so the bytes the
+     *                    admins approve and the bytes the commit signs cannot drift apart
+     * @param label       what this signature is for, for the log line only
+     */
+    private String buildPolicySignCarrier(KeycloakSession session, RealmModel realm,
+                                          IgaChangeRequestEntity cr, byte[] policyBytes,
+                                          String label) {
+        return buildPolicySignCarrier(session, realm, cr, policyBytes, label, null);
+    }
+
+    /**
+     * @param contractSource sent WITH the policy when the orks may not hold this contract yet.
+     *                       Null when they certainly do.
+     */
+    private String buildPolicySignCarrier(KeycloakSession session, RealmModel realm,
+                                          IgaChangeRequestEntity cr, byte[] policyBytes,
+                                          String label, String contractSource) {
+        // The EXISTING M0 admin Policy that authorizes the quorum.
         byte[] existingM0 = readM0AdminPolicyBytes(session, realm);
         if (existingM0 == null) {
-            throw new RuntimeException("IGA threshold-policy approval: realm " + realm.getName()
-                    + " is multiAdmin but has no existing M0 admin Policy to bootstrap the "
-                    + "Policy:1 threshold re-sign for CR " + cr.getId());
+            throw new RuntimeException("IGA " + label + " approval: realm " + realm.getName()
+                    + " is multiAdmin but has no existing M0 admin Policy to authorize the "
+                    + "Policy:1 signature for CR " + cr.getId());
         }
 
         // Policy:1 auth flow (admin quorum) over the NEW policy bytes; embed the EXISTING M0
         // policy. Mirrors signAdminPolicyViaPolicyFlow's request construction, but we persist
         // the carrier for the enclaves to approve rather than signing it here.
-        PolicySignRequest req = new PolicySignRequest(newPolicyBytes, POLICY_AUTH_FLOW);
+        PolicySignRequest req = new PolicySignRequest(policyBytes, POLICY_AUTH_FLOW);
+
+        // A contract reaches the orks by travelling with the first policy that names it. Storing
+        // it in TideCloak only records the source; a policy naming a contract the orks do not hold
+        // is refused outright. Sending it again later is harmless - they already have it.
+        if (contractSource != null && !contractSource.isBlank()) {
+            req.AddContractToUpload(PolicySignRequest.ContractType.forseti,
+                    buildContractPayload(contractSource));
+        }
         // LONG expiry — like buildMultiAdminApprovalModel, this carrier is PERSISTED and re-read
         // (ModelRequest.FromBytes) at commit, hours/days after this first phase-1 build. The old
         // 3-minute window expired the re-sign carrier before the quorum assembled ("Expiry cannot
@@ -2406,8 +2834,8 @@ public class TideAttestor implements IgaAttestor {
         String encoded = java.util.Base64.getEncoder().encodeToString(req.Encode());
         cr.setRequestModel(encoded);
         session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
-        log.infof("IGA threshold-policy approval (phase 1): built Policy:1 re-sign ModelRequest for "
-                + "CR %s (realm %s, creation-auth=%s).", cr.getId(), realm.getName(),
+        log.infof("IGA %s approval (phase 1): built Policy:1 ModelRequest for "
+                + "CR %s (realm %s, creation-auth=%s).", label, cr.getId(), realm.getName(),
                 approvalRequestNeedsVrkInit(realm) ? "VRK" : "none(dev)");
         return encoded;
     }
@@ -2555,6 +2983,268 @@ public class TideAttestor implements IgaAttestor {
                     + "for realm " + realm.getName());
         }
         return resp.Signatures[0];
+
+    /**
+     * Raise the governed request to sign one JIT policy.
+     *
+     * <p>The policy arrives already built (by {@code IgaJitPolicyService}) and is carried verbatim,
+     * so the bytes an admin approves are the bytes the commit signs. Nothing is stored in
+     * IGA_ROLE_POLICY until the quorum has signed it: an unsigned JIT policy cannot mint anything,
+     * and storing one early would put a row there that looks like a grant and is not.</p>
+     */
+    public IgaChangeRequestEntity requestJitPolicySignature(KeycloakSession session, RealmModel realm,
+                                                            String policyName, byte[] unsignedPolicy,
+                                                            String requestedBy) {
+        if (policyName == null || policyName.isBlank())
+            throw new IllegalArgumentException("policyName is required");
+        if (unsignedPolicy == null || unsignedPolicy.length == 0)
+            throw new IllegalArgumentException("unsignedPolicy is required");
+        if (TIDE_REALM_ADMIN_POLICY_KEY.equals(policyName))
+            throw new IllegalArgumentException("the reserved " + TIDE_REALM_ADMIN_POLICY_KEY
+                    + " policy may not be written through the JIT path");
+
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        IgaChangeRequestService service = new IgaChangeRequestService(em, session);
+
+        // One pending signature per policy name. A second would let two different policies race
+        // for the same row, and whichever committed last would silently win.
+        // ENTITY_ID is varchar(36), sized for a UUID, and a policy name is longer than that and
+        // not a UUID. A name-based UUID keys the row deterministically, so the duplicate check
+        // below still works, while the readable name travels in ROWS_JSON.
+        String entityId = jitPolicyEntityId(policyName);
+
+        IgaChangeRequestEntity pending =
+                service.findPending(realm.getId(), ENTITY_TYPE_JIT_POLICY, entityId);
+        if (pending != null) {
+            throw new IgaConflictException("a signature for JIT policy '" + policyName
+                    + "' is already pending approval (change request " + pending.getId() + ")");
+        }
+
+        List<Map<String, Object>> rows = new ArrayList<>(1);
+        Map<String, Object> row = new java.util.LinkedHashMap<>();
+        row.put(ROW_JIT_POLICY_NAME, policyName);
+        row.put(ROW_POLICY_BODY_UNSIGNED, java.util.Base64.getEncoder().encodeToString(unsignedPolicy));
+        rows.add(row);
+
+        IgaChangeRequestEntity created = service.create(realm, ENTITY_TYPE_JIT_POLICY, entityId,
+                ACTION_SIGN_JIT_POLICY, rows, requestedBy == null ? "system" : requestedBy,
+                new ArrayList<>());
+        log.infof("IGA JIT-policy signature requested: realm %s policy '%s' CR %s.",
+                realm.getName(), policyName, created.getId());
+        return created;
+    }
+
+    /**
+     * COMMIT of a {@link #ACTION_SIGN_JIT_POLICY} CR: the real Policy:1 quorum signature with the
+     * collected admin dokens, then store the signed policy in IGA_ROLE_POLICY.
+     *
+     * <p>Mirrors {@link #replayRegenAdminPolicy}, minus the threshold bookkeeping, and stores
+     * through {@code IgaRolePolicyService} so EXPIRY is derived from the signed bytes exactly as
+     * the REST path derives it. Fail-closed: no carrier, no material or a failed signature throws
+     * and rolls the commit back, so an unsigned or half-signed policy is never installed.</p>
+     */
+    public void replaySignJitPolicy(KeycloakSession session, RealmModel realm,
+                                    IgaChangeRequestEntity cr) {
+        String carrier = cr.getRequestModel();
+        if (carrier == null || carrier.isBlank()) {
+            throw new RuntimeException("IGA jit-policy commit: CR " + cr.getId()
+                    + " has no approval-model carrier — cannot Policy:1-sign the JIT policy");
+        }
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException("IGA jit-policy commit: realm "
+                        + realm.getName() + " has no tide-vendor-key component (VRK not provisioned)"));
+        MultivaluedHashMap<String, String> config = vendorKey.getConfig();
+        if (config == null) {
+            throw new RuntimeException("IGA jit-policy commit: tide-vendor-key component has no config "
+                    + "(realm " + realm.getName() + ")");
+        }
+
+        // The exact unsigned bytes the admins approved, and the row to store under.
+        byte[] unsignedPolicy = readUnsignedPolicyBytesFromCr(cr);
+        String policyName = readJitPolicyNameFromCr(cr);
+
+        try {
+            SignRequestSettingsMidgard settings = constructSignSettings(config);
+
+            // EVERY ork, not just a quorum, when this request carries the contract.
+            //
+            // A contract reaches the network by travelling with the first policy that names it, and
+            // only the orks that take part in that signing round receive it. Sign at the threshold
+            // and the ones left out never see it - so a later request routed to one of them fails
+            // with "Contract does not exist in code store", which looks like an intermittent fault
+            // and is not. This contract needed three separate signings before all five held it.
+            //
+            // Raising T to N makes the round wait for all of them. It is the same lever the browser
+            // side exposes as waitForAll on executeSignRequest, and it changes only how many orks
+            // must answer - the signature that comes out is the same ordinary Ed25519 signature.
+            //
+            // The cost is availability, and it is deliberate: one ork down means this policy cannot
+            // be signed. That is better than signing it and discovering later that a fraction of
+            // requests fail for a reason nothing reports. Only applied when a contract is actually
+            // attached; a policy naming a contract the network already holds signs at threshold.
+            boolean carriesContract = contractSourceFor(session, realm, unsignedPolicy) != null;
+            if (carriesContract) {
+                settings.Threshold_T = settings.Threshold_N;
+                log.infof("IGA jit-policy commit: policy '%s' carries its contract, so signing "
+                        + "requires all %d orks rather than %d - every ork must receive the "
+                        + "contract or later requests routed to it will be refused.",
+                        policyName, settings.Threshold_N,
+                        Integer.parseInt(System.getenv(ENV_THRESHOLD_T)));
+            }
+
+            ModelRequest req = ModelRequest.FromBytes(java.util.Base64.getDecoder().decode(carrier));
+
+            SignatureResponse resp = Midgard.SignModel(settings, req);
+            if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
+                    || resp.Signatures[0] == null) {
+                throw new RuntimeException("IGA jit-policy commit: Midgard.SignModel returned no "
+                        + "signature for realm " + realm.getName() + " (CR " + cr.getId() + ")");
+            }
+            String vvkSig = resp.Signatures[0];
+
+            // Rebuild from the EXACT approved bytes and attach the signature, so the stored body is
+            // the one the quorum saw.
+            Policy policy = Policy.From(unsignedPolicy);
+            policy.AddSignature(java.util.Base64.getDecoder().decode(vvkSig));
+
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            new IgaRolePolicyService(em).upsert(
+                    realm.getId(), policyName,
+                    java.util.Base64.getEncoder().encodeToString(policy.ToBytes()),
+                    vvkSig, localContractRowId(session, realm, policy.getContractId()),
+                    policy.getApprovalType().name(), policy.getExecutionType().name(),
+                    null, null, policy.getExpiry());
+            em.flush();
+
+            cr.setStatus("APPROVED");
+            cr.setResolvedAt(System.currentTimeMillis());
+            em.flush();
+
+            log.infof("IGA JIT policy '%s' signed via the Policy:1 admin quorum and stored "
+                    + "(realm %s, CR %s, expiry %s).", policyName, realm.getName(), cr.getId(),
+                    policy.getExpiry());
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("IGA jit-policy commit failed for realm " + realm.getName()
+                    + " (CR " + cr.getId() + "): " + e.getMessage(), e);
+        }
+    }
+
+    /** A stable 36-char key for a policy name, so it fits ENTITY_ID and still dedups per policy. */
+    static String jitPolicyEntityId(String policyName) {
+        return java.util.UUID.nameUUIDFromBytes(
+                policyName.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
+    }
+
+    /**
+     * The contract itself, packed the way a policy signature carries one.
+     *
+     * A contract reaches the ork network by travelling WITH the first policy that references it.
+     * Storing it in TideCloak only records the source; the orks have never seen it, and a policy
+     * naming a contract they do not hold is refused with "Policy referenced a contract which
+     * doesn't exist".
+     *
+     * Only the first policy for a given contract needs to carry it. After that the orks hold it,
+     * and a later policy simply names it - which is why this returns null when the contract is
+     * already known to have been sent.
+     *
+     * PolicySignRequest.AddContractToUpload adds the outer ["forseti", ...] wrapper itself, so
+     * this builds only what goes inside it. The nesting is fixed by what the ork unpacks:
+     *   forsetiData  = [ placeholder, innerPayload ]
+     *   innerPayload = [ sourceCode ]
+     */
+    private static byte[] buildContractPayload(String contractSource) {
+        byte[] innerPayload = org.midgard.Serialization.Tools.CreateTideMemory(
+                contractSource.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        // The placeholder is what the ork's ForsetiContract reads past to reach the payload.
+        return org.midgard.Serialization.Tools.CreateTideMemory(new byte[0], innerPayload);
+    }
+
+    /**
+     * The source of the contract a policy names, so it can be sent along with it.
+     *
+     * Best effort: if it cannot be found, the policy is sent alone and the orks will refuse it if
+     * they do not already hold the contract. That refusal is clearer than a guess here would be.
+     */
+    private static String contractSourceFor(KeycloakSession session, RealmModel realm, byte[] policyBytes) {
+        try {
+            String contractId = Policy.From(policyBytes).getContractId();
+            if (contractId == null || contractId.isBlank()) return null;
+
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+
+            // Matched by recomputing the hash, because neither stored column is the id the orks
+            // use. Our own id is a database uuid and our stored hash is a SHA-256; the orks name a
+            // contract by the SHA-512 of its source. So the only way to find the contract a policy
+            // refers to is to hash each one the way the orks would.
+            for (IgaForsetiContractEntity contract : new IgaForsetiContractService(em).listByRealm(realm.getId())) {
+                String source = contract.getContractCode();
+                if (source == null || source.isBlank()) continue;
+                if (contractId.equalsIgnoreCase(orkContractId(source))) return source;
+            }
+            return null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * The local contract row a policy names.
+     *
+     * CONTRACT_ID is a foreign key into IGA_FORSETI_CONTRACT, so what belongs in it is OUR row id,
+     * a uuid. The id a policy carries is the orks' one - the SHA-512 of the source - which is not a
+     * row id here; storing it verbatim breaks the foreign key, and the constraint violation reaches
+     * the caller as an opaque 409 "Duplicate resource error". The two ids are matched by hashing
+     * each stored contract the way the orks would.
+     *
+     * Null when nothing stored matches. The column is nullable, and the orks' id stays inside the
+     * policy's own bytes either way, so the link is a convenience rather than the record.
+     */
+    private static String localContractRowId(KeycloakSession session, RealmModel realm,
+                                             String contractId) {
+        if (contractId == null || contractId.isBlank()) return null;
+        try {
+            EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+            for (IgaForsetiContractEntity contract : new IgaForsetiContractService(em).listByRealm(realm.getId())) {
+                String source = contract.getContractCode();
+                if (source == null || source.isBlank()) continue;
+                if (contractId.equalsIgnoreCase(orkContractId(source))) return contract.getId();
+            }
+            return null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * A contract's identity to the ork network: the SHA-512 of its source, upper-case hex.
+     *
+     * Confirmed against a live refusal, which named the hash it expected and matched this exactly.
+     */
+    private static String orkContractId(String contractSource) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-512")
+                    .digest(contractSource.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            for (byte b : digest) hex.append(String.format("%02X", b));
+            return hex.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-512 is unavailable", e);
+        }
+    }
+
+    /** Decode {@link #ROW_JIT_POLICY_NAME} from a JIT-policy CR's rows. */
+    private static String readJitPolicyNameFromCr(IgaChangeRequestEntity cr) {
+        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+            String name = str(row, ROW_JIT_POLICY_NAME);
+            if (name != null && !name.isBlank()) return name;
+        }
+        throw new RuntimeException("IGA jit-policy CR " + cr.getId()
+                + " carries no " + ROW_JIT_POLICY_NAME);
     }
 
     /** Decode {@link #ROW_POLICY_BODY_UNSIGNED} (Base64 Policy.ToBytes()) from a REGEN CR's rows. */
@@ -2579,16 +3269,31 @@ public class TideAttestor implements IgaAttestor {
      * <ol>
      *   <li><b>Validate</b> — the returned Base64 must parse via {@link ModelRequest#FromBytes}.
      *       A malformed request is rejected (the enclave round-trip produced garbage).</li>
-     *   <li><b>Persist</b> — overwrite {@code REQUEST_MODEL} with the doken-embedded bytes.
-     *       The policy is deliberately NOT re-set ({@code SetPolicy} would invalidate the
-     *       embedded doken — gold reference {@code MultiAdmin.commit}, the "would invalidate
-     *       the doken" skip).</li>
-     *   <li><b>Record</b> — once-per-admin dedup (mirrors the gold reference's
-     *       already-approved guard), then persist the admin's {@link IgaAuthorizationEntity}
-     *       toward the {@link #getThreshold} gate, reusing {@link #record}'s approver-role +
+     *   <li><b>Dedup</b>: once-per-admin (mirrors the gold reference's already-approved
+     *       guard). This runs BEFORE the carrier write, because an admin already in the
+     *       accumulated carrier has appended a SECOND doken for themselves and that carrier
+     *       must not be stored.</li>
+     *   <li><b>Persist</b>: for a new approver, overwrite {@code REQUEST_MODEL} with the
+     *       doken-embedded bytes. The policy is deliberately NOT re-set ({@code SetPolicy}
+     *       would invalidate the embedded doken; gold reference {@code MultiAdmin.commit},
+     *       the "would invalidate the doken" skip).</li>
+     *   <li><b>Record</b>: persist the admin's {@link IgaAuthorizationEntity} toward the
+     *       {@link #getThreshold} gate, reusing {@link #record}'s approver-role +
      *       persistence path. The commit gate ({@code IgaAdminResource.commit}) still does
      *       the actual threshold check + combineFinal/dispatch.</li>
      * </ol>
+     *
+     * <h3>Why the already-approved path does not save the returned carrier</h3>
+     * The ORK requires every doken in a carrier to come from a DISTINCT user
+     * ({@code PolicyAuthorizationFlow}) and refuses the whole commit at PreSign otherwise.
+     * Phase 1 hands the 2nd..Nth approver the ACCUMULATED carrier and the enclave appends onto
+     * whatever it is handed, so an admin who approves twice returns a carrier naming themselves
+     * twice. Storing it satisfies the local threshold while guaranteeing the ORK refuses forever.
+     * So the stored carrier wins, and only a CR holding an approval row with NO carrier at all
+     * accepts the returned one: there the admin's doken is the only copy and dropping it would
+     * strand the CR the other way. The real prevention is upstream in
+     * {@code IgaAdminResource.approve}, which does not send an admin who has already approved
+     * back through the enclave at all; this is the backstop for any other caller.
      *
      * <p>This (phase 2) only collects + persists the doken-embedded carrier and counts
      * the approval toward threshold; the actual {@code Midgard.SignModel(Policy:1)} over
@@ -2597,8 +3302,9 @@ public class TideAttestor implements IgaAttestor {
      *
      * @param dokenEmbeddedModelB64 the Base64 of the doken-embedded {@code ModelRequest.Encode()}.
      * @param admin the approving admin (whose distinct approval counts toward threshold).
-     * @return {@code true} if this call recorded a NEW approval; {@code false} if the admin
-     *         had already approved (idempotent dedup — the model is still persisted).
+     * @return {@code true} if this call recorded a NEW approval; {@code false} if the admin had
+     *         already approved (idempotent dedup, the stored carrier is then left untouched
+     *         unless there was none).
      * @throws RuntimeException if the returned bytes do not parse as a {@link ModelRequest}.
      */
     public boolean acceptMultiAdminApprovalModel(KeycloakSession session, RealmModel realm,
@@ -2623,11 +3329,12 @@ public class TideAttestor implements IgaAttestor {
                     + cr.getId() + " is not a valid ModelRequest: " + e.getMessage(), e);
         }
 
-        // (2) Persist the doken-embedded model back on the carrier. NO re-SetPolicy —
-        // that would invalidate the embedded doken (gold reference MultiAdmin.commit).
-        cr.setRequestModel(dokenEmbeddedModelB64);
-
-        // (3) Once-per-admin dedup, then record toward threshold.
+        // (2) Once-per-admin dedup FIRST, because whether the carrier may be written depends on
+        // the answer. An admin already in the accumulated carrier who returns another one has
+        // appended a SECOND doken for themselves (the enclave appends onto whatever it is handed,
+        // and phase 1 hands back the accumulated carrier). Saving that makes the carrier
+        // non-distinct, every ORK refuses it at PreSign with "Not all dokens provided are
+        // distinct. User repetitions found", and the CR is uncommittable for good.
         EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<IgaAuthorizationEntity> existing = em.createNamedQuery(
                         "IgaAuthorization.findByChangeRequest", IgaAuthorizationEntity.class)
@@ -2636,12 +3343,31 @@ public class TideAttestor implements IgaAttestor {
         for (IgaAuthorizationEntity a : existing) {
             if ((admin.getUsername() != null && admin.getUsername().equals(a.getApproval()))
                     || (admin.getId() != null && admin.getId().equals(a.getAuthorizedBy()))) {
-                em.flush(); // keep the doken-embedded model write
+                // The carrier write is kept for the ONE case that still needs it: an approval row
+                // with no stored carrier, where this admin's doken is the only copy and dropping
+                // it would leave the CR unable to commit for the opposite reason. A carrier that
+                // is already stored is left exactly as it is.
+                String stored = cr.getRequestModel();
+                if (stored == null || stored.isBlank()) {
+                    cr.setRequestModel(dokenEmbeddedModelB64);
+                    em.flush();
+                    log.infof("IGA multiAdmin approval (phase 2): admin %s already approved CR %s but "
+                            + "it carried no model: storing theirs, no new approval recorded.",
+                            admin.getUsername(), cr.getId());
+                    return false;
+                }
                 log.infof("IGA multiAdmin approval (phase 2): admin %s already approved CR %s — "
-                        + "model persisted, no new approval recorded.", admin.getUsername(), cr.getId());
+                        + "KEEPING the stored carrier and discarding the returned one, which would "
+                        + "carry this admin twice and make the change request uncommittable. No new "
+                        + "approval recorded.", admin.getUsername(), cr.getId());
                 return false;
             }
         }
+
+        // (3) A genuinely new approver: persist the doken-embedded model back on the carrier, then
+        // record toward threshold. NO re-SetPolicy: that would invalidate the embedded doken
+        // (gold reference MultiAdmin.commit).
+        cr.setRequestModel(dokenEmbeddedModelB64);
         // record() enforces the approver-role gate and persists the IgaAuthorizationEntity.
         record(session, cr, admin, null);
         em.flush();
@@ -3815,8 +4541,8 @@ public class TideAttestor implements IgaAttestor {
                     new byte[][]{ unitCbor }, settings, firstAdminAuthorizer, firstAdminAuthorizerCert,
                     realm.getName());
 
-            log.infof("IGA firstAdmin GRANT_ROLES signed via Midgard VVK unit ceremony (realm %s).",
-                    realm.getName());
+            log.infof("IGA firstAdmin %s signed via Midgard VVK unit ceremony (realm %s).",
+                    cr.getActionType(), realm.getName());
             // Preserve the firstAdmin stamp shape: prefix + the real ORK signature
             // (the VVK signature over unit[0]'s CBOR), Base64 of the bare sig bytes.
             return FIRSTADMIN_SIG_PREFIX + java.util.Base64.getEncoder().encodeToString(sigs[0]);
@@ -3987,12 +4713,15 @@ public class TideAttestor implements IgaAttestor {
     private UserRoleMappingSetUnit buildUserRoleMappingSetUnit(KeycloakSession session, RealmModel realm,
                                                    IgaChangeRequestEntity cr) {
         List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
+        // ADD on GRANT_ROLES, SUBTRACT on REVOKE_ROLES — the same shrunken/grown
+        // user_role_mapping_set unit, mirroring the JOIN/LEAVE + GROUP_GRANT/REVOKE builders.
+        boolean addAction = ACTION_GRANT_ROLES.equals(cr.getActionType());
 
-        // Resolve the affected user: prefer the CR's entityId (the grant subject —
-        // IgaUserAdapter.grantRole sets entityId = userId), fall back to the first
-        // row's USER_ID. Collect every pending grant role-id for that user.
+        // Resolve the affected user: prefer the CR's entityId (the grant/revoke subject —
+        // IgaUserAdapter.grantRole/revokeRole sets entityId = userId), fall back to the first
+        // row's USER_ID. Collect every pending role-id delta for that user.
         String userId = cr.getEntityId();
-        LinkedHashSet<String> grantedRoleIds = new LinkedHashSet<>();
+        LinkedHashSet<String> deltaRoleIds = new LinkedHashSet<>();
         for (Map<String, Object> row : rows) {
             String rowUser = str(row, ROW_USER_ID);
             if (userId == null) {
@@ -4001,12 +4730,12 @@ public class TideAttestor implements IgaAttestor {
             if (rowUser != null && rowUser.equals(userId)) {
                 String roleId = str(row, ROW_ROLE_ID);
                 if (roleId != null) {
-                    grantedRoleIds.add(roleId);
+                    deltaRoleIds.add(roleId);
                 }
             }
         }
         if (userId == null) {
-            throw new RuntimeException("IGA firstAdmin sign: GRANT_ROLES CR " + cr.getId()
+            throw new RuntimeException("IGA firstAdmin sign: " + cr.getActionType() + " CR " + cr.getId()
                     + " carries no resolvable USER_ID for the user_role_mapping_set unit");
         }
 
@@ -4016,7 +4745,7 @@ public class TideAttestor implements IgaAttestor {
         // realm_default_roles_set (unit 18) authority + universal-inherit covers them, so the
         // per-user default-role edge is NOT signed. The two queries MUST produce byte-identical
         // sets or the VVK verify breaks: applied to BOTH the PRE-set query AND the pending
-        // grant union below.
+        // grant/revoke delta below.
         String defaultRoleId = (realm.getDefaultRole() == null) ? null : realm.getDefaultRole().getId();
 
         // PRE-change RAW stored role-id set for the user, in producer JPA order
@@ -4035,23 +4764,21 @@ public class TideAttestor implements IgaAttestor {
         }
         @SuppressWarnings("unchecked")
         List<String> roleIds = new ArrayList<>(preQuery.getResultList());
-        // Apply the pending grant delta: add each granted id not already present, EXCLUDING the
-        // default-role id (so the union never re-introduces what the PRE-set query excluded —
-        // keeping byte-identity with the producer helper).
-        for (String roleId : grantedRoleIds) {
-            if (defaultRoleId != null && defaultRoleId.equals(roleId)) {
-                continue;
-            }
-            if (!roleIds.contains(roleId)) {
-                roleIds.add(roleId);
-            }
+        // EXCLUDE the realm default-role id from the delta so the ADD path never re-introduces
+        // what the PRE-set query excluded (byte-identity with the producer helper). The REMOVE
+        // path is unaffected — the pre-set never contains the default-role id, so subtracting it
+        // is a no-op.
+        if (defaultRoleId != null) {
+            deltaRoleIds.remove(defaultRoleId);
         }
-        // Deterministic role-id ordering. The VVK sig is verified over the LITERAL
-        // envelope bytes (no re-canonicalization), so role_ids ORDER is load-bearing.
-        // Sort the assembled set ascending so it byte-matches the producer's emitted
-        // unit (RealmAttestationExporter#userRoleMappingSet, ORDER BY urm.roleId):
-        // signer = sorted(pre-set ∪ granted) == producer = sorted(committed set).
-        roleIds.sort(Comparator.naturalOrder());
+        // Apply the delta symmetrically (ADD on grant / SUBTRACT on revoke) over BOTH the
+        // phase-1 PRE-change pre-set and the commit POST-change pre-set — idempotent, since an
+        // already-present add or already-absent remove is a no-op, so framing == distribution.
+        // applyMemberDelta sorts ascending. The VVK sig is verified over the LITERAL envelope
+        // bytes (no re-canonicalization), so role_ids ORDER is load-bearing: the sorted assembled
+        // set byte-matches the producer's emitted unit (RealmAttestationExporter#userRoleMappingSet,
+        // ORDER BY urm.roleId): signer = sorted(pre-set ± delta) == producer = sorted(committed set).
+        roleIds = applyMemberDelta(roleIds, deltaRoleIds, addAction);
 
         return new UserRoleMappingSetUnit(realm.getId(), userId, roleIds);
     }
@@ -4076,7 +4803,8 @@ public class TideAttestor implements IgaAttestor {
             return false;
         }
         switch (actionType) {
-            case ACTION_GRANT_ROLES:            // user_role_mapping_set (template)
+            case ACTION_GRANT_ROLES:            // user_role_mapping_set (add)
+            case ACTION_REVOKE_ROLES:           // user_role_mapping_set (remove)
             case ACTION_JOIN_GROUPS:            // user_group_membership_set (add)
             case ACTION_LEAVE_GROUPS:           // user_group_membership_set (remove)
             case ACTION_GROUP_GRANT_ROLES:      // group_role_mapping_set (add)
@@ -4087,6 +4815,30 @@ public class TideAttestor implements IgaAttestor {
             default:
                 return false;
         }
+    }
+
+    /**
+     * Does this actionType perturb a DERIVED owner-set unit (a set keyed on an owner that
+     * already exists, whose members the change request adds to or removes from) WITHOUT being
+     * one of the eight {@link #isProducerEnvelopeSignedAction} edge actions?
+     *
+     * <p>These carry exactly the same frozen-carrier hazard as the edge actions and must be
+     * visible to the same machinery. Two change requests against ONE owner each froze that
+     * owner's set at approval as {@code pre + that change request's own delta}, so whichever
+     * commits second leaves a quorum signature over a set the database no longer holds. The
+     * eight-action predicate above cannot simply be widened to cover them: it ALSO gates
+     * {@code buildEdgeSetUnit} (the index-0 carrier contract) and {@code realCeremonyEligible},
+     * so widening it would change the carrier shape the ork already verifies.
+     *
+     * <p>Consumed by {@link #setUnitOwnerKey} (contested-owner detection, hence the framing
+     * batches) and {@link #stampCoalescedSetUnits} (sign each owner set ONCE per batch). Before
+     * this predicate existed, a bulk approve of two {@code ADD_PROTOCOL_MAPPER} change requests
+     * against one client was invisible to both: neither was refused as contested, neither was
+     * coalesced, and the second commit stamped {@code client_mapper_set} with a signature over
+     * a set missing the sibling's mapper.
+     */
+    static boolean isDerivedOwnerSetAction(String actionType) {
+        return actionType != null && DERIVED_OWNER_SET_ACTION_TYPES.contains(actionType);
     }
 
     /**
@@ -4111,6 +4863,7 @@ public class TideAttestor implements IgaAttestor {
         String actionType = cr.getActionType();
         switch (actionType) {
             case ACTION_GRANT_ROLES:
+            case ACTION_REVOKE_ROLES:
                 return buildUserRoleMappingSetUnit(session, realm, cr);
             case ACTION_JOIN_GROUPS:
             case ACTION_LEAVE_GROUPS:
@@ -4125,6 +4878,167 @@ public class TideAttestor implements IgaAttestor {
                 throw new RuntimeException("IGA firstAdmin sign: actionType " + actionType
                         + " has no producer-envelope unit builder (CR " + cr.getId() + ")");
         }
+    }
+
+    /**
+     * The DERIVED owner-set unit an {@link #isDerivedOwnerSetAction} change request perturbs,
+     * built over the owner's CURRENT member set, or {@code null} when the owner cannot be
+     * resolved. The mapper's parent is a client ({@code CLIENT_UUID}) or a client scope
+     * ({@code CLIENT_SCOPE_ID}); exactly one is set on the row.
+     *
+     * <p>Deliberately the SINGLE place this unit is built, so the owner key
+     * {@link #setUnitOwnerKey} groups on, the unit {@link #stampCoalescedSetUnits} signs, and
+     * the unit {@link #enumerateLiveCrUnits} frames are the same unit by construction.
+     */
+    private AttestationUnit buildDerivedOwnerSetUnit(KeycloakSession session, RealmModel realm,
+                                                     IgaChangeRequestEntity cr) {
+        String realmId = realm.getId();
+        switch (cr.getActionType()) {
+            case "ADD_PROTOCOL_MAPPER":
+            case "UPDATE_PROTOCOL_MAPPER":
+            case "REMOVE_PROTOCOL_MAPPER": {
+                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+                if (clientUuid != null) {
+                    ClientModel c = realm.getClientById(clientUuid);
+                    return c == null ? null : RealmAttestationExporter.clientMapperSet(c, realmId);
+                }
+                String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
+                if (scopeId != null) {
+                    ClientScopeModel s = realm.getClientScopeById(scopeId);
+                    return s == null ? null
+                            : RealmAttestationExporter.clientScopeMapperSet(s, realmId);
+                }
+                return null;
+            }
+            case "ASSIGN_SCOPE":
+            case "REMOVE_SCOPE": {
+                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+                ClientModel c = clientUuid == null ? null : realm.getClientById(clientUuid);
+                return c == null ? null
+                        : RealmAttestationExporter.clientScopeAssignmentSet(c, realmId);
+            }
+            case "SCOPE_MAPPING_ADD":
+            case "SCOPE_MAPPING_REMOVE": {
+                String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+                ClientModel c = clientUuid == null ? null : realm.getClientById(clientUuid);
+                return c == null ? null : RealmAttestationExporter.scopeRoleAllowlistSet(
+                        ParentType.client, c.getId(), c, realmId);
+            }
+            case "SCOPE_ADD_ROLE":
+            case "SCOPE_REMOVE_ROLE": {
+                String scopeId = firstRowKey(cr, "SCOPE_ID");
+                ClientScopeModel s = scopeId == null ? null : realm.getClientScopeById(scopeId);
+                return s == null ? null : RealmAttestationExporter.scopeRoleAllowlistSet(
+                        ParentType.client_scope, s.getId(), s, realmId);
+            }
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * The owner-set unit a change request perturbs, edge or derived, or {@code null} when it
+     * perturbs none. The single dispatch point shared by {@link #setUnitOwnerKey},
+     * {@link #stampCoalescedSetUnits} and {@link #verifyStampedSetUnit}, so a new owner-set
+     * action becomes visible to contested-owner detection, per-batch coalescing and the
+     * post-stamp verification together rather than one at a time.
+     */
+    private AttestationUnit buildOwnerSetUnit(KeycloakSession session, RealmModel realm,
+                                              IgaChangeRequestEntity cr) {
+        if (cr == null) {
+            return null;
+        }
+        if (isProducerEnvelopeSignedAction(cr.getActionType())) {
+            return buildEdgeSetUnit(session, realm, cr);
+        }
+        if (isDerivedOwnerSetAction(cr.getActionType())) {
+            return buildDerivedOwnerSetUnit(session, realm, cr);
+        }
+        return null;
+    }
+
+    /**
+     * Frame the per-mapper {@code protocol_mapper} unit (unit 3) for each mapper an
+     * {@code ADD_}/{@code UPDATE_PROTOCOL_MAPPER} change request touches.
+     *
+     * <p>Without this the change request framed ONLY its owner mapper-set, so the mapper's own
+     * {@code ProtocolMapperEntity.attestation} column was never stamped by the commit that
+     * created it. On firstAdmin the toggle-on convergence backfilled it later; on multiAdmin
+     * there is no such backstop and the column stayed NULL or a {@code TIDE-DUMMY-v1} stub,
+     * which the uniform login read rejects fail-closed.
+     *
+     * <p>{@code REMOVE_} frames nothing here: the row is gone from the post-change model, so
+     * there is no column to carry a signature and the owner set alone describes the change.
+     *
+     * <p>Ordering is the ascending mapper-id order of
+     * {@link RealmAttestationExporter#jwtRelevantMapperIds}, intersected with the ids THIS
+     * change request touches. Deterministic and re-derivable identically at commit, which the
+     * carrier contract requires: phase-1 framing and commit-time distribution both call
+     * {@link #enumerateLiveCrUnits} and {@code sigs[i]} is stamped onto {@code units.get(i)}.
+     * Intersecting with the change request's own rows (rather than taking the parent's whole
+     * mapper list) keeps the list stable if an unrelated mapper is added to the same parent
+     * between approval and commit.
+     *
+     * <p>The {@code jwtRelevantMapperIds} filter is what keeps a session-note-only mapper
+     * factory correctly unemitted: the login read emits no unit for it, so framing one would
+     * sign a unit nothing ever verifies.
+     */
+    private static void addOwnedMapperUnits(List<AttestationUnit> units, RealmModel realm,
+                                            IgaChangeRequestEntity cr, String action,
+                                            String realmId) {
+        if (!"ADD_PROTOCOL_MAPPER".equals(action) && !"UPDATE_PROTOCOL_MAPPER".equals(action)) {
+            return;
+        }
+        java.util.Set<String> touched = rowValues(cr, "ID");
+        if (touched.isEmpty()) {
+            return;
+        }
+        org.keycloak.models.ProtocolMapperContainerModel parent;
+        ParentType parentType;
+        String parentId;
+        String clientUuid = firstRowKey(cr, "CLIENT_UUID");
+        if (clientUuid != null) {
+            ClientModel c = realm.getClientById(clientUuid);
+            if (c == null) return;
+            parent = c;
+            parentType = ParentType.client;
+            parentId = c.getId();
+        } else {
+            String scopeId = firstRowKey(cr, "CLIENT_SCOPE_ID");
+            if (scopeId == null) return;
+            ClientScopeModel s = realm.getClientScopeById(scopeId);
+            if (s == null) return;
+            parent = s;
+            parentType = ParentType.client_scope;
+            parentId = s.getId();
+        }
+        for (String mapperId : RealmAttestationExporter.jwtRelevantMapperIds(
+                parent.getProtocolMappersStream())) {
+            if (!touched.contains(mapperId)) {
+                continue;
+            }
+            org.keycloak.models.ProtocolMapperModel pm = parent.getProtocolMapperById(mapperId);
+            if (pm != null) {
+                units.add(RealmAttestationExporter.protocolMapperUnit(
+                        pm, parentType, parentId, realmId));
+            }
+        }
+    }
+
+    /**
+     * EVERY row's value for {@code key}, in row order, skipping rows that do not carry it.
+     * {@link #firstRowKey} is not enough for the mapper actions: {@code coalesceOrCreate} folds
+     * several same-request mapper adds into ONE change request carrying one row per mapper.
+     */
+    private static java.util.Set<String> rowValues(IgaChangeRequestEntity cr, String key) {
+        java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        for (Map<String, Object> row : parseRows(cr.getRowsJson())) {
+            String v = str(row, key);
+            if (v != null) {
+                out.add(v);
+            }
+        }
+        return out;
     }
 
     // -------------------------------------------------------------------------
@@ -4225,6 +5139,26 @@ public class TideAttestor implements IgaAttestor {
     }
 
     /**
+     * Phase-1 framing over a whole {@link #resolveFramingBatch framing batch}: reach the
+     * post-BATCH model by scratch-replaying every member in the given order, then enumerate
+     * {@code cr}'s units over it.
+     *
+     * <p>For a single-member batch this is exactly {@link #buildAllCrUnits(KeycloakSession,
+     * RealmModel, IgaChangeRequestEntity)}. For a batch that shares an owner set it is what
+     * makes every member frame BYTE-IDENTICAL bytes for that owner, which a per-request
+     * frame cannot do once the carrier freezes them.
+     */
+    List<AttestationUnit> buildAllCrUnits(KeycloakSession session, RealmModel realm,
+                                          IgaChangeRequestEntity cr,
+                                          List<IgaChangeRequestEntity> framingBatch) {
+        if (framingBatch == null || framingBatch.size() <= 1) {
+            return buildAllCrUnits(session, realm, cr);
+        }
+        return IgaScratchUnitBuilder.unitsFromBatchScratchReplay(session, realm, framingBatch, cr,
+                this::enumerateLiveCrUnits);
+    }
+
+    /**
      * The single shared affected-units enumerator. Given a model that is ALREADY
      * POST-change (the live committed model at commit, or the scratch model after a scratch
      * replay at phase-1), build EVERY producer {@link AttestationUnit} the CR's actionType
@@ -4296,6 +5230,24 @@ public class TideAttestor implements IgaAttestor {
                     } else {
                         // SET_/UPDATE_ client CRs do NOT touch the derived sets — frame only the
                         // client_config node (the derived units are already real by then).
+                        // COMPLETE BY CONSTRUCTION (mirrors the CREATE_USER branch below): a
+                        // freshly-created client's LOGIN replay reads its WHOLE client-owned
+                        // family, not just the client_config node. KC attaches the realm
+                        // default/optional scopes during client creation and any rep-carried
+                        // protocol mappers are FOLDED into this CR (isOnClientCreationPath),
+                        // so NO separate ASSIGN_SCOPE / ADD_PROTOCOL_MAPPER CR is ever filed
+                        // for them. This CR is therefore the ONLY signer of
+                        // client_scope_assignment_set, client_mapper_set,
+                        // scope_role_allowlist_set and each folded protocol_mapper unit.
+                        // Framing only client_config left those columns NULL forever on
+                        // multiAdmin realms (no convergeAfterCommit backstop) and the first
+                        // login to the client fail-closed in replayOrFailClosed.
+                        units.addAll(clientOwnedUnits(session, c, realmId,
+                                /* includeOwnedMappers */ true));
+                    } else {
+                        // SET_* / UPDATE_*: only the client_config node changed. The derived
+                        // owner-sets are already real (signed at create / their own CRs);
+                        // re-framing them would needlessly re-sign already-attested units.
                         units.add(RealmAttestationExporter.clientConfig(session, c, realmId));
                     }
                     // Part C: post-flip the multiAdmin carrier is the ONLY signer of the SA user's
@@ -4316,12 +5268,44 @@ public class TideAttestor implements IgaAttestor {
                  "UPDATE_CLIENT_SCOPE_PROPERTY" -> {
                 String scopeId = firstRowKeyOr(cr, "SCOPE_ID", "ID");
                 ClientScopeModel s = scopeId == null ? null : realm.getClientScopeById(scopeId);
-                if (s != null) units.add(RealmAttestationExporter.clientScopeConfig(s, realmId));
+                if (s != null) {
+                    if ("CREATE_CLIENT_SCOPE".equals(action)) {
+                        // COMPLETE BY CONSTRUCTION (mirrors the CREATE_CLIENT branch above): a scope
+                        // created WITH inline protocol mappers FOLDS them into THIS CR — no separate
+                        // ADD_PROTOCOL_MAPPER CR ever fires — so this commit is their ONLY signer. The
+                        // dispatcher stamps those mapper rows with the DUMMY set stub at replay
+                        // (signNestedChildSet) and there is NO multiAdmin convergence backstop, so
+                        // framing only client_scope_config left client_scope_mapper_set + each
+                        // protocol_mapper as TIDE-DUMMY-v1 and the first login whose active scopes
+                        // include this one fail-closed in replayOrFailClosed. Frame the whole family.
+                        units.addAll(clientScopeOwnedUnits(s, realmId, /* includeOwnedMappers */ true));
+                    } else {
+                        // SET_/UPDATE_: only the client_scope_config node changed; the derived
+                        // mapper set/units are already real (signed at create / their own CRs).
+                        units.add(RealmAttestationExporter.clientScopeConfig(s, realmId));
+                    }
+                }
             }
             case "CREATE_ROLE", "SET_ROLE_ATTRIBUTE" -> {
                 String roleId = firstRowKeyOr(cr, "ROLE_ID", "ID");
                 RoleModel r = roleId == null ? null : realm.getRoleById(roleId);
-                if (r != null) units.add(RealmAttestationExporter.roleDefinition(r, realmId));
+                if (r != null) {
+                    if ("CREATE_ROLE".equals(action)) {
+                        // COMPLETE BY CONSTRUCTION (mirrors the CREATE_CLIENT branch above): a role
+                        // created WITH inline composites FOLDS them into THIS CR — no separate
+                        // ADD_COMPOSITE CR ever fires — so this commit is their ONLY signer. The
+                        // dispatcher stamps the composite_role rows with the DUMMY set stub at replay
+                        // (signNestedChildSet) and there is NO multiAdmin convergence backstop, so
+                        // framing only role_definition left role_composite_children_set as
+                        // TIDE-DUMMY-v1 and every login whose closure expands this role (e.g. once it
+                        // is added to default-roles-<realm>) fail-closed in replayOrFailClosed.
+                        units.addAll(roleOwnedUnits(r, realmId));
+                    } else {
+                        // SET_ROLE_ATTRIBUTE: only the role_definition node changed; composites are
+                        // governed by their own ADD/REMOVE_COMPOSITE CRs (framed as the edge-set unit).
+                        units.add(RealmAttestationExporter.roleDefinition(r, realmId));
+                    }
+                }
             }
             case "CREATE_GROUP", "SET_GROUP_ATTRIBUTE" -> {
                 String groupId = firstRowKeyOr(cr, "GROUP_ID", "ID");
@@ -4437,7 +5421,24 @@ public class TideAttestor implements IgaAttestor {
                 ClientScopeModel s = scopeId == null ? null : realm.getClientScopeById(scopeId);
                 if (s != null) units.add(RealmAttestationExporter.scopeRoleAllowlistSet(
                         ParentType.client_scope, s.getId(), s, realmId));
+            // These derived owner-sets are built by buildDerivedOwnerSetUnit, the same method
+            // setUnitOwnerKey groups on and stampCoalescedSetUnits signs, so the unit framed
+            // here and the unit those two act on cannot drift apart.
+            case "ASSIGN_SCOPE", "REMOVE_SCOPE" ->
+                    addIfPresent(units, buildDerivedOwnerSetUnit(session, realm, cr));
+            case "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER", "REMOVE_PROTOCOL_MAPPER" -> {
+                // The owner mapper-set FIRST (it is this action's owner-set unit, the one
+                // setUnitOwnerKey groups on and stampCoalescedSetUnits signs once per batch),
+                // then the per-mapper protocol_mapper unit for each mapper the change request
+                // adds or updates. Framing only the set left each new mapper's own attestation
+                // column unsigned, which the uniform login read rejects fail-closed.
+                addIfPresent(units, buildDerivedOwnerSetUnit(session, realm, cr));
+                addOwnedMapperUnits(units, realm, cr, action, realmId);
             }
+            case "SCOPE_MAPPING_ADD", "SCOPE_MAPPING_REMOVE" ->
+                    addIfPresent(units, buildDerivedOwnerSetUnit(session, realm, cr));
+            case "SCOPE_ADD_ROLE", "SCOPE_REMOVE_ROLE" ->
+                    addIfPresent(units, buildDerivedOwnerSetUnit(session, realm, cr));
 
             // ---- REALM-scoped units ----
             // REMOVE_REALM_ATTRIBUTE changes the SAME realm node a SET does (the post-change
@@ -4513,6 +5514,111 @@ public class TideAttestor implements IgaAttestor {
         return units;
     }
 
+    /**
+     * The FULL producer unit family a client OWNS, built from the (post-change) live model
+     * via the SAME {@link RealmAttestationExporter} builders the login export uses:
+     * {@code client_config} (1, first), {@code client_scope_assignment_set} (11),
+     * {@code client_mapper_set} (12) and {@code scope_role_allowlist_set}/client (14),
+     * plus, when {@code includeOwnedMappers}, one {@code protocol_mapper} (3) per
+     * JWT-relevant mapper the client owns (the {@code jwtRelevantMapperIds} filter + sort,
+     * exactly the login's emission set).
+     *
+     * <p>SINGLE source of truth for "what does a client own", shared by:
+     * <ul>
+     *   <li>{@code enumerateLiveCrUnits}' CREATE_CLIENT framing (multiAdmin lane, with
+     *       mappers: the create rep's mappers are FOLDED into the CR, so no separate
+     *       ADD_PROTOCOL_MAPPER CR ever signs them);</li>
+     *   <li>{@code stampCreateClientUnitFamily} (firstAdmin lane, with mappers);</li>
+     *   <li>{@code stampAdoptClient} (WITHOUT mappers: pre-existing mappers get their own
+     *       ADOPT_PROTOCOL_MAPPER edge CRs, which stamp the per-mapper column).</li>
+     * </ul>
+     * so the two commit lanes and the ADOPT lane cannot drift on the client family list.
+     *
+     * <p>The three set units are emitted even when EMPTY: their columns live on the
+     * always-present ClientEntity row (UnitColumnMapping 11/12/14), so an empty-set stamp
+     * never dangles (unlike the row-carried user/group set units), and the login emits the
+     * assignment/allowlist sets unconditionally.
+     */
+    private static List<AttestationUnit> clientOwnedUnits(KeycloakSession session, ClientModel client,
+                                                          String realmId, boolean includeOwnedMappers) {
+        List<AttestationUnit> units = new ArrayList<>();
+        units.add(RealmAttestationExporter.clientConfig(session, client, realmId));
+        units.add(RealmAttestationExporter.clientScopeAssignmentSet(client, realmId));
+        units.add(RealmAttestationExporter.clientMapperSet(client, realmId));
+        units.add(RealmAttestationExporter.scopeRoleAllowlistSet(
+                ParentType.client, client.getId(), client, realmId));
+        if (includeOwnedMappers) {
+            // jwtRelevantMapperIds applies the login's JWT_BODY_IRRELEVANT_FACTORIES filter
+            // AND sorts ascending, so the per-mapper unit order is deterministic across the
+            // phase-1 scratch framing and the commit-time distribution (mapper ids are pinned
+            // in the CR's REP_JSON, so both replays materialize identical mapper rows).
+            for (String mapperId : RealmAttestationExporter.jwtRelevantMapperIds(
+                    client.getProtocolMappersStream())) {
+                org.keycloak.models.ProtocolMapperModel pm = client.getProtocolMapperById(mapperId);
+                if (pm != null) {
+                    units.add(RealmAttestationExporter.protocolMapperUnit(
+                            pm, ParentType.client, client.getId(), realmId));
+                }
+            }
+        }
+        return units;
+    }
+
+    /**
+     * A role's OWN producer units — the CREATE_ROLE parallel of {@link #clientOwnedUnits}.
+     * {@code role_definition} (unit 4) ALWAYS + {@code role_composite_children_set} (unit 10)
+     * LEAF-GATED: emitted only when the role is a real composite with ≥1 child, so we never frame
+     * an orphan set unit with no {@code composite_role} row to stamp (byte-identical to the login
+     * gate {@code RealmAttestationExporter#emitRoleCompositeChildrenSet}). A role created WITH
+     * inline composites folds them into ONE CREATE_ROLE CR, so this commit is their ONLY signer;
+     * framing this family is what lets the uniform login read replay the composite-children set.
+     */
+    private static List<AttestationUnit> roleOwnedUnits(RoleModel role, String realmId) {
+        List<AttestationUnit> units = new ArrayList<>();
+        units.add(RealmAttestationExporter.roleDefinition(role, realmId));
+        RoleCompositeChildrenSetUnit children =
+                RealmAttestationExporter.roleCompositeChildrenSet(role, realmId);
+        if (!children.childRoleIds().isEmpty()) {
+            units.add(children);
+        }
+        return units;
+    }
+
+    /**
+     * A client scope's OWN producer units — the CREATE_CLIENT_SCOPE parallel of
+     * {@link #clientOwnedUnits}. {@code client_scope_config} (unit 2) ALWAYS + (when
+     * {@code includeOwnedMappers}) each JWT-relevant {@code protocol_mapper} (unit 3) and the
+     * {@code client_scope_mapper_set} (unit 13). The mapper-set is LEAF-GATED to a non-empty
+     * mapper list, byte-identical to the login gate {@code RealmAttestationExporter
+     * #emitAllActiveMappers} (which emits it only when the scope has ≥1 JWT-relevant mapper). A
+     * scope created WITH inline mappers folds them into ONE CREATE_CLIENT_SCOPE CR, so this commit
+     * is their ONLY signer; framing this family is what lets the login read replay them.
+     */
+    private static List<AttestationUnit> clientScopeOwnedUnits(ClientScopeModel scope, String realmId,
+                                                               boolean includeOwnedMappers) {
+        List<AttestationUnit> units = new ArrayList<>();
+        units.add(RealmAttestationExporter.clientScopeConfig(scope, realmId));
+        if (includeOwnedMappers) {
+            // jwtRelevantMapperIds applies the login's JWT_BODY_IRRELEVANT_FACTORIES filter AND
+            // sorts ascending, so the per-mapper unit order is deterministic across the phase-1
+            // scratch framing and the commit-time distribution (mapper ids are pinned in the CR's
+            // REP_JSON, so both replays materialize identical mapper rows).
+            List<String> mapperIds = RealmAttestationExporter.jwtRelevantMapperIds(
+                    scope.getProtocolMappersStream());
+            for (String mapperId : mapperIds) {
+                org.keycloak.models.ProtocolMapperModel pm = scope.getProtocolMapperById(mapperId);
+                if (pm != null) {
+                    units.add(RealmAttestationExporter.protocolMapperUnit(
+                            pm, ParentType.client_scope, scope.getId(), realmId));
+                }
+            }
+            if (!mapperIds.isEmpty()) {
+                units.add(RealmAttestationExporter.clientScopeMapperSet(scope, realmId));
+            }
+        }
+        return units;
+    }
+
     /** Resolve + build the {@code organization_domain_set} unit for an ORG_INVITE/RESEND CR. */
     private AttestationUnit buildOrgDomainSetUnit(KeycloakSession session, EntityManager em,
                                                   IgaChangeRequestEntity cr, String realmId) {
@@ -4537,12 +5643,50 @@ public class TideAttestor implements IgaAttestor {
      */
     byte[][] buildAllCrUnitCbor(KeycloakSession session, RealmModel realm,
                                 IgaChangeRequestEntity cr) {
-        List<AttestationUnit> units = buildAllCrUnits(session, realm, cr);
+        return buildAllCrUnitCbor(session, realm, cr, null);
+    }
+
+    /** {@link #buildAllCrUnitCbor} framed over a whole {@link #resolveFramingBatch} batch. */
+    byte[][] buildAllCrUnitCbor(KeycloakSession session, RealmModel realm,
+                                IgaChangeRequestEntity cr,
+                                List<IgaChangeRequestEntity> framingBatch) {
+        List<AttestationUnit> units = buildAllCrUnits(session, realm, cr, framingBatch);
+        // BUILD-time gate. Every carrier, for every action type, is framed through here, so a
+        // change request that could never be signed is refused at the enclave open, before any
+        // admin spends an approval on it.
+        requireCarrierUnitCountWithinBound(cr, units.size(), "framing");
         byte[][] out = new byte[units.size()][];
         for (int i = 0; i < units.size(); i++) {
             out[i] = units.get(i).serialize();
         }
         return out;
+    }
+
+    /**
+     * Refuse a carrier that frames more units than the ork can sign in one request, naming the
+     * change request, its action and the actual count so a field occurrence is immediately
+     * actionable instead of an opaque {@code IndexOutOfRangeException} 500 from the ork.
+     *
+     * <p>Fail-closed by construction: this THROWS rather than truncating or splitting. See
+     * {@link #MAX_CARRIER_UNITS} for why neither of those is available.
+     *
+     * @param phase {@code "framing"} when the carrier is being built, {@code "distribution"}
+     *              when an already-frozen carrier is about to be signed
+     */
+    static void requireCarrierUnitCountWithinBound(IgaChangeRequestEntity cr,
+                                                   int unitCount, String phase) {
+        if (unitCount <= MAX_CARRIER_UNITS) {
+            return;
+        }
+        throw new RuntimeException("IGA approval carrier (" + phase + "): change request "
+                + cr.getId() + " (action " + cr.getActionType() + ") frames " + unitCount
+                + " producer units, over the " + MAX_CARRIER_UNITS + "-unit limit for a single"
+                + " signing request. The ork encodes the requested-signature count in one byte,"
+                + " so a larger request cannot be signed, and the approval commits SHA-512 over"
+                + " the whole draft, so the carrier cannot be split across requests either."
+                + " Refusing rather than signing part of it. Split the underlying admin"
+                + " operation into smaller change requests (for example add the protocol"
+                + " mappers in several requests instead of one).");
     }
 
     /**
@@ -4834,6 +5978,17 @@ public class TideAttestor implements IgaAttestor {
                         // Part B3: also stamp the SA user's user_identity when the client has
                         // serviceAccountsEnabled. Self-gates (no-op for non-SA clients / SA-less
                         // UPDATE rows), so safe to call unconditionally for every client CR.
+                // CREATE_CLIENT stamps the client's FULL owned unit family (config + the three
+                // derived owner-sets + each folded protocol_mapper), NOT just the node: the
+                // default-scope attachments and any rep-carried mappers are FOLDED into this CR
+                // (isOnClientCreationPath), so no ASSIGN_SCOPE / ADD_PROTOCOL_MAPPER CR ever
+                // signs them and this commit is their ONLY signer. Same family the multiAdmin
+                // lane frames (enumerateLiveCrUnits) via the shared clientOwnedUnits enumerator.
+                case "CREATE_CLIENT" -> {
+                        stampCreateClientUnitFamily(session, realm, mode, em, cr);
+                        // Part B3: also stamp the SA user's user_identity when the client has
+                        // serviceAccountsEnabled. Self-gates (no-op for non-SA clients), so safe
+                        // to call unconditionally for every client CR.
                         stampServiceAccountUserIfPresent(session, realm, mode, em, cr);
                 }
                 case "SET_CLIENT_ATTRIBUTE", "UPDATE_CLIENT_WEB_ORIGINS",
@@ -4844,10 +5999,13 @@ public class TideAttestor implements IgaAttestor {
                         // UPDATE rows), so safe to call unconditionally for every client CR.
                         stampServiceAccountUserIfPresent(session, realm, mode, em, cr);
                 }
-                case "CREATE_CLIENT_SCOPE", "SET_CLIENT_SCOPE_ATTRIBUTE",
-                     "UPDATE_CLIENT_SCOPE_PROPERTY" ->
+                case "CREATE_CLIENT_SCOPE" ->
+                        stampCreateClientScopeUnitFamily(session, realm, mode, em, cr);
+                case "SET_CLIENT_SCOPE_ATTRIBUTE", "UPDATE_CLIENT_SCOPE_PROPERTY" ->
                         stampClientScopeConfig(session, realm, mode, em, cr);
-                case "CREATE_ROLE", "SET_ROLE_ATTRIBUTE" ->
+                case "CREATE_ROLE" ->
+                        stampCreateRoleUnitFamily(session, realm, mode, em, cr);
+                case "SET_ROLE_ATTRIBUTE" ->
                         stampRoleDefinition(session, realm, mode, em, cr);
                 case "CREATE_GROUP", "SET_GROUP_ATTRIBUTE" ->
                         stampGroupDefinition(session, realm, mode, em, cr);
@@ -4924,6 +6082,771 @@ public class TideAttestor implements IgaAttestor {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Coalesced per-(unit type, owner) SET-unit stamp + post-stamp verification
+    // -------------------------------------------------------------------------
+
+    /**
+     * <b>Coalesced edge-SET stamp.</b> Sign and stamp EXACTLY ONE signature per
+     * {@code (unit type, owner)} over the owner's FINAL committed member set, for a whole
+     * batch of already-replayed change requests.
+     *
+     * <p>The owner-keyed fan-out ({@code IgaReplayDispatcher#stampOwnerSetFanOut}) writes
+     * one signature onto EVERY row sharing the owner key and carries no member predicate,
+     * so a second CR against the same owner replaces the first CR's signature. Each CR's
+     * own {@code combineFinal} signature is computed PRE-replay over {@code pre-set ±
+     * that CR's delta}, so when a batch applies several CRs against one owner inside a
+     * single transaction the surviving column commits to a set the database no longer
+     * holds and the ork rejects the unit at token issue. Signing per-CR is therefore not
+     * expressible for a batch; the set must be signed ONCE, after every replay, over the
+     * post-batch state.
+     *
+     * <p>Runs AFTER the caller's replay loop. The pending writes are flushed first so the
+     * owner-set reads observe every sibling CR's model write, then each CR's edge-set unit
+     * is re-derived from the LIVE (post-batch) model ({@link #buildEdgeSetUnit}'s
+     * {@code pre-set ± delta} is idempotent once the delta is applied) and grouped by
+     * {@code unit.type()}+{@code unit.targetId()}. Every distinct owner set is signed in ONE
+     * batched ceremony ({@link #signProducerEnvelopes}) and stamped through
+     * {@link UnitColumnMapping} (the same owner fan-out the dispatcher and the login read
+     * use), then verified via {@link #verifyStampedSetUnit}.
+     *
+     * <p>RE-SIGNS ONLY WHERE {@link #signProducerEnvelopes} IS THE AUTHORITATIVE SIGNER, i.e.
+     * where it takes its REAL branch ({@link #MODE_FIRST_ADMIN} on a
+     * {@link #isRealSigningCapable} realm) or where nothing real exists to overwrite (a
+     * not-capable dev/test realm, where every signer stubs). On a real-signing-capable
+     * multiAdmin realm the authoritative signer for these edge sets is the Policy:1 ceremony
+     * {@link #sign} routes to ({@code signMultiAdminUnitViaPolicy}) and, for a carrier CR,
+     * {@link #distributeMultiAdminUnitSigs}; both produce a real 64-byte VVK signature under
+     * {@link #FIRSTADMIN_SIG_PREFIX}, whereas {@link #signProducerEnvelopes} would return the
+     * {@link #DUMMY_SIG_PREFIX} stub. Re-signing there would DESTROY a valid signature and
+     * break the next token mint, so that lane is audited ({@link #auditStampedSetUnits}) and
+     * left alone. Non-edge action types carry no owner set and are ignored, so the caller may
+     * pass its whole batch.
+     */
+    public void stampCoalescedSetUnits(KeycloakSession session, RealmModel realm,
+                                       List<IgaChangeRequestEntity> crs) {
+        if (crs == null || crs.isEmpty()) {
+            return;
+        }
+        String mode = resolveMode(session, realm);
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        em.flush();
+
+        java.util.LinkedHashMap<String, IgaChangeRequestEntity> crByOwner = new java.util.LinkedHashMap<>();
+        java.util.LinkedHashMap<String, AttestationUnit> unitByOwner = new java.util.LinkedHashMap<>();
+        for (IgaChangeRequestEntity cr : crs) {
+            // Edge sets AND derived owner-sets (the mapper sets): both are owner-keyed fan-outs
+            // with no member predicate, so both must be signed ONCE over the post-batch state
+            // rather than once per contributing change request.
+            AttestationUnit unit = buildOwnerSetUnit(session, realm, cr);
+            if (unit == null) {
+                continue;
+            }
+            String owner = unit.unitType() + '|' + unit.targetId();
+            crByOwner.put(owner, cr);
+            unitByOwner.put(owner, unit);
+        }
+        if (unitByOwner.isEmpty()) {
+            return;
+        }
+        List<String> owners = new ArrayList<>(unitByOwner.keySet());
+
+        if (!isAuthoritativeSetSigner(realm, mode)) {
+            auditStampedSetUnits(em, realm, owners, unitByOwner, crByOwner);
+            invalidateStaleSetUnitCarriers(session, realm, em, owners, framingBatchIds(crs));
+            return;
+        }
+
+        byte[][] envelopes = new byte[owners.size()][];
+        for (int i = 0; i < owners.size(); i++) {
+            envelopes[i] = unitByOwner.get(owners.get(i)).serialize();
+        }
+        String[] sigs = signProducerEnvelopes(session, realm, mode, envelopes);
+        for (int i = 0; i < owners.size(); i++) {
+            String owner = owners.get(i);
+            AttestationUnit unit = unitByOwner.get(owner);
+            int rows = UnitColumnMapping.stamp(em, unit, sigs[i]);
+            if (rows == 0) {
+                // The owner set has no rows left to carry a signature (e.g. a revoke that
+                // removed the last member). The login read emits no unit for it either, so a
+                // 0-row stamp is a coverage no-op, not an error, and there is nothing to
+                // verify. Matches UnitColumnMapping.stamp's contract and the identical
+                // treatment in distributeMultiAdminUnitSigs.
+                log.debugf("IGA set-unit coalescing: unit %s (target=%s) stamped 0 rows in realm %s",
+                        unit.unitType(), unit.targetId(), realm.getName());
+                continue;
+            }
+            verifyStampedSetUnit(session, realm, em, crByOwner.get(owner), envelopes[i], sigs[i]);
+        }
+        log.debugf("IGA set-unit coalescing: stamped %d owner set(s) from %d change request(s) "
+                + "in realm %s.", owners.size(), crs.size(), realm.getName());
+    }
+
+    /**
+     * Read-only pass for the lane this class does NOT sign (a real-signing-capable multiAdmin
+     * realm, whose edge sets are signed by the Policy:1 ceremony). Re-reads each owner's
+     * column through {@link UnitColumnMapping} and WARNS when it is not a replayable 64-byte
+     * VVK signature, which is what {@code IgaAttestationExporterProvider.replayOrFailClosed}
+     * will reject at the next token mint.
+     *
+     * <p>Deliberately does NOT throw: this commit did not write those values, so a stub there
+     * is a pre-existing coverage gap in another signer (the class of defect fixed for
+     * {@code REVOKE_ROLES} in 6ce18e5), not something this change introduced. Failing the
+     * commit closed on it would block admins on a condition they cannot resolve from here.
+     */
+    /**
+     * The eight edge actions whose commit signs a per-(table, owner) SET unit. Kept as a list
+     * so the pending-CR lookups below can filter server-side; {@link #isProducerEnvelopeSignedAction}
+     * remains the single predicate.
+     */
+    public static final List<String> EDGE_SET_ACTION_TYPES = List.of(
+            ACTION_GRANT_ROLES, ACTION_REVOKE_ROLES,
+            ACTION_JOIN_GROUPS, ACTION_LEAVE_GROUPS,
+            ACTION_GROUP_GRANT_ROLES, ACTION_GROUP_REVOKE_ROLES,
+            ACTION_ADD_COMPOSITE, ACTION_REMOVE_COMPOSITE);
+
+    /**
+     * The DERIVED owner-set actions: not edge actions, but they perturb an owner-keyed set the
+     * same way, so they carry the same frozen-carrier hazard. THE single source of truth for
+     * {@link #isDerivedOwnerSetAction}, so the predicate and the server-side action-type filter
+     * below cannot drift apart.
+     */
+    public static final List<String> DERIVED_OWNER_SET_ACTION_TYPES = List.of(
+            "ADD_PROTOCOL_MAPPER", "UPDATE_PROTOCOL_MAPPER", "REMOVE_PROTOCOL_MAPPER",
+            "ASSIGN_SCOPE", "REMOVE_SCOPE",
+            "SCOPE_MAPPING_ADD", "SCOPE_MAPPING_REMOVE",
+            "SCOPE_ADD_ROLE", "SCOPE_REMOVE_ROLE");
+
+    /**
+     * EVERY action whose commit perturbs an owner set, edge or derived.
+     *
+     * <p>This is the list the PENDING-change-request lookups must filter on. Both of them
+     * ({@link #resolveFramingBatch}, which decides what a phase-1 carrier is framed over, and
+     * {@link #invalidateStaleSetUnitCarriers}, which clears a sibling's carrier after a commit
+     * moved their shared owner) previously filtered on {@link #EDGE_SET_ACTION_TYPES} alone. A
+     * pending mapper or scope change request was therefore never returned by either query, so
+     * even once {@link #setUnitOwnerKey} resolved its owner it could not be batched with its
+     * siblings and its stale carrier was never invalidated: it would still commit a quorum
+     * signature over a member set the database no longer held.
+     */
+    public static final List<String> OWNER_SET_ACTION_TYPES =
+            java.util.stream.Stream.concat(
+                            EDGE_SET_ACTION_TYPES.stream(),
+                            DERIVED_OWNER_SET_ACTION_TYPES.stream())
+                    .collect(java.util.stream.Collectors.toUnmodifiableList());
+
+    /**
+     * Does this realm sign edge sets from a doken-bound approval carrier whose unit bytes are
+     * FROZEN at approval time? True for a real-signing-capable multiAdmin realm, whose
+     * {@code signMultiAdminUnitsViaPolicy} replays {@code ModelRequest.FromBytes(carrier)}
+     * VERBATIM: the ORK signs the bytes the enclave framed, not the bytes the commit re-derives.
+     * A carrier is therefore only valid while the owner's set is still what it was at approval.
+     *
+     * <p>The exact complement of {@link #isAuthoritativeSetSigner}: on every other realm this
+     * class re-signs from committed state, so no approval-time freeze applies.
+     */
+    public static boolean usesFrozenApprovalCarrier(RealmModel realm, String mode) {
+        return !isAuthoritativeSetSigner(realm, mode);
+    }
+
+    /** {@link #usesFrozenApprovalCarrier} for a caller that has not resolved the mode. */
+    public static boolean usesFrozenApprovalCarrier(KeycloakSession session, RealmModel realm) {
+        return usesFrozenApprovalCarrier(realm, resolveMode(session, realm));
+    }
+
+    /**
+     * The {@code (unit type, owner)} key of the edge set a CR perturbs, or {@code null} when it
+     * perturbs none or its owner cannot be resolved. Safe to call BEFORE the replay: the unit
+     * builder is {@code pre-set ± delta}, which yields the same owner either way.
+     */
+    public String setUnitOwnerKey(KeycloakSession session, RealmModel realm,
+                                  IgaChangeRequestEntity cr) {
+        if (cr == null) {
+            return null;
+        }
+        try {
+            AttestationUnit unit = buildOwnerSetUnit(session, realm, cr);
+            return unit == null ? null : unit.unitType() + '|' + unit.targetId();
+        } catch (RuntimeException unresolvable) {
+            // An owner we cannot resolve cannot be contested either; the CR will fail on its
+            // own merits in the commit gate.
+            log.debugf(unresolvable, "IGA set-unit owner unresolvable for CR %s (action %s)",
+                    cr.getId(), cr.getActionType());
+            return null;
+        }
+    }
+
+    /**
+     * Owners that MORE THAN ONE change request in {@code crs} would perturb, as
+     * {@code owner key -> contributing CR ids} in batch order. Empty when every owner has a
+     * single contributor.
+     *
+     * <p>On a {@link #usesFrozenApprovalCarrier} realm a contested owner CANNOT be committed as
+     * a batch: every contributor's carrier froze the owner's set at approval time as
+     * {@code pre + that CR's own delta}, so whichever commits second stamps a quorum signature
+     * over a set the database no longer holds. No re-ordering, no session boundary and no
+     * re-derivation at commit can repair that, because the signed bytes are not an input to the
+     * commit; only a fresh approval over the projected final set can.
+     */
+    public Map<String, List<String>> findContestedSetOwners(KeycloakSession session, RealmModel realm,
+                                                            List<IgaChangeRequestEntity> crs) {
+        Map<String, List<String>> byOwner = new java.util.LinkedHashMap<>();
+        for (IgaChangeRequestEntity cr : crs) {
+            String owner = setUnitOwnerKey(session, realm, cr);
+            if (owner != null) {
+                byOwner.computeIfAbsent(owner, k -> new ArrayList<>()).add(cr.getId());
+            }
+        }
+        Map<String, List<String>> contested = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> e : byOwner.entrySet()) {
+            if (e.getValue().size() > 1) {
+                contested.put(e.getKey(), e.getValue());
+            }
+        }
+        return contested;
+    }
+
+    // -------------------------------------------------------------------------
+    // Framing batches: the approval-time answer to the frozen-carrier hazard
+    // -------------------------------------------------------------------------
+
+    /**
+     * The deterministic order a batch of change requests commits in: DELETE_REALM strictly
+     * last, a RAISING REGEN_ADMIN_POLICY last among the rest, every other change request keeping
+     * its selection order (a STABLE sort). This is the order the bulk drain applies, and phase-1
+     * framing replays the batch in the SAME order so the framed bytes are the bytes the
+     * commit produces.
+     *
+     * <p>Only a RAISING policy needs to go last: it re-gates the pending assignments upward and
+     * would strand them. A LOWERING policy sorts with everything else, because holding it behind
+     * the revokes it accompanies is what strands the realm: the revokes remove the very approvers
+     * the policy commit needs. See {@link #regenRaisesThreshold}.
+     */
+    public static final Comparator<IgaChangeRequestEntity> BULK_COMMIT_ORDER =
+            Comparator.comparingInt(c -> {
+                String at = c.getActionType();
+                if (ACTION_DELETE_REALM.equals(at)) return 2;
+                if (ACTION_REGEN_ADMIN_POLICY.equals(at) && regenRaisesThreshold(c)) return 1;
+                return 0;
+            });
+
+    /**
+     * The change requests whose replay a phase-1 carrier for {@code cr} must assume: every
+     * currently-approvable PENDING change request that perturbs the SAME per-(unit type,
+     * owner) set, {@code cr} included, in {@link #BULK_COMMIT_ORDER}.
+     *
+     * <p>Each edge change request perturbs exactly ONE owner set, so "shares an owner with"
+     * partitions the pending pool into disjoint groups and the group of {@code cr} is simply
+     * everything sharing its owner key, with no transitive closure to walk. Framing over the whole
+     * group is what makes two change requests against one owner frame byte-identical units for
+     * it; per-request framing cannot, because the carrier freezes what it framed.
+     *
+     * <p>Returns a single-element list for a change request that perturbs no owner set or has
+     * no siblings, so the uncontested path frames exactly as before.
+     */
+    public List<IgaChangeRequestEntity> resolveFramingBatch(KeycloakSession session, RealmModel realm,
+                                                            IgaChangeRequestEntity cr) {
+        String owner = setUnitOwnerKey(session, realm, cr);
+        if (owner == null) {
+            return List.of(cr);
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<IgaChangeRequestEntity> pending = new IgaChangeRequestService(em, session)
+                .listPendingByActionTypeIn(realm.getId(), OWNER_SET_ACTION_TYPES, null, CARRIER_SWEEP_LIMIT);
+        List<IgaChangeRequestEntity> batch = new ArrayList<>();
+        boolean selfIncluded = false;
+        for (IgaChangeRequestEntity other : pending) {
+            if (!owner.equals(setUnitOwnerKey(session, realm, other))) {
+                continue;
+            }
+            batch.add(other);
+            selfIncluded |= cr.getId().equals(other.getId());
+        }
+        if (!selfIncluded) {
+            batch.add(cr);
+        }
+        if (batch.size() <= 1) {
+            return List.of(cr);
+        }
+        batch.sort(BULK_COMMIT_ORDER);
+        return batch;
+    }
+
+    /**
+     * Members of {@code cr}'s recorded framing batch whose replay can never happen, so the
+     * model state its carrier was framed over is unreachable: a member that no longer exists,
+     * belongs to another realm, or was denied or cancelled. A member that is still PENDING or
+     * already APPROVED is reachable (it will apply, or has).
+     *
+     * <p>Empty for a carrier with no framing batch, and empty in the ordinary case where a
+     * change request filed later merely joined the owner: that newcomer frames its OWN
+     * superset batch and waits, it does not move this one.
+     */
+    public List<String> unreachableFramingBasis(KeycloakSession session, RealmModel realm,
+                                                IgaChangeRequestEntity cr) {
+        List<String> memberIds = cr.getRequestBatchList();
+        if (memberIds.isEmpty()) {
+            return List.of();
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        List<String> unreachable = new ArrayList<>();
+        for (String memberId : memberIds) {
+            IgaChangeRequestEntity member = em.find(IgaChangeRequestEntity.class, memberId);
+            if (member == null || !realm.getId().equals(member.getRealmId())
+                    || !("PENDING".equals(member.getStatus()) || "APPROVED".equals(member.getStatus()))) {
+                unreachable.add(memberId);
+            }
+        }
+        if (!memberIds.contains(cr.getId())) {
+            unreachable.add(cr.getId());
+        }
+        return unreachable;
+    }
+
+    /** The ordered member ids of a framing batch. */
+    public static List<String> framingBatchIds(List<IgaChangeRequestEntity> batch) {
+        List<String> ids = new ArrayList<>(batch.size());
+        for (IgaChangeRequestEntity member : batch) {
+            if (member != null && !ids.contains(member.getId())) {
+                ids.add(member.getId());
+            }
+        }
+        return ids;
+    }
+
+    /**
+     * The identity of a framing batch: a name-based UUID over the realm and the SORTED member
+     * ids. Deterministic in the member set, so two carriers framed against the same group carry
+     * the same id with no cross-change-request write, and a group whose membership moved is
+     * immediately distinguishable. Used for logs, error payloads and the group-equality check;
+     * the authoritative membership is the persisted ordered list.
+     */
+    public static String framingBatchId(String realmId, List<String> memberIds) {
+        if (memberIds == null || memberIds.isEmpty()) {
+            return null;
+        }
+        List<String> sorted = new ArrayList<>(new TreeSet<>(memberIds));
+        return UUID.nameUUIDFromBytes(("iga-framing-batch|" + realmId + "|" + String.join(",", sorted))
+                .getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
+    /** {@link #framingBatchId} of the batch a change request's carrier was framed with. */
+    public static String framingBatchIdOf(IgaChangeRequestEntity cr) {
+        return framingBatchId(cr.getRealmId(), cr.getRequestBatchList());
+    }
+
+    /**
+     * Base64 SHA-256 over the ORDERED unit CBOR a carrier framed: the byte-provenance the
+     * commit re-derives. Length-prefixed per unit so a different split of the same
+     * concatenation cannot collide.
+     */
+    public static String framedUnitsHash(byte[][] unitCbors) {
+        if (unitCbors == null || unitCbors.length == 0) {
+            return null;
+        }
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            for (byte[] unit : unitCbors) {
+                int len = unit == null ? 0 : unit.length;
+                digest.update(new byte[]{
+                        (byte) (len >>> 24), (byte) (len >>> 16), (byte) (len >>> 8), (byte) len});
+                if (unit != null) {
+                    digest.update(unit);
+                }
+            }
+            return java.util.Base64.getEncoder().encodeToString(digest.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+    }
+
+    /**
+     * STRICT byte-provenance for the multiAdmin lane: re-derive {@code cr}'s producer units
+     * from the FINAL committed model, hash them, and require the digest the phase-1 carrier
+     * recorded. A match proves the frozen bytes the ork just signed are the bytes the login
+     * read will re-derive; a mismatch means they are not, and stamping that quorum signature
+     * would leave the owner set unverifiable at the next token mint.
+     *
+     * <p><b>When to call this.</b> A carrier is framed over the state after EVERY member of
+     * its framing batch has applied, so this is only meaningful at the moment that basis is
+     * EXACTLY applied. Calling it right after the change request's OWN replay is wrong for
+     * every member of a multi-member batch except the one that replays last: the model is then
+     * {@code pre + that member's delta} while the carrier described {@code pre + all deltas},
+     * and the digest mismatches BY CONSTRUCTION. Callers must drive this through
+     * {@link #verifyFramedUnitsWithAppliedBasis}, which fires each member exactly when
+     * {@link #hasAppliedFramingBasis} first holds for it.
+     *
+     * <p>Costs no key material and no extra ork round-trip. Fail-closed: throws
+     * {@link FramingBatchException}, so the commit transaction rolls back.
+     *
+     * <p>No-op for a carrier with no recorded digest (a legacy carrier, or a change request
+     * that framed no producer unit) and on any lane this class signs itself, where the
+     * signature is computed from committed state rather than frozen.
+     */
+    public void verifyFramedUnitHash(KeycloakSession session, RealmModel realm,
+                                     IgaChangeRequestEntity cr) {
+        String framed = cr.getRequestUnitsHash();
+        if (framed == null || framed.isBlank()
+                || !usesFrozenApprovalCarrier(realm, resolveMode(session, realm))) {
+            return;
+        }
+        session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
+        byte[][] committed;
+        try {
+            List<AttestationUnit> units =
+                    buildAllCrUnits(session, realm, cr, /* modelAlreadyPostChange */ true);
+            committed = new byte[units.size()][];
+            for (int i = 0; i < units.size(); i++) {
+                committed[i] = units.get(i).serialize();
+            }
+        } catch (RuntimeException unbuildable) {
+            throw new FramingBatchException(FramingBatchException.CODE_UNIT_HASH_MISMATCH,
+                    framingBatchIdOf(cr), cr.getId(),
+                    "the committed model does not re-derive this change request's producer units ("
+                            + unbuildable.getMessage() + ")");
+        }
+        requireFramedUnitHash(cr, framed, committed);
+    }
+
+    /**
+     * The comparison half of {@link #verifyFramedUnitHash}, independent of the realm
+     * capability gate: the units re-derived from the committed model must hash to what the
+     * carrier framed. Throws {@link FramingBatchException} otherwise.
+     */
+    public static void requireFramedUnitHash(IgaChangeRequestEntity cr, String framed,
+                                             byte[][] committed) {
+        String actual = framedUnitsHash(committed);
+        if (!framed.equals(actual)) {
+            throw new FramingBatchException(FramingBatchException.CODE_UNIT_HASH_MISMATCH,
+                    framingBatchIdOf(cr), cr.getId(),
+                    "the approval carrier framed unit bytes hashing to " + framed
+                            + " but the committed model re-derives " + actual
+                            + ". The quorum signature would not verify against the committed set");
+        }
+    }
+
+    /**
+     * Has the model reached the state {@code cr}'s carrier was framed over, i.e. has EVERY
+     * member of its framing batch applied?
+     *
+     * <p>A member counts as applied once its change request is APPROVED, which the replay sets
+     * before the transaction completes, so this reads true for members applied earlier in the
+     * SAME operation as well as for members committed in an earlier one. An empty framing
+     * batch (a legacy carrier) is trivially satisfied.
+     */
+    public static boolean hasAppliedFramingBasis(EntityManager em, IgaChangeRequestEntity cr) {
+        for (String memberId : cr.getRequestBatchList()) {
+            IgaChangeRequestEntity member = em.find(IgaChangeRequestEntity.class, memberId);
+            if (member == null || !"APPROVED".equals(member.getStatus())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Verify every not-yet-verified change request in {@code members} whose framing basis has
+     * just become fully applied, recording the ones checked in {@code verified}.
+     *
+     * <p>Call this after EACH member of an operation replays, not once at the end. The
+     * verification point is per member: a carrier framed over {@code {A, B}} may only be
+     * checked once both have applied, while one framed over {@code {A}} alone (filed before B
+     * existed, then frozen by its first approval) must be checked as soon as A applies, since
+     * a later replay of B moves the owner set past what that carrier described. Firing each
+     * member at the moment its own basis is first satisfied is the only rule that is correct
+     * for both.
+     */
+    public void verifyFramedUnitsWithAppliedBasis(KeycloakSession session, RealmModel realm,
+                                                  List<IgaChangeRequestEntity> members,
+                                                  Set<String> verified) {
+        if (members == null || members.isEmpty()) {
+            return;
+        }
+        EntityManager em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        for (IgaChangeRequestEntity member : members) {
+            if (member == null || verified.contains(member.getId())
+                    || !hasAppliedFramingBasis(em, member)) {
+                continue;
+            }
+            verifyFramedUnitHash(session, realm, member);
+            verified.add(member.getId());
+        }
+    }
+
+    /**
+     * Fail closed on any committed change request whose framing basis this operation never
+     * reached, so a carrier can never slip through unverified because the group it was framed
+     * with did not fully apply.
+     */
+    public void requireAllFramedUnitsVerified(List<IgaChangeRequestEntity> members,
+                                              Set<String> verified) {
+        if (members == null) {
+            return;
+        }
+        for (IgaChangeRequestEntity member : members) {
+            if (member == null || verified.contains(member.getId())) {
+                continue;
+            }
+            throw new FramingBatchException(FramingBatchException.CODE_BATCH_BROKEN,
+                    framingBatchIdOf(member), member.getId(),
+                    "this operation committed the change request without ever reaching the model "
+                            + "state its carrier was framed over (framing batch "
+                            + member.getRequestBatchList() + " did not all apply)");
+        }
+    }
+
+    /**
+     * Single-change-request form for the lane that commits one at a time: verify now, and fail
+     * closed if the basis is not applied (which for a one-member batch it always is, since the
+     * change request has just replayed).
+     */
+    public void verifyFramedUnitHashWhenBasisApplied(KeycloakSession session, RealmModel realm,
+                                                     IgaChangeRequestEntity cr) {
+        List<IgaChangeRequestEntity> one = List.of(cr);
+        Set<String> verified = new HashSet<>();
+        verifyFramedUnitsWithAppliedBasis(session, realm, one, verified);
+        requireAllFramedUnitsVerified(one, verified);
+    }
+
+    /**
+     * Clear a change request's frozen approval carrier and everything derived from it, so the
+     * next commit attempt fails closed on the missing carrier instead of stamping a signature
+     * over bytes that no longer describe the model. The admin re-approves, which re-frames
+     * against current state.
+     */
+    public static void clearFramingCarrier(EntityManager em, IgaChangeRequestEntity cr) {
+        cr.setRequestModel(null);
+        cr.setRequestBatch(null);
+        cr.setRequestUnitsHash(null);
+        clearAuthorizations(em, cr);
+    }
+
+    /**
+     * Invalidate every PENDING change request whose framing batch contains {@code crId}: the
+     * group whose carriers were framed assuming that change request would apply.
+     *
+     * <p>Called when a change request leaves the approvable pool (denied or blocked) and when a
+     * commit refuses on a broken batch. Without it the survivors keep a quorum signature over a
+     * projected set that will never exist; with it they simply need re-approval, which re-frames
+     * them over the survivors alone. Returns how many carriers were cleared.
+     */
+    public int invalidateFramingBatchOf(KeycloakSession session, RealmModel realm,
+                                        EntityManager em, String crId) {
+        List<IgaChangeRequestEntity> pending = em.createNamedQuery(
+                        "IgaChangeRequest.findPendingWithRequestBatch", IgaChangeRequestEntity.class)
+                .setParameter("realmId", realm.getId())
+                .setMaxResults(CARRIER_SWEEP_LIMIT)
+                .getResultList();
+        int invalidated = 0;
+        for (IgaChangeRequestEntity other : pending) {
+            if (crId.equals(other.getId()) || !other.getRequestBatchList().contains(crId)) {
+                continue;
+            }
+            log.warnf("IGA framing batch invalidated: PENDING change request %s (action %s, batch %s) "
+                            + "was framed assuming change request %s would apply in the same operation, "
+                            + "which it no longer will. Its carrier is cleared; re-approve it to re-frame "
+                            + "against the current state of realm %s.",
+                    other.getId(), other.getActionType(), framingBatchIdOf(other), crId, realm.getName());
+            clearFramingCarrier(em, other);
+            invalidated++;
+        }
+        if (invalidated > 0) {
+            em.flush();
+        }
+        return invalidated;
+    }
+
+    /**
+     * Invalidate the carriers of an ENTIRE framing batch, including the change request that
+     * refused. Used when the batch is found broken at commit: every member's bytes assumed a
+     * group that no longer exists, so none of them may be committed as framed.
+     */
+    public int invalidateFramingBatch(KeycloakSession session, RealmModel realm,
+                                      EntityManager em, IgaChangeRequestEntity cr) {
+        int invalidated = 0;
+        for (String memberId : cr.getRequestBatchList()) {
+            IgaChangeRequestEntity member = em.find(IgaChangeRequestEntity.class, memberId);
+            if (member == null || !"PENDING".equals(member.getStatus())) {
+                continue;
+            }
+            clearFramingCarrier(em, member);
+            invalidated++;
+        }
+        if (!cr.getRequestBatchList().contains(cr.getId()) && "PENDING".equals(cr.getStatus())) {
+            clearFramingCarrier(em, cr);
+            invalidated++;
+        }
+        em.flush();
+        log.warnf("IGA framing batch %s invalidated in realm %s (%d carrier(s)) after change request %s "
+                        + "refused: the group the carriers were framed with is no longer intact.",
+                framingBatchIdOf(cr), realm.getName(), invalidated, cr.getId());
+        return invalidated;
+    }
+
+    /**
+     * Invalidate the frozen approval carrier of every OTHER still-PENDING change request that
+     * shares an owner set this commit just changed, so it cannot later stamp a quorum signature
+     * over the pre-commit member set.
+     *
+     * <p>Clears {@code REQUEST_MODEL} and the recorded authorizations, exactly as the
+     * threshold-policy re-pin does when its signed content moves (the old approvals genuinely
+     * signed different bytes). The next commit attempt then fails closed in
+     * {@code signMultiAdminUnitsViaPolicy} with "has no approval-model carrier" instead of
+     * corrupting the column, and re-opening the approval enclave re-frames the carrier against
+     * the now-current set, which is correct by construction.
+     *
+     * <p>This is what closes the CROSS-REQUEST half of the hazard: two CRs approved in one
+     * enclave session and committed one per request are just as stale as two committed in one
+     * batch. Only runs on a {@link #usesFrozenApprovalCarrier} realm.
+     */
+    private void invalidateStaleSetUnitCarriers(KeycloakSession session, RealmModel realm,
+                                                EntityManager em, List<String> owners,
+                                                List<String> committedCrIds) {
+        Set<String> committedOwners = new HashSet<>(owners);
+        List<IgaChangeRequestEntity> pending = new IgaChangeRequestService(em, session)
+                .listPendingByActionTypeIn(realm.getId(), OWNER_SET_ACTION_TYPES, null, CARRIER_SWEEP_LIMIT);
+        int invalidated = 0;
+        for (IgaChangeRequestEntity other : pending) {
+            String carrier = other.getRequestModel();
+            if (carrier == null || carrier.isBlank()) {
+                continue;
+            }
+            String owner = setUnitOwnerKey(session, realm, other);
+            if (owner == null || !committedOwners.contains(owner)) {
+                continue;
+            }
+            // A carrier framed over a batch that ALREADY contains everything this operation
+            // committed is not stale: its frozen bytes assumed exactly these applications, and
+            // they just happened. Clearing it would force a re-approval that changes nothing.
+            if (other.getRequestBatchList().containsAll(committedCrIds)) {
+                continue;
+            }
+            clearFramingCarrier(em, other);
+            invalidated++;
+            log.warnf("IGA set-unit carrier invalidated: PENDING change request %s (action %s) shares "
+                    + "owner set %s with a change request just committed in realm %s. Its approval "
+                    + "froze the pre-commit member set, so its quorum signature would no longer match "
+                    + "the committed set. Re-open the approval enclave to re-approve it.",
+                    other.getId(), other.getActionType(), owner, realm.getName());
+        }
+        if (invalidated > 0) {
+            em.flush();
+        }
+    }
+
+    /** Upper bound on the pending-CR scan {@link #invalidateStaleSetUnitCarriers} performs. */
+    private static final int CARRIER_SWEEP_LIMIT = 1000;
+
+    private void auditStampedSetUnits(EntityManager em, RealmModel realm, List<String> owners,
+                                      Map<String, AttestationUnit> unitByOwner,
+                                      Map<String, IgaChangeRequestEntity> crByOwner) {
+        for (String owner : owners) {
+            AttestationUnit unit = unitByOwner.get(owner);
+            String stored = UnitColumnMapping.readStored(em, unit);
+            if (stored != null && !isReplayableVvkSig(stored)) {
+                log.warnf("IGA set-unit audit: unit %s target %s in realm %s carries a "
+                        + "non-replayable attestation after commit of change request %s. The "
+                        + "next token mint will reject it in the uniform login replay.",
+                        unit.unitType(), unit.targetId(), realm.getName(),
+                        crByOwner.get(owner).getId());
+            }
+        }
+    }
+
+    /**
+     * Post-stamp fail-closed invariant for ONE owner set: the signature now stored in the
+     * owner's attestation column must be the signature this commit computed, and the bytes
+     * it was computed over must still be what the committed model serializes to.
+     *
+     * <p>Re-derives the unit from the live model AFTER the stamp (a second, independent
+     * read) rather than trusting the copy that was signed, so a model write that landed
+     * between the sign and the stamp is caught. Then re-reads the column through
+     * {@link UnitColumnMapping}, the SAME read the login performs, so a fan-out that
+     * overwrote this owner's signature is caught at commit rather than at the next login.
+     * On a real-signing-capable realm the stored value must additionally be a replayable
+     * 64-byte VVK signature, never a stub the login read would reject.
+     */
+    private void verifyStampedSetUnit(KeycloakSession session, RealmModel realm, EntityManager em,
+                                      IgaChangeRequestEntity cr, byte[] signedEnvelope,
+                                      String stampedSig) {
+        em.flush();
+        AttestationUnit reDerived = buildOwnerSetUnit(session, realm, cr);
+        if (reDerived == null) {
+            // The owner vanished between the stamp and this re-read (the caller only reaches
+            // here for a change request that DID build a unit). Nothing to verify against.
+            return;
+        }
+        String unitType = reDerived.unitType();
+        String targetId = reDerived.targetId();
+        if (!java.util.Arrays.equals(signedEnvelope, reDerived.serialize())) {
+            throw new SetUnitAttestationException(unitType, targetId, realm.getName(),
+                    "the committed owner set no longer serializes to the envelope that was "
+                            + "signed (change request " + cr.getId() + ")");
+        }
+        String stored = UnitColumnMapping.readStored(em, reDerived);
+        if (stored == null || stored.isBlank()) {
+            throw new SetUnitAttestationException(unitType, targetId, realm.getName(),
+                    "the owner set carries no attestation after the stamp (change request "
+                            + cr.getId() + ")");
+        }
+        if (!stored.equals(stampedSig)) {
+            throw new SetUnitAttestationException(unitType, targetId, realm.getName(),
+                    "the owner set's attestation is not the signature computed over the "
+                            + "committed set; another write overwrote it (change request "
+                            + cr.getId() + ")");
+        }
+        if (isRealSigningCapable(realm) && !isReplayableVvkSig(stored)) {
+            throw new SetUnitAttestationException(unitType, targetId, realm.getName(),
+                    "the owner set carries a stub attestation on a real-signing-capable realm "
+                            + "(change request " + cr.getId() + ")");
+        }
+    }
+
+    /**
+     * May {@link #stampCoalescedSetUnits} overwrite an edge set's existing attestation on this
+     * realm? Only where {@link #signProducerEnvelopes} is the AUTHORITATIVE signer, which is
+     * exactly where it takes its real branch, plus the case where nothing real can be lost:
+     *
+     * <ul>
+     *   <li>{@link #MODE_FIRST_ADMIN}: {@link #signProducerEnvelopes} runs the real firstAdmin
+     *       VVK ceremony when capable, and the same stub every other signer on that realm would
+     *       produce when not.</li>
+     *   <li>NOT {@link #isRealSigningCapable}: a dev/test realm where every signer stubs, so no
+     *       replayable signature exists to destroy.</li>
+     * </ul>
+     *
+     * <p>Everything else (notably a real-signing-capable multiAdmin realm) is EXCLUDED. There
+     * {@link #sign} routes an edge CR to {@code signMultiAdminUnitViaPolicy}, whose real 64-byte
+     * VVK signature the dispatcher fans across the owner set; {@link #signProducerEnvelopes}
+     * would return the {@link #DUMMY_SIG_PREFIX} stub and replacing a real signature with it
+     * breaks the next token mint.
+     *
+     * <p>Keyed on mode + capability, NOT on whether the CR still carries a phase-1 doken carrier
+     * ({@code getRequestModel}): the multiAdmin signer is selected by {@code realCeremonyEligible
+     * && isRealSigningCapable} in {@link #sign}, and the carrier column is not a reliable proxy
+     * for it (it is cleared on some paths), so a carrier-keyed test misses carrier-less edge CRs
+     * that were nonetheless really signed.
+     */
+    private static boolean isAuthoritativeSetSigner(RealmModel realm, String mode) {
+        return MODE_FIRST_ADMIN.equals(mode) || !isRealSigningCapable(realm);
+    }
+
+    /**
+     * Does a stored attestation carry a replayable bare 64-byte VVK signature (the shape the
+     * login read decodes), as opposed to the {@code base64(sha256(...))} stub?
+     */
+    private static boolean isReplayableVvkSig(String attestation) {
+        if (attestation == null || !attestation.startsWith(FIRSTADMIN_SIG_PREFIX)) {
+            return false;
+        }
+        try {
+            return java.util.Base64.getDecoder()
+                    .decode(attestation.substring(FIRSTADMIN_SIG_PREFIX.length())).length == 64;
+        } catch (IllegalArgumentException notBase64) {
+            return false;
+        }
+    }
+
     /**
      * Commit-time distribution (multiAdmin, real-signing-capable). Sign the
      * phase-1 collected-doken carrier ONCE via {@link #signMultiAdminUnitsViaPolicy}
@@ -4952,6 +6875,10 @@ public class TideAttestor implements IgaAttestor {
         // double-apply). The SAME enumerateLiveCrUnits the phase-1 scratch path ran is used, so
         // sigs[i] (carrier order) lands on units.get(i)'s column by construction.
         List<AttestationUnit> units = buildAllCrUnits(session, realm, cr, /* modelAlreadyPostChange */ true);
+        // SEND-time gate, for a carrier frozen BEFORE this bound existed (or by an older node
+        // mid-upgrade). Refusing here still beats an ork 500: the commit fails closed with a
+        // message naming the change request instead of half-stamping the columns.
+        requireCarrierUnitCountWithinBound(cr, units.size(), "distribution");
         if (units.isEmpty()) {
             // No producer unit framed at phase-1 for this action — nothing to distribute.
             // (The carrier carried only the regular-canonical carry-through; no per-unit
@@ -5017,6 +6944,29 @@ public class TideAttestor implements IgaAttestor {
         }
         String prefix = MODE_FIRST_ADMIN.equals(mode) ? FIRSTADMIN_SIG_PREFIX : DUMMY_SIG_PREFIX;
         return stubSign(prefix, envelope);
+    }
+
+    /**
+     * BATCH form of {@link #signProducerEnvelope}: the identical mode dispatch, but a
+     * real-signing-capable firstAdmin realm signs the WHOLE batch in one (chunked)
+     * VVK ceremony round-trip via {@link #signEnvelopesWithFirstAdminVvk} instead of one
+     * ceremony per envelope. {@code out[i]} is byte-identical to what
+     * {@code signProducerEnvelope(session, realm, mode, envelopes[i])} would return
+     * (same real sig bytes for the same envelope on the real path, same deterministic
+     * stub on the stub path), so callers may batch freely. Fail-closed like the single
+     * form: a real ceremony failure propagates.
+     */
+    String[] signProducerEnvelopes(KeycloakSession session, RealmModel realm, String mode,
+                                   byte[][] envelopes) {
+        if (MODE_FIRST_ADMIN.equals(mode) && isRealSigningCapable(realm)) {
+            return signEnvelopesWithFirstAdminVvk(realm, envelopes);
+        }
+        String prefix = MODE_FIRST_ADMIN.equals(mode) ? FIRSTADMIN_SIG_PREFIX : DUMMY_SIG_PREFIX;
+        String[] out = new String[envelopes.length];
+        for (int i = 0; i < envelopes.length; i++) {
+            out[i] = stubSign(prefix, envelopes[i]);
+        }
+        return out;
     }
 
     /**
@@ -5108,6 +7058,92 @@ public class TideAttestor implements IgaAttestor {
             String sig = signProducerEnvelope(session, realm, mode, env);
             em.createQuery("UPDATE ClientEntity e SET e.attestation = :sig WHERE e.id = :id")
                     .setParameter("sig", sig).setParameter("id", client.getId()).executeUpdate();
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    /**
+     * firstAdmin-lane CREATE_CLIENT stamp: sign + stamp the client's FULL owned unit
+     * family (the shared {@link #clientOwnedUnits} enumeration, WITH the folded per-mapper
+     * units) instead of only the {@code client_config} node. Envelopes are the SAME
+     * {@link RealmAttestationExporter} builder bytes the login read replays; the batch is
+     * signed in ONE VVK ceremony round-trip via {@link #signProducerEnvelopes} (per-unit
+     * byte-identical to a {@link #signProducerEnvelope} call), and each sig is stamped
+     * through {@link UnitColumnMapping} exactly like the multiAdmin distribution and the
+     * ADOPT stampers. Same fail-closed wrapping as the other stampers.
+     */
+    private void stampCreateClientUnitFamily(KeycloakSession session, RealmModel realm, String mode,
+                                             EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            ClientModel client = resolveClientForStamp(realm, cr);
+            if (client == null) return;
+            List<AttestationUnit> units = clientOwnedUnits(session, client, realm.getId(),
+                    /* includeOwnedMappers */ true);
+            byte[][] envelopes = new byte[units.size()][];
+            for (int i = 0; i < units.size(); i++) {
+                envelopes[i] = units.get(i).serialize();
+            }
+            String[] sigs = signProducerEnvelopes(session, realm, mode, envelopes);
+            for (int i = 0; i < units.size(); i++) {
+                UnitColumnMapping.stamp(em, units.get(i), sigs[i]);
+            }
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    /**
+     * firstAdmin per-CR stamp for CREATE_ROLE — the role-family parallel of
+     * {@link #stampCreateClientUnitFamily}. CREATE_ROLE folds inline composites into ONE CR, so
+     * this commit is the ONLY per-CR signer of {@code role_composite_children_set}; stamping only
+     * {@code role_definition} (the old {@code stampRoleDefinition}) left the composite-children
+     * column a DUMMY stub that relied on the {@code convergeAfterCommit} backstop. Sign + stamp
+     * the whole {@link #roleOwnedUnits} family (leaf-gated, so a non-composite role stamps only its
+     * node). Defense-in-depth: the multiAdmin fix is the {@code enumerateLiveCrUnits} framing.
+     */
+    private void stampCreateRoleUnitFamily(KeycloakSession session, RealmModel realm, String mode,
+                                           EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String roleId = firstRowKeyOr(cr, "ROLE_ID", "ID");
+            if (roleId == null) return;
+            RoleModel role = realm.getRoleById(roleId);
+            if (role == null) return;
+            List<AttestationUnit> units = roleOwnedUnits(role, realm.getId());
+            byte[][] envelopes = new byte[units.size()][];
+            for (int i = 0; i < units.size(); i++) {
+                envelopes[i] = units.get(i).serialize();
+            }
+            String[] sigs = signProducerEnvelopes(session, realm, mode, envelopes);
+            for (int i = 0; i < units.size(); i++) {
+                UnitColumnMapping.stamp(em, units.get(i), sigs[i]);
+            }
+        } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
+    }
+
+    /**
+     * firstAdmin per-CR stamp for CREATE_CLIENT_SCOPE — the scope-family parallel of
+     * {@link #stampCreateClientUnitFamily}. CREATE_CLIENT_SCOPE folds inline protocol mappers into
+     * ONE CR, so this commit is the ONLY per-CR signer of the scope's {@code client_scope_mapper_set}
+     * + each {@code protocol_mapper}; stamping only {@code client_scope_config} (the old
+     * {@code stampClientScopeConfig}) left those mapper columns a DUMMY stub that relied on the
+     * {@code convergeAfterCommit} backstop. Sign + stamp the whole {@link #clientScopeOwnedUnits}
+     * family (mapper-set leaf-gated). Defense-in-depth: the multiAdmin fix is the
+     * {@code enumerateLiveCrUnits} framing.
+     */
+    private void stampCreateClientScopeUnitFamily(KeycloakSession session, RealmModel realm, String mode,
+                                                  EntityManager em, IgaChangeRequestEntity cr) {
+        try {
+            String scopeId = firstRowKeyOr(cr, "SCOPE_ID", "ID");
+            if (scopeId == null) return;
+            ClientScopeModel scope = realm.getClientScopeById(scopeId);
+            if (scope == null) return;
+            List<AttestationUnit> units = clientScopeOwnedUnits(scope, realm.getId(),
+                    /* includeOwnedMappers */ true);
+            byte[][] envelopes = new byte[units.size()][];
+            for (int i = 0; i < units.size(); i++) {
+                envelopes[i] = units.get(i).serialize();
+            }
+            String[] sigs = signProducerEnvelopes(session, realm, mode, envelopes);
+            for (int i = 0; i < units.size(); i++) {
+                UnitColumnMapping.stamp(em, units.get(i), sigs[i]);
+            }
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
 
@@ -5281,6 +7317,16 @@ public class TideAttestor implements IgaAttestor {
                 String sig = signProducerEnvelope(session, realm, mode, env);
                 em.createQuery("UPDATE ClientScopeEntity e SET e.clientScopeMapperSetAttestation = :sig WHERE e.id = :id")
                         .setParameter("sig", sig).setParameter("id", scopeId).executeUpdate();
+            }
+            // MIRRORS the framing enumerator (enumerateLiveCrUnits): each mapper this change
+            // request adds or updates owns a protocol_mapper column of its own that the login
+            // read replays. Stamping only the owner set left that column NULL or stubbed.
+            // Same builder, same jwt-relevance filter, same order as the framing side.
+            List<AttestationUnit> mapperUnits = new ArrayList<>();
+            addOwnedMapperUnits(mapperUnits, realm, cr, cr.getActionType(), realm.getId());
+            for (AttestationUnit unit : mapperUnits) {
+                UnitColumnMapping.stamp(em, unit,
+                        signProducerEnvelope(session, realm, mode, unit.serialize()));
             }
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
@@ -5471,16 +7517,14 @@ public class TideAttestor implements IgaAttestor {
             ClientModel client = realm.getClientById(clientUuid);
             if (client == null) return;
             // client_config (1), client_scope_assignment_set (11), client_mapper_set (12),
-            // scope_role_allowlist_set/client (14).
-            signAndStampUnit(session, realm, mode, em,
-                    RealmAttestationExporter.clientConfig(session, client, realm.getId()));
-            signAndStampUnit(session, realm, mode, em,
-                    RealmAttestationExporter.clientScopeAssignmentSet(client, realm.getId()));
-            signAndStampUnit(session, realm, mode, em,
-                    RealmAttestationExporter.clientMapperSet(client, realm.getId()));
-            signAndStampUnit(session, realm, mode, em,
-                    RealmAttestationExporter.scopeRoleAllowlistSet(
-                            ParentType.client, client.getId(), client, realm.getId()));
+            // scope_role_allowlist_set/client (14): the shared clientOwnedUnits family,
+            // WITHOUT the per-mapper units: a pre-existing client's mappers get their own
+            // ADOPT_PROTOCOL_MAPPER edge CRs (see stampAdoptProtocolMapper), unlike the
+            // folded mappers of a governed CREATE_CLIENT.
+            for (AttestationUnit unit : clientOwnedUnits(session, client, realm.getId(),
+                    /* includeOwnedMappers */ false)) {
+                signAndStampUnit(session, realm, mode, em, unit);
+            }
         } catch (RuntimeException fatal) { rethrowIfFailClosed(fatal); }
     }
 

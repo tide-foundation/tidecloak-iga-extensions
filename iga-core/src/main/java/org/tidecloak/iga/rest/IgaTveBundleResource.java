@@ -307,12 +307,38 @@ public class IgaTveBundleResource {
             }
 
             TokenManager tokenManager = new TokenManager();
-            // TokenManager.createClientAccessToken:
+            // TokenManager.createClientAccessToken (KC 26.7.0):
             //   public AccessToken createClientAccessToken(KeycloakSession, RealmModel, ClientModel,
-            //                                              UserModel, UserSessionModel, ClientSessionContext)
+            //                                              UserModel, UserSessionModel, ClientSessionContext,
+            //                                              boolean isOffline)
             // This is the claim-construction path (initToken + transformAccessToken) and does NOT
             // call session.tokens().encode(...), so the Tide-signed branch in DefaultTokenManager
             // is never reached.
+            //
+            // isOffline (NEW in 26.7.0; it replaced a `UriInfo uriInfo` parameter that
+            // initToken never actually read). We pass FALSE. This is a synthesized
+            // TVE claim-preview bundle, not an offline token: nothing is persisted, no
+            // refresh token is issued, and there is no offline user session.
+            //
+            // isOffline is threaded ONLY into
+            //   encoder.getTokenContextFromClientSessionContext(clientSessionCtx, rawId, isOffline)
+            // whose result is encoded into the token id (jti). It does NOT affect `exp` —
+            // initToken derives `offlineTokenRequested` independently, from whether the
+            // offline_access client scope is present in the ClientSessionContext.
+            //
+            // On THIS call site the flag is doubly inert, which is worth stating so nobody
+            // "fixes" it to true later:
+            //   1. DefaultTokenContextEncoderProvider checks the user session's persistence
+            //      state FIRST. Our userSession is created with SessionPersistenceState
+            //      .TRANSIENT (see above), so it takes the transient branch and the
+            //      isOffline argument is never read at all. With no CREATED_FROM_PERSISTENT
+            //      note on the session, the SessionType resolves to TRANSIENT.
+            //   2. Even that only shapes the encoded jti prefix, and we unconditionally
+            //      overwrite the jti with the engine-supported "trrtcc:" prefix a few lines
+            //      below.
+            // Passing true would therefore change nothing today, but it would be a lie about
+            // the call site's semantics and would start mattering the moment this path is
+            // given a persistent session.
 
             // Diagnostic — DEBUG log just before the mapper pipeline runs.
             // If mapperCount == 0 the cause is upstream (scope/user filtering
@@ -338,7 +364,8 @@ public class IgaTveBundleResource {
             }
 
             AccessToken claims = tokenManager.createClientAccessToken(
-                    session, realm, client, user, userSession, clientSessionCtx);
+                    session, realm, client, user, userSession, clientSessionCtx,
+                    /* isOffline = */ false);
 
             // Force engine-compatible jti prefix "trrtcc:" regardless of whether
             // the resolved TokenContextEncoder chose lightweight (encoded "lt")

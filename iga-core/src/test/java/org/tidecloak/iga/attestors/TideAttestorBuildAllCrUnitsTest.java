@@ -147,6 +147,97 @@ class TideAttestorBuildAllCrUnitsTest {
     }
 
     @Test
+    void createClientCr_enumeratesTheFullClientOwnedFamily_withFoldedMappers_byteIdentical() {
+        // Regression guard for the CREATE_CLIENT multiAdmin coverage bug: the carrier
+        // historically framed ONLY the client_config node (+ SA user units). But KC attaches
+        // the realm default/optional scopes during client creation and any rep-carried
+        // protocol mappers are FOLDED into the CREATE_CLIENT CR (isOnClientCreationPath), so
+        // no separate ASSIGN_SCOPE / ADD_PROTOCOL_MAPPER CR ever signs them. The first login
+        // to the new client emits client_scope_assignment_set / client_mapper_set /
+        // scope_role_allowlist_set (and a protocol_mapper per folded mapper) and fail-closed
+        // on their NULL columns in replayOrFailClosed. On firstAdmin realms convergeAfterCommit
+        // self-healed the NULLs; multiAdmin realms kept them forever.
+        //
+        // The fix: the CREATE_CLIENT branch of enumerateLiveCrUnits frames the client's FULL
+        // owned unit family via the shared clientOwnedUnits enumerator, so the quorum signs
+        // every client-owned unit the login replays.
+        org.keycloak.models.ProtocolMapperModel folded = new org.keycloak.models.ProtocolMapperModel();
+        folded.setId("mapper-folded-1");
+        folded.setName("custom-audience");
+        folded.setProtocol("openid-connect");
+        folded.setProtocolMapper("oidc-audience-mapper");
+        folded.setConfig(java.util.Map.of("included.custom.audience", "aud-x"));
+        // A JWT-body-irrelevant mapper (login filters it via JWT_BODY_IRRELEVANT_FACTORIES);
+        // the carrier must apply the SAME filter or it would frame a unit the login never
+        // emits (an orphaned sign) and drift from the login closure.
+        org.keycloak.models.ProtocolMapperModel irrelevant = new org.keycloak.models.ProtocolMapperModel();
+        irrelevant.setId("mapper-irrelevant-1");
+        irrelevant.setName("acr");
+        irrelevant.setProtocol("openid-connect");
+        irrelevant.setProtocolMapper("oidc-acr-mapper");
+
+        ClientModel client = mock(ClientModel.class);
+        when(client.getId()).thenReturn(CLIENT_UUID);
+        when(client.getClientId()).thenReturn("governed-app");
+        when(client.getClientScopes(org.mockito.ArgumentMatchers.anyBoolean()))
+                .thenReturn(java.util.Collections.emptyMap());
+        when(client.getScopeMappingsStream()).thenAnswer(inv -> java.util.stream.Stream.empty());
+        when(client.getProtocolMappersStream())
+                .thenAnswer(inv -> java.util.stream.Stream.of(folded, irrelevant));
+        when(client.getProtocolMapperById("mapper-folded-1")).thenReturn(folded);
+        when(client.isServiceAccountsEnabled()).thenReturn(false);
+        when(realm.getClientById(CLIENT_UUID)).thenReturn(client);
+        when(cr.getActionType()).thenReturn("CREATE_CLIENT");
+        // CREATE_CLIENT ROWS_JSON carries ID (own UUID) + CLIENT_ID (human id).
+        when(cr.getRowsJson()).thenReturn(
+                "[{\"ID\":\"" + CLIENT_UUID + "\",\"CLIENT_ID\":\"governed-app\"}]");
+
+        List<AttestationUnit> units = attestor.buildAllCrUnits(session, realm, cr, true);
+
+        assertEquals(5, units.size(),
+                "CREATE_CLIENT must frame the FULL client-owned family (config + 3 derived "
+                        + "owner-sets + 1 JWT-relevant folded mapper); got " + units.size());
+        assertEquals(AttestationUnitType.CLIENT_CONFIG, units.get(0).type(),
+                "the client_config node must stay first in the family");
+        assertEquals(CLIENT_UUID, units.get(0).targetId());
+        assertEquals(AttestationUnitType.CLIENT_SCOPE_ASSIGNMENT_SET, units.get(1).type(),
+                "the folded default/optional scope attachments' set unit must be framed");
+        assertEquals(CLIENT_UUID, units.get(1).targetId());
+        assertEquals(AttestationUnitType.CLIENT_MAPPER_SET, units.get(2).type());
+        assertEquals(CLIENT_UUID, units.get(2).targetId());
+        assertEquals(AttestationUnitType.SCOPE_ROLE_ALLOWLIST_SET, units.get(3).type());
+        assertEquals(CLIENT_UUID, units.get(3).targetId());
+        assertEquals(AttestationUnitType.PROTOCOL_MAPPER, units.get(4).type(),
+                "each JWT-relevant folded mapper must be framed as its own protocol_mapper unit");
+        assertEquals("mapper-folded-1", units.get(4).targetId());
+        assertFalse(units.stream().anyMatch(u ->
+                        u.type() == AttestationUnitType.PROTOCOL_MAPPER
+                                && "mapper-irrelevant-1".equals(u.targetId())),
+                "a JWT-body-irrelevant mapper must NOT be framed (the login never emits it)");
+
+        // Byte-identity with the producer/login builders (the VVK sig verifies over the
+        // LITERAL envelope bytes the login re-derives, so this equality is load-bearing).
+        assertArrayEquals(org.tidecloak.iga.producer.RealmAttestationExporter
+                        .clientConfig(session, client, REALM_ID).serialize(),
+                units.get(0).serialize());
+        assertArrayEquals(org.tidecloak.iga.producer.RealmAttestationExporter
+                        .clientScopeAssignmentSet(client, REALM_ID).serialize(),
+                units.get(1).serialize());
+        assertArrayEquals(org.tidecloak.iga.producer.RealmAttestationExporter
+                        .clientMapperSet(client, REALM_ID).serialize(),
+                units.get(2).serialize());
+        assertArrayEquals(org.tidecloak.iga.producer.RealmAttestationExporter
+                        .scopeRoleAllowlistSet(org.tidecloak.iga.producer.units.ParentType.client,
+                                CLIENT_UUID, client, REALM_ID).serialize(),
+                units.get(3).serialize());
+        assertArrayEquals(org.tidecloak.iga.producer.RealmAttestationExporter
+                        .protocolMapperUnit(folded,
+                                org.tidecloak.iga.producer.units.ParentType.client,
+                                CLIENT_UUID, REALM_ID).serialize(),
+                units.get(4).serialize());
+    }
+
+    @Test
     void assignScopeCr_enumeratesTheClientScopeAssignmentSet() {
         ClientModel client = mock(ClientModel.class);
         when(client.getId()).thenReturn(CLIENT_UUID);

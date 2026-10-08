@@ -90,7 +90,7 @@ class IgaRealmPolicyServiceByNameTest {
     @Test
     void upsert_insertsKeyedByName() {
         stubByName(null); // no existing -> INSERT
-        service.upsert(REALM_ID, "custom-x", "body", "SIG", null, "EXPLICIT", "PUBLIC", 2, null);
+        service.upsert(REALM_ID, "custom-x", "body", "SIG", null, "EXPLICIT", "PUBLIC", 2, null, null);
 
         ArgumentCaptor<IgaRolePolicyEntity> cap = ArgumentCaptor.forClass(IgaRolePolicyEntity.class);
         verify(em).persist(cap.capture());

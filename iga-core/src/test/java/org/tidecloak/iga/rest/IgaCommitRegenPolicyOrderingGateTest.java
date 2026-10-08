@@ -75,6 +75,9 @@ class IgaCommitRegenPolicyOrderingGateTest {
         when(realm.getName()).thenReturn("test-realm");
         when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
         when(jpa.getEntityManager()).thenReturn(em);
+        // commitResolved runs the single-CR pipeline under the per-realm IgaBulkLock, so the
+        // cluster mutex must resolve; run its callable inline.
+        IgaTestClusterLock.stubInlineClusterLock(session);
         resource = new IgaAdminResource(session, realm, auth);
 
         // resolveMode(...) -> multiAdmin via the IgaAuthorizer.findByRealm named query.
@@ -181,6 +184,9 @@ class IgaCommitRegenPolicyOrderingGateTest {
     @Test
     @SuppressWarnings("unchecked")
     void blockedWhenTideRealmAdminGrantStillPending() {
+        // This policy CR pins no OLD/NEW thresholds, so the direction is unknown and the guard
+        // treats it as RAISING, the old behaviour, unchanged. See
+        // loweringPolicyIsNotBlockedByPendingRevokes for the narrowing.
         IgaChangeRequestEntity policy = policyCr();
         when(em.find(IgaChangeRequestEntity.class, POLICY_CR_ID)).thenReturn(policy);
         stubFindPendingPolicy(policy);
@@ -230,6 +236,51 @@ class IgaCommitRegenPolicyOrderingGateTest {
                     "a grant commit must never be blocked by the REGEN ordering guard");
         }
         assertEquals(401, resp.getStatus());
+    }
+
+    @Test
+    void loweringPolicyIsNotBlockedByPendingRevokes() {
+        // The deadlock this guard caused when applied in both directions. A policy CR LOWERING the
+        // threshold 2 -> 1 sits behind two pending tide-realm-admin revokes. Holding it back is
+        // fatal: those revokes remove the very approvers whose signatures the policy CR needs, and
+        // once they commit the threshold can never be collected again. A lowering policy strands
+        // nothing (it makes every pending CR easier), so the guard must let it through.
+        IgaChangeRequestEntity policy = policyCr();
+        policy.setRowsJson("[{\"OLD_THRESHOLD\":2,\"NEW_THRESHOLD\":1,\"ROLE_ID\":\""
+                + TIDE_ROLE_ID + "\"}]");
+        when(em.find(IgaChangeRequestEntity.class, POLICY_CR_ID)).thenReturn(policy);
+        stubFindPendingPolicy(policy);
+        stubPendingAssignments(List.of(), List.of(
+                grantCr("revoke-a", "REVOKE_ROLES"), grantCr("revoke-b", "REVOKE_ROLES")));
+        when(auth.adminAuth()).thenReturn(null);
+
+        Response resp = commitResolved(POLICY_CR_ID, policy);
+
+        if (resp.getStatus() == 412 && resp.getEntity() instanceof Map<?, ?> m) {
+            assertNotEquals("PENDING_ADMIN_GRANTS", m.get("error"),
+                    "a LOWERING policy CR must not be held behind the revokes it accompanies");
+        }
+        assertEquals(401, resp.getStatus(),
+                "a lowering policy falls through the ordering gate to the 401 no-admin branch");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void raisingPolicyIsStillBlocked_whenItCarriesItsThresholds() {
+        // The narrowing is by DIRECTION only. A policy CR that genuinely raises 1 -> 2 is blocked
+        // exactly as before, thresholds pinned or not.
+        IgaChangeRequestEntity policy = policyCr();
+        policy.setRowsJson("[{\"OLD_THRESHOLD\":1,\"NEW_THRESHOLD\":2,\"ROLE_ID\":\""
+                + TIDE_ROLE_ID + "\"}]");
+        when(em.find(IgaChangeRequestEntity.class, POLICY_CR_ID)).thenReturn(policy);
+        stubFindPendingPolicy(policy);
+        stubPendingAssignments(List.of(grantCr("grant-cr", "GRANT_ROLES")), List.of());
+
+        Response resp = commitResolved(POLICY_CR_ID, policy);
+
+        assertEquals(412, resp.getStatus());
+        Map<String, Object> body = (Map<String, Object>) resp.getEntity();
+        assertEquals("PENDING_ADMIN_GRANTS", body.get("error"));
     }
 
     @Test

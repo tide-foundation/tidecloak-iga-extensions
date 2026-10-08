@@ -1,6 +1,10 @@
 package org.tidecloak.iga.providers;
 
+import org.keycloak.Config;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.services.IgaMigrationContext;
+import org.keycloak.models.AdminRoles;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.GroupModel;
@@ -8,6 +12,8 @@ import org.keycloak.models.GroupModel.Type;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
+import org.keycloak.models.UserModel;
+import org.keycloak.models.UserSessionModel;
 import org.keycloak.models.jpa.JpaRealmProvider;
 import org.keycloak.models.jpa.RealmAdapter;
 import org.keycloak.models.jpa.entities.ClientEntity;
@@ -32,6 +38,11 @@ import java.util.Set;
 public class IgaRealmProvider extends JpaRealmProvider {
 
     private static final Logger log = Logger.getLogger(IgaRealmProvider.class);
+
+    /** SPI config key for the master admin realm-delete bypass, read by the factory. Default on. */
+    static final String MASTER_ADMIN_DELETE_BYPASS_KEY = "masterAdminRealmDeleteBypass";
+
+    static volatile boolean masterAdminDeleteBypass = true;
 
     private final KeycloakSession igaSession;
 
@@ -61,6 +72,10 @@ public class IgaRealmProvider extends JpaRealmProvider {
         // limited to the firstAdmin tide-claims passthrough). Inert when the flag is
         // absent — ongoing admin edits stay governed.
         if (service.isVendorProvisioning()) return false;
+        // TIDECLOAK: Keycloak's own model migration must apply directly — never
+        // captured as a governance CR (would 409 on a realm with a pending CR
+        // and abort boot). See IgaMigrationContext.
+        if (IgaMigrationContext.isOnKeycloakMigrationPath()) return false;
         Object replay = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
         return !"true".equals(replay);
     }
@@ -95,6 +110,123 @@ public class IgaRealmProvider extends JpaRealmProvider {
             }
         }
         return base;
+    }
+
+    // -------------------------------------------------------------------------
+    // REALM delete — governed as a first-class DELETE_REALM change request.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Whole-realm delete (DELETE {realm} → RealmAdminResource.deleteRealm →
+     * RealmManager.removeRealm → model.removeRealm(id)). Governed as a first-class
+     * {@code DELETE_REALM} CR (entityType {@code REALM}).
+     *
+     * <p><b>Why this override exists.</b> Without it, the delete falls through to
+     * {@code JpaRealmProvider.removeRealm}, whose cascade calls
+     * {@code session.clients().removeClients(realm)} →
+     * {@code JpaRealmProvider.removeClients} which iterates
+     * {@code forEach(id -> removeClient(realm, id))}. That is a VIRTUAL call and
+     * {@code this} is the IGA mega-provider, so it re-enters
+     * {@link #removeClient(RealmModel, String)} — which, on an IGA-on realm, MIS-FILES
+     * a {@code DELETE_CLIENT} CR for the realm's first client and rolls the whole
+     * realm-delete back. The admin then sees "a change request was created" (a
+     * DELETE_CLIENT, not a DELETE_REALM), and committing it deletes only that one
+     * client while the realm survives. Capturing the delete HERE, before the cascade,
+     * closes that leak.
+     *
+     * <p>The REAL teardown runs on commit-replay
+     * ({@code IgaReplayDispatcher.replayDeleteRealm} → {@code RealmManager.removeRealm})
+     * under {@code IGA_REPLAY_ACTIVE}, where {@link #isIgaActive(RealmModel)} returns
+     * false — so this override falls straight through to {@code super.removeRealm(id)}
+     * and the internal cascade passes through the IGA wrappers WITHOUT re-capture.
+     */
+    @Override
+    public boolean removeRealm(String id) {
+        if (id != null) {
+            RealmModel realm = getRealm(id);
+            if (realm != null && isIgaActive(realm)) {
+                // A master super admin deletes the realm directly, no CR. Checked only
+                // here, never in isIgaActive, so every other master write stays governed.
+                if (masterAdminDeleteBypass && isMasterAdmin(igaSession)) {
+                    UserModel admin = igaSession.getContext().getUserSession().getUser();
+                    RealmModel adminRealm = igaSession.getContext().getUserSession().getRealm();
+                    String realmName = realm.getName();
+                    log.warnf("IGA bypass: realm %s (%s) deleted with no change request by master admin %s (%s)",
+                            realmName, id, admin.getUsername(), admin.getId());
+                    // Same flag the commit replay uses, so the delete cascade is not captured again.
+                    Object prior = igaSession.getAttribute("IGA_REPLAY_ACTIVE");
+                    igaSession.setAttribute("IGA_REPLAY_ACTIVE", "true");
+                    boolean removed;
+                    try {
+                        removed = super.removeRealm(id);
+                    } finally {
+                        if (prior == null) {
+                            igaSession.removeAttribute("IGA_REPLAY_ACTIVE");
+                        } else {
+                            igaSession.setAttribute("IGA_REPLAY_ACTIVE", prior);
+                        }
+                    }
+                    if (removed) {
+                        recordBypassAudit(adminRealm, id, realmName, admin.getId(), admin.getUsername());
+                    }
+                    return removed;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("REALM_ID", id);
+                // REALM_NAME so the approval UI can render which realm is being deleted.
+                row.put("REALM_NAME", realm.getName());
+                recordAndThrow(realm, "REALM", id, "DELETE_REALM", List.of(row));
+                return false; // unreachable
+            }
+        }
+        return super.removeRealm(id);
+    }
+
+    /**
+     * True when the request comes from a master realm user holding the master
+     * {@code admin} role. No bearer token or user session (import overwrite, jobs)
+     * means false, and so does any error.
+     */
+    static boolean isMasterAdmin(KeycloakSession session) {
+        try {
+            if (session.getContext().getBearerToken() == null) return false;
+            UserSessionModel userSession = session.getContext().getUserSession();
+            if (userSession == null) return false;
+            RealmModel adminRealm = userSession.getRealm();
+            if (adminRealm == null || !Config.getAdminRealm().equals(adminRealm.getName())) return false;
+            UserModel user = userSession.getUser();
+            RoleModel admin = adminRealm.getRole(AdminRoles.ADMIN);
+            return user != null && user.isEnabled() && admin != null && user.hasRole(admin);
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Audit row for a bypassed delete. It is filed under the MASTER realm, already
+     * APPROVED, so it outlives the deleted realm and nothing can act on it. Same
+     * transaction as the delete: if the delete rolls back, so does the record.
+     */
+    private void recordBypassAudit(RealmModel adminRealm, String realmId, String realmName,
+                                   String adminUserId, String adminUsername) {
+        // ENTITY_ID and REQUESTED_BY are 36-char columns.
+        if (realmId.length() > 36) {
+            log.warnf("IGA bypass: no audit row for realm %s, id %s is longer than 36 chars",
+                    realmName, realmId);
+            return;
+        }
+        String requestedBy = adminUserId != null && adminUserId.length() <= 36 ? adminUserId : null;
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("REALM_ID", realmId);
+        row.put("REALM_NAME", realmName);
+        row.put("BYPASS", "master-admin");
+        row.put("ADMIN_USERNAME", adminUsername);
+        IgaChangeRequestEntity audit = getService().create(adminRealm, "REALM", realmId,
+                "DELETE_REALM", List.of(row), requestedBy);
+        audit.setStatus("APPROVED");
+        audit.setResolvedAt(System.currentTimeMillis());
+        audit.setResolvedBy(requestedBy);
+        em.flush();
     }
 
     /**
@@ -250,6 +382,14 @@ public class IgaRealmProvider extends JpaRealmProvider {
 
     @Override
     public RoleModel addRealmRole(RealmModel realm, String id, String name) {
+        // TIDECLOAK: Keycloak's own model migration on an IGA-on realm must NOT apply
+        // this create directly (it would land un-attested and fail the login closure)
+        // nor throw through the REST capture seam (uncaught at boot). Capture it as a
+        // pending CREATE_ROLE CR and return a non-persisting phantom handle. See
+        // IgaMigrationRoleCapture.
+        if (IgaMigrationRoleCapture.isActive(igaSession, realm)) {
+            return new IgaMigrationRoleCapture(igaSession).captureRealmRole(realm, id, name);
+        }
         // partialImport batch governance for REALM ROLE. Same gap
         // class as createGroup: under POST /partialImport, KC's
         // RolesPartialImport.doImport → RepresentationToModel.importRoles →
@@ -335,6 +475,11 @@ public class IgaRealmProvider extends JpaRealmProvider {
     @Override
     public RoleModel addClientRole(ClientModel client, String id, String name) {
         RealmModel realm = client.getRealm();
+        // TIDECLOAK: migration-capture (see addRealmRole / IgaMigrationRoleCapture). The
+        // 26.7.0 org-admin roles (view-/manage-/query-organizations) are created here.
+        if (IgaMigrationRoleCapture.isActive(igaSession, realm)) {
+            return new IgaMigrationRoleCapture(igaSession).captureClientRole(realm, client, id, name);
+        }
         // partialImport batch governance for CLIENT ROLE. Same gap
         // class as addRealmRole: under POST /partialImport, KC's
         // RolesPartialImport.doImport → RepresentationToModel.importRoles
@@ -398,6 +543,40 @@ public class IgaRealmProvider extends JpaRealmProvider {
         RoleEntity entity = em.find(RoleEntity.class, id);
         if (entity == null) return base;
         return new IgaRoleAdapter(igaSession, realm, em, entity);
+    }
+
+    // -------------------------------------------------------------------------
+    // Role-by-NAME lookups — normally left to JpaRealmProvider (returning a plain
+    // RoleAdapter). During a Keycloak model migration ONLY, wrap the result in an
+    // IgaRoleAdapter so a composite-add the migrator performs on an EXISTING role
+    // (MigrationUtils.addAdminRole: realm.getRole("admin")/client.getRole("realm-admin")
+    // .addCompositeRole(newOrgRole)) is intercepted at IgaRoleAdapter.addCompositeRole
+    // and captured as an ADD_COMPOSITE CR — instead of a plain RoleAdapter persisting a
+    // CompositeRoleEntity that references the not-yet-committed phantom child (FK-fail at
+    // the outer flush) UNSIGNED. The StackWalker gate keeps ordinary runtime lookups
+    // (token issuance, admin edits) on the unwrapped fast path. Phantom (not-yet-committed)
+    // roles are never wrapped here: super.get*Role queries the DB and returns null for
+    // them, so core's null-guarded addQueryCompositeRoles still skips cleanly.
+    // -------------------------------------------------------------------------
+
+    @Override
+    public RoleModel getRealmRole(RealmModel realm, String name) {
+        RoleModel base = super.getRealmRole(realm, name);
+        if (base != null && IgaMigrationContext.isOnKeycloakMigrationPath()) {
+            RoleEntity entity = em.find(RoleEntity.class, base.getId());
+            if (entity != null) return new IgaRoleAdapter(igaSession, realm, em, entity);
+        }
+        return base;
+    }
+
+    @Override
+    public RoleModel getClientRole(ClientModel client, String name) {
+        RoleModel base = super.getClientRole(client, name);
+        if (base != null && IgaMigrationContext.isOnKeycloakMigrationPath()) {
+            RoleEntity entity = em.find(RoleEntity.class, base.getId());
+            if (entity != null) return new IgaRoleAdapter(igaSession, client.getRealm(), em, entity);
+        }
+        return base;
     }
 
     // -------------------------------------------------------------------------
