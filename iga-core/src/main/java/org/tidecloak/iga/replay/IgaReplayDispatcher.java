@@ -310,7 +310,10 @@ public class IgaReplayDispatcher {
             case "ORG_INVITE_MEMBER", "ORG_RESEND_INVITE" -> replayOrgInviteMember(session, realm, rows);
             case "ORG_ADD_IDP" -> replayOrgAddIdp(session, realm, rows);
             case "ORG_REMOVE_IDP" -> replayOrgRemoveIdp(session, realm, rows);
-            case "CREATE_TIDE_POLICY" -> replayCreateTidePolicy(session, realm, rows);
+            // ----- Tide policy create -----
+            // Signs the policy (VRK in firstAdmin, admin-quorum Policy:1 in multiAdmin) via
+            // the TideAttestor before storing it; see replayCreateTidePolicy.
+            case "CREATE_TIDE_POLICY" -> replayCreateTidePolicy(session, realm, cr, rows);
 
             default -> throw new IllegalArgumentException("Unknown IGA action: " + cr.getActionType());
         }
@@ -1221,39 +1224,32 @@ public class IgaReplayDispatcher {
     }
 
     private static void replayCreateTidePolicy(KeycloakSession session, RealmModel realm,
+                                               IgaChangeRequestEntity cr,
                                                List<Map<String, Object>> rows) {
-        TidePolicyService svc = new TidePolicyService(session);
-        for (Map<String, Object> row : rows) {
-            String id = str(row, "ID");
-            String repJson = str(row, "REP_JSON");
-
-            // REP_JSON is the full CREATE snapshot ({id, realmId, data, notes}) —
-            // the authoritative source, mirroring rebuildCreateUserFromRow. `notes`
-            // exists ONLY here (not a top-level row key), so we must read it out.
-            String data;
-            String notes;
-            if (repJson != null && !repJson.isEmpty()) {
-                try {
-                    Map<String, Object> rep =
-                            MAPPER.readValue(repJson, new TypeReference<Map<String, Object>>() {});
-                    data = rep.get("data") != null ? rep.get("data").toString() : null;
-                    notes = rep.get("notes") != null ? rep.get("notes").toString() : null;
-                } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-                    throw new RuntimeException(
-                            "Failed to deserialize REP_JSON for CREATE_TIDE_POLICY replay (row id=" + id + ")", e);
-                }
-            } else {
-                // Bare-create net (non-REST programmatic callers): fall back to the
-                // top-level DATA row key; notes unavailable without REP_JSON.
-                data = str(row, "DATA");
-                notes = null;
-            }
-
-            // Re-drive the real write. `realm` comes from doReplay (resolved from
-            // cr.getRealmId()), NOT from the row — the captured REALM_ID row value
-            // is unreliable (the service stored the RealmModel object, not its id).
-            svc.writePolicy(realm, id, data, notes);
+        // One policy, one signature, one CR: the multiAdmin carrier the admins approved wraps
+        // exactly one Policy, so a multi-row CR could not be signed row-by-row.
+        if (rows.size() != 1) {
+            throw new IllegalStateException("CREATE_TIDE_POLICY CR " + cr.getId()
+                    + " must carry exactly one policy row (found " + rows.size() + ")");
         }
+        Map<String, Object> row = rows.get(0);
+        String id = str(row, "ID");
+        // The SAME accessor the phase-1 carrier build reads, so the bytes the admins approved
+        // and the bytes signed/stored here cannot drift.
+        String data = TidePolicyService.dataOf(row);
+        String notes = TidePolicyService.notesOf(row);
+
+        String vvkSig = org.tidecloak.iga.attestors.TideAttestor.signTidePolicy(session, realm, cr);
+
+        if (vvkSig != null) {
+            // The signature lives on the Policy itself: DATA becomes the signed Policy.
+            data = TidePolicyService.attachSignature(data, vvkSig);
+        }
+
+        // On a realm without real Tide signing (Tideless / dev) there is no signature and the
+        // policy is stored unsigned, as before. `realm` comes from doReplay (resolved from
+        // cr.getRealmId()), not from the row.
+        new TidePolicyService(session).writePolicy(realm, id, data, notes);
     }
 
     private static void replayAddProtocolMapper(KeycloakSession session, RealmModel realm,

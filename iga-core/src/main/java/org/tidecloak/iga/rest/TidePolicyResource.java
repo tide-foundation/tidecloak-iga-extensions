@@ -84,7 +84,14 @@ public class TidePolicyResource {
 
         // Routes through IGA: a change request when IGA is enabled, or a direct
         // write returning null when it isn't.
-        IgaChangeRequestEntity changeRequest = this.service.create(realm, id, data, notes, requestedBy);
+        IgaChangeRequestEntity changeRequest;
+        try {
+            changeRequest = this.service.create(realm, id, data, notes, requestedBy);
+        } catch (IllegalArgumentException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(Map.of("error", e.getMessage()))
+                    .build();
+        }
 
         if (changeRequest != null) {
             // IGA enabled — write is pending approval; hand back the CR id

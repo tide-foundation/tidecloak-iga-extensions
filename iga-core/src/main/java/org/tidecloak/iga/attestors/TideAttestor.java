@@ -319,6 +319,18 @@ public class TideAttestor implements IgaAttestor {
     public static final String ROW_POLICY_BODY_UNSIGNED = "POLICY_BODY_UNSIGNED";
 
     // -------------------------------------------------------------------------
+    // Tide policy CR (a caller-supplied Policy, drafted via TidePolicyService)
+    // -------------------------------------------------------------------------
+    /**
+     * Action type of a {@code TidePolicyEntity} create. Like {@link #ACTION_REGEN_ADMIN_POLICY}
+     * it is NOT a producer-unit CR: the thing being authorized and signed is the unsigned
+     * {@link Policy} carried in ROWS_JSON, wrapped in a {@link PolicySignRequest}.
+     */
+    public static final String ACTION_CREATE_TIDE_POLICY = "CREATE_TIDE_POLICY";
+    /** Entity type stamped on a {@link #ACTION_CREATE_TIDE_POLICY} CR. */
+    public static final String ENTITY_TYPE_TIDE_POLICY = "TIDE_POLICY";
+
+    // -------------------------------------------------------------------------
     // Admin-policy artifact shape
     // -------------------------------------------------------------------------
     /** Stock realm-management client id the admin policy scopes. */
@@ -2144,6 +2156,12 @@ public class TideAttestor implements IgaAttestor {
             return buildPolicyResignApprovalModel(session, realm, cr);
         }
 
+        // A Tide policy create is the same shape: the draft is the unsigned Policy from
+        // ROWS_JSON, authorized by the admin quorum against the M0 policy.
+        if (ACTION_CREATE_TIDE_POLICY.equals(cr.getActionType())) {
+            return buildTidePolicyApprovalModel(session, realm, cr);
+        }
+
         // REQUEST_SERVER_CERT is multi-carrier and is handled up-front by
         // buildServerCertApprovalCarrier (routed at the top of this method via the
         // carrier-selector overload) — it never reaches this single-carrier body.
@@ -2392,6 +2410,151 @@ public class TideAttestor implements IgaAttestor {
                 + "CR %s (realm %s, creation-auth=%s).", cr.getId(), realm.getName(),
                 approvalRequestNeedsVrkInit(realm) ? "VRK" : "none(dev)");
         return encoded;
+    }
+
+    // -------------------------------------------------------------------------
+    // Tide policy: approval carrier + signing ceremonies
+    // -------------------------------------------------------------------------
+
+    /**
+     * Phase-1 approval-model build for a {@link #ACTION_CREATE_TIDE_POLICY} CR. Same
+     * construction as {@link #buildPolicyResignApprovalModel} (see there for why each step is
+     * ordered as it is): a {@code Policy:1} {@link PolicySignRequest} over the unsigned Policy
+     * carried verbatim in ROWS_JSON, the M0 admin Policy embedded as the authorizer, the long
+     * persisted-carrier expiry, and the seg-7 VRK creation-auth from the MAIN gVRK pack.
+     */
+    private String buildTidePolicyApprovalModel(KeycloakSession session, RealmModel realm,
+                                                IgaChangeRequestEntity cr) {
+        byte[] policyBytes = readUnsignedTidePolicyBytesFromCr(cr);
+
+        byte[] m0AdminPolicy = readM0AdminPolicyBytes(session, realm);
+        if (m0AdminPolicy == null) {
+            throw new RuntimeException("IGA tide-policy approval: realm " + realm.getName()
+                    + " has no signed tide-realm-admin admin Policy (M0) to authorize the "
+                    + "Policy:1 sign for CR " + cr.getId());
+        }
+
+        PolicySignRequest req = new PolicySignRequest(policyBytes, POLICY_AUTH_FLOW);
+        req.SetCustomExpiry((System.currentTimeMillis() / 1000) + MULTIADMIN_APPROVAL_EXPIRY_SECONDS);
+        req.SetPolicy(m0AdminPolicy);
+
+        // Materialize Draft BEFORE the creation-auth and Encode() — both cover it.
+        try {
+            req.GetDraft();
+        } catch (Exception e) {
+            throw new RuntimeException("IGA tide-policy approval: failed to serialize the Policy:1 "
+                    + "draft for CR " + cr.getId() + ": " + e.getMessage(), e);
+        }
+
+        if (approvalRequestNeedsVrkInit(realm)) {
+            initializeApprovalRequestWithVrk(realm, req);
+        }
+
+        String encoded = java.util.Base64.getEncoder().encodeToString(req.Encode());
+        cr.setRequestModel(encoded);
+        session.getProvider(JpaConnectionProvider.class).getEntityManager().flush();
+        log.infof("IGA tide-policy approval (phase 1): built Policy:1 ModelRequest for CR %s "
+                + "(realm %s, creation-auth=%s).", cr.getId(), realm.getName(),
+                approvalRequestNeedsVrkInit(realm) ? "VRK" : "none(dev)");
+        return encoded;
+    }
+
+    /** The unsigned Policy bytes a {@link #ACTION_CREATE_TIDE_POLICY} CR carries (its single row). */
+    private static byte[] readUnsignedTidePolicyBytesFromCr(IgaChangeRequestEntity cr) {
+        List<Map<String, Object>> rows = parseRows(cr.getRowsJson());
+        if (rows.size() != 1) {
+            throw new RuntimeException("IGA tide-policy CR " + cr.getId() + " must carry exactly one "
+                    + "policy row (found " + rows.size() + ")");
+        }
+        return org.tidecloak.iga.providers.TidePolicyService.decodeUnsignedPolicy(
+                org.tidecloak.iga.providers.TidePolicyService.dataOf(rows.get(0)));
+    }
+
+    /**
+     * COMMIT-time signing of a {@link #ACTION_CREATE_TIDE_POLICY} CR's Policy, called from
+     * {@code IgaReplayDispatcher.replayCreateTidePolicy}. Returns the Base64 VVK signature over
+     * the policy, or {@code null} when the realm is not on real Tide signing (Tideless, or a
+     * dev/test tide realm) and the policy is therefore stored unsigned.
+     *
+     * <p>Only the multiAdmin Policy:1 quorum can sign it. The firstAdmin VRK:1 route is
+     * deliberately NOT offered: the ORK revokes the authorizer of every VRK-authorized Policy
+     * sign ({@code PolicySignRequest.UpdateAuthorization}), so signing an ordinary policy with
+     * the firstAdmin pack would burn the pack before the M0 admin Policy exists and wedge the
+     * realm. A provisioned firstAdmin realm is refused (see {@link #tidePolicyRequiresMultiAdmin}).
+     */
+    public static String signTidePolicy(KeycloakSession session, RealmModel realm,
+                                        IgaChangeRequestEntity cr) {
+        if (tidePolicyRequiresMultiAdmin(session, realm)) {
+            throw new RuntimeException("IGA tide-policy commit refused: realm " + realm.getName()
+                    + " is still in firstAdmin mode (CR " + cr.getId() + "). A policy can only be "
+                    + "signed by the tide-realm-admin quorum; assign the first tide-realm-admin first.");
+        }
+        if (MODE_MULTI_ADMIN.equals(resolveMode(session, realm)) && isRealSigningCapable(realm)) {
+            return signTidePolicyViaPolicyFlow(realm, cr);
+        }
+        return null;
+    }
+
+    /**
+     * True iff the realm is Tide-provisioned but still firstAdmin, where a Tide policy cannot
+     * be signed without burning the firstAdmin pack. Checked at draft and again at commit.
+     */
+    public static boolean tidePolicyRequiresMultiAdmin(KeycloakSession session, RealmModel realm) {
+        return MODE_FIRST_ADMIN.equals(resolveMode(session, realm)) && isTideSigningProvisioned(realm);
+    }
+
+    /**
+     * multiAdmin: the Policy:1 quorum sign over the doken-embedded phase-1 carrier, mirroring
+     * {@link #replayRegenAdminPolicy}'s sign body. The carrier is reloaded verbatim — re-setting
+     * any segment would invalidate the dokens.
+     */
+    private static String signTidePolicyViaPolicyFlow(RealmModel realm, IgaChangeRequestEntity cr) {
+        String carrier = cr.getRequestModel();
+        if (carrier == null || carrier.isBlank()) {
+            throw new RuntimeException("IGA tide-policy commit: CR " + cr.getId()
+                    + " has no approval-model carrier (phase-1 buildTidePolicyApprovalModel never ran) "
+                    + "— cannot Policy:1-sign the policy");
+        }
+        MultivaluedHashMap<String, String> config = tidePolicyVendorKeyConfig(realm);
+        try {
+            ModelRequest req = ModelRequest.FromBytes(java.util.Base64.getDecoder().decode(carrier));
+            if (req == null) {
+                throw new RuntimeException("ModelRequest.FromBytes returned null for the CR carrier");
+            }
+            String vvkSig = firstTidePolicySignature(
+                    Midgard.SignModel(constructSignSettings(config), req), realm);
+            log.infof("IGA tide-policy signed via Midgard Policy:1 quorum ceremony (realm %s, CR %s).",
+                    realm.getName(), cr.getId());
+            return vvkSig;
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("IGA tide-policy commit: Policy:1 ceremony failed for realm "
+                    + realm.getName() + " (CR " + cr.getId() + "): " + e.getMessage(), e);
+        }
+    }
+
+    private static MultivaluedHashMap<String, String> tidePolicyVendorKeyConfig(RealmModel realm) {
+        ComponentModel vendorKey = realm.getComponentsStream()
+                .filter(c -> TIDE_VENDOR_KEY_PROVIDER_ID.equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException(
+                        "IGA tide-policy sign: realm " + realm.getName()
+                                + " has no tide-vendor-key component (VRK not provisioned)"));
+        if (vendorKey.getConfig() == null) {
+            throw new RuntimeException("IGA tide-policy sign: tide-vendor-key component has no config "
+                    + "(realm " + realm.getName() + ")");
+        }
+        return vendorKey.getConfig();
+    }
+
+    private static String firstTidePolicySignature(SignatureResponse resp, RealmModel realm) {
+        if (resp == null || resp.Signatures == null || resp.Signatures.length == 0
+                || resp.Signatures[0] == null) {
+            throw new RuntimeException("IGA tide-policy sign: Midgard.SignModel returned no signature "
+                    + "for realm " + realm.getName());
+        }
+        return resp.Signatures[0];
     }
 
     /** Decode {@link #ROW_POLICY_BODY_UNSIGNED} (Base64 Policy.ToBytes()) from a REGEN CR's rows. */
@@ -4557,6 +4720,11 @@ public class TideAttestor implements IgaAttestor {
         // without this guard the multiAdmin-distribution branch below would wrongly treat that
         // carrier as a framed producer-unit request. No-op here.
         if (ACTION_REGEN_ADMIN_POLICY.equals(action)) {
+            return;
+        }
+        // Same for a Tide policy create: its carrier is a PolicySignRequest, signed in the
+        // replay (signTidePolicy), and it touches no producer unit.
+        if (ACTION_CREATE_TIDE_POLICY.equals(action)) {
             return;
         }
 
