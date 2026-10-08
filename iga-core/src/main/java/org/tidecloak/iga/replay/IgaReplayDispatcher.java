@@ -13,6 +13,12 @@ import org.keycloak.models.RoleModel;
 import org.keycloak.services.managers.ClientManager;
 import org.keycloak.services.managers.RealmManager;
 import org.tidecloak.iga.entities.IgaChangeRequestEntity;
+import org.tidecloak.iga.entities.IgaRealmCertEntity;
+import org.tidecloak.iga.entities.IgaServerCertDraftEntity;
+import org.tidecloak.iga.providers.IgaChangeRequestService;
+import org.tidecloak.iga.providers.IgaRealmCertService;
+import org.tidecloak.iga.providers.IgaServerCertDraftService;
+import org.tidecloak.iga.providers.TidePolicyService;
 
 import jakarta.persistence.EntityManager;
 import java.util.List;
@@ -229,7 +235,8 @@ public class IgaReplayDispatcher {
                     r -> scopeMappingAddDirect(session, realm, r), setSigned, "SCOPE_MAPPING_ADD");
             case "SCOPE_MAPPING_REMOVE" -> replayRevoke(session, realm, rows, finalAttestation, em,
                     r -> scopeMappingRemoveDirect(session, realm, r), setSigned, "SCOPE_MAPPING_REMOVE");
-            case "REQUEST_SERVER_CERT" -> replayRequestServerCert(cr);
+            case "REQUEST_SERVER_CERT" -> replayRequestServerCert(session, realm, cr, em);
+            case "REQUEST_REALM_CERT" -> replayRequestRealmCert(session, realm, cr, em);
             case "INSTALL_LICENSE", "ROTATE_LICENSE" -> replayLicenseAction(cr);
 
             // ----- Governed IGA disable -----
@@ -319,6 +326,10 @@ public class IgaReplayDispatcher {
             case "ORG_INVITE_MEMBER", "ORG_RESEND_INVITE" -> replayOrgInviteMember(session, realm, rows);
             case "ORG_ADD_IDP" -> replayOrgAddIdp(session, realm, rows);
             case "ORG_REMOVE_IDP" -> replayOrgRemoveIdp(session, realm, rows);
+            // ----- Tide policy create -----
+            // Signs the policy (VRK in firstAdmin, admin-quorum Policy:1 in multiAdmin) via
+            // the TideAttestor before storing it; see replayCreateTidePolicy.
+            case "CREATE_TIDE_POLICY" -> replayCreateTidePolicy(session, realm, cr, rows);
 
             default -> throw new IllegalArgumentException("Unknown IGA action: " + cr.getActionType());
         }
@@ -1229,6 +1240,35 @@ public class IgaReplayDispatcher {
         }
     }
 
+    private static void replayCreateTidePolicy(KeycloakSession session, RealmModel realm,
+                                               IgaChangeRequestEntity cr,
+                                               List<Map<String, Object>> rows) {
+        // One policy, one signature, one CR: the multiAdmin carrier the admins approved wraps
+        // exactly one Policy, so a multi-row CR could not be signed row-by-row.
+        if (rows.size() != 1) {
+            throw new IllegalStateException("CREATE_TIDE_POLICY CR " + cr.getId()
+                    + " must carry exactly one policy row (found " + rows.size() + ")");
+        }
+        Map<String, Object> row = rows.get(0);
+        String id = str(row, "ID");
+        // The SAME accessor the phase-1 carrier build reads, so the bytes the admins approved
+        // and the bytes signed/stored here cannot drift.
+        String data = TidePolicyService.dataOf(row);
+        String notes = TidePolicyService.notesOf(row);
+
+        String vvkSig = org.tidecloak.iga.attestors.TideAttestor.signTidePolicy(session, realm, cr);
+
+        if (vvkSig != null) {
+            // The signature lives on the Policy itself: DATA becomes the signed Policy.
+            data = TidePolicyService.attachSignature(data, vvkSig);
+        }
+
+        // On a realm without real Tide signing (Tideless / dev) there is no signature and the
+        // policy is stored unsigned, as before. `realm` comes from doReplay (resolved from
+        // cr.getRealmId()), not from the row.
+        new TidePolicyService(session).writePolicy(realm, id, data, notes);
+    }
+
     private static void replayAddProtocolMapper(KeycloakSession session, RealmModel realm,
                                                  IgaChangeRequestEntity cr, List<Map<String, Object>> rows,
                                                  String sig, EntityManager em, boolean setSigned) {
@@ -1352,15 +1392,121 @@ public class IgaReplayDispatcher {
     // -------------------------------------------------------------------------
 
     /**
-     * REQUEST_SERVER_CERT approval grants the workload the right to receive a
-     * cert. The sidecar IGA_SERVER_CERT_DRAFT is NOT touched here — issuance
-     * is decoupled and happens via POST /iga/server-certs/{draftId}/issue once
-     * the signing infrastructure produces the cert + trust bundle. The
-     * surrounding doReplay() will mark the parent change request APPROVED.
+     * REQUEST_SERVER_CERT commit — TEMPLATE.
+     *
+     * <p>Signs the {@code ResourceIdentity:1} carrier via the ORK cohort and stores the issued
+     * certificates on the IGA_SERVER_CERT_DRAFT sidecar (status ACTIVE). The single carrier rides
+     * {@code cr.getRequestModel()}; {@code combineFinal} has already collected the enclave dokens
+     * onto it by the time replay reaches here, so {@code ServerCertSigner.issue} reuses it rather
+     * than rebuilding.
+     *
+     * <p>Capability-gated: a non-real-signing-capable realm (no VVK material) leaves the cert
+     * UN-issued (the workload status endpoint keeps reporting DRAFT) rather than hard-failing the
+     * commit, mirroring the firstAdmin-stub posture of the rest of the attestor.
+     *
+     * <p>Nothing is persisted unvalidated: {@code ServerCertSigner.issue} runs every returned
+     * certificate through {@code IssuedCertificateValidator} first, so a response that certifies
+     * the wrong key, is out of its validity bounds, or carries permissions beyond what was
+     * requested aborts the commit instead of landing in the database.
+     *
+     * <p>TODO: only the resource leaf is stored. The root CA and the realm server certificate are
+     * REALM-scoped, not per-request, so the {@code trustBundle} / {@code realmCertificate} columns
+     * that used to duplicate them on every row have been dropped pending a realm-scoped home. Until
+     * that lands the workload receives a leaf with no trust anchor.
      */
-    private static void replayRequestServerCert(IgaChangeRequestEntity cr) {
-        log.infof("REQUEST_SERVER_CERT approved for change request %s — awaiting cert issuance via /iga/server-certs/{draftId}/issue",
-                cr.getId());
+    private static void replayRequestServerCert(KeycloakSession session, RealmModel realm,
+                                                IgaChangeRequestEntity cr, EntityManager em) {
+        List<IgaServerCertDraftEntity> drafts = em.createNamedQuery(
+                        "IgaServerCertDraft.findByChangeRequestId", IgaServerCertDraftEntity.class)
+                .setParameter("crId", cr.getId())
+                .getResultList();
+        if (drafts.isEmpty()) {
+            log.warnf("REQUEST_SERVER_CERT commit: CR %s has no IGA_SERVER_CERT_DRAFT sidecar — "
+                    + "nothing to issue.", cr.getId());
+            return;
+        }
+        IgaServerCertDraftEntity draft = drafts.get(0);
+
+        if (!org.tidecloak.iga.attestors.TideAttestor.isRealSigningCapableRealm(realm)) {
+            log.infof("REQUEST_SERVER_CERT approved for CR %s but realm %s is not real-signing-capable "
+                    + "(no VVK material) — leaving the cert un-issued (status DRAFT).",
+                    cr.getId(), realm.getName());
+            return;
+        }
+
+        org.tidecloak.iga.crypto.ServerCertSigner.IssuedCerts issued =
+                org.tidecloak.iga.crypto.ServerCertSigner.issue(session, realm, draft);
+
+        // Persist through the service so the sidecar's write rules live in one place. The CR's own
+        // status transition is NOT its job — this dispatcher's tail sets APPROVED + resolvedAt.
+        new IgaServerCertDraftService(em, new IgaChangeRequestService(em, session))
+                .issueCert(draft.getId(), issued.resourceCertificatePem,
+                        issued.notBefore, issued.notAfter);
+
+        log.infof("REQUEST_SERVER_CERT issued for CR %s (client %s, realm %s) — validated certificate "
+                        + "stored, notAfter=%d, status ACTIVE.",
+                cr.getId(), draft.getClientId(), realm.getName(), issued.notAfter);
+    }
+
+    /**
+     * REQUEST_REALM_CERT commit — TEMPLATE.
+     *
+     * <p>The realm-scoped sibling of {@link #replayRequestServerCert}: signs the same
+     * {@code ResourceIdentity:1} carrier via the cohort, but stores slots 1 and 2 — the P-256 realm
+     * server certificate and the Ed25519 realm root CA — onto the IGA_REALM_CERT row. Those are the
+     * two halves a workload needs beyond its own leaf: the anchor to verify peers against, and
+     * Tidecloak's own TLS identity.
+     *
+     * <p>Committing this is what unblocks any client certificate CR chained to it — the enrolment
+     * path files client requests with this CR as a {@code dependsOn} prerequisite precisely so a
+     * leaf is never issued into a realm with no anchor.
+     *
+     * <p>Same posture as the client path in both directions: capability-gated (a realm with no VVK
+     * material leaves the row un-issued rather than hard-failing the commit), and nothing is
+     * persisted unvalidated — {@code ServerCertSigner.issueRealm} runs both certificates through
+     * {@code IssuedCertificateValidator} and requires BOTH slots, so a round that returns a server
+     * certificate without its anchor aborts instead of landing half a result.
+     */
+    private static void replayRequestRealmCert(KeycloakSession session, RealmModel realm,
+                                               IgaChangeRequestEntity cr, EntityManager em) {
+        List<IgaRealmCertEntity> rows = em.createNamedQuery(
+                        "IgaRealmCert.findByChangeRequestId", IgaRealmCertEntity.class)
+                .setParameter("crId", cr.getId())
+                .getResultList();
+        if (rows.isEmpty()) {
+            log.warnf("REQUEST_REALM_CERT commit: CR %s has no IGA_REALM_CERT sidecar — "
+                    + "nothing to issue.", cr.getId());
+            return;
+        }
+        IgaRealmCertEntity realmCert = rows.get(0);
+
+        if (!org.tidecloak.iga.attestors.TideAttestor.isRealSigningCapableRealm(realm)) {
+            log.infof("REQUEST_REALM_CERT approved for CR %s but realm %s is not real-signing-capable "
+                    + "(no VVK material) — leaving the realm certificates un-issued.",
+                    cr.getId(), realm.getName());
+            return;
+        }
+
+        org.tidecloak.iga.crypto.ServerCertSigner.IssuedRealmCerts issued =
+                org.tidecloak.iga.crypto.ServerCertSigner.issueRealm(session, realm, realmCert);
+
+        // Persist through the service, as the client path does. The dispatcher tail owns the CR
+        // status transition.
+        new IgaRealmCertService(em, new IgaChangeRequestService(em, session))
+                .issueCerts(realmCert.getId(),
+                        issued.serverCertificatePem, issued.serverNotBefore, issued.serverNotAfter,
+                        issued.rootCaPem, issued.rootCaSerialNumberHex,
+                        issued.rootCaNotBefore, issued.rootCaNotAfter);
+
+        // The generation the certificates landed in — the number every replica's nginx must reach
+        // before this issuance is actually being served.
+        long generation = new org.tidecloak.iga.nginx.NginxGlobalCounterService(em)
+                .readDesiredGeneration();
+        org.tidecloak.iga.nginx.NginxGenerationNotifier.notifyAfterCommit(session, generation);
+
+        log.infof("REQUEST_REALM_CERT issued for CR %s (realm %s) — validated server certificate + "
+                        + "root CA stored, server notAfter=%d, root CA notAfter=%d, nginx generation=%d.",
+                cr.getId(), realm.getName(), issued.serverNotAfter, issued.rootCaNotAfter, generation);
     }
 
     // -------------------------------------------------------------------------

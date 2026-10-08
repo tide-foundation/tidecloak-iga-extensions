@@ -4,6 +4,20 @@
                    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
                    http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
 
+    <!-- Intentionally empty.
+
+         This changelog previously added CA_REQUEST_MODEL / PK_REQUEST_MODEL to
+         IGA_SERVER_CERT_DRAFT, to carry the enclave-approved ServerCert:1 CA and public-key
+         sub-model carriers alongside the leaf on the parent CR's REQUEST_MODEL.
+
+         ResourceIdentity:1 replaced that three-carrier ceremony with a single carrier — the ORK
+         builds every TBSCertificate itself and returns three signatures from one request — so both
+         columns are gone. The changeset was removed rather than paired with a dropColumn because
+         the server-identity feature has not shipped; see the same call on IGA_SERVER_CERT_DRAFT's
+         SPIFFE_ID / INSTANCE_ID columns in iga-changelog-1.5.0.xml.
+
+         The file and its <include> in iga-changelog-master.xml are retained so the changelog
+         numbering stays contiguous. -->
     <!--
       2.12.0: Framing-batch provenance for the multiAdmin approval carrier.
 
