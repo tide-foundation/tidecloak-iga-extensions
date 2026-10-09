@@ -168,25 +168,13 @@ public class TideAdminCompatResource {
         String[] adoptScanFailed = new String[1];
         List<Map<String, Object>> commitFailures = new ArrayList<>();
 
-        // OFF→ON, non-master: auto-create the tide-realm-admin approver
-        // role BEFORE the isIGAEnabled flip below. Creating it pre-flip means
-        // IGA is still OFF, so the addRole/addCompositeRole/setSingleAttribute
-        // writes are PLAIN model writes and are NOT captured as a CREATE_ROLE
-        // CR. After the flip, the IgaAdoptScan picks up this newly-created
-        // (still-unattested) role and emits an ADOPT_ROLE CR — the intended
-        // attestation path (firstAdmin commits it). Idempotency guard ported
-        // verbatim from the old createRealmAdminPolicy: only create when the
-        // role does not already exist on realm-management.
+        // OFF→ON, non-master: auto-create the tide-realm-admin approver role
+        // BEFORE the isIGAEnabled flip below, while IGA is still OFF, so the
+        // writes are plain model writes and not captured as a CREATE_ROLE CR.
+        // It is committed in its own transaction so the ADOPT scan and the
+        // sign-defaults sweep, which run in their own sessions, can see it.
         if (!current && next && !"master".equals(realm.getName())) {
-            ClientModel realmManagement = realm.getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
-            if (realmManagement != null
-                    && session.roles().getClientRole(realmManagement, "tide-realm-admin") == null) {
-                RoleModel tideRealmAdmin = realmManagement.addRole("tide-realm-admin");
-                tideRealmAdmin.addCompositeRole(realmManagement.getRole(AdminRoles.REALM_ADMIN));
-                tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
-                logger.infof("IGA toggle-on: created approver role 'tide-realm-admin' (composite of %s, tideThreshold=1) on realm-management for realm %s before isIGAEnabled flip",
-                        AdminRoles.REALM_ADMIN, realm.getName());
-            }
+            ensureTideRealmAdminRole(realm.getId());
         }
 
         // OFF→ON, Tide realm: a realm's defaultSignatureAlgorithm = EdDSA iff
@@ -788,6 +776,34 @@ public class TideAdminCompatResource {
                     .build();
         }
         return Response.ok(status).build();
+    }
+
+    /**
+     * Create the tide-realm-admin approver role (composite of realm-admin,
+     * tideThreshold=1) on realm-management in its own committed transaction.
+     * No-op when the role already exists.
+     */
+    private void ensureTideRealmAdminRole(String realmId) {
+        KeycloakModelUtils.runJobInTransaction(
+                session.getKeycloakSessionFactory(),
+                roleSession -> {
+                    RealmModel roleRealm = roleSession.realms().getRealm(realmId);
+                    if (roleRealm == null) {
+                        throw new IllegalStateException(
+                                "IGA toggle ensureTideRealmAdminRole: realm " + realmId
+                                        + " not loadable in role session");
+                    }
+                    ClientModel realmManagement = roleRealm.getClientByClientId(Constants.REALM_MANAGEMENT_CLIENT_ID);
+                    if (realmManagement == null
+                            || roleSession.roles().getClientRole(realmManagement, "tide-realm-admin") != null) {
+                        return;
+                    }
+                    RoleModel tideRealmAdmin = realmManagement.addRole("tide-realm-admin");
+                    tideRealmAdmin.addCompositeRole(realmManagement.getRole(AdminRoles.REALM_ADMIN));
+                    tideRealmAdmin.setSingleAttribute("tideThreshold", "1");
+                    logger.infof("IGA toggle-on: created approver role 'tide-realm-admin' (composite of %s, tideThreshold=1) on realm-management for realm %s before isIGAEnabled flip",
+                            AdminRoles.REALM_ADMIN, roleRealm.getName());
+                });
     }
 
     /**
