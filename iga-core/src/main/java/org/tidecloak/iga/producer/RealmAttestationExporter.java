@@ -13,6 +13,7 @@ import org.keycloak.models.ProtocolMapperModel;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.jpa.entities.ProtocolMapperEntity;
 import org.keycloak.organization.OrganizationProvider;
 import org.tidecloak.iga.producer.units.AttestationUnit;
 import org.tidecloak.iga.producer.units.ClientConfigUnit;
@@ -391,7 +392,7 @@ public final class RealmAttestationExporter {
         //     ALL mappers of the active scopes (client-owned + each active scope's),
         //     so every claim the token carries (profile/email/roles/...) has an
         //     attested source.
-        emitAllActiveMappers(client, assigned, req, realmId, out);
+        emitAllActiveMappers(session, client, assigned, req, realmId, out);
 
         // 13) realm_default_groups_set (unit 16) — the realm's REALM_DEFAULT_GROUPS
         //     set, target = realm UUID. Load-bearing only for user-creation flows but
@@ -577,7 +578,7 @@ public final class RealmAttestationExporter {
             out.add(clientScopeConfig(scope, realmId));
             out.add(clientScopeMapperSet(scope, realmId));
             out.add(scopeRoleAllowlistSet(ParentType.client_scope, scope.getId(), scope, realmId));
-            emitContainerProtocolMappers(scope.getProtocolMappersStream(),
+            emitContainerProtocolMappers(session, scope.getProtocolMappersStream(),
                     ParentType.client_scope, scope.getId(), realmId, out);
         });
 
@@ -633,7 +634,7 @@ public final class RealmAttestationExporter {
         out.add(clientMapperSet(client, realmId));
         out.add(clientScopeAssignmentSet(client, realmId));
         out.add(scopeRoleAllowlistSet(ParentType.client, client.getId(), client, realmId));
-        emitContainerProtocolMappers(client.getProtocolMappersStream(),
+        emitContainerProtocolMappers(session, client.getProtocolMappersStream(),
                 ParentType.client, client.getId(), realmId, out);
         client.getRolesStream().forEach(role -> emitRoleMetadata(role, realmId, out));
         return out;
@@ -650,10 +651,11 @@ public final class RealmAttestationExporter {
      * unit bytes are final at commit (the mapper config is applied by the replay), so this
      * byte-matches the login read.
      */
-    public List<AttestationUnit> clientMapperUnits(ClientModel client, String realmId) {
+    public List<AttestationUnit> clientMapperUnits(KeycloakSession session, ClientModel client,
+                                                   String realmId) {
         List<AttestationUnit> out = new ArrayList<>();
         out.add(clientMapperSet(client, realmId));
-        emitContainerProtocolMappers(client.getProtocolMappersStream(),
+        emitContainerProtocolMappers(session, client.getProtocolMappersStream(),
                 ParentType.client, client.getId(), realmId, out);
         return out;
     }
@@ -661,10 +663,11 @@ public final class RealmAttestationExporter {
     /** Symmetric counterpart to {@link #clientMapperUnits} for a client-SCOPE-owned mapper set:
      *  {@code client_scope_mapper_set} (unit 13) + a {@code protocol_mapper} (unit 3) per
      *  JWT-relevant scope-owned mapper. */
-    public List<AttestationUnit> clientScopeMapperUnits(ClientScopeModel scope, String realmId) {
+    public List<AttestationUnit> clientScopeMapperUnits(KeycloakSession session,
+                                                        ClientScopeModel scope, String realmId) {
         List<AttestationUnit> out = new ArrayList<>();
         out.add(clientScopeMapperSet(scope, realmId));
-        emitContainerProtocolMappers(scope.getProtocolMappersStream(),
+        emitContainerProtocolMappers(session, scope.getProtocolMappersStream(),
                 ParentType.client_scope, scope.getId(), realmId, out);
         return out;
     }
@@ -710,14 +713,15 @@ public final class RealmAttestationExporter {
      * the login would suppress (which would dangle an un-referenced column with no harm,
      * but emitting only JWT-relevant mappers keeps the closure exactly the login's).
      */
-    private void emitContainerProtocolMappers(Stream<ProtocolMapperModel> mappers,
+    private void emitContainerProtocolMappers(KeycloakSession session,
+                                              Stream<ProtocolMapperModel> mappers,
                                               ParentType parentType, String parentId,
                                               String realmId, List<AttestationUnit> out) {
         mappers.forEach(pm -> {
             if (JWT_BODY_IRRELEVANT_FACTORIES.contains(pm.getProtocolMapper())) {
                 return;
             }
-            out.add(protocolMapperUnit(pm, parentType, parentId, realmId));
+            out.add(protocolMapperUnit(session, pm, parentType, parentId, realmId));
         });
     }
 
@@ -1345,7 +1349,8 @@ public final class RealmAttestationExporter {
      * resolves every id in a mapper-set to a protocol_mapper unit, so the set and the
      * units stay in lockstep.)
      */
-    private void emitAllActiveMappers(ClientModel client, Map<String, ClientScopeModel> assigned,
+    private void emitAllActiveMappers(KeycloakSession session, ClientModel client,
+                                      Map<String, ClientScopeModel> assigned,
                                       ExportRequest req, String realmId,
                                       List<AttestationUnit> out) {
         // Client-owned (dedicated) mappers — the client-as-scope participant.
@@ -1356,7 +1361,7 @@ public final class RealmAttestationExporter {
                         pm.getId(), pm.getProtocolMapper());
                 return;
             }
-            out.add(protocolMapper(pm, ParentType.client, client.getId(), realmId));
+            out.add(protocolMapper(session, pm, ParentType.client, client.getId(), realmId));
         });
         if (!clientMapperIds.isEmpty()) {
             out.add(new ClientMapperSetUnit(realmId, client.getId(), clientMapperIds));
@@ -1373,7 +1378,7 @@ public final class RealmAttestationExporter {
                             pm.getProtocolMapper());
                     return;
                 }
-                out.add(protocolMapper(pm, ParentType.client_scope, scope.getId(), realmId));
+                out.add(protocolMapper(session, pm, ParentType.client_scope, scope.getId(), realmId));
             });
             if (!scopeMapperIds.isEmpty()) {
                 out.add(new ClientScopeMapperSetUnit(realmId, scope.getId(), scopeMapperIds));
@@ -1466,9 +1471,10 @@ public final class RealmAttestationExporter {
                 scopeMappingRoleIds(container));
     }
 
-    private ProtocolMapperUnit protocolMapper(ProtocolMapperModel pm, ParentType parentType,
-                                              String parentId, String realmId) {
-        return protocolMapperUnit(pm, parentType, parentId, realmId);
+    private ProtocolMapperUnit protocolMapper(KeycloakSession session, ProtocolMapperModel pm,
+                                              ParentType parentType, String parentId,
+                                              String realmId) {
+        return protocolMapperUnit(session, pm, parentType, parentId, realmId);
     }
 
     /**
@@ -1478,13 +1484,28 @@ public final class RealmAttestationExporter {
      */
     public static ProtocolMapperUnit protocolMapperUnit(ProtocolMapperModel pm, ParentType parentType,
                                                         String parentId, String realmId) {
+        return protocolMapperUnit(null, pm, parentType, parentId, realmId);
+    }
+
+    public static ProtocolMapperUnit protocolMapperUnit(KeycloakSession session, ProtocolMapperModel pm,
+                                                        ParentType parentType, String parentId,
+                                                        String realmId) {
         return new ProtocolMapperUnit(realmId,
                 pm.getId(),
                 parentType,
                 parentId,
                 nullToEmpty(pm.getProtocol()),
                 pm.getProtocolMapper(),
-                attributeNameValues(pm.getConfig()));
+                attributeNameValues(storedConfig(session, pm)));
+    }
+
+    // Use the stored row, not the cached model: some mappers write into the cached config at token time.
+    private static Map<String, String> storedConfig(KeycloakSession session, ProtocolMapperModel pm) {
+        if (session == null || pm.getId() == null) return pm.getConfig();
+        JpaConnectionProvider jpa = session.getProvider(JpaConnectionProvider.class);
+        EntityManager em = jpa == null ? null : jpa.getEntityManager();
+        ProtocolMapperEntity e = em == null ? null : em.find(ProtocolMapperEntity.class, pm.getId());
+        return e == null ? pm.getConfig() : e.getConfig();
     }
 
     /**
@@ -1512,7 +1533,7 @@ public final class RealmAttestationExporter {
             }
             ProtocolMapperModel pm = client.getProtocolMapperById(mapperId);
             return pm == null ? null
-                    : protocolMapperUnit(pm, ParentType.client, client.getId(), realm.getId());
+                    : protocolMapperUnit(session, pm, ParentType.client, client.getId(), realm.getId());
         }
         @SuppressWarnings("unchecked")
         List<String> scopeIds = em.createQuery(
@@ -1525,7 +1546,7 @@ public final class RealmAttestationExporter {
             }
             ProtocolMapperModel pm = scope.getProtocolMapperById(mapperId);
             return pm == null ? null
-                    : protocolMapperUnit(pm, ParentType.client_scope, scope.getId(), realm.getId());
+                    : protocolMapperUnit(session, pm, ParentType.client_scope, scope.getId(), realm.getId());
         }
         return null;
     }
