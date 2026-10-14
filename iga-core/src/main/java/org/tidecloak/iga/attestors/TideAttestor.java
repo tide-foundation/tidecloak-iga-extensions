@@ -4666,7 +4666,8 @@ public class TideAttestor implements IgaAttestor {
      * factory correctly unemitted: the login read emits no unit for it, so framing one would
      * sign a unit nothing ever verifies.
      */
-    private static void addOwnedMapperUnits(List<AttestationUnit> units, RealmModel realm,
+    private static void addOwnedMapperUnits(KeycloakSession session, List<AttestationUnit> units,
+                                            RealmModel realm,
                                             IgaChangeRequestEntity cr, String action,
                                             String realmId) {
         if (!"ADD_PROTOCOL_MAPPER".equals(action) && !"UPDATE_PROTOCOL_MAPPER".equals(action)) {
@@ -4703,7 +4704,7 @@ public class TideAttestor implements IgaAttestor {
             org.keycloak.models.ProtocolMapperModel pm = parent.getProtocolMapperById(mapperId);
             if (pm != null) {
                 units.add(RealmAttestationExporter.protocolMapperUnit(
-                        pm, parentType, parentId, realmId));
+                        session, pm, parentType, parentId, realmId));
             }
         }
     }
@@ -4931,7 +4932,7 @@ public class TideAttestor implements IgaAttestor {
                         // framing only client_scope_config left client_scope_mapper_set + each
                         // protocol_mapper as TIDE-DUMMY-v1 and the first login whose active scopes
                         // include this one fail-closed in replayOrFailClosed. Frame the whole family.
-                        units.addAll(clientScopeOwnedUnits(s, realmId, /* includeOwnedMappers */ true));
+                        units.addAll(clientScopeOwnedUnits(session, s, realmId, /* includeOwnedMappers */ true));
                     } else {
                         // SET_/UPDATE_: only the client_scope_config node changed; the derived
                         // mapper set/units are already real (signed at create / their own CRs).
@@ -5028,7 +5029,7 @@ public class TideAttestor implements IgaAttestor {
                 // adds or updates. Framing only the set left each new mapper's own attestation
                 // column unsigned, which the uniform login read rejects fail-closed.
                 addIfPresent(units, buildDerivedOwnerSetUnit(session, realm, cr));
-                addOwnedMapperUnits(units, realm, cr, action, realmId);
+                addOwnedMapperUnits(session, units, realm, cr, action, realmId);
             }
             case "SCOPE_MAPPING_ADD", "SCOPE_MAPPING_REMOVE" ->
                     addIfPresent(units, buildDerivedOwnerSetUnit(session, realm, cr));
@@ -5152,7 +5153,7 @@ public class TideAttestor implements IgaAttestor {
                 org.keycloak.models.ProtocolMapperModel pm = client.getProtocolMapperById(mapperId);
                 if (pm != null) {
                     units.add(RealmAttestationExporter.protocolMapperUnit(
-                            pm, ParentType.client, client.getId(), realmId));
+                            session, pm, ParentType.client, client.getId(), realmId));
                 }
             }
         }
@@ -5189,7 +5190,8 @@ public class TideAttestor implements IgaAttestor {
      * scope created WITH inline mappers folds them into ONE CREATE_CLIENT_SCOPE CR, so this commit
      * is their ONLY signer; framing this family is what lets the login read replay them.
      */
-    private static List<AttestationUnit> clientScopeOwnedUnits(ClientScopeModel scope, String realmId,
+    private static List<AttestationUnit> clientScopeOwnedUnits(KeycloakSession session,
+                                                               ClientScopeModel scope, String realmId,
                                                                boolean includeOwnedMappers) {
         List<AttestationUnit> units = new ArrayList<>();
         units.add(RealmAttestationExporter.clientScopeConfig(scope, realmId));
@@ -5204,7 +5206,7 @@ public class TideAttestor implements IgaAttestor {
                 org.keycloak.models.ProtocolMapperModel pm = scope.getProtocolMapperById(mapperId);
                 if (pm != null) {
                     units.add(RealmAttestationExporter.protocolMapperUnit(
-                            pm, ParentType.client_scope, scope.getId(), realmId));
+                            session, pm, ParentType.client_scope, scope.getId(), realmId));
                 }
             }
             if (!mapperIds.isEmpty()) {
@@ -6632,7 +6634,7 @@ public class TideAttestor implements IgaAttestor {
             if (scopeId == null) return;
             ClientScopeModel scope = realm.getClientScopeById(scopeId);
             if (scope == null) return;
-            List<AttestationUnit> units = clientScopeOwnedUnits(scope, realm.getId(),
+            List<AttestationUnit> units = clientScopeOwnedUnits(session, scope, realm.getId(),
                     /* includeOwnedMappers */ true);
             byte[][] envelopes = new byte[units.size()][];
             for (int i = 0; i < units.size(); i++) {
@@ -6808,7 +6810,7 @@ public class TideAttestor implements IgaAttestor {
             // read replays. Stamping only the owner set left that column NULL or stubbed.
             // Same builder, same jwt-relevance filter, same order as the framing side.
             List<AttestationUnit> mapperUnits = new ArrayList<>();
-            addOwnedMapperUnits(mapperUnits, realm, cr, cr.getActionType(), realm.getId());
+            addOwnedMapperUnits(session, mapperUnits, realm, cr, cr.getActionType(), realm.getId());
             for (AttestationUnit unit : mapperUnits) {
                 UnitColumnMapping.stamp(em, unit,
                         signProducerEnvelope(session, realm, mode, unit.serialize()));
