@@ -84,7 +84,8 @@ public final class IssuedCertificateValidator {
     }
 
     /**
-     * Validate the resource-identity (workload mTLS client) certificate.
+     * Validate the resource-identity (workload mTLS) certificate. The ORK issues it with both
+     * serverAuth and clientAuth so a workload can present it on either side of a TLS handshake.
      *
      * @param certificateDer  the assembled certificate
      * @param expectedSpkiDer the SubjectPublicKeyInfo from the CSR that was submitted
@@ -100,14 +101,15 @@ public final class IssuedCertificateValidator {
         ValidatedCertificate validity = requireValidity(cert, MAX_LEAF_LIFETIME_MILLIS, "resource certificate");
         requireEndEntity(cert, "resource certificate");
         requireKeyUsage(cert, KeyUsage.digitalSignature, "resource certificate");
-        requireExtendedKeyUsage(cert, KeyPurposeId.id_kp_clientAuth, "resource certificate");
+        requireExtendedKeyUsage(cert, "resource certificate",
+                KeyPurposeId.id_kp_serverAuth, KeyPurposeId.id_kp_clientAuth);
         requireSignedBy(cert, issuerRawPublicKey, "resource certificate");
         return validity;
     }
 
     /**
      * Validate the Tidecloak realm server certificate. Same shape as the resource certificate but
-     * serverAuth rather than clientAuth, and its key is Tidecloak's own rather than the workload's.
+     * serverAuth only (no clientAuth), and its key is Tidecloak's own rather than the workload's.
      *
      * <p>Its permitted lifetime is the one real difference: {@link #MAX_REALM_CERT_LIFETIME_MILLIS}
      * rather than the workload leaf's 11 years, because the ORK issues this one for 20 years.
@@ -122,7 +124,7 @@ public final class IssuedCertificateValidator {
         ValidatedCertificate validity = requireValidity(cert, MAX_REALM_CERT_LIFETIME_MILLIS, "realm certificate");
         requireEndEntity(cert, "realm certificate");
         requireKeyUsage(cert, KeyUsage.digitalSignature, "realm certificate");
-        requireExtendedKeyUsage(cert, KeyPurposeId.id_kp_serverAuth, "realm certificate");
+        requireExtendedKeyUsage(cert, "realm certificate", KeyPurposeId.id_kp_serverAuth);
         requireSignedBy(cert, issuerRawPublicKey, "realm certificate");
         return validity;
     }
@@ -262,20 +264,23 @@ public final class IssuedCertificateValidator {
         }
     }
 
-    /** The certificate must carry the expected EKU, and must not carry any other. */
-    private static void requireExtendedKeyUsage(X509CertificateHolder cert, KeyPurposeId expected,
-                                                String certificateLabel) {
+    /** The certificate must carry every expected EKU, and must not carry any other. */
+    private static void requireExtendedKeyUsage(X509CertificateHolder cert, String certificateLabel,
+                                                KeyPurposeId... expected) {
         ExtendedKeyUsage extendedKeyUsage = ExtendedKeyUsage.fromExtensions(requireExtensions(cert, certificateLabel));
         if (extendedKeyUsage == null) {
             throw new InvalidIssuedCertificateException(certificateLabel + " has no extendedKeyUsage extension");
         }
-        if (!extendedKeyUsage.hasKeyPurposeId(expected)) {
-            throw new InvalidIssuedCertificateException(certificateLabel + " is missing extendedKeyUsage "
-                    + expected.getId());
+        for (KeyPurposeId purpose : expected) {
+            if (!extendedKeyUsage.hasKeyPurposeId(purpose)) {
+                throw new InvalidIssuedCertificateException(certificateLabel + " is missing extendedKeyUsage "
+                        + purpose.getId());
+            }
         }
-        if (extendedKeyUsage.size() != 1) {
+        // Every expected purpose is present, so a larger count can only mean an extra one.
+        if (extendedKeyUsage.size() != expected.length) {
             throw new InvalidIssuedCertificateException(certificateLabel
-                    + " carries extendedKeyUsage purposes beyond " + expected.getId());
+                    + " carries extendedKeyUsage purposes beyond those permitted");
         }
     }
 
