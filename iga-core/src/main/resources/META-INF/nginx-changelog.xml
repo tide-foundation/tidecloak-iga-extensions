@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <changeSet id="nginx-1.0.0-1" author="tidecloak-nginx">
+        <createTable tableName="NGINX_GLOBAL_COUNTER">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="COUNTER" type="BIGINT" defaultValueNumeric="0">
+                <constraints nullable="false"/>
+            </column>
+            <column name="UPDATED_AT" type="BIGINT"/>
+        </createTable>
+    </changeSet>
+
+    <!-- Seeded here, not lazily on first use: Liquibase's changelog lock is the only cluster-wide
+         mutex available, so this is the one place two replicas cannot race to insert the same row. -->
+    <changeSet id="nginx-1.0.0-2" author="tidecloak-nginx">
+        <insert tableName="NGINX_GLOBAL_COUNTER">
+            <column name="ID" value="GLOBAL"/>
+            <column name="COUNTER" valueNumeric="0"/>
+        </insert>
+    </changeSet>
+
+</databaseChangeLog>

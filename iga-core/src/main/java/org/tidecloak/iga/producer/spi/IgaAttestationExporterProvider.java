@@ -92,7 +92,7 @@ public class IgaAttestationExporterProvider implements AttestationExporterProvid
      * a stub / wrong-length. Extracted (package-private + static) so the all-or-nothing
      * read contract is unit-testable without a session.
      */
-    static SignedUnit replayOrFailClosed(AttestationUnit unit, String stored, String realmName) {
+    public static SignedUnit replayOrFailClosed(AttestationUnit unit, String stored, String realmName) {
         byte[] sig = decodeReplayableSig(stored);
         if (sig == null) {
             // The toggle-on backfill + per-CR-commit stampers (and, for self-registered
