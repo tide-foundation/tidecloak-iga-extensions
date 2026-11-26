@@ -1092,6 +1092,8 @@ public class IgaAdminResource {
         // on any non-(setRegistrationAllowed) CR. This is the COMMON single-CR /
         // multiAdmin commit tail; bulk has the identical call in processOneCr.
         org.tidecloak.iga.signing.IgaIdpSettingsResign.maybeReSign(session, realm, cr);
+        // Post-commit (the CR is APPROVED now): file tide-mcp-login if tide-claims just cleared.
+        org.tidecloak.iga.services.TideMcpClientProvisioner.onCommitted(session, realm, cr);
 
         // Also re-sign when this commit changed CLIENT settings that feed the
         // VVK-signed IdP-settings bundle (per-client web origins + the realm's
@@ -2594,6 +2596,8 @@ public class IgaAdminResource {
             // (the CR's replay rolls back with the tx), never silently committed
             // with a stale settingsSig. No-op on Tideless / non-signed-field CRs.
             org.tidecloak.iga.signing.IgaIdpSettingsResign.maybeReSign(session, realm, cr);
+            // Post-commit hook for tide-mcp-login (see the single-CR commit tail).
+            org.tidecloak.iga.services.TideMcpClientProvisioner.onCommitted(session, realm, cr);
 
             outcome.put("status", "COMMITTED");
             return outcome;
