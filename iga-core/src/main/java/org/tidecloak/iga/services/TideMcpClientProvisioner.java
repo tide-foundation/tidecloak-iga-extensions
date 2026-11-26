@@ -55,6 +55,9 @@ public final class TideMcpClientProvisioner {
     /** The only redirect URI the Tide MCP server login accepts. */
     public static final String TIDE_MCP_REDIRECT_URI = "http://localhost:18433/*";
 
+    /** Exact web origin for the Tide MCP login client (no wildcard). */
+    public static final String TIDE_MCP_WEB_ORIGIN = "http://localhost:18433";
+
     /** Stock client scope the tide-mcp-login client must never carry. */
     public static final String ROLES_SCOPE_NAME = "roles";
 
@@ -311,6 +314,7 @@ public final class TideMcpClientProvisioner {
         rep.setServiceAccountsEnabled(false);
         rep.setFullScopeAllowed(false);
         rep.setRedirectUris(List.of(TIDE_MCP_REDIRECT_URI));
+        rep.setWebOrigins(List.of(TIDE_MCP_WEB_ORIGIN));
 
         // Keep the realm defaults, as stock client creation does, except "roles".
         // Replay goes through RepresentationToModel.createClient, which only
@@ -327,6 +331,7 @@ public final class TideMcpClientProvisioner {
         Map<String, String> attributes = new LinkedHashMap<>();
         attributes.put("pkce.code.challenge.method", "S256");
         attributes.put("dpop.bound.access.tokens", "true");
+        attributes.put("post.logout.redirect.uris", TIDE_MCP_REDIRECT_URI);
         rep.setAttributes(attributes);
 
         String repJson;
