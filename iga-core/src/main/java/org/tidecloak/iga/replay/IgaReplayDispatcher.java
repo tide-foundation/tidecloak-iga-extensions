@@ -557,6 +557,17 @@ public class IgaReplayDispatcher {
                 rep.setId(id);
                 if (clientId != null) rep.setClientId(clientId);
                 org.keycloak.models.utils.RepresentationToModel.createClient(session, realm, rep);
+                // tide-mcp-login must never carry the stock "roles" scope. The REP
+                // already omits it; this prune is the backstop if a default is attached.
+                ClientModel mcp = realm.getClientById(id);
+                if (mcp != null && org.tidecloak.iga.services.TideMcpClientProvisioner
+                        .TIDE_MCP_CLIENT_ID.equals(mcp.getClientId())) {
+                    ClientScopeModel roles = realm.getClientScopesStream()
+                            .filter(s -> org.tidecloak.iga.services.TideMcpClientProvisioner
+                                    .ROLES_SCOPE_NAME.equals(s.getName()))
+                            .findFirst().orElse(null);
+                    if (roles != null) mcp.removeClientScope(roles);
+                }
                 // Materialize the service-account-<clientId> user when the replayed client has
                 // serviceAccountsEnabled. RepresentationToModel.createClient sets the flag but does
                 // NOT create the SA user, so without this a governed cc client's client_credentials
@@ -2213,6 +2224,10 @@ public class IgaReplayDispatcher {
                 }
                 case "protocol" -> client.setProtocol(value);
                 case "clientId" -> { if (value != null) client.setClientId(value); }
+                // Enable/disable toggle, captured only for tide-mcp-login (see
+                // IgaClientAdapter.setEnabled). Replay runs under IGA_REPLAY_ACTIVE,
+                // so this write passes straight through the adapter.
+                case "enabled" -> client.setEnabled(Boolean.parseBoolean(value));
                 // Origin-URL columns (see IgaClientAdapter setRootUrl/setBaseUrl/
                 // setManagementUrl). A null value is a legitimate "field cleared"
                 // and is applied as-is; these feed getAllWebOriginsForClient, so

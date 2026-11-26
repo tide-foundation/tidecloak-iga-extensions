@@ -13,6 +13,7 @@ import org.keycloak.models.utils.ModelToRepresentation;
 import org.keycloak.representations.idm.ClientRepresentation;
 import org.tidecloak.iga.services.IgaMigrationContext;
 import org.tidecloak.iga.services.IgaQuarantineCache;
+import org.tidecloak.iga.services.TideMcpClientProvisioner;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -794,6 +795,25 @@ public class IgaClientAdapter extends ClientAdapter {
             return;
         }
         captureClientProperty("fullScopeAllowed", String.valueOf(value));
+    }
+
+    /**
+     * Governed enable/disable toggle for the {@code tide-mcp-login} client only.
+     * Every other client keeps the ungoverned direct write it has today; the
+     * change to all clients is a separate PR. The guard is on the client's
+     * clientId, so no other client takes the capture path.
+     */
+    @Override
+    public void setEnabled(boolean value) {
+        if (!isIgaActive()
+                || !TideMcpClientProvisioner.TIDE_MCP_CLIENT_ID.equals(super.getClientId())) {
+            super.setEnabled(value);
+            return;
+        }
+        if (value == super.isEnabled()) {
+            return;
+        }
+        captureClientProperty("enabled", String.valueOf(value));
     }
 
     @Override

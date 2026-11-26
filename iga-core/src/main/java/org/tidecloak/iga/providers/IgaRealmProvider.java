@@ -800,6 +800,19 @@ public class IgaRealmProvider extends JpaRealmProvider {
             return;
         }
 
+        // tide-mcp-login must never carry the stock "roles" scope. Refuse a governed
+        // attach of it, so no later commit can bring it back.
+        if (org.tidecloak.iga.services.TideMcpClientProvisioner.TIDE_MCP_CLIENT_ID
+                .equals(client.getClientId())) {
+            for (ClientScopeModel scope : clientScopes) {
+                if (org.tidecloak.iga.services.TideMcpClientProvisioner.ROLES_SCOPE_NAME
+                        .equals(scope.getName())) {
+                    throw new org.keycloak.models.ModelValidationException(
+                            "The tide-mcp-login client cannot have the roles client scope");
+                }
+            }
+        }
+
         // Governed admin-initiated attach: emit ONE ASSIGN_SCOPE CR carrying all
         // scopes as multiple rows, then defer persistence to commit/replay.
         String clientUuid = client.getId();
